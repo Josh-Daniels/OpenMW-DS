@@ -1,0 +1,1064 @@
+From f4540248bc7c81be54265cf79de90e09baacbc02 Mon Sep 17 00:00:00 2001
+From: Duron27 <duron27@gmail.com>
+Date: Thu, 29 May 2025 21:43:09 -0400
+Subject: [PATCH] NG-Gl4es
+
+---
+ apps/openmw/mwrender/npcanimation.cpp         |  2 +-
+ apps/openmw/mwrender/postprocessor.cpp        | 20 ++++-----
+ apps/openmw/mwrender/renderingmanager.cpp     | 43 ++++++++++++++----
+ apps/openmw/mwrender/renderingmanager.hpp     |  2 +
+ apps/openmw/mwrender/transparentpass.cpp      | 26 +++++++++--
+ apps/openmw/mwrender/transparentpass.hpp      |  4 ++
+ components/sceneutil/lightmanager.cpp         |  5 ++-
+ components/sceneutil/mwshadowtechnique.cpp    | 30 +++++++++++--
+ components/settings/categories/shadows.hpp    |  1 +
+ components/shader/shadervisitor.cpp           |  3 ++
+ files/settings-default.cfg                    |  3 ++
+ files/shaders/compatibility/bs/default.frag   | 12 +----
+ files/shaders/compatibility/bs/default.vert   |  8 ----
+ .../shaders/compatibility/bs/nolighting.frag  | 12 +----
+ files/shaders/compatibility/debug.frag        |  2 +-
+ files/shaders/compatibility/debug.vert        |  2 +-
+ files/shaders/compatibility/fog.glsl          |  4 +-
+ .../shaders/compatibility/fullscreen_tri.vert |  2 +-
+ files/shaders/compatibility/groundcover.frag  | 10 +----
+ files/shaders/compatibility/groundcover.vert  |  8 +---
+ files/shaders/compatibility/objects.frag      | 16 +++----
+ files/shaders/compatibility/objects.vert      | 12 +++--
+ .../shaders/compatibility/shadowcasting.frag  |  4 --
+ .../shaders/compatibility/shadowcasting.vert  |  4 +-
+ .../compatibility/shadows_fragment.glsl       | 21 ++++++++-
+ files/shaders/compatibility/terrain.frag      | 14 +++---
+ files/shaders/compatibility/terrain.vert      | 12 +++--
+ files/shaders/compatibility/water.frag        | 10 +----
+ files/shaders/lib/core/fragment.h.glsl        | 44 +++++++++++++++----
+ files/shaders/lib/core/fragment.h_orig.glsl   | 22 ++++++++++
+ files/shaders/lib/core/vertex.h.glsl          | 20 ++++++---
+ files/shaders/lib/core/vertex.h_orig.glsl     |  6 +++
+ files/shaders/lib/light/lighting.glsl         |  2 +-
+ files/shaders/lib/light/lighting_util.glsl    | 14 +++++-
+ files/shaders/lib/material/alpha.glsl         |  2 +-
+ 35 files changed, 263 insertions(+), 139 deletions(-)
+ create mode 100644 files/shaders/lib/core/fragment.h_orig.glsl
+ create mode 100644 files/shaders/lib/core/vertex.h_orig.glsl
+
+diff --git a/apps/openmw/mwrender/npcanimation.cpp b/apps/openmw/mwrender/npcanimation.cpp
+index c14eee27e4b..631724d7ad6 100644
+--- a/apps/openmw/mwrender/npcanimation.cpp
++++ b/apps/openmw/mwrender/npcanimation.cpp
+@@ -344,7 +344,7 @@ namespace MWRender
+             auto primaryFBO = postProcessor->getPrimaryFbo(frameId);
+             primaryFBO->apply(*state);
+ 
+-            postProcessor->getFbo(PostProcessor::FBO_OpaqueDepth, frameId)->apply(*state);
++//            postProcessor->getFbo(PostProcessor::FBO_OpaqueDepth, frameId)->apply(*state);
+ 
+             // depth accumulation pass
+             osg::ref_ptr<osg::StateSet> restore = bin->getStateSet();
+diff --git a/apps/openmw/mwrender/postprocessor.cpp b/apps/openmw/mwrender/postprocessor.cpp
+index 8b835a4d47a..fe04a282699 100644
+--- a/apps/openmw/mwrender/postprocessor.cpp
++++ b/apps/openmw/mwrender/postprocessor.cpp
+@@ -195,10 +195,6 @@ namespace MWRender
+         if (!ext->glDisablei && ext->glDisableIndexedEXT)
+             ext->glDisablei = ext->glDisableIndexedEXT;
+ 
+-#ifdef ANDROID
+-        ext->glDisablei = nullptr;
+-#endif
+-
+         if (ext->glDisablei)
+             mNormalsSupported = true;
+         else
+@@ -301,7 +297,7 @@ namespace MWRender
+         mCanvases[frameId]->setCalculateAvgLum(mHDR);
+ 
+         mCanvases[frameId]->setTextureScene(getTexture(Tex_Scene, frameId));
+-        mCanvases[frameId]->setTextureDepth(getTexture(Tex_OpaqueDepth, frameId));
++        mCanvases[frameId]->setTextureDepth(getTexture(Tex_Depth/*Tex_OpaqueDepth*/, frameId));
+         mCanvases[frameId]->setTextureDistortion(getTexture(Tex_Distortion, frameId));
+ 
+         mTransparentDepthPostPass->mFbo[frameId] = mFbos[frameId][FBO_Primary];
+@@ -413,11 +409,15 @@ namespace MWRender
+ 
+             if (mNormalsSupported)
+             {
+-                auto& shaderManager
+-                    = MWBase::Environment::get().getResourceSystem()->getSceneManager()->getShaderManager();
+-                auto defines = shaderManager.getGlobalDefines();
+-                defines["disableNormals"] = mNormals ? "0" : "1";
+-                shaderManager.setGlobalDefines(defines);
++                // Crashing with gl4es, use OSG define instead
++                /*
++                 a uto& shaderManager                  *
++                 = MWBase::Environment::get().getResourceSystem()->getSceneManager()->getShaderManager();
++                 auto defines = shaderManager.getGlobalDefines();
++                 defines["disableNormals"] = mNormals ? "0" : "1";
++                 shaderManager.setGlobalDefines(defines);
++                 */
++                mRendering.setWriteNormals(mNormals);
+             }
+ 
+             mRendering.getLightRoot()->setCollectPPLights(mPassLights);
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index 6afbfcfe7dd..f861938eb24 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -213,6 +213,7 @@ namespace MWRender
+             : mFogStart(0.f)
+             , mFogEnd(0.f)
+             , mWireframe(false)
++            , mWriteNormals(false)
+         {
+         }
+ 
+@@ -231,6 +232,12 @@ namespace MWRender
+             }
+             else
+                 stateset->removeAttribute(osg::StateAttribute::POLYGONMODE);
++
++            stateset->setDefine("FORCE_PPL", (Settings::shaders().mForcePerPixelLighting == true) ? "1" : "0", osg::StateAttribute::ON);
++            stateset->setDefine("CLASSIC_FALLOFF", (Settings::shaders().mClassicFalloff == true) ? "1" : "0", osg::StateAttribute::ON);
++            stateset->setDefine("MAX_LIGHTS", std::to_string(Settings::shaders().mMaxLights), osg::StateAttribute::ON);
++
++            stateset->setDefine("WRITE_NORMALS", (mWriteNormals) ? "1" : "0", osg::StateAttribute::ON);
+         }
+ 
+         void apply(osg::StateSet* stateset, osg::NodeVisitor*) override
+@@ -242,6 +249,8 @@ namespace MWRender
+             fog->setColor(mFogColor);
+             fog->setStart(mFogStart);
+             fog->setEnd(mFogEnd);
++
++            stateset->setDefine("WRITE_NORMALS", (mWriteNormals) ? "1" : "0", osg::StateAttribute::ON);
+         }
+ 
+         void setAmbientColor(const osg::Vec4f& col) { mAmbientColor = col; }
+@@ -263,12 +272,15 @@ namespace MWRender
+ 
+         bool getWireframe() const { return mWireframe; }
+ 
++        void setWriteNormals(float enabled) {mWriteNormals = enabled; }
++
+     private:
+         osg::Vec4f mAmbientColor;
+         osg::Vec4f mFogColor;
+         float mFogStart;
+         float mFogEnd;
+         bool mWireframe;
++        bool mWriteNormals;
+     };
+ 
+     class PreloadCommonAssetsWorkItem : public SceneUtil::WorkItem
+@@ -460,6 +472,9 @@ namespace MWRender
+ 
+         globalDefines["reverseZ"] = reverseZ ? "1" : "0";
+ 
++        globalDefines["shadowMapSize"] = std::to_string(Settings::shadows().mShadowMapResolution);
++        globalDefines["PCFSamples"] = std::to_string(Settings::shadows().mPercentageCloserFiltering);
++
+         // It is unnecessary to stop/start the viewer as no frames are being rendered yet.
+         mResourceSystem->getSceneManager()->getShaderManager().setGlobalDefines(globalDefines);
+ 
+diff --git a/apps/openmw/mwrender/renderingmanager.cpp b/apps/openmw/mwrender/renderingmanager.cpp
+index 67d1cfb587..5275c816f5 100644
+--- a/apps/openmw/mwrender/renderingmanager.cpp
++++ b/apps/openmw/mwrender/renderingmanager.cpp
+@@ -510,8 +510,8 @@ namespace MWRender
+ 
+         mPostProcessor = new PostProcessor(*this, viewer, mRootNode, resourceSystem->getVFS());
+         resourceSystem->getSceneManager()->setOpaqueDepthTex(
+-            mPostProcessor->getTexture(PostProcessor::Tex_OpaqueDepth, 0),
+-            mPostProcessor->getTexture(PostProcessor::Tex_OpaqueDepth, 1));
++            mPostProcessor->getTexture(PostProcessor::Tex_Depth/*Tex_OpaqueDepth*/, 0),
++            mPostProcessor->getTexture(PostProcessor::Tex_Depth/*Tex_OpaqueDepth*/, 1));
+         resourceSystem->getSceneManager()->setSupportsNormalsRT(mPostProcessor->getSupportsNormalsRT());
+         resourceSystem->getSceneManager()->setWeatherParticleOcclusion(Settings::shaders().mWeatherParticleOcclusion);
+ 
+@@ -1541,17 +1556,21 @@ namespace MWRender
+             else if (it->first == "Shaders"
+                 && (it->second == "force per pixel lighting" || it->second == "classic falloff"))
+             {
+-                mViewer->stopThreading();
++/*
++            mViewer->stopThreading();
+ 
+-                auto defines = mResourceSystem->getSceneManager()->getShaderManager().getGlobalDefines();
+-                defines["forcePPL"] = Settings::shaders().mForcePerPixelLighting ? "1" : "0";
+-                defines["classicFalloff"] = Settings::shaders().mClassicFalloff ? "1" : "0";
+-                mResourceSystem->getSceneManager()->getShaderManager().setGlobalDefines(defines);
++            auto defines = mResourceSystem->getSceneManager()->getShaderManager().getGlobalDefines();
++            defines["forcePPL"] = Settings::shaders().mForcePerPixelLighting ? "1" : "0";
++            defines["classicFalloff"] = Settings::shaders().mClassicFalloff ? "1" : "0";
++            mResourceSystem->getSceneManager()->getShaderManager().setGlobalDefines(defines);
++*/
+ 
+                 if (MWMechanics::getPlayer().isInCell() && it->second == "classic falloff")
+                     configureAmbient(*MWMechanics::getPlayer().getCell()->getCell());
+ 
+-                mViewer->startThreading();
++                mStateUpdater->reset();
++
++//                mViewer->startThreading();
+             }
+             else if (it->first == "Shaders"
+                 && (it->second == "light bounds multiplier" || it->second == "maximum light distance"
+@@ -1568,11 +1587,12 @@ namespace MWRender
+ 
+                     lightManager->updateMaxLights(Settings::shaders().mMaxLights);
+ 
++/*
+                     auto defines = mResourceSystem->getSceneManager()->getShaderManager().getGlobalDefines();
+                     for (const auto& [name, key] : lightManager->getLightDefines())
+                         defines[name] = key;
+                     mResourceSystem->getSceneManager()->getShaderManager().setGlobalDefines(defines);
+-
++*/
+                     mStateUpdater->reset();
+ 
+                     mViewer->startThreading();
+@@ -1824,4 +1844,9 @@ namespace MWRender
+     {
+         mNavMesh->setMode(value);
+     }
++
++    void RenderingManager::setWriteNormals(bool enabled)
++    {
++        mStateUpdater->setWriteNormals(enabled);
++    }
+ }
+diff --git a/apps/openmw/mwrender/renderingmanager.hpp b/apps/openmw/mwrender/renderingmanager.hpp
+index 2e573f82769..5edd6e31f38 100644
+--- a/apps/openmw/mwrender/renderingmanager.hpp
++++ b/apps/openmw/mwrender/renderingmanager.hpp
+@@ -275,6 +275,8 @@ namespace MWRender
+ 
+         void setNavMeshMode(Settings::NavMeshRenderMode value);
+ 
++        void setWriteNormals(bool enabled);
++
+     private:
+         void updateTextureFiltering();
+         void updateAmbient();
+diff --git a/apps/openmw/mwrender/transparentpass.cpp b/apps/openmw/mwrender/transparentpass.cpp
+index ce53b1c2193..ccff71c934c 100644
+--- a/apps/openmw/mwrender/transparentpass.cpp
++++ b/apps/openmw/mwrender/transparentpass.cpp
+@@ -43,6 +43,12 @@ namespace MWRender
+ 
+         for (unsigned int unit = 1; unit < 8; ++unit)
+             mStateSet->setTextureMode(unit, GL_TEXTURE_2D, modeOff);
++
++
++        mDepth = new SceneUtil::AutoDepth;
++        mDepth->setWriteMask(false);
++
++        //   setPostPass(mPostPass);
+     }
+ 
+     void TransparentDepthBinCallback::drawImplementation(
+@@ -92,20 +98,27 @@ namespace MWRender
+         else
+         {
+             opaqueFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+-            ext->glBlitFramebuffer(0, 0, tex->getTextureWidth(), tex->getTextureHeight(), 0, 0, tex->getTextureWidth(),
+-                tex->getTextureHeight(), GL_DEPTH_BUFFER_BIT, GL_NEAREST);
++            //ext->glBlitFramebuffer(0, 0, tex->getTextureWidth(), tex->getTextureHeight(), 0, 0, tex->getTextureWidth(),
++            //   tex->getTextureHeight(), GL_DEPTH_BUFFER_BIT, GL_NEAREST);
++            glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+         }
+ 
+         msaaFbo ? msaaFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER)
+                 : fbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+ 
++        if (mPostPass)
++            bin->getStateSet()->setAttributeAndModes(mDepth, osg::StateAttribute::ON);
++
+         // draws scene into primary attachments
+         bin->drawImplementation(renderInfo, previous);
+ 
++        if (mPostPass)
++            bin->getStateSet()->setAttributeAndModes(mDepth, osg::StateAttribute::OFF);
++
+         if (!mPostPass)
+             return;
+ 
+-        opaqueFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
++        //opaqueFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+ 
+         // draw transparent post-pass to populate a postprocess friendly depth texture with alpha-clipped geometry
+ 
+@@ -140,4 +153,11 @@ namespace MWRender
+                 : fbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+         state.checkGLErrors("after TransparentDepthBinCallback::drawImplementation");
+     }
++
++    void TransparentDepthBinCallback::setPostPass(bool enable)
++    {
++        mPostPass = enable;
++
++        //      osgUtil::RenderBin::getRenderBinPrototype("DepthSortedBin")->getStateSet()->setAttributeAndModes(mDepth, (mPostPass) ? osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE : osg::StateAttribute::OFF);
++    }
+ }
+diff --git a/apps/openmw/mwrender/transparentpass.hpp b/apps/openmw/mwrender/transparentpass.hpp
+index 9d727cf08d2..21fcb6c2036 100644
+--- a/apps/openmw/mwrender/transparentpass.hpp
++++ b/apps/openmw/mwrender/transparentpass.hpp
+@@ -4,6 +4,7 @@
+ #include <array>
+ #include <memory>
+ 
++#include <osg/Depth>
+ #include <osg/FrameBufferObject>
+ #include <osg/StateSet>
+ 
+@@ -35,9 +36,12 @@ namespace MWRender
+ 
+         std::array<std::unique_ptr<Stereo::MultiviewFramebufferResolve>, 2> mMultiviewResolve;
+ 
++         void setPostPass(bool enable);
++
+     private:
+         osg::ref_ptr<osg::StateSet> mStateSet;
+         bool mPostPass;
++        osg::ref_ptr<osg::Depth> mDepth;
+     };
+ 
+ }
+diff --git a/components/sceneutil/lightmanager.cpp b/components/sceneutil/lightmanager.cpp
+index 178ea087c0f..7b041df6b36 100644
+--- a/components/sceneutil/lightmanager.cpp
++++ b/components/sceneutil/lightmanager.cpp
+@@ -717,6 +717,7 @@ namespace SceneUtil
+ 
+         if (!mInitLayout)
+         {
++/*
+             mDummyProgram->apply(state);
+             auto handle = mDummyProgram->getPCP(state)->getHandle();
+             auto* ext = state.get<osg::GLExtensions>();
+@@ -726,8 +727,10 @@ namespace SceneUtil
+ 
+             // wait until the UBO binding is created
+             if (activeUniformBlocks > 0)
++*/
+             {
+-                initSharedLayout(ext, handle, frame);
++                //initSharedLayout(ext, handle, frame);
++                mTemplate->configureLayout(0, 16, 32, 16384, 0);
+                 mInitLayout = true;
+             }
+         }
+diff --git a/components/sceneutil/mwshadowtechnique.cpp b/components/sceneutil/mwshadowtechnique.cpp
+index 9fa01385d5d..cf14cba1255 100644
+--- a/components/sceneutil/mwshadowtechnique.cpp
++++ b/components/sceneutil/mwshadowtechnique.cpp
+@@ -89,8 +89,19 @@ static const char fragmentShaderSource_withBaseTexture_twoShadowMaps[] =
+         "} \n";
+ #endif
+ 
+-std::string debugVertexShaderSource = "void main(void){gl_Position = gl_Vertex; gl_TexCoord[0]=gl_MultiTexCoord0;}";
++//std::string debugVertexShaderSource = "void main(void){gl_Position = gl_Vertex; gl_TexCoord[0]=gl_MultiTexCoord0;}";
++std::string debugVertexShaderSource =
++        "#version 120                                                            \n"
++        "                                                                        \n"
++        "void main(void)                                                         \n"
++        "{                                                                       \n"
++        "    gl_Position = gl_Vertex;                                            \n"
++        "    gl_TexCoord[0]=gl_MultiTexCoord0;                                   \n"
++        "}                                                                       \n";
++
+ std::string debugFragmentShaderSource =
++        "#version 120                                                            \n"
++        "                                                                        \n"
+         "uniform sampler2D texture;                                              \n"
+         "                                                                        \n"
+         "void main(void)                                                         \n"
+@@ -127,8 +138,21 @@ std::string debugFragmentShaderSource =
+ #endif
+         "}                                                                       \n";
+ 
+-std::string debugFrustumVertexShaderSource = "varying float depth; uniform mat4 transform; void main(void){gl_Position = transform * gl_Vertex; depth = gl_Position.z / gl_Position.w;}";
++//std::string debugFrustumVertexShaderSource = "varying float depth; uniform mat4 transform; void main(void){gl_Position = transform * gl_Vertex; depth = gl_Position.z / gl_Position.w;}";
++std::string debugFrustumVertexShaderSource =
++        "#version 120                                                            \n"
++        "                                                                        \n"
++        "varying float depth;                                                    \n"
++        "uniform mat4 transform;                                                 \n"
++        "void main(void)                                                         \n"
++        "{                                                                       \n"
++        "    gl_Position = transform * gl_Vertex;                                \n"
++        "    depth = gl_Position.z / gl_Position.w;                              \n"
++        "}                                                                       \n";
++
+ std::string debugFrustumFragmentShaderSource =
++        "#version 120                                                            \n"
++        "                                                                        \n"
+         "varying float depth;                                                    \n"
+         "                                                                        \n"
+         "void main(void)                                                         \n"
+@@ -552,7 +576,7 @@ MWShadowTechnique::ShadowData::ShadowData(MWShadowTechnique::ViewDependentData*
+     {
+         _texture->setInternalFormat(GL_DEPTH_COMPONENT);
+         _texture->setShadowComparison(true);
+-        _texture->setShadowTextureMode(osg::Texture2D::LUMINANCE);
++//        _texture->setShadowTextureMode(osg::Texture2D::LUMINANCE);
+     }
+ 
+     _texture->setFilter(osg::Texture2D::MIN_FILTER,osg::Texture2D::LINEAR);
+diff --git a/components/settings/categories/shadows.hpp b/components/settings/categories/shadows.hpp
+index b6349dfd440..5732471e63b 100644
+--- a/components/settings/categories/shadows.hpp
++++ b/components/settings/categories/shadows.hpp
+@@ -42,6 +42,7 @@ namespace Settings
+         SettingValue<bool> mTerrainShadows{ mIndex, "Shadows", "terrain shadows" };
+         SettingValue<bool> mObjectShadows{ mIndex, "Shadows", "object shadows" };
+         SettingValue<bool> mEnableIndoorShadows{ mIndex, "Shadows", "enable indoor shadows" };
++        SettingValue<int> mPercentageCloserFiltering{ mIndex, "Shadows", "percentage closer filtering" };
+     };
+ }
+ 
+diff --git a/components/shader/shadervisitor.cpp b/components/shader/shadervisitor.cpp
+index d97276576fa..ad1a214dcfd 100644
+--- a/components/shader/shadervisitor.cpp
++++ b/components/shader/shadervisitor.cpp
+@@ -713,7 +713,10 @@ namespace Shader
+             defineMap["endLight"] = "0";
+ 
+         if (simpleLighting || dynamic_cast<osgParticle::ParticleSystem*>(&node))
++        {
+             defineMap["forcePPL"] = "0";
++            writableStateSet->setDefine("FORCE_PPL", "0", osg::StateAttribute::ON | osg::StateAttribute::PROTECTED);
++        }
+ 
+         bool particleOcclusion = false;
+         node.getUserValue("particleOcclusion", particleOcclusion);
+diff --git a/files/settings-default.cfg b/files/settings-default.cfg
+index e5654794ccc..da4923ab526 100644
+--- a/files/settings-default.cfg
++++ b/files/settings-default.cfg
+@@ -1072,6 +1072,9 @@ object shadows = false
+ # Allow shadows indoors. Due to limitations with Morrowind's data, only actors can cast shadows indoors, which some might feel is distracting.
+ enable indoor shadows = true
+ 
++# Smooth out shadows edges, 0 = 1 sample, 1 = 2*2 samples, 2 = 3*3 samples and so on.
++percentage closer filtering = 0
++
+ [Physics]
+ # Set the number of background threads used for physics.
+ # If no background threads are used, physics calculations are processed in the main thread
+diff --git a/files/shaders/compatibility/bs/default.frag b/files/shaders/compatibility/bs/default.frag
+index 6f38c4df5ea..d02ac878681 100644
+--- a/files/shaders/compatibility/bs/default.frag
++++ b/files/shaders/compatibility/bs/default.frag
+@@ -1,13 +1,5 @@
+ #version 120
+-#pragma import_defines(FORCE_OPAQUE, DISTORTION)
+-
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(FORCE_OPAQUE, DISTORTION, WRITE_NORMALS, FORCE_PPL, CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ #define PER_PIXEL_LIGHTING 1
+ 
+@@ -109,7 +101,7 @@ void main()
+     gl_FragData[0].a = 1.0;
+ #endif
+ 
+-#if !defined(FORCE_OPAQUE) && !@disableNormals
++#if !defined(FORCE_OPAQUE) && defined(WRITE_NORMALS) && WRITE_NORMALS
+     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
+ #endif
+ 
+diff --git a/files/shaders/compatibility/bs/default.vert b/files/shaders/compatibility/bs/default.vert
+index 21942ec91e8..479ef3bcea4 100644
+--- a/files/shaders/compatibility/bs/default.vert
++++ b/files/shaders/compatibility/bs/default.vert
+@@ -1,13 +1,5 @@
+ #version 120
+ 
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
+-
+ #define PER_PIXEL_LIGHTING 1
+ 
+ #include "lib/core/vertex.h.glsl"
+diff --git a/files/shaders/compatibility/bs/nolighting.frag b/files/shaders/compatibility/bs/nolighting.frag
+index a46e99aa823..6d254a63aed 100644
+--- a/files/shaders/compatibility/bs/nolighting.frag
++++ b/files/shaders/compatibility/bs/nolighting.frag
+@@ -1,13 +1,5 @@
+ #version 120
+-#pragma import_defines(FORCE_OPAQUE)
+-
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(FORCE_OPAQUE, WRITE_NORMALS)
+ 
+ #if @diffuseMap
+ uniform sampler2D diffuseMap;
+@@ -81,7 +73,7 @@ void main()
+     gl_FragData[0].a = 1.0;
+ #endif
+ 
+-#if !defined(FORCE_OPAQUE) && !@disableNormals
++#if !defined(FORCE_OPAQUE) && defined(WRITE_NORMALS) && WRITE_NORMALS
+     vec3 viewNormal = normalize(gl_NormalMatrix * passNormal);
+     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
+ #endif
+diff --git a/files/shaders/compatibility/debug.frag b/files/shaders/compatibility/debug.frag
+index a92b406d46b..041562fc0e2 100644
+--- a/files/shaders/compatibility/debug.frag
++++ b/files/shaders/compatibility/debug.frag
+@@ -4,7 +4,7 @@
+ 
+ varying vec3 vertexNormal;
+ 
+-uniform bool useAdvancedShader = false;
++uniform bool useAdvancedShader;
+ 
+ void main()
+ {
+diff --git a/files/shaders/compatibility/debug.vert b/files/shaders/compatibility/debug.vert
+index 47d5337a66f..a1fa462f397 100644
+--- a/files/shaders/compatibility/debug.vert
++++ b/files/shaders/compatibility/debug.vert
+@@ -6,7 +6,7 @@ uniform vec3 color;
+ uniform vec3 trans;
+ uniform vec3 scale;
+ uniform bool useNormalAsColor;
+-uniform bool useAdvancedShader = false;
++uniform bool useAdvancedShader;
+ 
+ centroid varying vec4 passColor;
+ varying vec3 vertexNormal;
+diff --git a/files/shaders/compatibility/fog.glsl b/files/shaders/compatibility/fog.glsl
+index a7cccbf7876..77270e3668f 100644
+--- a/files/shaders/compatibility/fog.glsl
++++ b/files/shaders/compatibility/fog.glsl
+@@ -16,7 +16,7 @@ vec4 applyFogAtDist(vec4 color, float euclideanDist, float linearDist, float far
+ #else
+     float fogValue = clamp((dist - gl_Fog.start) * gl_Fog.scale, 0.0, 1.0);
+ #endif
+-#ifdef ADDITIVE_BLENDING
++#if defined(ADDITIVE_BLENDING)
+     color.xyz *= 1.0 - fogValue;
+ #else
+     color.xyz = mix(color.xyz, gl_Fog.color.xyz, fogValue);
+@@ -25,7 +25,7 @@ vec4 applyFogAtDist(vec4 color, float euclideanDist, float linearDist, float far
+ #if @skyBlending
+     float fadeValue = clamp((far - dist) / (far - skyBlendingStart), 0.0, 1.0);
+     fadeValue *= fadeValue;
+-#ifdef ADDITIVE_BLENDING
++#if defined(ADDITIVE_BLENDING)
+     color.xyz *= fadeValue;
+ #else
+     color.xyz = mix(sampleSkyColor(gl_FragCoord.xy / screenRes), color.xyz, fadeValue);
+diff --git a/files/shaders/compatibility/fullscreen_tri.vert b/files/shaders/compatibility/fullscreen_tri.vert
+index 3174384212e..a85f189e212 100644
+--- a/files/shaders/compatibility/fullscreen_tri.vert
++++ b/files/shaders/compatibility/fullscreen_tri.vert
+@@ -1,6 +1,6 @@
+ #version 120
+ 
+-uniform vec2 scaling = vec2(1.0, 1.0);
++uniform vec2 scaling;
+ 
+ varying vec2 uv;
+ 
+diff --git a/files/shaders/compatibility/groundcover.frag b/files/shaders/compatibility/groundcover.frag
+index 96a79c8793e..1f7c0896742 100644
+--- a/files/shaders/compatibility/groundcover.frag
++++ b/files/shaders/compatibility/groundcover.frag
+@@ -1,12 +1,6 @@
+ #version 120
+ 
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(WRITE_NORMALS, CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ #define GROUNDCOVER
+ 
+@@ -85,7 +79,7 @@ void main()
+     gl_FragData[0].xyz *= lighting;
+     gl_FragData[0] = applyFogAtDist(gl_FragData[0], euclideanDepth, linearDepth, far);
+ 
+-#if !@disableNormals
++#if defined(WRITE_NORMALS) && WRITE_NORMALS
+     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
+ #endif
+ 
+diff --git a/files/shaders/compatibility/groundcover.vert b/files/shaders/compatibility/groundcover.vert
+index 8cf53a19e05..16cdff35e48 100644
+--- a/files/shaders/compatibility/groundcover.vert
++++ b/files/shaders/compatibility/groundcover.vert
+@@ -1,12 +1,6 @@
+ #version 120
+ 
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ #include "lib/core/vertex.h.glsl"
+ 
+diff --git a/files/shaders/compatibility/objects.frag b/files/shaders/compatibility/objects.frag
+index ad6d262f6dc..6a726745375 100644
+--- a/files/shaders/compatibility/objects.frag
++++ b/files/shaders/compatibility/objects.frag
+@@ -1,13 +1,5 @@
+ #version 120
+-#pragma import_defines(FORCE_OPAQUE, DISTORTION)
+-
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(FORCE_OPAQUE, DISTORTION, WRITE_NORMALS, FORCE_PPL, CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ #if @diffuseMap
+ uniform sampler2D diffuseMap;
+@@ -68,7 +60,11 @@ uniform float far;
+ uniform float alphaRef;
+ uniform float distortionStrength;
+ 
++#if defined(FORCE_PPL)
++#define PER_PIXEL_LIGHTING (@normalMap || @specularMap || FORCE_PPL)
++#else
+ #define PER_PIXEL_LIGHTING (@normalMap || @specularMap || @forcePPL)
++#endif
+ 
+ #if !PER_PIXEL_LIGHTING
+ centroid varying vec3 passLighting;
+@@ -269,7 +265,7 @@ vec2 screenCoords = gl_FragCoord.xy / screenRes;
+     gl_FragData[0].a = 1.0;
+ #endif
+ 
+-#if !defined(FORCE_OPAQUE) && !@disableNormals
++#if !defined(FORCE_OPAQUE) && defined(WRITE_NORMALS) && WRITE_NORMALS
+     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
+ #endif
+ 
+diff --git a/files/shaders/compatibility/objects.vert b/files/shaders/compatibility/objects.vert
+index 081ff909cf0..a0307310ba0 100644
+--- a/files/shaders/compatibility/objects.vert
++++ b/files/shaders/compatibility/objects.vert
+@@ -1,12 +1,6 @@
+ #version 120
+ 
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(FORCE_PPL, CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ #include "lib/core/vertex.h.glsl"
+ #if @diffuseMap
+@@ -49,7 +43,11 @@ varying vec2 specularMapUV;
+ varying vec2 glossMapUV;
+ #endif
+ 
++#if defined(FORCE_PPL)
++#define PER_PIXEL_LIGHTING (@normalMap || @specularMap || FORCE_PPL)
++#else
+ #define PER_PIXEL_LIGHTING (@normalMap || @specularMap || @forcePPL)
++#endif
+ 
+ #if !PER_PIXEL_LIGHTING
+ centroid varying vec3 passLighting;
+diff --git a/files/shaders/compatibility/shadowcasting.frag b/files/shaders/compatibility/shadowcasting.frag
+index 5e550e99fb1..595c8312815 100644
+--- a/files/shaders/compatibility/shadowcasting.frag
++++ b/files/shaders/compatibility/shadowcasting.frag
+@@ -1,9 +1,5 @@
+ #version 120
+ 
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
+-
+ uniform sampler2D diffuseMap;
+ varying vec2 diffuseMapUV;
+ 
+diff --git a/files/shaders/compatibility/shadowcasting.vert b/files/shaders/compatibility/shadowcasting.vert
+index c68bdd5c177..41136c2d42d 100644
+--- a/files/shaders/compatibility/shadowcasting.vert
++++ b/files/shaders/compatibility/shadowcasting.vert
+@@ -6,8 +6,8 @@ varying float alphaPassthrough;
+ 
+ uniform int colorMode;
+ uniform bool useTreeAnim;
+-uniform bool useDiffuseMapForShadowAlpha = true;
+-uniform bool alphaTestShadows = true;
++uniform bool useDiffuseMapForShadowAlpha;
++uniform bool alphaTestShadows;
+ 
+ void main(void)
+ {
+diff --git a/files/shaders/compatibility/shadows_fragment.glsl b/files/shaders/compatibility/shadows_fragment.glsl
+index 3c7a37a1628..c7b63648904 100644
+--- a/files/shaders/compatibility/shadows_fragment.glsl
++++ b/files/shaders/compatibility/shadows_fragment.glsl
+@@ -13,6 +13,25 @@
+     @endforeach
+ #endif // SHADOWS
+ 
++float calcShadowing(sampler2DShadow shadowTexture, vec4 LightSpacePos)
++{
++    float Offset = 1.0/@shadowMapSize.0;
++    float shadowing = 1.0;
++
++    float numPixels = @PCFSamples.0 + 1.0;
++    float mult = (numPixels -1.0) / 2.0;
++    shadowing = 0.0;
++    for (float y = -1.0 * mult; y <= mult; y+=1.0) {
++        for (float x = -1.0 * mult; x <= mult; x+=1.0) {
++            vec4 Offsets = vec4(float(x) * Offset, float(y) * Offset, -0.001, 0.0);
++            shadowing += min(shadow2DProj(shadowTexture, LightSpacePos + (Offsets * vec4(LightSpacePos.w, LightSpacePos.w, 1.0, 1.0))), 1.0);
++        }
++    }
++    shadowing = shadowing / (numPixels * numPixels);
++
++    return  shadowing;
++}
++
+ float unshadowedLightRatio(float distance)
+ {
+     float shadowing = 1.0;
+@@ -32,7 +51,7 @@ float unshadowedLightRatio(float distance)
+ #endif
+             if (all(lessThan(shadowXYZ.xy, vec2(1.0, 1.0))) && all(greaterThan(shadowXYZ.xy, vec2(0.0, 0.0))))
+             {
+-                shadowing = min(shadow2DProj(shadowTexture@shadow_texture_unit_index, shadowSpaceCoords@shadow_texture_unit_index).r, shadowing);
++                shadowing = calcShadowing(shadowTexture@shadow_texture_unit_index, shadowSpaceCoords@shadow_texture_unit_index);
+ 
+                 doneShadows = all(lessThan(shadowXYZ, vec3(0.95, 0.95, 1.0))) && all(greaterThan(shadowXYZ, vec3(0.05, 0.05, 0.0)));
+ #if @perspectiveShadowMaps
+diff --git a/files/shaders/compatibility/terrain.frag b/files/shaders/compatibility/terrain.frag
+index 9d89217f359..0cd0006afc5 100644
+--- a/files/shaders/compatibility/terrain.frag
++++ b/files/shaders/compatibility/terrain.frag
+@@ -1,12 +1,6 @@
+ #version 120
+ 
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(WRITE_NORMALS, FORCE_PPL, CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ varying vec2 uv;
+ 
+@@ -23,7 +17,11 @@ uniform sampler2D blendMap;
+ varying float euclideanDepth;
+ varying float linearDepth;
+ 
++#if defined(FORCE_PPL)
++#define PER_PIXEL_LIGHTING (@normalMap || @specularMap || FORCE_PPL)
++#else
+ #define PER_PIXEL_LIGHTING (@normalMap || @specularMap || @forcePPL)
++#endif
+ 
+ #if !PER_PIXEL_LIGHTING
+ centroid varying vec3 passLighting;
+@@ -97,7 +95,7 @@ void main()
+ 
+     gl_FragData[0] = applyFogAtDist(gl_FragData[0], euclideanDepth, linearDepth, far);
+ 
+-#if !@disableNormals && @writeNormals
++#if defined(WRITE_NORMALS) && WRITE_NORMALS && @writeNormals
+     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
+ #endif
+ 
+diff --git a/files/shaders/compatibility/terrain.vert b/files/shaders/compatibility/terrain.vert
+index cbfb7769ba5..e26d6658671 100644
+--- a/files/shaders/compatibility/terrain.vert
++++ b/files/shaders/compatibility/terrain.vert
+@@ -1,19 +1,17 @@
+ #version 120
+ 
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(FORCE_PPL, CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ #include "lib/core/vertex.h.glsl"
+ varying vec2 uv;
+ varying float euclideanDepth;
+ varying float linearDepth;
+ 
++#if defined(FORCE_PPL)
++#define PER_PIXEL_LIGHTING (@normalMap || @specularMap || FORCE_PPL)
++#else
+ #define PER_PIXEL_LIGHTING (@normalMap || @specularMap || @forcePPL)
++#endif
+ 
+ #if !PER_PIXEL_LIGHTING
+ centroid varying vec3 passLighting;
+diff --git a/files/shaders/compatibility/water.frag b/files/shaders/compatibility/water.frag
+index 749dcf27cd0..c63fdd24364 100644
+--- a/files/shaders/compatibility/water.frag
++++ b/files/shaders/compatibility/water.frag
+@@ -1,12 +1,6 @@
+ #version 120
+ 
+-#if @useUBO
+-    #extension GL_ARB_uniform_buffer_object : require
+-#endif
+-
+-#if @useGPUShader4
+-    #extension GL_EXT_gpu_shader4: require
+-#endif
++#pragma import_defines(WRITE_NORMALS, CLASSIC_FALLOFF, MAX_LIGHTS)
+ 
+ #include "lib/core/fragment.h.glsl"
+ 
+@@ -237,7 +231,7 @@ void main(void)
+ 
+     gl_FragData[0] = applyFogAtDist(gl_FragData[0], radialDepth, linearDepth, far);
+ 
+-#if !@disableNormals
++#if defined(WRITE_NORMALS) && WRITE_NORMALS
+     gl_FragData[1].rgb = normalize(gl_NormalMatrix * normal) * 0.5 + 0.5;
+ #endif
+ 
+diff --git a/files/shaders/lib/core/fragment.h.glsl b/files/shaders/lib/core/fragment.h.glsl
+index 9b7ef768e6c..fc9cf8f7a78 100644
+--- a/files/shaders/lib/core/fragment.h.glsl
++++ b/files/shaders/lib/core/fragment.h.glsl
+@@ -1,22 +1,50 @@
+ #ifndef OPENMW_FRAGMENT_H_GLSL
+ #define OPENMW_FRAGMENT_H_GLSL
+ 
+-@link "lib/core/fragment.glsl" if !@useOVR_multiview
+-@link "lib/core/fragment_multiview.glsl" if @useOVR_multiview
++uniform sampler2D reflectionMap;
+ 
+-vec4 sampleReflectionMap(vec2 uv);
++vec4 sampleReflectionMap(vec2 uv)
++{
++    return texture2D(reflectionMap, uv);
++}
+ 
+ #if @waterRefraction
+-vec4 sampleRefractionMap(vec2 uv);
+-float sampleRefractionDepthMap(vec2 uv);
++uniform sampler2D refractionMap;
++uniform highp sampler2D refractionDepthMap;
++
++vec4 sampleRefractionMap(vec2 uv)
++{
++    return texture2D(refractionMap, uv);
++}
++
++float sampleRefractionDepthMap(vec2 uv)
++{
++    return texture2D(refractionDepthMap, uv).x;
++}
++
+ #endif
+ 
+-vec4 samplerLastShader(vec2 uv);
++uniform sampler2D lastShader;
++
++vec4 samplerLastShader(vec2 uv)
++{
++    return texture2D(lastShader, uv);
++}
+ 
+ #if @skyBlending
+-vec3 sampleSkyColor(vec2 uv);
++uniform sampler2D sky;
++
++vec3 sampleSkyColor(vec2 uv)
++{
++    return texture2D(sky, uv).xyz;
++}
+ #endif
+ 
+-vec4 sampleOpaqueDepthTex(vec2 uv);
++uniform sampler2D opaqueDepthTex;
++
++vec4 sampleOpaqueDepthTex(vec2 uv)
++{
++    return texture2D(opaqueDepthTex, uv);
++}
+ 
+ #endif  // OPENMW_FRAGMENT_H_GLSL
+diff --git a/files/shaders/lib/core/fragment.h_orig.glsl b/files/shaders/lib/core/fragment.h_orig.glsl
+new file mode 100644
+index 00000000000..9b7ef768e6c
+--- /dev/null
++++ b/files/shaders/lib/core/fragment.h_orig.glsl
+@@ -0,0 +1,22 @@
++#ifndef OPENMW_FRAGMENT_H_GLSL
++#define OPENMW_FRAGMENT_H_GLSL
++
++@link "lib/core/fragment.glsl" if !@useOVR_multiview
++@link "lib/core/fragment_multiview.glsl" if @useOVR_multiview
++
++vec4 sampleReflectionMap(vec2 uv);
++
++#if @waterRefraction
++vec4 sampleRefractionMap(vec2 uv);
++float sampleRefractionDepthMap(vec2 uv);
++#endif
++
++vec4 samplerLastShader(vec2 uv);
++
++#if @skyBlending
++vec3 sampleSkyColor(vec2 uv);
++#endif
++
++vec4 sampleOpaqueDepthTex(vec2 uv);
++
++#endif  // OPENMW_FRAGMENT_H_GLSL
+diff --git a/files/shaders/lib/core/vertex.h.glsl b/files/shaders/lib/core/vertex.h.glsl
+index 6e22f6deb15..c8a1080574d 100644
+--- a/files/shaders/lib/core/vertex.h.glsl
++++ b/files/shaders/lib/core/vertex.h.glsl
+@@ -1,6 +1,16 @@
+-@link "lib/core/vertex.glsl" if !@useOVR_multiview
+-@link "lib/core/vertex_multiview.glsl" if @useOVR_multiview
++uniform mat4 projectionMatrix;
+ 
+-vec4 modelToClip(vec4 pos);
+-vec4 modelToView(vec4 pos);
+-vec4 viewToClip(vec4 pos);
++vec4 modelToView(vec4 pos)
++{
++    return gl_ModelViewMatrix * pos;
++}
++
++vec4 modelToClip(vec4 pos)
++{
++    return projectionMatrix * modelToView(pos);
++}
++
++vec4 viewToClip(vec4 pos)
++{
++    return projectionMatrix * pos;
++}
+diff --git a/files/shaders/lib/core/vertex.h_orig.glsl b/files/shaders/lib/core/vertex.h_orig.glsl
+new file mode 100644
+index 00000000000..6e22f6deb15
+--- /dev/null
++++ b/files/shaders/lib/core/vertex.h_orig.glsl
+@@ -0,0 +1,6 @@
++@link "lib/core/vertex.glsl" if !@useOVR_multiview
++@link "lib/core/vertex_multiview.glsl" if @useOVR_multiview
++
++vec4 modelToClip(vec4 pos);
++vec4 modelToView(vec4 pos);
++vec4 viewToClip(vec4 pos);
+diff --git a/files/shaders/lib/light/lighting.glsl b/files/shaders/lib/light/lighting.glsl
+index 4a86233294f..fd2696652ed 100644
+--- a/files/shaders/lib/light/lighting.glsl
++++ b/files/shaders/lib/light/lighting.glsl
+@@ -66,7 +66,7 @@ void doLighting(vec3 viewPos, vec3 viewNormal, float shininess, out vec3 diffuse
+         float lightDistance = length(lightPos);
+ 
+         // cull non-FFP point lighting by radius, light is guaranteed to not fall outside this bound with our cutoff
+-#if !@classicFalloff && !@lightingMethodFFP
++#if defined(CLASSIC_FALLOFF) && !CLASSIC_FALLOFF && !@lightingMethodFFP
+         if (lightDistance > lcalcRadius(lightIndex) * 2.0)
+             continue;
+ #endif
+diff --git a/files/shaders/lib/light/lighting_util.glsl b/files/shaders/lib/light/lighting_util.glsl
+index b56afe285b7..0812ea77ab6 100644
+--- a/files/shaders/lib/light/lighting_util.glsl
++++ b/files/shaders/lib/light/lighting_util.glsl
+@@ -35,11 +35,16 @@ struct LightData
+     vec4 attenuation;
+ };
+ 
++#if defined(MAX_LIGHTS)
++uniform int PointLightIndex[MAX_LIGHTS];
++#else
+ uniform int PointLightIndex[@maxLights];
++#endif
++
+ uniform int PointLightCount;
+ 
+ // Defaults to shared layout. If we ever move to GLSL 140, std140 layout should be considered
+-uniform LightBufferBinding
++layout(std140) uniform LightBufferBinding
+ {
+     LightData LightBuffer[@maxLightsInScene];
+ };
+@@ -54,7 +59,12 @@ uniform LightBufferBinding
+ |  att_c  |  att_l   |  att_q   |  radius/spec_a  |
+  --------------------------------------------------
+ */
++#if defined(MAX_LIGHTS)
++uniform mat4 LightBuffer[MAX_LIGHTS];
++#else
+ uniform mat4 LightBuffer[@maxLights];
++#endif
++
+ uniform int PointLightCount;
+ 
+ #endif
+@@ -106,7 +116,7 @@ float lcalcRadius(int lightIndex)
+ float lcalcIllumination(int lightIndex, float dist)
+ {
+     float illumination = 1.0 / (lcalcConstantAttenuation(lightIndex) + lcalcLinearAttenuation(lightIndex) * dist + lcalcQuadraticAttenuation(lightIndex) * dist * dist);
+-#if !@classicFalloff && !@lightingMethodFFP
++#if defined(CLASSIC_FALLOFF) && !CLASSIC_FALLOFF && !@lightingMethodFFP
+     // Fade illumination between the radius and the radius doubled to diminish pop-in
+     illumination *= 1.0 - quickstep((dist / lcalcRadius(lightIndex)) - 1.0);
+ #endif
+diff --git a/files/shaders/lib/material/alpha.glsl b/files/shaders/lib/material/alpha.glsl
+index 62722e52a18..d9d83ff37b6 100644
+--- a/files/shaders/lib/material/alpha.glsl
++++ b/files/shaders/lib/material/alpha.glsl
+@@ -23,7 +23,7 @@ float coveragePreservingAlphaScale(sampler2D diffuseMap, vec2 uv)
+     #if @adjustCoverage
+         vec2 textureSize;
+         #if @useGPUShader4
+-            textureSize = textureSize2D(diffuseMap, 0);
++            textureSize = vec2(textureSize2D(diffuseMap, 0));
+         #else
+             textureSize = vec2(256.0);
+         #endif
+-- 
+GitLab
+

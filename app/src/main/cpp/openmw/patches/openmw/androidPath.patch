@@ -1,0 +1,26 @@
+From cf7c849ceba5cdd45195b61b758a1dc7eaa0dae9 Mon Sep 17 00:00:00 2001
+From: Jared Davenport <duron27@gmail.com>
+Date: Fri, 27 Sep 2024 13:48:29 +0000
+Subject: [PATCH] Update androidpath.cpp
+
+---
+ components/files/androidpath.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/components/files/androidpath.cpp b/components/files/androidpath.cpp
+index 0a6cc161f31..dbd363658f9 100644
+--- a/components/files/androidpath.cpp
++++ b/components/files/androidpath.cpp
+@@ -15,7 +15,7 @@ static const char* g_path_user; //< Path to user root, e.g. /sdcard/Android/data
+ /**
+  * \brief Called by java code to set up directory paths
+  */
+-extern "C" JNIEXPORT void JNICALL Java_ui_activity_GameActivity_getPathToJni(
++extern "C" JNIEXPORT void JNICALL Java_org_openmw_EngineActivity_getPathToJni(
+     JNIEnv* env, jobject obj, jstring global, jstring user)
+ {
+     g_path_global = env->GetStringUTFChars(global, nullptr);     
+
+-- 
+GitLab
+

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">web.archive.org</domain>
+        <domain includeSubdomains="true">en.m.uesp.net</domain>
+        <domain includeSubdomains="true">mega.co.nz</domain>
+        <domain includeSubdomains="true">mega.nz</domain>
+        <domain includeSubdomains="true">userstorage.mega.co.nz</domain>
+    </domain-config>
+</network-security-config>

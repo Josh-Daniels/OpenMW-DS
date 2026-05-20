@@ -1,0 +1,26 @@
+diff --git a/Android.mk b/Android.mk
+index 2290e5ac..888f516a 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -92,13 +92,17 @@ LOCAL_SRC_FILES := \
+ LOCAL_CFLAGS += -g -std=gnu99 -funwind-tables -O3 -fvisibility=hidden -include include/android_debug.h
+ LOCAL_CFLAGS += -DNOX11
+ LOCAL_CFLAGS += -DNO_GBM
+-#LOCAL_CFLAGS += -DNO_INIT_CONSTRUCTOR
++LOCAL_CFLAGS += -DNO_INIT_CONSTRUCTOR
++LOCAL_CFLAGS += -DNOEGL
++LOCAL_CFLAGS += -DNO_LOADER
+ LOCAL_CFLAGS += -DDEFAULT_ES=2
+ //TODO: maybe temporary?
+ LOCAL_CFLAGS += -Wno-typedef-redefinition -Wno-dangling-else
++LOCAL_CFLAGS += -Dasm=__asm__ -Dvolatile=__volatile__
++LOCAL_CFLAGS += -include include/gl4esinit.h
+ 
+ LOCAL_LDLIBS := -llog
+-#building as a static lib
++#building as a shared lib
+ 
+-LOCAL_CFLAGS += -DSTATICLIB
+-include $(BUILD_STATIC_LIBRARY)
++LOCAL_CFLAGS += -DSHAREDLIB
++include $(BUILD_SHARED_LIBRARY)

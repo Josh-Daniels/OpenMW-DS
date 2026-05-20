@@ -1,0 +1,15 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5c7348b407..095697bb97 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -461,7 +461,9 @@ endif(HAVE_MULTIVIEW)
+ 
+ set(BOOST_COMPONENTS iostreams program_options system)
+ 
+-find_package(Boost 1.70.0 CONFIG REQUIRED COMPONENTS ${BOOST_COMPONENTS} OPTIONAL_COMPONENTS ${BOOST_OPTIONAL_COMPONENTS})
++set(Boost_NO_BOOST_CMAKE ON)
++
++find_package(Boost 1.6.2 REQUIRED COMPONENTS ${BOOST_COMPONENTS} OPTIONAL_COMPONENTS ${BOOST_OPTIONAL_COMPONENTS})
+ 
+ if(OPENMW_USE_SYSTEM_MYGUI)
+     find_package(MyGUI 3.4.3 REQUIRED)
