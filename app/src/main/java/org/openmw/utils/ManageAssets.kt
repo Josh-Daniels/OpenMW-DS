@@ -3,8 +3,8 @@ package org.openmw.utils
 import android.content.Context
 import android.util.Log
 import androidx.compose.ui.graphics.Color
+import org.openmw.BuildConfig
 import org.openmw.Constants
-import org.openmw.Constants.RANDOM_NUM
 import org.openmw.ui.controls.UIStateManager.gameList
 import org.openmw.ui.controls.UIStateManager.userUI
 import org.openmw.ui.view.addCustomLog
@@ -14,30 +14,45 @@ import java.io.IOException
 
 class ManageAssets(private val context: Context) {
 
-    fun copy(src: String, dst: String) {
+    fun copy(src: String, dst: String, overwrite: Boolean = false) {
         val assetManager = context.assets
         val assets = assetManager.list(src) ?: return
 
         if (assets.isEmpty()) {
-            copyFile(src, dst)
+            copyFile(src, dst, overwrite)
         } else {
             File(dst).apply { mkdirs() }
             assets.forEach { asset ->
-                copy("$src/$asset", "$dst/$asset")
+                copy("$src/$asset", "$dst/$asset", overwrite)
             }
         }
     }
 
-    private fun copyFile(src: String, dst: String) {
+    private fun copyFile(src: String, dst: String, overwrite: Boolean = false) {
         val destinationFile = File(dst)
         if (destinationFile.exists()) {
-            Log.d("ManageAssets", "File $dst already exists, skipping copy.")
-            addCustomLog(
-                "ManageAssets, File $dst already exists, skipping copy.",
-                textSize = 10,
-                textColor = Color.White
-            )
-            return
+            if (!overwrite) {
+                Log.d("ManageAssets", "File $dst already exists, skipping copy.")
+                addCustomLog(
+                    "ManageAssets, File $dst already exists, skipping copy.",
+                    textSize = 10,
+                    textColor = Color.White
+                )
+                return
+            }
+
+            // Smart check: Compare sizes
+            try {
+                context.assets.open(src).use { input ->
+                    val assetSize = input.available().toLong()
+                    if (destinationFile.length() == assetSize) {
+                        Log.d("ManageAssets", "File $dst is identical (size match), skipping.")
+                        return
+                    }
+                }
+            } catch (e: IOException) {
+                // Fallback to copy if size check fails
+            }
         }
         try {
             context.assets.open(src).use { input ->
@@ -117,29 +132,27 @@ class UserManageAssets(val context: Context) {
     }
 
     fun resourcePrepare() {
-        val versionFile = File("${Constants.USER_RESOURCES}/version")
-        val versionContent = if (versionFile.exists()) {
-            versionFile.readLines().lastOrNull { it.isNotBlank() }?.trim() ?: ""
-        } else {
-            ""
+        val stampFile = File(Constants.VERSION_STAMP)
+        val currentStamp = if (stampFile.exists()) stampFile.readText().trim() else ""
+        val targetStamp = BuildConfig.RANDOMIZER.toString()
+
+        if (currentStamp == targetStamp) {
+            Log.d("ManageAssets", "Version match (stamp: $currentStamp), skipping resource update.")
+            return
         }
-        val RANDOM_NUM = "Alpha-8086"
-        if (versionContent != RANDOM_NUM) {
-            Log.d("onFirstLaunch", "Version mismatch: versionContent='$versionContent', expected='$RANDOM_NUM'")
-            // Delete the USER_RESOURCES folder if it exists
-            val userResourcesDir = File(Constants.USER_RESOURCES)
-            if (userResourcesDir.exists()) {
-                Log.d("onFirstLaunch", "Deleting USER_RESOURCES folder: ${Constants.USER_RESOURCES}")
-                val deleted = userResourcesDir.deleteRecursively()
-                Log.d("onFirstLaunch", "USER_RESOURCES folder deletion ${if (deleted) "successful" else "failed"}")
-            } else {
-                Log.d("onFirstLaunch", "USER_RESOURCES folder does not exist: ${Constants.USER_RESOURCES}")
-            }
-            // Copy the resources after deletion
-            Log.d("onFirstLaunch", "Copying resources from libopenmw/resources to ${Constants.USER_RESOURCES}")
-            assetCopier.copy("libopenmw/resources", Constants.USER_RESOURCES)
-        } else {
-            Log.d("onFirstLaunch", "Version match: versionContent='$versionContent', no action needed")
+
+        Log.d("ManageAssets", "Version mismatch: current='$currentStamp', target='$targetStamp'. Updating resources...")
+
+        // Copy the resources with overwrite enabled
+        Log.d("ManageAssets", "Smart copying resources from libopenmw/resources to ${Constants.USER_RESOURCES}")
+        assetCopier.copy("libopenmw/resources", Constants.USER_RESOURCES, overwrite = true)
+
+        // Write the new stamp after successful copy
+        try {
+            stampFile.writeText(targetStamp)
+            Log.d("ManageAssets", "Successfully updated resources and stamp: $targetStamp")
+        } catch (e: Exception) {
+            Log.e("ManageAssets", "Failed to write version stamp", e)
         }
     }
 

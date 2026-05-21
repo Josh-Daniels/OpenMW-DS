@@ -1,5 +1,6 @@
 import org.gradle.kotlin.dsl.coreLibraryDesugaring
 import java.util.Properties
+import java.util.Random
 import java.io.FileInputStream
 
 plugins {
@@ -40,6 +41,8 @@ android {
         targetSdk = 36
         versionCode = 2
         versionName = "2.7.4"
+
+        buildConfigField("int", "RANDOMIZER", "${Random().nextInt(999).let { if (it < 0) -it else it }}")
 
         ndk {
             //noinspection ChromeOsAbiSupport
