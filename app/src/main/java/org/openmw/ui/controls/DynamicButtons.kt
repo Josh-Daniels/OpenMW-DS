@@ -480,9 +480,12 @@ fun ResizableDraggableButton(
                                                         when (keyCode) {
                                                             KeyEvent.KEYCODE_Z -> {
                                                                 if (isCursorVisible == 1 && UIStateManager.tempCodeGroup == "OpenMW") {
-                                                                    SDLActivity.sendMouseButton(
+                                                                    SDLActivity.onNativeMouse(
                                                                         1,
-                                                                        1
+                                                                        0,
+                                                                        0f,
+                                                                        0f,
+                                                                        true
                                                                     )
                                                                 } else {
                                                                     if (isVibrationOn) {
@@ -502,8 +505,7 @@ fun ResizableDraggableButton(
                                                         if (keyCode == KeyEvent.KEYCODE_B) {
                                                             onNativeKeyUp(keyCode)
                                                             if (isCursorVisible == 1) {
-                                                                //sendMouseClick(sdlView)
-                                                                SDLActivity.sendMouseButton(1, 2)
+                                                                SDLActivity.onNativeMouse(2, 0, 0f, 0f, true)
                                                             }
                                                         }
                                                     }
@@ -538,9 +540,12 @@ fun ResizableDraggableButton(
 
                                                                 // Call the native function with updated coordinates
                                                                 if (UIStateManager.tempCodeGroup == "OpenMW" && !blockMouse.value) {
-                                                                    SDLActivity.sendRelativeMouseMotion(
-                                                                        movementX.roundToInt(),
-                                                                        movementY.roundToInt()
+                                                                    SDLActivity.onNativeMouse(
+                                                                        0,
+                                                                        2,
+                                                                        movementX,
+                                                                        movementY,
+                                                                        true
                                                                     )
                                                                 }
 
@@ -564,8 +569,8 @@ fun ResizableDraggableButton(
                                                     onNativeKeyUp(keyCode)
                                                     if (UIStateManager.tempCodeGroup == "OpenMW") {
                                                         if (isMouseShown() == 1) {
-                                                            SDLActivity.sendMouseButton(0, 1)
-                                                            SDLActivity.sendMouseButton(0, 2)
+                                                            SDLActivity.onNativeMouse(1, 1, 0f, 0f, true)
+                                                            SDLActivity.onNativeMouse(2, 1, 0f, 0f, true)
                                                         }
                                                     }
                                                 }

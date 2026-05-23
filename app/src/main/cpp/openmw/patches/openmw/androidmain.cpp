@@ -1,14 +1,14 @@
-#if defined(stderr) && (!defined(__ANDROID_API__) || __ANDROID_API__ < 23)
+#if defined(stderr) && (__ANDROID_API__ < 23)
 int stderr = 0; // Hack: fix linker error
 #endif
 
 #include "SDL_main.h"
 #include "engine.hpp"
 #include "mwbase/windowmanager.hpp"
-#include <SDL_gamecontroller.h>
-#include <SDL_mouse.h>
 #include <SDL_events.h>
+#include <SDL_gamecontroller.h>
 #include <SDL_hints.h>
+#include <SDL_mouse.h>
 
 #include <osg/GraphicsContext>
 #include <osg/OperationThread>
@@ -22,39 +22,30 @@ int stderr = 0; // Hack: fix linker error
 
 extern void SDL_Android_Init(JNIEnv* env, jclass cls);
 extern int argcData;
-extern const char **argvData;
+extern const char** argvData;
 void releaseArgv();
 
-
-extern "C" int Java_org_libsdl_app_SDLActivity_getMouseX(JNIEnv *env, jclass cls, jobject obj) {
+extern "C" int Java_org_libsdl_app_SDLActivity_getMouseX(JNIEnv* env, jclass cls, jobject obj)
+{
     int ret = 0;
     SDL_GetMouseState(&ret, nullptr);
     return ret;
 }
 
-
-extern "C" int Java_org_libsdl_app_SDLActivity_getMouseY(JNIEnv *env, jclass cls, jobject obj) {
+extern "C" int Java_org_libsdl_app_SDLActivity_getMouseY(JNIEnv* env, jclass cls, jobject obj)
+{
     int ret = 0;
     SDL_GetMouseState(nullptr, &ret);
     return ret;
 }
 
-extern "C" int Java_org_libsdl_app_SDLActivity_isMouseShown(JNIEnv *env, jclass cls, jobject obj) {
+extern "C" int Java_org_libsdl_app_SDLActivity_isMouseShown(JNIEnv* env, jclass cls, jobject obj)
+{
     return SDL_ShowCursor(SDL_QUERY);
 }
 
-extern SDL_Window *Android_Window;
-extern "C" int SDL_SendMouseMotion(SDL_Window * window, int mouseID, int relative, int x, int y);
-extern "C" void Java_org_libsdl_app_SDLActivity_sendRelativeMouseMotion(JNIEnv *env, jclass cls, int x, int y) {
-    SDL_SendMouseMotion(Android_Window, 0, 1, x, y);
-}
-
-extern "C" int SDL_SendMouseButton(SDL_Window * window, int mouseID, Uint8 state, Uint8 button);
-extern "C" void Java_org_libsdl_app_SDLActivity_sendMouseButton(JNIEnv *env, jclass cls, int state, int button) {
-    SDL_SendMouseButton(Android_Window, 0, state, button);
-}
-
-extern "C" int Java_org_libsdl_app_SDLActivity_nativeInit(JNIEnv* env, jclass cls, jobject obj) {
+extern "C" int Java_org_libsdl_app_SDLActivity_nativeInit(JNIEnv* env, jclass cls, jobject obj)
+{
     setenv("OPENMW_DECOMPRESS_TEXTURES", "1", 1);
 
     // On Android, we use a virtual controller with guid="Virtual"
@@ -67,23 +58,26 @@ extern "C" int Java_org_libsdl_app_SDLActivity_nativeInit(JNIEnv* env, jclass cl
 }
 
 extern osg::ref_ptr<osgViewer::Viewer> g_viewer;
-static osg::GraphicsContext *ctx;
+static osg::GraphicsContext* ctx;
 
 class CtxReleaseOperation : public osg::Operation {
 public:
-    virtual void operator () (osg::Object* caller) {
+    virtual void operator()(osg::Object* caller)
+    {
         ctx->releaseContext();
     }
 };
 
 class CtxAcquireOperation : public osg::Operation {
 public:
-    virtual void operator () (osg::Object* caller) {
+    virtual void operator()(osg::Object* caller)
+    {
         ctx->makeCurrent();
     }
 };
 
-extern "C" void Java_org_libsdl_app_SDLActivity_omwSurfaceDestroyed(JNIEnv *env, jclass cls, jobject obj) {
+extern "C" void Java_org_libsdl_app_SDLActivity_omwSurfaceDestroyed(JNIEnv* env, jclass cls, jobject obj)
+{
     if (!g_viewer)
         return;
 
@@ -91,12 +85,13 @@ extern "C" void Java_org_libsdl_app_SDLActivity_omwSurfaceDestroyed(JNIEnv *env,
     ctx = g_viewer->getCamera()->getGraphicsContext();
     ctx->add(op);
 
-    auto win = (MWBase::WindowManager *)MWBase::Environment::get().getWindowManager();
+    auto win = (MWBase::WindowManager*)MWBase::Environment::get().getWindowManager();
     if (win)
         win->windowVisibilityChange(false);
 }
 
-extern "C" void Java_org_libsdl_app_SDLActivity_omwSurfaceRecreated(JNIEnv *env, jclass cls, jobject obj) {
+extern "C" void Java_org_libsdl_app_SDLActivity_omwSurfaceRecreated(JNIEnv* env, jclass cls, jobject obj)
+{
     if (!g_viewer)
         return;
 
@@ -104,7 +99,7 @@ extern "C" void Java_org_libsdl_app_SDLActivity_omwSurfaceRecreated(JNIEnv *env,
     ctx = g_viewer->getCamera()->getGraphicsContext();
     ctx->add(op);
 
-    auto win = (MWBase::WindowManager *)MWBase::Environment::get().getWindowManager();
+    auto win = (MWBase::WindowManager*)MWBase::Environment::get().getWindowManager();
     if (win)
         win->windowVisibilityChange(true);
 }

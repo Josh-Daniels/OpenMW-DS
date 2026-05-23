@@ -361,9 +361,12 @@ fun ResizableDraggableRightThumbstick(
                                                                     clampedY
                                                                 )
                                                             } else {
-                                                                SDLActivity.sendRelativeMouseMotion(
-                                                                    movementX.roundToInt(),
-                                                                    movementY.roundToInt()
+                                                                SDLActivity.onNativeMouse(
+                                                                    0,
+                                                                    2,
+                                                                    movementX,
+                                                                    movementY,
+                                                                    true
                                                                 )
                                                             }
 

@@ -362,7 +362,6 @@ ExternalProject_Add(sdl2
 	CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
 	${COMMON_CMAKE_ARGS}
 	-DSDL_STATIC=OFF
-	-DHAVE_GCC_FVISIBILITY=OFF
 
 	BUILD_COMMAND ${wrapper_command} make -j${NPROC} PROGRAMS=
 	INSTALL_COMMAND ${wrapper_command} make install
