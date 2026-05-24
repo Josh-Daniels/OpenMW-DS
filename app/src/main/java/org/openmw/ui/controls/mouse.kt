@@ -2,10 +2,8 @@
 
 package org.openmw.ui.controls
 
-import android.content.Context
 import android.util.Log
 import android.view.MotionEvent.ACTION_SCROLL
-import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -65,6 +63,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -94,11 +93,9 @@ import com.composables.core.Thumb
 import com.composables.core.VerticalScrollbar
 import com.composables.core.rememberScrollAreaState
 import kotlinx.coroutines.InternalCoroutinesApi
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.libsdl.app.SDLActivity
 import org.libsdl.app.SDLActivity.onNativeMouse
-import org.openmw.Constants
 import org.openmw.EngineActivity
 import org.openmw.R
 import org.openmw.isControllerConnected
@@ -112,40 +109,48 @@ import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getOffsetXMouse
 import org.openmw.utils.GameFilesPreferences.getOffsetYMouse
 import org.openmw.utils.GameFilesPreferences.getSelectedAnimation
-import org.openmw.ui.view.currentDeviceRealSize
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.fromHex
 import kotlin.math.roundToInt
 
 @Composable
-fun MouseIcon() {
+fun MouseIcon(
+    containerWidth: Float,
+    containerHeight: Float
+) {
     val context = LocalContext.current
-    var iconOffset by remember { mutableStateOf(IntOffset.Zero) }
     val offsetXMouse by getOffsetXMouse(context).collectAsState(initial = 0f)
     val offsetYMouse by getOffsetYMouse(context).collectAsState(initial = 0f)
-    val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    val (screenWidth, screenHeight) = windowManager.currentDeviceRealSize()
     val sdlWidth = EngineActivity.resolutionX.toFloat()
     val sdlHeight = EngineActivity.resolutionY.toFloat()
 
-    LaunchedEffect(Unit) {
+    var xPos by remember { mutableFloatStateOf(0f) }
+    var yPos by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(containerWidth, containerHeight, sdlWidth, sdlHeight) {
         while (true) {
-            val x = (SDLActivity.getMouseX().toFloat() + (offsetXMouse ?: 0f)) * (screenWidth / sdlWidth)
-            val y = (SDLActivity.getMouseY().toFloat() + (offsetYMouse ?: 0f)) * (screenHeight / sdlHeight)
-            iconOffset = IntOffset(x.roundToInt(), y.roundToInt())
-            delay(16L)
+            withFrameNanos {
+                val rawX = SDLActivity.getMouseX().toFloat()
+                val rawY = SDLActivity.getMouseY().toFloat()
+                xPos = (rawX * (containerWidth / sdlWidth)) + (offsetXMouse ?: 0f)
+                yPos = (rawY * (containerHeight / sdlHeight)) + (offsetYMouse ?: 0f)
+            }
         }
     }
 
-    Box {
+    Box(modifier = Modifier.fillMaxSize()) {
         Image(
             painter = rememberAsyncImagePainter(model = "file:${userUI}/pointer_arrow.png"),
             contentDescription = "Pointer Icon",
+            alignment = Alignment.TopStart,
             contentScale = ContentScale.Fit,
             modifier = Modifier
-                .offset { iconOffset }
                 .size(32.dp)
+                .graphicsLayer {
+                    translationX = xPos
+                    translationY = yPos
+                }
         )
     }
 }
@@ -193,8 +198,8 @@ fun ScrollWheelIndicator(
     )
 
     LaunchedEffect(containerWidth, containerHeight, utilityButton) {
-        offsetX.value = utilityButton.offsetX ?: (0.5f / containerWidth)
-        offsetY.value = utilityButton.offsetY ?: (0.5f / containerHeight)
+        offsetX.floatValue = utilityButton.offsetX ?: (0.5f / containerWidth)
+        offsetY.floatValue = utilityButton.offsetY ?: (0.5f / containerHeight)
     }
     LaunchedEffect(globalColorChange) {
         if (globalColorChange) {
@@ -236,8 +241,8 @@ fun ScrollWheelIndicator(
         coroutineScope.launch {
             // Create an updated copy of the utility button with new UI values
             val updatedUtilityButton = utilityButton.copy(
-                offsetX = offsetX.value,
-                offsetY = offsetY.value,
+                offsetX = offsetX.floatValue,
+                offsetY = offsetY.floatValue,
                 size = buttonSize.value.value,
                 color = hexCode,
                 alpha = buttonAlpha,
@@ -272,8 +277,8 @@ fun ScrollWheelIndicator(
                 .background(Color.Transparent)
                 .offset {
                     IntOffset(
-                        (offsetX.value).roundToInt(),
-                        (offsetY.value).roundToInt()
+                        (offsetX.floatValue).roundToInt(),
+                        (offsetY.floatValue).roundToInt()
                     )
                 }
                 .border(

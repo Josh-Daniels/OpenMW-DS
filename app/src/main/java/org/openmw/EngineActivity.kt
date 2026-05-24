@@ -267,7 +267,10 @@ class EngineActivity : SDLActivity() {
                             exit = fadeOut() + shrinkOut()
                         ) {
                             if (autoMouseMode != "None" || controllerConnected) {
-                                MouseIcon()
+                                MouseIcon(
+                                    containerWidth = containerWidth,
+                                    containerHeight = containerHeight
+                                )
                             }
                         }
 
