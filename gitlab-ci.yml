@@ -1,0 +1,112 @@
+default:
+  tags:
+    - saas-linux-large-amd64
+
+# Use of a smaller runner model is possible but not cheaper because it takes proportionally longer. If using full lto "large" runner is required.
+
+variables:
+
+  ANDROID_COMPILE_SDK: "28"
+
+  ANDROID_BUILD_TOOLS: "29.0.2"
+
+  # It's what version of the command line tools we're going to download from the official site.
+  # Official Site-> https://developer.android.com/studio/index.html
+  # There, look down below at the cli tools only, sdk tools package is of format:
+  #        commandlinetools-os_type-ANDROID_SDK_TOOLS_latest.zip
+  # when the script was last modified for latest compileSdkVersion, it was which is written down below
+  ANDROID_SDK_TOOLS: "11076708"
+
+  JAVA_HOME: "/usr/lib/jvm/java-17-openjdk-17.0.9.0.9-3.fc39.x86_64"
+
+stages:
+  - building
+  - tests
+  - release
+
+# Run the build script and create an apk using gradle
+buildingJob:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+    - when: never
+# Run CI when a new tag is created
+  interruptible: true
+  stage: building
+  
+  image: fedora:39
+
+  before_script:
+  - echo $CI_COMMIT_TAG
+  - dnf upgrade -y
+  - dnf groupinstall -y development-tools
+  - dnf install -y wget glibc-devel.i686 glibc-devel java-17-openjdk java-17-openjdk-devel gcc gcc-c++ libstdc++-devel unzip bzip2 cmake make which pkgconf pkg-config java-11-openjdk java-11-openjdk-devel 
+
+  # Setup path as android_home for moving/exporting the downloaded sdk into it
+  - export ANDROID_HOME="${PWD}/android-sdk-root"
+  # Create a new directory at specified location
+  - mkdir $ANDROID_HOME
+  # Here we are installing androidSDK tools from official source,
+  # after that unzipping those tools and
+  # then running a series of SDK manager commands to install necessary android SDK packages that'll allow the app to build
+  - wget --no-verbose --output-document=$ANDROID_HOME/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_SDK_TOOLS}_latest.zip
+  - unzip -q -d "$ANDROID_HOME/cmdline-tools" "$ANDROID_HOME/cmdline-tools.zip"
+  - mv -T "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/tools"
+  - export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/cmdline-tools/tools/bin
+
+  # Nothing fancy here, just checking sdkManager version
+  - sdkmanager --version
+
+  # use yes to accept all licenses
+  - yes | sdkmanager --licenses > /dev/null || true
+  - sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}"
+  - sdkmanager "ndk;26.1.10909125"
+  - sdkmanager "platform-tools"
+  - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
+
+  # Not necessary, but just for surity
+  - chmod +x ./gradlew
+
+  script:
+    - ./gradlew assembleNightlyDebug -Dorg.gradle.java.home=/usr/lib/jvm/java-11-openjdk-11.0.22.0.7-1.fc39.x86_64 &> ./gradle.log
+    - cp app/build/outputs/apk/nightly/debug/*.apk openmw-android-$CI_COMMIT_TAG.apk
+
+  # So we can access the artifacts in the next job:
+  after_script:
+    - echo "JOB_ID=$CI_JOB_ID" >> job.env
+    
+
+  artifacts:
+    when: always
+    paths:
+      - ./buildscript.log
+      - ./gradle.log
+      - openmw-android-$CI_COMMIT_TAG.apk
+    expire_in: never
+    reports:
+      dotenv: job.env
+
+
+# Create a release with the apk attached, named after the tag which triggered the CI:
+releaseJob:
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+    - when: never
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: buildingJob
+      artifacts: true
+  script:
+    - echo "Create Release $CI_COMMIT_TAG"
+    - echo $JOB_ID  
+  release:
+    name: 'Release $CI_COMMIT_TAG'
+    tag_name: '$CI_COMMIT_TAG'
+    ref: '$CI_COMMIT_TAG'
+    description: 'Release $CI_COMMIT_TAG'
+    assets:
+      links:
+        - name: "openmw-android-$CI_COMMIT_TAG.apk"
+          url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-$CI_COMMIT_TAG.apk"
