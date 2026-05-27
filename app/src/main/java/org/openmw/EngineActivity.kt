@@ -4,7 +4,6 @@ package org.openmw
 
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.LauncherActivity
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -24,7 +23,6 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
-import androidx.annotation.RequiresApi
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandIn
 import androidx.compose.animation.fadeIn
@@ -33,10 +31,12 @@ import androidx.compose.animation.shrinkOut
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.lifecycleScope
+import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
@@ -94,6 +95,7 @@ import kotlin.math.roundToInt
 
 @Suppress("DEPRECATION")
 @InternalCoroutinesApi
+@AndroidEntryPoint
 class EngineActivity : SDLActivity() {
     private lateinit var sdlView: View
     private external fun getPathToJni(path_global: String, path_user: String)
@@ -280,7 +282,7 @@ class EngineActivity : SDLActivity() {
                             onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
                         )
 
-                        Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight, sdlView = sdlView)
+                        Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
 
                         AnimatedVisibility(
                             visible = enableRightThumb && UIStateManager.tempCodeGroup == "OpenMW",
@@ -348,26 +350,26 @@ class EngineActivity : SDLActivity() {
                     }
 
                     //if (UIStateManager.tempCodeGroup == "OpenMW") {
-                        val composeViewLeftThumb = findViewById<ComposeView>(R.id.compose_leftThumb)
-                        (composeViewLeftThumb.parent as? ViewGroup)?.removeView(composeViewLeftThumb)
+                    val composeViewLeftThumb = findViewById<ComposeView>(R.id.compose_leftThumb)
+                    (composeViewLeftThumb.parent as? ViewGroup)?.removeView(composeViewLeftThumb)
 
-                        initializeOffsetsFromStateFlow()
+                    initializeOffsetsFromStateFlow()
 
-                        composeViewLeftThumb.setContent {
-                            ResizableDraggableThumbstick(
-                                context = this@EngineActivity,
-                                containerWidth = containerWidth,
-                                containerHeight = containerHeight
-                            )
-                        }
+                    composeViewLeftThumb.setContent {
+                        ResizableDraggableThumbstick(
+                            context = this@EngineActivity,
+                            containerWidth = containerWidth,
+                            containerHeight = containerHeight
+                        )
+                    }
 
-                        sdlContainer.addView(composeViewLeftThumb)
-                        updateComposeViewPosition(composeViewLeftThumb)
+                    sdlContainer.addView(composeViewLeftThumb)
+                    updateComposeViewPosition(composeViewLeftThumb)
                     //}
                 } else if (UIStateManager.useNavmesh) {
                     composeViewUI.setContent {
                         BackgroundAnimation()
-                        NavmeshScreen(onComplete = { navigateToLauncher() })
+                        NavmeshScreen(onComplete = { navigateToMain() })
                     }
                 }
                 // Remove the Global Layout Listener to prevent multiple calls
@@ -376,8 +378,9 @@ class EngineActivity : SDLActivity() {
         })
     }
 
-    private fun navigateToLauncher() {
-        val intent = Intent(this, LauncherActivity::class.java)
+    @OptIn(ExperimentalMaterial3Api::class)
+    private fun navigateToMain() {
+        val intent = Intent(this, MainActivity::class.java)
         startActivity(intent)
         finish()
     }
@@ -413,77 +416,77 @@ class EngineActivity : SDLActivity() {
 
     private fun setEnvironmentVariables(context: Context) {
         try {
-        Os.setenv("OPENMW_GLES_VERSION", "32", true)
-        Os.setenv("LIBGL_ES", "3", true)
+            Os.setenv("OPENMW_GLES_VERSION", "32", true)
+            Os.setenv("LIBGL_ES", "3", true)
 
-        Os.setenv("UQM_CONFIG_DIR", "${Constants.USER_FILE_STORAGE}/uqm", true)
+            Os.setenv("UQM_CONFIG_DIR", "${Constants.USER_FILE_STORAGE}/uqm", true)
 
-        if ((UIStateManager.tempCodeGroup) != "UQM") {
-            val enableANGLE = runBlocking {
-                readAngle(context).first()
-            }
-            val enableSPIRV = runBlocking {
-                readSPIRV(context).first()
-            }
-            if (enableSPIRV) {
-                Os.setenv("LIBGL_SIMPLE_SHADERCONV", "1", true)
-            }
-            if (enableANGLE) {
-                Os.setenv("LIBGL_SIMPLE_SHADERCONV", "0", true)
-                Os.setenv("LIBGL_GLES", "libGLESv2_angle.so", true)
-                Os.setenv("LIBGL_EGL", "libEGL_angle.so", true)
-                Os.setenv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so", true)
-                Os.setenv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so", true)
-            }
-        }
-
-        Os.setenv("OSG_TEXT_SHADER_TECHNIQUE", "ALL", true)
-        Os.setenv("OSG_VERTEX_BUFFER_HINT", "VBO", true)
-        Os.setenv("OSG_GL_TEXTURE_STORAGE", "OFF", true)
-        Os.setenv("LIBGL_INSTANCING", "1", true)
-
-        Os.setenv("DETHRACE_ROOT_DIR", "${Constants.USER_FILE_STORAGE}/dethrace/", true);
-
-        Os.setenv("HARNESS_OPENGL", "1", true)
-
-        CoroutineScope(Dispatchers.IO).launch {
-            patchShaders()
-            GameFilesPreferences.readAvoid16Bits(context).collect { avoid16bits ->
-                if (avoid16bits) {
-                    Os.setenv("LIBGL_AVOID16BITS", "1", true)
-                } else {
-                    Os.setenv("LIBGL_AVOID16BITS", "0", true)
+            if ((UIStateManager.tempCodeGroup) != "UQM") {
+                val enableANGLE = runBlocking {
+                    readAngle(context).first()
+                }
+                val enableSPIRV = runBlocking {
+                    readSPIRV(context).first()
+                }
+                if (enableSPIRV) {
+                    Os.setenv("LIBGL_SIMPLE_SHADERCONV", "1", true)
+                }
+                if (enableANGLE) {
+                    Os.setenv("LIBGL_SIMPLE_SHADERCONV", "0", true)
+                    Os.setenv("LIBGL_GLES", "libGLESv2_angle.so", true)
+                    Os.setenv("LIBGL_EGL", "libEGL_angle.so", true)
+                    Os.setenv("SDL_VIDEO_GL_DRIVER", "libGLESv2_angle.so", true)
+                    Os.setenv("SDL_VIDEO_EGL_DRIVER", "libEGL_angle.so", true)
                 }
             }
-            // Set LIBGL_SHRINK based on preference
-            GameFilesPreferences.readTextureShrinkingOption(context)
-                .collect { textureShrinkingOption ->
-                    when (textureShrinkingOption) {
-                        "low" -> Os.setenv("LIBGL_SHRINK", "2", true)
-                        "medium" -> Os.setenv("LIBGL_SHRINK", "7", true)
-                        "high" -> Os.setenv("LIBGL_SHRINK", "6", true)
-                        else -> Os.setenv("LIBGL_SHRINK", "0", true)
+
+            Os.setenv("OSG_TEXT_SHADER_TECHNIQUE", "ALL", true)
+            Os.setenv("OSG_VERTEX_BUFFER_HINT", "VBO", true)
+            Os.setenv("OSG_GL_TEXTURE_STORAGE", "OFF", true)
+            Os.setenv("LIBGL_INSTANCING", "1", true)
+
+            Os.setenv("DETHRACE_ROOT_DIR", "${Constants.USER_FILE_STORAGE}/dethrace/", true);
+
+            Os.setenv("HARNESS_OPENGL", "1", true)
+
+            CoroutineScope(Dispatchers.IO).launch {
+                patchShaders()
+                GameFilesPreferences.readAvoid16Bits(context).collect { avoid16bits ->
+                    if (avoid16bits) {
+                        Os.setenv("LIBGL_AVOID16BITS", "1", true)
+                    } else {
+                        Os.setenv("LIBGL_AVOID16BITS", "0", true)
                     }
                 }
-        }
+                // Set LIBGL_SHRINK based on preference
+                GameFilesPreferences.readTextureShrinkingOption(context)
+                    .collect { textureShrinkingOption ->
+                        when (textureShrinkingOption) {
+                            "low" -> Os.setenv("LIBGL_SHRINK", "2", true)
+                            "medium" -> Os.setenv("LIBGL_SHRINK", "7", true)
+                            "high" -> Os.setenv("LIBGL_SHRINK", "6", true)
+                            else -> Os.setenv("LIBGL_SHRINK", "0", true)
+                        }
+                    }
+            }
 
-        val envLine = getENVLine(context)
-        envLine?.let {
-            if (it.isNotEmpty()) {
-                // Split the command line string by commas to get individual key-value pairs
-                envLine.split(" ").forEach { pair ->
-                    // Split each pair by '=' to separate key and value
-                    val keyValue = pair.trim().split("=")
-                    if (keyValue.size == 2) {
-                        val key = keyValue[0].trim()
-                        val value = keyValue[1].trim()
-                        if (key.isNotEmpty() && value.isNotEmpty()) {
-                            Os.setenv(key, value, true)
+            val envLine = getENVLine(context)
+            envLine?.let {
+                if (it.isNotEmpty()) {
+                    // Split the command line string by commas to get individual key-value pairs
+                    envLine.split(" ").forEach { pair ->
+                        // Split each pair by '=' to separate key and value
+                        val keyValue = pair.trim().split("=")
+                        if (keyValue.size == 2) {
+                            val key = keyValue[0].trim()
+                            val value = keyValue[1].trim()
+                            if (key.isNotEmpty() && value.isNotEmpty()) {
+                                Os.setenv(key, value, true)
+                            }
                         }
                     }
                 }
             }
-        }
         } catch (e: ErrnoException) {
             Log.e("Alpha3", "Failed setting environment variables.")
             e.printStackTrace()
@@ -559,7 +562,7 @@ fun AutoMouseModeComposable() {
 }
 
 @Composable
-fun Buttons(context: Context, containerWidth: Float, containerHeight: Float, sdlView: View) {
+fun Buttons(context: Context, containerWidth: Float, containerHeight: Float) {
     val buttonStates by UIStateManager.buttonStates.collectAsState()
 
     buttonStates.values
@@ -571,7 +574,6 @@ fun Buttons(context: Context, containerWidth: Float, containerHeight: Float, sdl
                 keyCode = button.keyCode,
                 containerWidth = containerWidth,
                 containerHeight = containerHeight,
-                sdlView = sdlView,
                 onDelete = {
                     UIStateManager.removeButtonState(button.id, context, containerWidth, containerHeight)
                 }

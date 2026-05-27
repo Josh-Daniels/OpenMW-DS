@@ -29,8 +29,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -114,7 +114,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.openmw.R
-import org.openmw.ui.page.setting.ToggleFeatureSwitch
 import org.openmw.ui.controls.DynamicButtonManager
 import org.openmw.ui.controls.UIKeyboard
 import org.openmw.ui.controls.UIStateManager
@@ -133,26 +132,25 @@ import org.openmw.ui.controls.UIStateManager.memoryInfoFlow
 import org.openmw.ui.controls.UIStateManager.menuAlpha
 import org.openmw.ui.controls.UIStateManager.menuColor
 import org.openmw.ui.controls.UIStateManager.showWebView
+import org.openmw.ui.page.setting.ToggleFeatureSwitch
 import org.openmw.ui.theme.White
-import org.openmw.ui.view.CompactGpuMonitor
+import org.openmw.ui.view.LogRepository
+import org.openmw.ui.view.LogsBox
+import org.openmw.ui.view.getBatteryStatus
+import org.openmw.ui.view.hasInternetPermission
+import org.openmw.ui.view.startLoggingUpdates
+import org.openmw.ui.view.startResourceInfoUpdates
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getOffsetXMouse
 import org.openmw.utils.GameFilesPreferences.getOffsetYMouse
 import org.openmw.utils.GameFilesPreferences.getSensitivityMouse
-import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
 import org.openmw.utils.GameFilesPreferences.setOffsetXMouse
 import org.openmw.utils.GameFilesPreferences.setOffsetYMouse
 import org.openmw.utils.GameFilesPreferences.setSensitivityMouse
 import org.openmw.utils.GameFilesPreferences.setTutorial
 import org.openmw.utils.GameFilesPreferences.setWhatsNew
-import org.openmw.ui.view.LogRepository
-import org.openmw.ui.view.LogsBox
 import org.openmw.utils.TravelMenuPopup
-import org.openmw.ui.view.getBatteryStatus
-import org.openmw.ui.view.hasInternetPermission
 import org.openmw.utils.sendKeyEvent
-import org.openmw.ui.view.startLoggingUpdates
-import org.openmw.ui.view.startResourceInfoUpdates
 import org.openmw.utils.stringRes
 import org.openmw.utils.updateConsoleOutput
 import kotlin.math.roundToInt
@@ -187,6 +185,8 @@ fun OverlayUI(
     var offsetXMouse by remember { mutableFloatStateOf(offsetXMouseFlow.value ?: 0f) }
     val offsetYMouseFlow = getOffsetYMouse(context).collectAsState(initial = 0f)
     var offsetYMouse by remember { mutableFloatStateOf(offsetYMouseFlow.value ?: 0f) }
+    val menuCorner by GameFilesPreferences.getMenuCorner(context).collectAsState(initial = 1)
+
     val rotationAngle by animateFloatAsState(
         targetValue = if (expanded2) 360f else -360f, animationSpec = tween(1000),
         label = ""
@@ -353,8 +353,17 @@ fun OverlayUI(
             }
         }
 
+        val menuAlignment = when (menuCorner) {
+            0 -> Alignment.TopEnd
+            1 -> Alignment.TopStart
+            2 -> Alignment.BottomEnd
+            3 -> Alignment.BottomStart
+            else -> Alignment.TopEnd
+        }
+
         Surface(
             color = Color.Transparent,
+            modifier = Modifier.align(menuAlignment)
         ) {
             AnimatedContent(
                 targetState = expanded,
@@ -382,7 +391,7 @@ fun OverlayUI(
                 if (targetExpanded) {
                     Column(
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
+                            .align(menuAlignment)
                             .background(Color(alpha = 0.6f, red = 0f, green = 0f, blue = 0f))
                             .padding(5.dp)
                     ) {
@@ -394,42 +403,124 @@ fun OverlayUI(
                 }
                 Row(
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 15.dp, start = 15.dp)
+                        .align(menuAlignment)
+                        .padding(
+                            top = if (menuCorner < 2) 15.dp else 0.dp,
+                            bottom = if (menuCorner >= 2) 15.dp else 0.dp,
+                            start = if (menuCorner % 2 == 1) 15.dp else 0.dp,
+                            end = if (menuCorner % 2 == 0) 15.dp else 0.dp
+                        )
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 10.dp, start = 10.dp)
-                    ) {
-                        if (iconGlowChecked) {
+                    val isRightSide = menuCorner % 2 == 0
+
+                    val settingsIcon = @Composable {
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 10.dp, start = 10.dp)
+                        ) {
+                            if (iconGlowChecked) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Settings,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .scale(scaleFactor)
+                                        .blur(blurRadius),
+                                    tint = shadowColor,
+                                )
+                            }
                             Icon(
                                 imageVector = Icons.Rounded.Settings,
-                                contentDescription = null,
+                                contentDescription = "Settings",
                                 modifier = Modifier
                                     .size(30.dp)
-                                    .scale(scaleFactor)
-                                    .blur(blurRadius),
-                                tint = shadowColor,
+                                    .rotate(rotationAngle)
+                                    .pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onTap = { expanded = !expanded },
+                                            onLongPress = {
+                                                CoroutineScope(Dispatchers.Main).launch {
+                                                    GameFilesPreferences.setMenuCorner(context, (menuCorner + 1) % 4)
+                                                }
+                                            }
+                                        )
+                                    },
+                                tint = if (matchIconColorChecked) {
+                                    menuColor.copy(alpha = menuAlpha)
+                                } else {
+                                    Color.Black
+                                }
                             )
                         }
-                        Icon(
-                            imageVector = Icons.Rounded.Settings,
-                            contentDescription = "Settings",
-                            modifier = Modifier
-                                .size(30.dp)
-                                .rotate(rotationAngle)
-                                .clickable { expanded = !expanded },
-                            tint = if (matchIconColorChecked) {
+                    }
+
+                    val expansionButton = @Composable {
+                        IconButton(
+                            onClick = {
+                                expanded2 = !expanded2
+                                showMouseMenu = false
+                                if (configureControls && tutorial && highlightStep == 1) {
+                                    highlightStep++
+                                }
+                                if (!expanded2) {
+                                    editMode = false
+                                }
+                            }
+                        ) {
+                            val isLeftEdge = menuCorner % 2 == 1
+                            val iconTint = if (configureControls && tutorial && highlightStep == 1) {
+                                Color.Yellow
+                            } else if (matchIconColorChecked) {
                                 menuColor.copy(alpha = menuAlpha)
                             } else {
                                 Color.Black
                             }
-                        )
+
+                            val expandedIcon = if (isLeftEdge) Icons.Default.KeyboardArrowLeft else Icons.Default.KeyboardArrowRight
+                            val collapsedIcon = if (isLeftEdge) Icons.Default.KeyboardArrowRight else Icons.Default.KeyboardArrowLeft
+
+                            if (iconGlowChecked) {
+                                @Suppress("DEPRECATION")
+                                Icon(
+                                    imageVector = if (expanded2) expandedIcon else collapsedIcon,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .scale(scaleFactor)
+                                        .blur(blurRadius)
+                                        .alpha(if (configureControls && tutorial && highlightStep == 1) alpha.value else 1f),
+                                    tint = shadowColor,
+                                )
+                            }
+
+                            @Suppress("DEPRECATION")
+                            Icon(
+                                imageVector = if (expanded2) expandedIcon else collapsedIcon,
+                                contentDescription = if (expanded2) "Collapse" else "Expand",
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .alpha(if (configureControls && tutorial && highlightStep == 1) alpha.value else 1f),
+                                tint = iconTint
+                            )
+                        }
                     }
+
+                    if (isRightSide) {
+                        expansionButton()
+                    } else {
+                        settingsIcon()
+                    }
+
                     AnimatedVisibility(
                         visible = expanded2,
-                        enter = expandHorizontally(animationSpec = tween(300)),
-                        exit = shrinkHorizontally(animationSpec = tween(300))
+                        enter = expandHorizontally(
+                            animationSpec = tween(300),
+                            expandFrom = if (menuCorner % 2 == 1) Alignment.Start else Alignment.End
+                        ),
+                        exit = shrinkHorizontally(
+                            animationSpec = tween(300),
+                            shrinkTowards = if (menuCorner % 2 == 1) Alignment.Start else Alignment.End
+                        )
                     ) {
                         Row(
                             verticalAlignment = Alignment.Top
@@ -514,11 +605,18 @@ fun OverlayUI(
                                         )
                                     }
                                     if (showMouseMenu) {
+                                        val isBottom = menuCorner >= 2
                                         Column(
                                             verticalArrangement = Arrangement.Top,
                                             horizontalAlignment = Alignment.CenterHorizontally,
                                             modifier = Modifier
-                                                .padding(top = 32.dp)
+                                                .padding(
+                                                    top = if (!isBottom) 32.dp else 0.dp,
+                                                    bottom = if (isBottom) 32.dp else 0.dp
+                                                )
+                                                .then(
+                                                    if (isBottom) Modifier.offset(y = (-300).dp) else Modifier
+                                                )
                                                 .background(
                                                     color = Color.White,
                                                     shape = RoundedCornerShape(8.dp)
@@ -790,49 +888,10 @@ fun OverlayUI(
                         }
                     }
 
-                    IconButton(
-                        onClick = {
-                            expanded2 = !expanded2
-                            showMouseMenu = false
-                            if (configureControls && tutorial && highlightStep == 1) {
-                                highlightStep++
-                            }
-                            if (!expanded2) {
-                                editMode = false
-                            }
-                        }
-                    ) {
-                        val iconTint = if (configureControls && tutorial && highlightStep == 1) {
-                            Color.Yellow
-                        } else if (matchIconColorChecked) {
-                            menuColor.copy(alpha = menuAlpha)
-                        } else {
-                            Color.Black
-                        }
-
-                        if (iconGlowChecked) {
-                            @Suppress("DEPRECATION")
-                            Icon(
-                                imageVector = if (expanded2) Icons.Default.KeyboardArrowLeft else Icons.Default.KeyboardArrowRight,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .size(30.dp)
-                                    .scale(scaleFactor)
-                                    .blur(blurRadius)
-                                    .alpha(if (configureControls && tutorial && highlightStep == 1) alpha.value else 1f),
-                                tint = shadowColor,
-                            )
-                        }
-
-                        @Suppress("DEPRECATION")
-                        Icon(
-                            imageVector = if (expanded2) Icons.Default.KeyboardArrowLeft else Icons.Default.KeyboardArrowRight,
-                            contentDescription = if (expanded2) "Collapse" else "Expand",
-                            modifier = Modifier
-                                .size(30.dp)
-                                .alpha(if (configureControls && tutorial && highlightStep == 1) alpha.value else 1f),
-                            tint = iconTint
-                        )
+                    if (isRightSide) {
+                        settingsIcon()
+                    } else {
+                        expansionButton()
                     }
                 }
             }

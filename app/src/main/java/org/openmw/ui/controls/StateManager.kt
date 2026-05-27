@@ -112,7 +112,7 @@ object UIStateManager {
     var buttonsGroup by mutableIntStateOf(1)
     var globalColorChange by mutableStateOf(false)
     var globalColor by mutableStateOf("#FFFFFF") // Default color
-    var globalAlpha by mutableFloatStateOf(1.0f) // Default alpha
+    var globalAlpha by mutableFloatStateOf(1.0f)
 
     // This is needed for now in Activities
     var tempCodeGroup by mutableStateOf("OpenMW")
@@ -137,9 +137,6 @@ object UIStateManager {
     // Added highlightStep
     var highlightStep by mutableIntStateOf(1)
 
-    // Odd bug where dragging either thumbstick and a button at the same time removes one from the UI so lets
-    // just lock them for now.
-    var isThumbDragging by mutableStateOf(false)
     // Is the Right thumb visible?
     var enableRightThumb by mutableStateOf(false)
     // isMouseShown() toggles this on and off at EngineActivity line 372.
@@ -239,101 +236,136 @@ object UIStateManager {
     }
 
     fun saveButtonState(containerWidth: Float, containerHeight: Float) {
+        val width = if (containerWidth > 1f) containerWidth else containerGlobalWidth.floatValue
+        val height = if (containerHeight > 1f) containerHeight else containerGlobalHeight.floatValue
+
         CoroutineScope(Dispatchers.IO).launch {
-            val file = File("${userUI}/UI.cfg")
-            if (!file.exists()) {
-                file.createNewFile()
-            }
-
             val buttonStateMap = _buttonStates.value
-            file.printWriter().use { out ->
-                buttonStateMap.values
-                    .filter { it.id != -1 } // Exclude DeletedButtonState
-                    .forEach { button ->
-                        // Calculate relative offsets
-                        val relativeOffsetX = button.offsetX / containerWidth
-                        val relativeOffsetY = button.offsetY / containerHeight
-
-                        // Ensure relative offsets are within the bounds of 0 to 1
-                        val validRelativeOffsetX = relativeOffsetX.coerceIn(0f, 1f)
-                        val validRelativeOffsetY = relativeOffsetY.coerceIn(0f, 1f)
-
-                        val uriString = button.uri?.let { uri ->
-                            // Properly format the URI string
-                            val uriPath = uri.path
-                            val extension = uriPath?.substringAfterLast(".")
-                            "${userUI}/${button.id}.$extension"
-                        } ?: "null"
-                        out.println("ButtonID_${button.id}(${button.size};${validRelativeOffsetX};${validRelativeOffsetY};${button.isLocked};${button.blockMouse};${button.keyCode};#${button.color};${button.alpha};${uriString};${button.group})")
-                        addCustomLog("ButtonID_${button.id}(${button.size};${validRelativeOffsetX};${validRelativeOffsetY};${button.isLocked};${button.blockMouse};${button.keyCode};#${button.color};${button.alpha};${uriString};${button.group})", textSize = 10, textColor = Color.Cyan)
+            val configs = buttonStateMap.values
+                .filter { it.id != -1 } // Exclude DeletedButtonState
+                .map { button ->
+                    val type = when (button.id) {
+                        99 -> "leftStick"
+                        98 -> "rightStick"
+                        101 -> "utility"
+                        else -> "dynamic"
                     }
+                    ButtonConfig(
+                        type = type,
+                        keyCode = button.keyCode,
+                        label = if (button.id == 99) "Left Thumbstick" else "",
+                        id = button.id,
+                        size = button.size,
+                        offsetX = button.offsetX / width,
+                        offsetY = button.offsetY / height,
+                        isLocked = button.isLocked,
+                        blockMouse = button.blockMouse,
+                        color = button.color,
+                        alpha = button.alpha,
+                        uri = button.uri,
+                        group = button.group
+                    )
+                }
+
+            ButtonConfigManager.updateMultipleButtonsByTypes(
+                listOf("parent", "leftStick", "rightStick", "utility", "dynamic"),
+                configs
+            )
+
+            configs.forEach { config ->
+                val log = "ButtonID_${config.id}(${config.size};${config.offsetX};${config.offsetY};${config.isLocked};${config.blockMouse};${config.keyCode};#${config.color};${config.alpha};${config.uri};${config.group})"
+                println("Saved to JSON: $log")
+                addCustomLog("Saved to JSON: $log", textSize = 10, textColor = Color.Cyan)
             }
         }
     }
 
+    private fun migrateFromOldConfig(): List<ButtonConfig> {
+        val oldFile = File("${userUI}/UI.cfg")
+        if (!oldFile.exists()) return emptyList()
+
+        val configs = mutableListOf<ButtonConfig>()
+        try {
+            oldFile.readLines().forEach { line ->
+                val regex = """ButtonID_(\d+)\(([\d.]+);([\d.]+);([\d.]+);(true|false);(true|false);(\d+);#([A-Fa-f0-9]+);([\d.]+);(.+);(\d+)\)""".toRegex()
+                val matchResult = regex.find(line) ?: return@forEach
+
+                val buttonId = matchResult.groupValues[1].toInt()
+                val uriString = matchResult.groupValues[10]
+                val uri = if (uriString == "null") null else Uri.parse("file://${userUI}/${buttonId}.${uriString.substringAfterLast(".")}")
+
+                configs.add(ButtonConfig(
+                    type = when(buttonId) {
+                        99 -> "leftStick"
+                        98 -> "rightStick"
+                        else -> "dynamic"
+                    },
+                    keyCode = matchResult.groupValues[7].toInt(),
+                    id = buttonId,
+                    size = matchResult.groupValues[2].toFloat(),
+                    offsetX = matchResult.groupValues[3].toFloat(),
+                    offsetY = matchResult.groupValues[4].toFloat(),
+                    isLocked = matchResult.groupValues[5].toBoolean(),
+                    blockMouse = matchResult.groupValues[6].toBoolean(),
+                    color = matchResult.groupValues[8],
+                    alpha = matchResult.groupValues[9].toFloat(),
+                    uri = uri,
+                    group = matchResult.groupValues.getOrNull(11)?.toInt() ?: 1
+                ))
+            }
+            if (configs.isNotEmpty()) {
+                ButtonConfigManager.saveButtons(configs)
+                println("Successfully migrated ${configs.size} buttons from UI.cfg to JSON.")
+                // oldFile.renameTo(File("${userUI}/UI.cfg.bak"))
+            }
+        } catch (e: Exception) {
+            Log.e("UIStateManager", "Error during migration from UI.cfg", e)
+        }
+        return configs
+    }
+
     fun loadButtonState(context: Context, containerWidth: Float, containerHeight: Float) {
-        val file = File("${userUI}/UI.cfg")
-        if (!file.exists()) {
-            println("File does not exist: ${file.absolutePath}")
-            return
+        val width = if (containerWidth > 1f) containerWidth else containerGlobalWidth.floatValue
+        val height = if (containerHeight > 1f) containerHeight else containerGlobalHeight.floatValue
+
+        val jsonFile = File("${userUI}/button_configs.json")
+        val configs = if (jsonFile.exists()) {
+            ButtonConfigManager.loadAllButtons()
+        } else {
+            migrateFromOldConfig()
         }
 
-        val lines = file.readLines()
-        println("File content: $lines")
-        if (lines.isEmpty()) {
-            println("File is empty")
+        if (configs.isEmpty()) {
+            println("No button configs found to load.")
             return
         }
 
         val buttonStateMap = mutableMapOf<Int, ButtonState>()
         var foundButton98 = false
-        var foundButton99 = false
 
-        lines.forEach { line ->
-            val regex = """ButtonID_(\d+)\(([\d.]+);([\d.]+);([\d.]+);(true|false);(true|false);(\d+);#([A-Fa-f0-9]+);([\d.]+);(.+);(\d+)\)""".toRegex()
-            val matchResult = regex.find(line)
-            println("Processing line: $line")
-            if (matchResult == null) {
-                println("No match for line: $line")
-                return@forEach
-            }
-
-            val buttonId = matchResult.groupValues[1].toInt()
-            val uriString = matchResult.groupValues[10]
-            val uri = if (uriString == "null") null else Uri.parse("file://${userUI}/${buttonId}.${uriString.substringAfterLast(".")}")
-            val group = matchResult.groupValues.getOrNull(11)?.toInt() ?: 1 // Default group to 1 if not specified
-
-            if (buttonId == 98) {
-                foundButton98 = true
-            }
-            if (buttonId == 99) {
-                foundButton99 = true
-            }
+        configs.forEach { config ->
+            val buttonId = config.id ?: return@forEach
+            if (buttonId == 98) foundButton98 = true
 
             // Calculate absolute offsets based on the container dimensions
-            val absoluteOffsetX = matchResult.groupValues[3].toFloat() * containerWidth
-            val absoluteOffsetY = matchResult.groupValues[4].toFloat() * containerHeight
+            val absoluteOffsetX = (config.offsetX ?: 0f) * width
+            val absoluteOffsetY = (config.offsetY ?: 0f) * height
 
             val buttonState = ButtonState(
                 id = buttonId,
-                size = matchResult.groupValues[2].toFloat(),
+                size = config.size ?: 60f,
                 offsetX = absoluteOffsetX,
                 offsetY = absoluteOffsetY,
-                isLocked = matchResult.groupValues[5].toBoolean(),
-                blockMouse = matchResult.groupValues[6].toBoolean(),
-                keyCode = matchResult.groupValues[7].toInt(),
-                color = matchResult.groupValues[8],
-                alpha = matchResult.groupValues[9].toFloat(),
-                uri = uri,
-                group = group // Load group information
+                isLocked = config.isLocked ?: false,
+                blockMouse = config.blockMouse ?: false,
+                keyCode = config.keyCode,
+                color = config.color,
+                alpha = config.alpha,
+                uri = config.uri,
+                group = config.group ?: 1
             )
 
-            if (uri != null) {
-                println("Loaded image URI for button ID $buttonId: ${uri.path}")
-            }
-
             println("Loaded button state: $buttonState")
-            // Update the map with the loaded button state
             buttonStateMap[buttonId] = buttonState
         }
         _buttonStates.value = buttonStateMap

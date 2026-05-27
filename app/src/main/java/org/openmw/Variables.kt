@@ -19,7 +19,6 @@ object Constants {
     var DEFAULTS_BIN = ""
     var OPENMW_CFG = ""
     var SETTINGS_FILE = ""
-    var UMO_HELPER = ""
     var LOGCAT_FILE = ""
     var OPENMW_LOG = ""
     var GLOBAL_CONFIG = ""
@@ -53,7 +52,6 @@ class MyApp : Application() {
         Constants.LOGCAT_FILE = "${Constants.USER_CONFIG}/openmw_logcat.txt"
         Constants.OPENMW_LOG = "${Constants.USER_CONFIG}/openmw.log"
         Constants.CRASH_FILE = "${Constants.USER_CONFIG}/crash.log"
-        Constants.UMO_HELPER = "${Constants.USER_CONFIG}/UMOhelper.sh"
         Constants.DEFAULTS_BIN = File(filesDir, "config/defaults.bin").toString()
         Constants.INTERNAL_CRASH_FILE = File(filesDir, "config/crash.log").absolutePath
         Constants.OPENMW_CFG = File(filesDir, "config/openmw.cfg").absolutePath

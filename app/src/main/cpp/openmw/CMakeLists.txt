@@ -499,6 +499,74 @@ ExternalProject_Add(libxml
 	INSTALL_COMMAND ${wrapper_command} make install
 )
 
+ExternalProject_Add(libogg
+		URL https://github.com/xiph/ogg/releases/download/v1.3.5/libogg-1.3.5.tar.gz
+		DOWNLOAD_DIR ${download_dir}
+
+		CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
+		${COMMON_CMAKE_ARGS}
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+		BUILD_COMMAND ${wrapper_command} make -j${NPROC}
+		INSTALL_COMMAND ${wrapper_command} make install
+)
+
+ExternalProject_Add(libvorbis
+		DEPENDS libogg
+		URL https://github.com/xiph/vorbis/releases/download/v1.3.7/libvorbis-1.3.7.tar.gz
+		DOWNLOAD_DIR ${download_dir}
+
+		CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
+		${COMMON_CMAKE_ARGS}
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+		BUILD_COMMAND ${wrapper_command} make -j${NPROC}
+		INSTALL_COMMAND ${wrapper_command} make install
+)
+
+ExternalProject_Add(uqm
+	DEPENDS sdl2 openal libpng zlib libvorbis libogg
+
+	GIT_REPOSITORY https://github.com/JHGuitarFreak/UQM-MegaMod.git
+	GIT_TAG master
+	DOWNLOAD_DIR ${download_dir}
+	BUILD_ALWAYS 1
+
+	UPDATE_COMMAND ""
+
+	PATCH_COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/openmw/patches/uqm/jni_engine.c <SOURCE_DIR>/src/jni_engine.c
+	COMMAND	${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/openmw/patches/uqm/config_android.h.in <SOURCE_DIR>/src/config_android.h.in
+	COMMAND sed -i "/add_library (UrQuanMasters SHARED/i list(APPEND UQM_SOURCES src/jni_engine.c)" <SOURCE_DIR>/CMakeLists.txt
+
+	CONFIGURE_COMMAND ${wrapper_command} cmake -S <SOURCE_DIR> -B <BINARY_DIR>
+	${COMMON_CMAKE_ARGS}
+
+	BUILD_COMMAND ${wrapper_command} make -C <BINARY_DIR> -j${NPROC}
+	INSTALL_COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/libUrQuanMasters.so ${prefix}/lib/libuqm.so
+)
+
+ExternalProject_Add(dethrace
+	DEPENDS sdl2 openal
+
+	GIT_REPOSITORY https://github.com/Duron27-org/dethrace.git
+	GIT_TAG main
+	GIT_SUBMODULES_RECURSE ON
+	DOWNLOAD_DIR ${download_dir}
+
+	UPDATE_COMMAND ""
+
+	CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
+	${COMMON_CMAKE_ARGS}
+	-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+	-DDETHRACE_ANDROID=ON
+	-DDETHRACE_PLATFORM_SDL2=ON
+	-DSDL2_INCLUDE_DIR=${prefix}/include
+	-DSDL2_LIBRARY=${prefix}/lib/libSDL2.so
+
+	BUILD_COMMAND ${wrapper_command} make -C <BINARY_DIR> -j${NPROC}
+	INSTALL_COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/src/DETHRACE/libdethrace.so ${prefix}/lib/libdethrace.so
+)
+
 set(LIBCOLLADA_PATCH
 	patch -d <SOURCE_DIR> -p0 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/libcollada-minizip-fix.patch
 )
@@ -635,7 +703,6 @@ set(OPENMW_COMMON
 set(OPENMW_PATCH
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/0009-windowmanagerimp-always-show-mouse-when-possible-pat.patch &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/androidPath.patch &&
-    patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/4307.diff &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/FIXME-composie-maps-mipmaps.patch &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/FIXME-setGlobalDefines-crash.patch &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/force-postprocess-glsl-version.patch &&
@@ -671,7 +738,7 @@ ExternalProject_Add(openmw
 )
 
 add_custom_target(copy_jni_libs ALL
-	DEPENDS openmw kram
+	DEPENDS openmw kram uqm dethrace
 
 	COMMAND ${CMAKE_COMMAND} -E make_directory ${jni_libs_dir}
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libopenmw.so ${jni_libs_dir}/
@@ -681,6 +748,8 @@ add_custom_target(copy_jni_libs ALL
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libkram.so ${jni_libs_dir}/
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libopenal.so ${jni_libs_dir}/
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libcollada-dom2.5-dp.so ${jni_libs_dir}/
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libuqm.so ${jni_libs_dir}/
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libdethrace.so ${jni_libs_dir}/
 
 	#Copy tools
 	COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/openmw/angle/ ${jni_libs_dir}/

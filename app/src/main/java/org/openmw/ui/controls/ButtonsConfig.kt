@@ -3,7 +3,6 @@ package org.openmw.ui.controls
 import android.net.Uri
 import android.util.Log
 import android.view.KeyEvent
-import kotlinx.serialization.Contextual
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.descriptors.PrimitiveKind
@@ -12,7 +11,6 @@ import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
-import org.openmw.Constants
 import org.openmw.ui.controls.UIStateManager.userUI
 import java.io.File
 import java.io.FileInputStream
@@ -22,14 +20,15 @@ import java.io.FileOutputStream
 data class ButtonConfig(
     val type: String,
     val keyCode: Int,
-    val label: String,
-    val position: Int,
+    val label: String = "",
+    val position: Int = -1,
     // Optional fields from ButtonState
     val id: Int? = null,
     val size: Float? = null,
     val offsetX: Float? = null,
     val offsetY: Float? = null,
     val isLocked: Boolean? = null,
+    val blockMouse: Boolean? = null,
     val color: String,
     val alpha: Float,
     @Serializable(with = UriSerializer::class) val uri: Uri?,
@@ -133,7 +132,7 @@ object ButtonConfigManager {
 
     fun saveButtons(allConfigs: List<ButtonConfig>) {
         try {
-            val json = Json { encodeDefaults = true }.encodeToString(allConfigs)
+            val json = Json { encodeDefaults = true; prettyPrint = true }.encodeToString(allConfigs)
             val file = File("${userUI}/button_configs.json")
             FileOutputStream(file).use { output ->
                 output.write(json.toByteArray())
@@ -142,6 +141,18 @@ object ButtonConfigManager {
         } catch (e: Exception) {
             Log.e("ButtonConfigManager", "Error saving buttons to file", e)
         }
+    }
+
+    fun updateMultipleButtonsByTypes(types: List<String>, newConfigs: List<ButtonConfig>) {
+        val allButtons = loadAllButtons().toMutableList()
+
+        // Remove existing buttons of the specified types
+        allButtons.removeAll { it.type in types }
+
+        // Add the new buttons
+        allButtons.addAll(newConfigs)
+
+        saveButtons(allButtons)
     }
 
     fun loadAllButtons(): List<ButtonConfig> {
@@ -163,23 +174,6 @@ object ButtonConfigManager {
             emptyList()
         }
     }
-    /*
-
-    fun addUtilityButton(keyCode: Int, label: String, function: String) {
-        val utilityConfig = ButtonConfig(
-            type = "utility",
-            keyCode = keyCode,
-            label = label,
-            position = -1, // Special position for utility
-            // You could store the function name in one of the optional fields
-            color = function // Using color field to store function name as an example
-        )
-        allButtons.add(utilityConfig)
-        saveButtons(allButtons)
-    }
-
-     */
-
 
     // Helper functions
     fun filterButtonsByType(configs: List<ButtonConfig>, type: String): List<ButtonConfig> {

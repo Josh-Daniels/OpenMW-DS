@@ -72,7 +72,6 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -205,7 +204,7 @@ fun ResizableDraggableRightThumbstick(
             UIStateManager.saveButtonState(containerWidth, containerHeight)
         }
 
-        // Manage whats in the tabs here
+        // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
         var colors by remember { mutableStateOf(false) }
 
@@ -276,7 +275,7 @@ fun ResizableDraggableRightThumbstick(
                                         onDragStart = {
                                             isDragging.value = true
                                         },
-                                        onDrag = { change, dragAmount ->
+                                        onDrag = { _, dragAmount ->
                                             offsetX.floatValue += dragAmount.x
                                             offsetY.floatValue += dragAmount.y
                                         },
@@ -345,20 +344,13 @@ fun ResizableDraggableRightThumbstick(
                                                             touchOffset = Offset(newX, newY)
 
                                                             if (isVirtualRight) {
-                                                                val movementX =
-                                                                    (newX - curX) * sensitivityRT / screenWidth
-                                                                val movementY =
-                                                                    (newY - curY) * sensitivityRT / screenHeight
-
-                                                                val clampedX =
-                                                                    movementX.coerceIn(-1f, 1f)
-                                                                val clampedY =
-                                                                    movementY.coerceIn(-1f, 1f)
+                                                                val xRatio = (newX - radiusPx) / radiusPx
+                                                                val yRatio = (newY - radiusPx) / radiusPx
 
                                                                 updateStickTest(
                                                                     1,
-                                                                    clampedX,
-                                                                    clampedY
+                                                                    xRatio.coerceIn(-1f, 1f),
+                                                                    yRatio.coerceIn(-1f, 1f)
                                                                 )
                                                             } else {
                                                                 SDLActivity.onNativeMouse(
@@ -413,22 +405,17 @@ fun ResizableDraggableRightThumbstick(
                                 }
                             )
                         }
-                        val density = LocalDensity.current.density
                         Box(
                             modifier = Modifier
                                 .size(25.dp)
-                                .offset {
-                                    val offsetX =
-                                        ((touchOffset.x - (buttonSize.toPx() / 2)) / density).coerceIn(
-                                            -radiusPx,
-                                            radiusPx
-                                        ).dp.roundToPx()
-                                    val offsetY =
-                                        ((touchOffset.y - (buttonSize.toPx() / 2)) / density).coerceIn(
-                                            -radiusPx,
-                                            radiusPx
-                                        ).dp.roundToPx()
-                                    IntOffset(offsetX, offsetY)
+                                .graphicsLayer {
+                                    val centerX = buttonSize.toPx() / 2
+                                    translationX = (touchOffset.x - centerX).coerceIn(-radiusPx,
+                                        radiusPx
+                                    )
+                                    translationY = (touchOffset.y - centerX).coerceIn(-radiusPx,
+                                        radiusPx
+                                    )
                                 }
                                 .background(
                                     rightThumbColor,

@@ -9,7 +9,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import org.openmw.Constants
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -23,7 +25,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.openmw.ui.controls.UIStateManager
 
-val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "game_files_prefs")
+// Singleton instance to avoid multiple DataStore instances for the same file
+private var dataStoreInstance: DataStore<Preferences>? = null
+
+val Context.dataStore: DataStore<Preferences>
+    get() = dataStoreInstance ?: synchronized(this) {
+        dataStoreInstance ?: PreferenceDataStoreFactory.create(
+            produceFile = { File(Constants.USER_FILE_STORAGE, "game_files_prefs.preferences_pb") }
+        ).also { dataStoreInstance = it }
+    }
 
 object GameFilesPreferences {
     val GAME_FILES_URI_KEY = stringPreferencesKey("game_files_uri")
@@ -63,6 +73,7 @@ object GameFilesPreferences {
     val HIDE_SYSTEM_BARS = booleanPreferencesKey("hide_system_bars")
     val SCREEN_STAY_ON = booleanPreferencesKey("screen_stay_on")
     val TUTORIAL_KEY = booleanPreferencesKey("tutorial_enable")
+    val MENU_CORNER_KEY = intPreferencesKey("menu_corner")
 
     // Android 15 bug where game files not detected when launching
     val BYPASS_GAME_FILES_KEY = booleanPreferencesKey("bypass_game_files_check")
@@ -656,6 +667,18 @@ object GameFilesPreferences {
     fun getTutorial(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
             preferences[TUTORIAL_KEY] != false
+        }
+    }
+
+    suspend fun setMenuCorner(context: Context, corner: Int) {
+        context.dataStore.edit { preferences ->
+            preferences[MENU_CORNER_KEY] = corner
+        }
+    }
+
+    fun getMenuCorner(context: Context): Flow<Int> {
+        return context.dataStore.data.map { preferences ->
+            preferences[MENU_CORNER_KEY] ?: 0 // Default to TopRight
         }
     }
 }

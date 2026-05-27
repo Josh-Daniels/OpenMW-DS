@@ -154,7 +154,6 @@ fun ResizableDraggableButton(
     keyCode: Int,
     containerWidth: Float,
     containerHeight: Float,
-    sdlView: View,
     onDelete: (Int) -> Unit
 ) {
     val buttonStates by UIStateManager.buttonStates.collectAsState()
@@ -304,7 +303,7 @@ fun ResizableDraggableButton(
             UIStateManager.saveButtonState(containerWidth, containerHeight)
         }
 
-        // Manage whats in the tabs here
+        // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
         var colors by remember { mutableStateOf(false) }
 
@@ -367,11 +366,9 @@ fun ResizableDraggableButton(
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .offset {
-                                IntOffset(
-                                    (if (highlightStep == 4 && id == 999) animatedOffsetX.value else offsetX.floatValue).roundToInt(),
-                                    (if (highlightStep == 4 && id == 999) animatedOffsetY.value else offsetY.floatValue).roundToInt()
-                                )
+                            .graphicsLayer {
+                                translationX = if (highlightStep == 4 && id == 999) animatedOffsetX.value else offsetX.floatValue
+                                translationY = if (highlightStep == 4 && id == 999) animatedOffsetY.value else offsetY.floatValue
                             }
                             .border(
                                 2.dp,

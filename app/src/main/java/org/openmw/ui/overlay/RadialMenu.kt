@@ -106,7 +106,6 @@ import org.openmw.ui.controls.ButtonConfig
 import org.openmw.ui.controls.ButtonConfigManager
 import org.openmw.ui.controls.ButtonConfigManager.filterButtonsByType
 import org.openmw.ui.controls.ButtonConfigManager.loadAllButtons
-import org.openmw.ui.controls.ButtonConfigManager.saveButtons
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.editMode
 import org.openmw.ui.controls.UIStateManager.globalColorChange
@@ -154,33 +153,48 @@ fun ExpandableCircleButton() {
             uri = null
         )
 
-        allButtons.add(newConfig)
+        val updatedRadials = radialButtons.value + newConfig
+        ButtonConfigManager.updateMultipleButtonsByTypes(listOf("radial"), updatedRadials)
 
-        // Create proper lambda that triggers the key event
-        sections.add(buttonLabel to {
-            SDLActivity.onNativeKeyDown(keyCode)
-            SDLActivity.onNativeKeyUp(keyCode)
-        })
+        // Refresh local list
+        allButtons.clear()
+        allButtons.addAll(loadAllButtons())
 
-        usedKeys = usedKeys + keyCode
-        saveButtons(allButtons)
+        // Re-initialize sections to ensure they have correct lambdas
+        sections.clear()
+        radialButtons.value.sortedBy { it.position }.forEach { config ->
+            sections.add(config.label to {
+                SDLActivity.onNativeKeyDown(config.keyCode)
+                SDLActivity.onNativeKeyUp(config.keyCode)
+            })
+        }
+
+        usedKeys = radialButtons.value.map { it.keyCode }
     }
 
     // Function to delete a radial button
     fun deleteRadialButton(index: Int) {
         if (index in radialButtons.value.indices) {
             val configToRemove = radialButtons.value[index]
-            allButtons.remove(configToRemove)
-            sections.removeAt(index)
+            val updatedRadials = radialButtons.value.filter { it != configToRemove }
+                .mapIndexed { newIndex, config -> config.copy(position = newIndex) }
 
-            // Update positions of remaining radial buttons
-            val updatedRadials = filterButtonsByType(allButtons, "radial")
-            updatedRadials.forEachIndexed { newIndex, config ->
-                val updatedConfig = config.copy(position = newIndex)
-                allButtons[allButtons.indexOf(config)] = updatedConfig
+            ButtonConfigManager.updateMultipleButtonsByTypes(listOf("radial"), updatedRadials)
+
+            // Refresh local list
+            allButtons.clear()
+            allButtons.addAll(loadAllButtons())
+
+            // Re-initialize sections
+            sections.clear()
+            radialButtons.value.sortedBy { it.position }.forEach { config ->
+                sections.add(config.label to {
+                    SDLActivity.onNativeKeyDown(config.keyCode)
+                    SDLActivity.onNativeKeyUp(config.keyCode)
+                })
             }
 
-            saveButtons(allButtons)
+            usedKeys = radialButtons.value.map { it.keyCode }
         }
     }
 

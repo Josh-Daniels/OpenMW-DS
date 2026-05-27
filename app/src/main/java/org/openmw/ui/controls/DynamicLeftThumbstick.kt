@@ -101,7 +101,6 @@ import org.openmw.ui.controls.UIStateManager.configureControls
 import org.openmw.ui.controls.UIStateManager.editMode
 import org.openmw.ui.controls.UIStateManager.globalColorChange
 import org.openmw.ui.controls.UIStateManager.isCursorVisible
-import org.openmw.ui.controls.UIStateManager.isThumbDragging
 import org.openmw.ui.controls.UIStateManager.menuAlpha
 import org.openmw.ui.controls.UIStateManager.menuColor
 import org.openmw.ui.controls.UIStateManager.offsetXFlow
@@ -149,7 +148,7 @@ fun ResizableDraggableThumbstick(
     )
     buttonState?.let { state ->
         var buttonSize by remember { mutableStateOf(state.size.dp) }
-        var hexCode by remember { mutableStateOf(state.color) } // Set initial hex code directly from state
+        var hexCode by remember { mutableStateOf(state.color) }
         var buttonColor by remember { mutableStateOf(Color.fromHex(hexCode)) }
         var buttonAlpha by remember { mutableFloatStateOf(state.alpha) }
         val buttonTint by GameFilesPreferences.loadButtonTint(context).collectAsState(initial = false)
@@ -166,12 +165,20 @@ fun ResizableDraggableThumbstick(
         val radiusPx = with(density) { (buttonSize / 2).toPx() }
         val deadZone = 0.2f * radiusPx
         var touchState by remember { mutableStateOf(Offset(0f, 0f)) }
+        val isDragging = remember { mutableStateOf(false) }
+
+        // Track key states to prevent redundant events
+        var isWPressed by remember { mutableStateOf(false) }
+        var isAPressed by remember { mutableStateOf(false) }
+        var isSPressed by remember { mutableStateOf(false) }
+        var isDPressed by remember { mutableStateOf(false) }
+        var isShiftPressed by remember { mutableStateOf(false) }
+
         var showControlsPopup by remember { mutableStateOf(false) }
         val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
         val isVirtualLeft by GameFilesPreferences.getVirtualLeftThumbstick(context).collectAsState(initial = true)
         val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = false)
         val controllerConnected = isControllerConnected(context)
-        var isShiftPressed by remember { mutableStateOf(false) }
         val painter: Painter? = state.uri?.let { uri ->
             if (uri.toString().endsWith(".gif", ignoreCase = true)) {
                 // Use Coil's GIF decoder for animated GIFs
@@ -200,7 +207,7 @@ fun ResizableDraggableThumbstick(
             }
         }
 
-        // Manage whats in the tabs here
+        // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
         var colors by remember { mutableStateOf(false) }
 
@@ -210,7 +217,7 @@ fun ResizableDraggableThumbstick(
         }
 
         val thumbColor =
-            if (isThumbDragging) Color.Red.copy(alpha = buttonAlpha) else buttonColor.copy(
+            if (isDragging.value) Color.Red.copy(alpha = buttonAlpha) else buttonColor.copy(
                 alpha = buttonAlpha
             )
 
@@ -227,7 +234,7 @@ fun ResizableDraggableThumbstick(
                 uri = buttonUri.value,
                 group = 1
             )
-            updateButtonState(buttonState.id, updatedState)
+            updateButtonState(99, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
         }
 
@@ -240,7 +247,7 @@ fun ResizableDraggableThumbstick(
         val selectedKeycodes by selectedKeycodesFlow.collectAsState(initial = emptyList())
         val isOnMouseScreen by derivedStateOf { 99 in selectedKeycodes }
         val visibility = when {
-            isCursorVisible == 0 && autoMouseMode == "None" -> !isUIHidden // Set to isUIHidden if autoMouseMode is None
+            isCursorVisible == 0 && autoMouseMode == "None" -> !isUIHidden
             isCursorVisible == 0 && autoMouseMode == "Hybrid" || 99 in selectedKeycodes -> !isUIHidden
             isCursorVisible == 0 && autoMouseMode == "Hybrid" || 99 !in selectedKeycodes -> isUIHidden
             isCursorVisible == 0 -> !isUIHidden
@@ -262,35 +269,36 @@ fun ResizableDraggableThumbstick(
                 modifier = Modifier
                     .size(buttonSize)
                     .background(Color.Transparent)
-                    .then(
-                        if (editMode) {
-                            Modifier.pointerInput(Unit) {
-                                detectDragGestures(
-                                    onDragStart = {
-                                        isThumbDragging = true
-                                    },
-                                    onDrag = { _, dragAmount ->
-                                        updateOffsets(
-                                            offsetX + dragAmount.x,
-                                            offsetY + dragAmount.y
-                                        )
-                                    },
-                                    onDragEnd = {
-                                        isThumbDragging = false
-                                        saveState()
-                                    }
-                                )
-                            }
-                        } else Modifier
-                    ),
             ) {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .size(buttonSize)
                         .background(Color.Transparent)
+                        .then(
+                            if (editMode) {
+                                Modifier.pointerInput(Unit) {
+                                    detectDragGestures(
+                                        onDragStart = {
+                                            isDragging.value = true
+                                        },
+                                        onDrag = { _, dragAmount ->
+                                            offsetX + dragAmount.x
+                                            offsetY + dragAmount.y
+                                            updateOffsets(
+                                                offsetX + dragAmount.x,
+                                                offsetY + dragAmount.y
+                                            )
+                                        },
+                                        onDragEnd = {
+                                            isDragging.value = false
+                                            saveState()
+                                        }
+                                    )
+                                }
+                            } else Modifier
+                        )
                         .border(2.dp, if (painter == null) thumbColor else Color.Transparent, CircleShape)
-                        .align(Alignment.Center)
                 ) {
                     Box(
                         contentAlignment = Alignment.Center,
@@ -328,12 +336,6 @@ fun ResizableDraggableThumbstick(
                                                             val clampedY = yRatio.coerceIn(-1f, 1f)
                                                             updateStickTest(0, clampedX, clampedY)
                                                         } else {
-                                                            // Handle touch actions
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_W)
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_A)
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_S)
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_D)
-
                                                             if (autoRUN) {
                                                                 // Handle shift key (90%+ tilt in any direction)
                                                                 if (distanceFromCenter > 0.9f) {
@@ -347,19 +349,28 @@ fun ResizableDraggableThumbstick(
                                                                 }
                                                             }
 
-                                                            // Handle movement keys (always)
-                                                            if (touchState.y < -deadZone) onNativeKeyDown(
-                                                                KeyEvent.KEYCODE_W
-                                                            )
-                                                            if (touchState.y > deadZone) onNativeKeyDown(
-                                                                KeyEvent.KEYCODE_S
-                                                            )
-                                                            if (touchState.x < -deadZone) onNativeKeyDown(
-                                                                KeyEvent.KEYCODE_A
-                                                            )
-                                                            if (touchState.x > deadZone) onNativeKeyDown(
-                                                                KeyEvent.KEYCODE_D
-                                                            )
+                                                            // Handle movement keys with state tracking
+                                                            val shouldPressW = touchState.y < -deadZone
+                                                            val shouldPressS = touchState.y > deadZone
+                                                            val shouldPressA = touchState.x < -deadZone
+                                                            val shouldPressD = touchState.x > deadZone
+
+                                                            if (shouldPressW != isWPressed) {
+                                                                if (shouldPressW) onNativeKeyDown(KeyEvent.KEYCODE_W) else onNativeKeyUp(KeyEvent.KEYCODE_W)
+                                                                isWPressed = shouldPressW
+                                                            }
+                                                            if (shouldPressS != isSPressed) {
+                                                                if (shouldPressS) onNativeKeyDown(KeyEvent.KEYCODE_S) else onNativeKeyUp(KeyEvent.KEYCODE_S)
+                                                                isSPressed = shouldPressS
+                                                            }
+                                                            if (shouldPressA != isAPressed) {
+                                                                if (shouldPressA) onNativeKeyDown(KeyEvent.KEYCODE_A) else onNativeKeyUp(KeyEvent.KEYCODE_A)
+                                                                isAPressed = shouldPressA
+                                                            }
+                                                            if (shouldPressD != isDPressed) {
+                                                                if (shouldPressD) onNativeKeyDown(KeyEvent.KEYCODE_D) else onNativeKeyUp(KeyEvent.KEYCODE_D)
+                                                                isDPressed = shouldPressD
+                                                            }
                                                         }
                                                     }
 
@@ -369,10 +380,10 @@ fun ResizableDraggableThumbstick(
                                                             updateStickTest(0, 0f, 0f)
                                                         } else {
                                                             touchState = Offset.Zero
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_W)
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_A)
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_S)
-                                                            onNativeKeyUp(KeyEvent.KEYCODE_D)
+                                                            if (isWPressed) { onNativeKeyUp(KeyEvent.KEYCODE_W); isWPressed = false }
+                                                            if (isAPressed) { onNativeKeyUp(KeyEvent.KEYCODE_A); isAPressed = false }
+                                                            if (isSPressed) { onNativeKeyUp(KeyEvent.KEYCODE_S); isSPressed = false }
+                                                            if (isDPressed) { onNativeKeyUp(KeyEvent.KEYCODE_D); isDPressed = false }
                                                             if (isShiftPressed) {
                                                                 onNativeKeyUp(KeyEvent.KEYCODE_SHIFT_LEFT)
                                                                 isShiftPressed = false
@@ -408,16 +419,9 @@ fun ResizableDraggableThumbstick(
                         Box(
                             modifier = Modifier
                                 .size(25.dp)
-                                .offset {
-                                    val offsetXx = (touchState.x / density.density).coerceIn(
-                                        -radiusPx / density.density,
-                                        radiusPx / density.density
-                                    ).dp
-                                    val offsetYy = (touchState.y / density.density).coerceIn(
-                                        -radiusPx / density.density,
-                                        radiusPx / density.density
-                                    ).dp
-                                    IntOffset(offsetXx.roundToPx(), offsetYy.roundToPx())
+                                .graphicsLayer {
+                                    translationX = touchState.x
+                                    translationY = touchState.y
                                 }
                                 .background(
                                     thumbColor,
@@ -819,7 +823,6 @@ fun ResizableDraggableThumbstick(
     }
 }
 
-// Function to update offsets
 fun updateOffsets(newOffsetX: Float, newOffsetY: Float) {
     offsetXFlow.value = newOffsetX
     offsetYFlow.value = newOffsetY

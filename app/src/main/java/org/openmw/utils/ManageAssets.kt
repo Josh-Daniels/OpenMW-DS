@@ -121,7 +121,7 @@ class UserManageAssets(val context: Context) {
         }
         gameList.forEach { game ->
             val uiDir = "${Constants.USER_FILE_STORAGE}/$game/ui"
-            val uiCfgFile = File("$uiDir/ui.cfg")
+            val uiCfgFile = File("$uiDir/button_configs.json")
 
             if (!uiCfgFile.exists()) {
                 assetCopier.copy("libopenmw/ui", uiDir)
@@ -129,6 +129,7 @@ class UserManageAssets(val context: Context) {
         }
         copyIfNotExists("libopenmw/openmw/settings.fallback.cfg", Constants.SETTINGS_FILE)
         copyIfNotExists("libopenmw/ui/input_v3.xml", Constants.USER_CONFIG + "/input_v3.xml")
+        UserManageAssets(context).installUQMResourceFiles()
     }
 
     fun resourcePrepare() {
@@ -167,9 +168,20 @@ class UserManageAssets(val context: Context) {
     }
 
     fun installUQMResourceFiles() {
-        File(Constants.USER_CONFIG).mkdirs()
-        if (!File(Constants.USER_FILE_STORAGE + "/resources/libuqm").isDirectory) {
-            assetCopier.copy("libuqm", Constants.USER_RESOURCES + "/libuqm")
+        val contentDir = File(Constants.USER_FILE_STORAGE, "uqm/content")
+        if (!contentDir.exists()) {
+            contentDir.mkdirs()
         }
+
+        val versionFile = File(contentDir, "version")
+
+        // Write EXACT content
+        versionFile.writeText(
+        $$"""
+        0.8.3
+
+        $Format:%ad$
+        """.trimIndent()
+        )
     }
 }
