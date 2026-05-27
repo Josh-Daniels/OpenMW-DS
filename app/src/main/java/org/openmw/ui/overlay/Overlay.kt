@@ -50,6 +50,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
@@ -58,8 +60,6 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Remove
@@ -437,12 +437,7 @@ fun OverlayUI(
                                     .rotate(rotationAngle)
                                     .pointerInput(Unit) {
                                         detectTapGestures(
-                                            onTap = { expanded = !expanded },
-                                            onLongPress = {
-                                                CoroutineScope(Dispatchers.Main).launch {
-                                                    GameFilesPreferences.setMenuCorner(context, (menuCorner + 1) % 4)
-                                                }
-                                            }
+                                            onTap = { expanded = !expanded }
                                         )
                                     },
                                 tint = if (matchIconColorChecked) {
@@ -476,8 +471,8 @@ fun OverlayUI(
                                 Color.Black
                             }
 
-                            val expandedIcon = if (isLeftEdge) Icons.Default.KeyboardArrowLeft else Icons.Default.KeyboardArrowRight
-                            val collapsedIcon = if (isLeftEdge) Icons.Default.KeyboardArrowRight else Icons.Default.KeyboardArrowLeft
+                            val expandedIcon = if (isLeftEdge) Icons.AutoMirrored.Filled.KeyboardArrowLeft else Icons.AutoMirrored.Filled.KeyboardArrowRight
+                            val collapsedIcon = if (isLeftEdge) Icons.AutoMirrored.Filled.KeyboardArrowRight else Icons.AutoMirrored.Filled.KeyboardArrowLeft
 
                             if (iconGlowChecked) {
                                 @Suppress("DEPRECATION")
@@ -881,6 +876,33 @@ fun OverlayUI(
                                             ColorFilter.tint(menuColor.copy(alpha = menuAlpha))
                                         } else {
                                             ColorFilter.tint(Color.Black)
+                                        }
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    CoroutineScope(Dispatchers.Main).launch {
+                                        GameFilesPreferences.setMenuCorner(context, (menuCorner + 1) % 4)
+                                    }
+                                }) {
+                                    if (iconGlowChecked) {
+                                        Icon(
+                                            imageVector = Icons.Default.OpenInFull,
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(30.dp)
+                                                .scale(scaleFactor)
+                                                .blur(blurRadius),
+                                            tint = shadowColor,
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.OpenInFull,
+                                        contentDescription = "Change Menu Corner",
+                                        modifier = Modifier.size(24.dp),
+                                        tint = if (matchIconColorChecked) {
+                                            menuColor.copy(alpha = menuAlpha)
+                                        } else {
+                                            Color.Black
                                         }
                                     )
                                 }
