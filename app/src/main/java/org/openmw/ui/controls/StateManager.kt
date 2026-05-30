@@ -343,7 +343,7 @@ object UIStateManager {
                 alpha = config.alpha,
                 uri = config.uri,
                 group = config.group ?: 1,
-                vibrate = config.vibrate ?: true,
+                vibrate = config.vibrate ?: false,
                 isMouseButton = config.isMouseButton ?: false,
                 mouseButton = config.mouseButton ?: 1
             )

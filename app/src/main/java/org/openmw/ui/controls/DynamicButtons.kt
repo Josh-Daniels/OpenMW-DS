@@ -1101,7 +1101,7 @@ fun ResizableDraggableButton(
                                                                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                                     horizontalArrangement = Arrangement.SpaceEvenly
                                                                 ) {
-                                                                    listOf(1 to "Left", 4 to "Middle", 3 to "Right").forEach { (index, label) ->
+                                                                    listOf(1 to "Left", 4 to "Middle", 2 to "Right").forEach { (index, label) ->
                                                                 Button(
                                                                     onClick = { saveMouseButton(index) },
                                                                     colors = ButtonDefaults.buttonColors(
@@ -1119,7 +1119,7 @@ fun ResizableDraggableButton(
                                                             HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
                                                             Spacer(modifier = Modifier.height(8.dp))
                                                             Text("Button State Info:", color = Color(202, 165, 96), fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                                            StateInfoRow("ID:", "${state.id}")
+                                                            StateInfoRow("ID / Keycode:", "${state.id} / $keyCode")
                                                             StateInfoRow("Current Key:", keyCodeToChar(keyCode))
                                                             StateInfoRow("Group:", "${state.group}")
                                                             StateInfoRow("Size:", "${buttonSize.value}")
