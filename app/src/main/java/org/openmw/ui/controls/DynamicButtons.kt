@@ -523,8 +523,8 @@ fun ResizableDraggableButton(
                                                             onNativeKeyUp(keyCode)
                                                         }
                                                     } else {
+                                                        if (buttonVibrate.value && isVibrationOn) vibrate(context)
                                                         if (isMouseButton.value) {
-                                                            if (buttonVibrate.value && isVibrationOn) vibrate(context)
                                                             SDLActivity.onNativeMouse(mouseButton.intValue, ACTION_DOWN, 0f, 0f, true)
                                                             Log.d(
                                                                 "SDLMouse",

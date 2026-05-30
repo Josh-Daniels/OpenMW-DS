@@ -90,7 +90,7 @@
         "alpha": 0.60784316,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/3.png",
         "group": 1,
-        "vibrate": true,
+        "vibrate": false,
         "isMouseButton": true,
         "mouseButton": 2
     },
@@ -109,7 +109,7 @@
         "alpha": 0.6392157,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/4.png",
         "group": 1,
-        "vibrate": false,
+        "vibrate": true,
         "isMouseButton": false,
         "mouseButton": 1
     },
@@ -207,5 +207,24 @@
         "vibrate": false,
         "isMouseButton": false,
         "mouseButton": 1
+    },
+    {
+        "type": "parent",
+        "keyCode": 0,
+        "label": "Menu",
+        "position": -1,
+        "id": null,
+        "size": 60.0,
+        "offsetX": 100.0,
+        "offsetY": 100.0,
+        "isLocked": true,
+        "blockMouse": null,
+        "color": "#64f3f8ff",
+        "alpha": 0.39215687,
+        "uri": null,
+        "group": null,
+        "vibrate": null,
+        "isMouseButton": null,
+        "mouseButton": null
     }
 ]
