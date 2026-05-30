@@ -3,29 +3,31 @@ package org.openmw.utils
 import android.annotation.SuppressLint
 import android.os.Build
 import android.view.HapticFeedbackConstants
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -38,16 +40,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import org.openmw.Constants
-import org.openmw.R
-import org.openmw.ui.controls.UIStateManager.customColor
 import org.openmw.ui.controls.UIStateManager.darkGray
-import org.openmw.ui.controls.UIStateManager.lightGray
 import java.io.File
 
 class IniConverter(private val data: String) {
@@ -80,7 +78,7 @@ private fun readIniValues(): Map<String, List<Triple<String, Any, String?>>> {
     val comments = mutableMapOf<String, String?>()
     val sections = mutableMapOf<String, MutableMap<String, String>>()
     var currentSection: String? = null
-    var lastKey: String? = null
+    var pendingComment: String? = null
 
     // Define your blacklist here
     val blacklist = setOf("key1", "key2", "key3")
@@ -91,21 +89,24 @@ private fun readIniValues(): Map<String, List<Triple<String, Any, String?>>> {
             trimmedLine.startsWith("[") && trimmedLine.endsWith("]") -> {
                 currentSection = trimmedLine.substring(1, trimmedLine.length - 1).trim()
                 sections[currentSection!!] = mutableMapOf()
+                pendingComment = null
             }
             trimmedLine.startsWith("#") -> {
-                val comment = trimmedLine.substring(1).trim()
-                if (lastKey != null && lastKey !in blacklist) {
-                    comments[lastKey!!] = comment
-                }
+                val commentText = trimmedLine.substring(1).trim()
+                pendingComment = if (pendingComment == null) commentText else "$pendingComment\n$commentText"
             }
             "=" in trimmedLine -> {
                 val (key, value) = trimmedLine.split("=", limit = 2).map { it.trim() }
                 if (currentSection != null && key !in blacklist) {
                     sections[currentSection]!![key] = value
-                    lastKey = key
-                } else {
-                    lastKey = null // Reset lastKey if the key is blacklisted
+                    if (pendingComment != null) {
+                        comments[key] = pendingComment
+                        pendingComment = null
+                    }
                 }
+            }
+            trimmedLine.isEmpty() -> {
+                pendingComment = null // Blank line breaks the association between comment and next key
             }
         }
     }
@@ -143,347 +144,270 @@ fun writeIniValue(section: String, key: String, value: Any, comment: String?) {
             if (line.substring(1, line.length - 1).trim() == section) {
                 sectionFound = true
             }
-        } else if (sectionFound && line.startsWith(key)) {
-            lines[i] = "${key.trim()} = ${value.toString().trim()}"
-            keyFound = true
-            if (comment != null) {
-                val commentIndex = i + 1
-                if (commentIndex < lines.size && lines[commentIndex].trim() != comment.trim()) {
-                    lines.add(commentIndex, comment.trim())
-                    lines.add(commentIndex + 1, "") // Add an empty line after the comment
+        } else if (sectionFound && "=" in line) {
+            val lineKey = line.split("=", limit = 2)[0].trim()
+            if (lineKey == key) {
+                lines[i] = "${key.trim()} = ${value.toString().trim()}"
+                keyFound = true
+                if (comment != null) {
+                    val formattedComment = if (comment.startsWith("#")) comment.trim() else "# ${comment.trim()}"
+                    // Check if comment already exists above (either directly or separated by other comments)
+                    var existingCommentIndex = -1
+                    for (j in (i - 1) downTo 0) {
+                        val prevLine = lines[j].trim()
+                        if (prevLine == formattedComment) {
+                            existingCommentIndex = j
+                            break
+                        }
+                        if (!prevLine.startsWith("#") && prevLine.isNotEmpty()) break
+                    }
+
+                    if (existingCommentIndex == -1) {
+                        lines.add(i, formattedComment)
+                    }
                 }
+                break
             }
-            break
         }
     }
 
     if (!sectionFound) {
         lines.add("[${section.trim()}]")
-        lines.add("${key.trim()} = ${value.toString().trim()}")
         if (comment != null) {
-            lines.add(comment.trim())
-            lines.add("") // Add an empty line after the comment
+            val formattedComment = if (comment.startsWith("#")) comment.trim() else "# ${comment.trim()}"
+            lines.add(formattedComment)
         }
+        lines.add("${key.trim()} = ${value.toString().trim()}")
     } else if (!keyFound) {
-        lines.add(sectionEndIndex, "${key.trim()} = ${value.toString().trim()}")
         if (comment != null) {
-            lines.add(sectionEndIndex + 1, comment.trim())
-            lines.add(sectionEndIndex + 2, "") // Add an empty line after the comment
+            val formattedComment = if (comment.startsWith("#")) comment.trim() else "# ${comment.trim()}"
+            lines.add(sectionEndIndex, formattedComment)
+            lines.add(sectionEndIndex + 1, "${key.trim()} = ${value.toString().trim()}")
+        } else {
+            lines.add(sectionEndIndex, "${key.trim()} = ${value.toString().trim()}")
         }
     }
     settingsFile.writeText(lines.joinToString("\n"))
 }
 
-@SuppressLint("MutableCollectionMutableState")
 @Composable
-fun ReadAndDisplayIniValues() {
-    var isColumnExpanded by remember { mutableStateOf(false) }
+fun IniSettings() {
+    var settings by remember { mutableStateOf(readIniValues()) }
+    var searchQuery by remember { mutableStateOf("") }
+    val view = LocalView.current
+    val context = LocalContext.current
+    val translationChecked by GameFilesPreferences.loadTranslationState(context)
+        .collectAsState(initial = false)
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, Color.Black)
-            .background(color = customColor)
-            .clickable { isColumnExpanded = !isColumnExpanded }, // Toggle column expansion
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(
+    val filteredSettings = remember(settings, searchQuery) {
+        if (searchQuery.isBlank()) {
+            settings
+        } else {
+            settings.mapValues { (_, sectionSettings) ->
+                sectionSettings.filter { (key, _, comment) ->
+                    key.contains(searchQuery, ignoreCase = true) ||
+                            (comment?.contains(searchQuery, ignoreCase = true) == true)
+                }
+            }.filterValues { it.isNotEmpty() }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Search Bar
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .background(color = customColor)
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(bottom = 12.dp),
+            placeholder = { Text("Search settings...", color = Color.Gray) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color.Gray) },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = Color.Gray
+            )
+        )
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = stringResource(R.string.openmw_settings),
-                fontWeight = FontWeight.Bold,
-                fontSize = 24.sp,
-                color = Color.White
-            )
-            Icon(
-                imageVector = if (isColumnExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = if (isColumnExpanded) "Collapse" else "Expand"
-            )
-        }
-        if (isColumnExpanded) {
-            IniSettings()
+            filteredSettings.entries.forEach { (section, sectionSettings) ->
+                IniSectionCard(
+                    section = section,
+                    sectionSettings = sectionSettings,
+                    translationChecked = translationChecked,
+                    onValueChange = { key, newValue ->
+                        writeIniValue(section, key, newValue, null)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
+                        }
+                        settings = readIniValues()
+                    }
+                )
+            }
         }
     }
 }
 
 @Composable
-fun IniSettings() {
-    val settings = remember { mutableStateOf(readIniValues()) }
-    val view = LocalView.current
-    val focusManager = LocalFocusManager.current
-    val context = LocalContext.current
-    val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
-    LazyColumn {
-        items(settings.value.entries.toList()) { (section, sectionSettings) ->
-            var isExpanded by remember { mutableStateOf(false) }
-            Column(
+fun IniSectionCard(
+    section: String,
+    sectionSettings: List<Triple<String, Any, String?>>,
+    translationChecked: Boolean,
+    onValueChange: (String, Any) -> Unit
+) {
+    var isExpanded by remember { mutableStateOf(false) }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = darkGray.copy(alpha = 0.9f)
+        )
+    ) {
+        Column {
+            Row(
                 modifier = Modifier
-                    .background(color = customColor)
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded }
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, Color.Black)
-                        .clickable { isExpanded = !isExpanded }, // Toggle expansion
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = section,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp,
-                        color = Color.White,
-                        modifier = Modifier.padding(
-                            horizontal = 16.dp,
-                            vertical = 2.dp
+                Text(
+                    text = section,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Icon(
+                    imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = Color.White
+                )
+            }
+
+            if (isExpanded) {
+                HorizontalDivider(color = Color.Gray.copy(alpha = 0.3f))
+                Column(modifier = Modifier.padding(8.dp)) {
+                    sectionSettings.forEachIndexed { index, (key, value, comment) ->
+                        IniSettingItem(
+                            propertyKey = key,
+                            value = value,
+                            comment = comment,
+                            translationChecked = translationChecked,
+                            onValueChange = { onValueChange(key, it) }
                         )
+                        if (index < sectionSettings.size - 1) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                color = Color.Gray.copy(alpha = 0.2f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun IniSettingItem(
+    propertyKey: String,
+    value: Any,
+    comment: String?,
+    translationChecked: Boolean,
+    onValueChange: (Any) -> Unit
+) {
+    val context = LocalContext.current
+    val extractedKey = propertyKey.substringAfterLast('.')
+    
+    var translatedKey by remember { mutableStateOf(extractedKey) }
+    var translatedComment by remember { mutableStateOf(comment ?: "") }
+
+    if (translationChecked) {
+        TranslateText(context, extractedKey) { translatedKey = it }
+        if (comment != null) {
+            TranslateText(context, comment) { translatedComment = it }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = translatedKey,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                if (comment != null) {
+                    Text(
+                        text = translatedComment,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.LightGray,
+                        modifier = Modifier.padding(top = 2.dp)
                     )
-                    Icon(
-                        imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                        contentDescription = if (isExpanded) "Collapse" else "Expand",
-                        modifier = Modifier.padding(
-                            horizontal = 16.dp,
-                            vertical = 10.dp
+                }
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            when (value) {
+                is Boolean -> {
+                    Switch(
+                        checked = value,
+                        onCheckedChange = { onValueChange(it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.primary,
+                            checkedTrackColor = MaterialTheme.colorScheme.primaryContainer
                         )
                     )
                 }
-                if (isExpanded) {
-                    sectionSettings.forEachIndexed { index, (propertyKey, value, comment) ->
-                        val extractedPropertyKey =
-                            propertyKey.substringAfterLast('.')
-                        val backgroundColor = if (index % 2 == 0) darkGray else lightGray
-                        settings.value = readIniValues()
-
-                        var translatedText by remember { mutableStateOf("") }
-                        var translatedTextCOM by remember { mutableStateOf("") }
-                        if (translationChecked) {
-                            TranslateText(
-                                context = context,
-                                inputText = extractedPropertyKey, // Pass modValue.value here
-                                onTranslationResult = { result ->
-                                    translatedText =
-                                        result // Update the state with the translated text
-                                }
-                            )
-                            TranslateText(
-                                context = context,
-                                inputText = "$comment", // Pass modValue.value here
-                                onTranslationResult = { result ->
-                                    translatedTextCOM =
-                                        result // Update the state with the translated text
-                                }
-                            )
-                        }
-
-                        when (value) {
-                            is Boolean -> {
-                                var switchState by remember { mutableStateOf(value) }
-                                Column(
-                                    modifier = Modifier
-                                        .background(color = backgroundColor)
-                                        .fillMaxWidth()
-                                        .border(2.dp, Color.Black)
-                                        .padding(bottom = 16.dp) // Add space between each iteration
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .border(1.dp, Color.Black),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = if (translationChecked) translatedText else extractedPropertyKey,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (value.toString() == "false") Color.Red else Color.Green,
-                                            fontSize = 16.sp,
-                                            modifier = Modifier.padding(start = 10.dp, top = 4.dp)
-                                        )
-                                        Spacer(modifier = Modifier.weight(1f))
-                                        Switch(
-                                            checked = switchState,
-                                            onCheckedChange = {
-                                                switchState = it
-
-                                                writeIniValue(section, extractedPropertyKey, it, null)
-
-                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                                                    view.performHapticFeedback(
-                                                        HapticFeedbackConstants.SEGMENT_FREQUENT_TICK
-                                                    )
-                                                }
-
-                                                settings.value = readIniValues() // Reload settings
-                                            },
-                                            colors = SwitchDefaults.colors(
-                                                checkedThumbColor = MaterialTheme.colorScheme.primary,
-                                                checkedTrackColor = MaterialTheme.colorScheme.primaryContainer,
-                                                uncheckedThumbColor = MaterialTheme.colorScheme.secondary,
-                                                uncheckedTrackColor = MaterialTheme.colorScheme.secondaryContainer,
-                                            )
-                                        )
-                                    }
-                                    if (comment != null) {
-                                        Text(
-                                            text = if (translationChecked) translatedTextCOM else comment,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.White,
-                                            fontSize = 14.sp,
-                                            modifier = Modifier.padding(start = 10.dp, top = 4.dp)
-                                        )
-                                    }
-                                }
+                is Int, is Float -> {
+                    var textValue by remember(value) { mutableStateOf(value.toString()) }
+                    val focusManager = LocalFocusManager.current
+                    
+                    OutlinedTextField(
+                        value = textValue,
+                        onValueChange = { 
+                            textValue = it
+                            if (value is Int) {
+                                it.toIntOrNull()?.let { onValueChange(it) }
+                            } else {
+                                it.toFloatOrNull()?.let { onValueChange(it) }
                             }
-
-                            is Float -> {
-                                var floatValue by remember { mutableStateOf(value.toString()) }
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .border(1.dp, Color.Black),
-                                    verticalArrangement = Arrangement.Center
-                                ) {
-                                    Text(
-                                        text = if (translationChecked) translatedText else extractedPropertyKey,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.Green,
-                                        fontSize = 16.sp,
-                                        modifier = Modifier.padding(
-                                            start = 10.dp,
-                                            top = 4.dp
-                                        )
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    TextField(
-                                        value = floatValue,
-                                        onValueChange = {
-                                            floatValue = it
-                                            val floatVal =
-                                                it.toFloatOrNull() ?: 0.0f
-                                            writeIniValue(
-                                                section,
-                                                extractedPropertyKey,
-                                                floatVal,
-                                                null
-                                            )
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                                                view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
-                                            }
-
-                                            settings.value = readIniValues() // Reload settings
-
-                                        },
-                                        label = { Text(stringResource(R.string.enter_value)) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Done),
-                                        keyboardActions = KeyboardActions(
-                                            onDone = {
-                                                focusManager.clearFocus()
-                                            }
-                                        )
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    if (comment != null) {
-                                        Text(
-                                            text = if (translationChecked) translatedTextCOM else comment,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.White,
-                                            fontSize = 14.sp,
-                                            modifier = Modifier.padding(start = 10.dp, top = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            is Int -> {
-                                var intValue by remember { mutableStateOf(value.toString()) }
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .border(1.dp, Color.Black),
-                                    verticalArrangement = Arrangement.Center
-                                ) {
-                                    Text(
-                                        text = if (translationChecked) translatedText else extractedPropertyKey,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.Green,
-                                        fontSize = 16.sp,
-                                        modifier = Modifier.padding(
-                                            start = 10.dp,
-                                            top = 4.dp
-                                        )
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    TextField(
-                                        value = intValue,
-                                        onValueChange = {
-                                            intValue = it
-                                            val intVal = it.toIntOrNull() ?: 0
-                                            writeIniValue(
-                                                section,
-                                                extractedPropertyKey,
-                                                intVal,
-                                                null
-                                            )
-
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                                                view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
-                                            }
-                                            settings.value = readIniValues() // Reload settings
-                                        },
-                                        label = { Text(stringResource(R.string.enter_value)) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Done),
-                                        keyboardActions = KeyboardActions(
-                                            onDone = {
-                                                focusManager.clearFocus()
-                                            }
-                                        )
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    if (comment != null) {
-                                        Text(
-                                            text = if (translationChecked) translatedTextCOM else comment,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.White,
-                                            fontSize = 14.sp,
-                                            modifier = Modifier.padding(start = 10.dp, top = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            else -> {
-                                Text(
-                                    text = if (translationChecked) "$translatedText = $value" else "$extractedPropertyKey = $value",
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White,
-                                    fontSize = 16.sp,
-                                    modifier = Modifier.padding(
-                                        start = 10.dp,
-                                        top = 4.dp
-                                    )
-                                )
-                                if (comment != null) {
-                                    Text(
-                                        text = if (translationChecked) translatedTextCOM else comment,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        fontSize = 16.sp,
-                                        modifier = Modifier.padding(
-                                            start = 24.dp,
-                                            top = 4.dp
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
+                        },
+                        modifier = Modifier.width(100.dp),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color.White),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            imeAction = ImeAction.Done,
+                            keyboardType = if (value is Int) KeyboardType.Number 
+                                          else KeyboardType.Decimal
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = Color.Gray
+                        )
+                    )
+                }
+                else -> {
+                    Text(
+                        text = value.toString(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.Cyan
+                    )
                 }
             }
         }

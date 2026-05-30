@@ -32,7 +32,10 @@ data class ButtonConfig(
     val color: String,
     val alpha: Float,
     @Serializable(with = UriSerializer::class) val uri: Uri?,
-    val group: Int? = null
+    val group: Int? = null,
+    val vibrate: Boolean? = null,
+    val isMouseButton: Boolean? = null,
+    val mouseButton: Int? = null
 )
 
 object UriSerializer : KSerializer<Uri> {

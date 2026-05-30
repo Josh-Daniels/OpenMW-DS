@@ -165,7 +165,7 @@ set(COMMON_CMAKE_ARGS
 	-DCMAKE_C_FLAGS=-I${prefix}/include/\ ${GLOBAL_CFLAGS}
 	-DCMAKE_CXX_FLAGS=-I${prefix}/include/\ ${GLOBAL_CXXFLAGS}
 	-DCMAKE_SHARED_LINKER_FLAGS=${GLOBAL_LDFLAGS}
-	-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+	-DCMAKE_BUILD_TYPE=release #${CMAKE_BUILD_TYPE}
 	-DCMAKE_DEBUG_POSTFIX=
 	-DCMAKE_INSTALL_PREFIX=${prefix}
 	-DCMAKE_FIND_ROOT_PATH=${prefix}
@@ -358,6 +358,9 @@ ExternalProject_Add(ffmpeg
 ExternalProject_Add(sdl2
 	URL https://www.libsdl.org/release/SDL2-${SDL2_VERSION}.tar.gz
 	DOWNLOAD_DIR ${download_dir}
+#	BUILD_ALWAYS 1
+
+#	PATCH_COMMAND patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/sdl2-add-display-mode.patch
 
 	CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
 	${COMMON_CMAKE_ARGS}
@@ -697,7 +700,7 @@ set(OPENMW_COMMON
 	-DOPENAL_INCLUDE_DIR=${prefix}/include/AL/
 	-DOSG_STATIC=TRUE
 	-DCMAKE_CXX_FLAGS=-std=gnu++20\ -I${prefix}/include/\ ${GLOBAL_CXXFLAGS}
-	-DMyGUI_LIBRARY=${prefix}/lib/libMyGUIEngineStatic_d.a
+	-DMyGUI_LIBRARY=${prefix}/lib/libMyGUIEngineStatic.a
 )
 
 set(OPENMW_PATCH

@@ -1,4 +1,4 @@
-@file:OptIn(InternalCoroutinesApi::class)
+@file:OptIn(InternalCoroutinesApi::class, ExperimentalMaterial3Api::class)
 
 package org.openmw.ui.page.setting
 
@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -18,21 +19,33 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.ColorLens
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.DisplaySettings
+import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -40,6 +53,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -49,9 +63,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Color.Companion.White
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -59,25 +75,20 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
 import org.openmw.Constants
 import org.openmw.MainActivity
 import org.openmw.R
 import org.openmw.isControllerConnected
-import org.openmw.ui.controls.UIKeyboard
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.configureControls
 import org.openmw.ui.controls.UIStateManager.customColor
 import org.openmw.ui.controls.UIStateManager.gameList
 import org.openmw.ui.controls.UIStateManager.launchedActivity
 import org.openmw.ui.controls.UIStateManager.tempCodeGroup
-import org.openmw.ui.controls.UIStateManager.uqmJNI
 import org.openmw.ui.controls.stringToShape
 import org.openmw.ui.overlay.AnimationSettings
-import org.openmw.ui.page.main.OpenMW
 import org.openmw.ui.page.mod.LandscapeSettings
 import org.openmw.ui.view.BouncingBackground
 import org.openmw.ui.view.CircularBackground
@@ -97,8 +108,8 @@ import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.GameFilesPreferences.readTextureShrinkingOption
 import org.openmw.utils.GameFilesPreferences.saveAutoMouseMode
 import org.openmw.utils.GameFilesPreferences.saveIconGlow
+import org.openmw.utils.IniSettings
 import org.openmw.utils.InitialDirectorySelection
-import org.openmw.utils.ReadAndDisplayIniValues
 import org.openmw.utils.UserManageAssets
 import org.openmw.utils.getLayoutType
 import org.openmw.utils.startGame
@@ -114,6 +125,10 @@ fun SettingPage(navigateToHome: () -> Unit) {
     val newFeatureEnabledChecked by GameFilesPreferences.loadNewFeatureEnabledState(context).collectAsState(initial = false)
     val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
     val layoutType = getLayoutType()
+
+    LaunchedEffect(Unit) {
+        UIStateManager.expandedSections.clear()
+    }
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -134,34 +149,46 @@ fun SettingPage(navigateToHome: () -> Unit) {
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
-                Column(
-                    modifier = Modifier
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     if (codeGroupOption == "OpenMW" && layoutType == NavigationSuiteType.NavigationBar) {
-                        ToggleFeatureSwitch(context)
-                        ReadAndDisplayIniValues()
-                        ControlsMenu()
+                        item { GeneralSettingsSection() }
+                        item { GraphicsSettingsSection() }
+                        item { ControlsSettingsSection() }
+                        item { InterfaceSettingsSection() }
+                        item { SystemSettingsSection() }
+
+                        item {
+                            SettingSectionCard(
+                                title = stringResource(R.string.openmw_settings),
+                                icon = Icons.Default.Settings
+                            ) {
+                                IniSettings()
+                            }
+                        }
 
                         if (newFeatureEnabledChecked) {
-                            DeveloperMenu()
+                            item { DeveloperToolsSection() }
                         }
                     } else if (codeGroupOption == "OpenMW") {
-                        //navigateToHome()
-                        LandscapeSettings(isNewFeatureEnabledChecked = newFeatureEnabledChecked)
-                    }
-                    else if (codeGroupOption == "UQM") {
-                        UQM()
-                        ToggleFeatureSwitch(context)
-                        ControlsMenu()
-                        if (newFeatureEnabledChecked) {
-                            DeveloperMenu()
+                        item {
+                            LandscapeSettings(isNewFeatureEnabledChecked = newFeatureEnabledChecked)
                         }
-                    }
-                    else if (codeGroupOption == "Dethrace") {
-                        ToggleFeatureSwitch(context)
-                        ControlsMenu()
+                    } else if (codeGroupOption == "UQM") {
+                        item { UQM() }
+                        item { GeneralSettingsSection() }
+                        item { ControlsSettingsSection() }
                         if (newFeatureEnabledChecked) {
-                            DeveloperMenu()
+                            item { DeveloperToolsSection() }
+                        }
+                    } else if (codeGroupOption == "Dethrace") {
+                        item { GeneralSettingsSection() }
+                        item { ControlsSettingsSection() }
+                        if (newFeatureEnabledChecked) {
+                            item { DeveloperToolsSection() }
                         }
                     }
                 }
@@ -170,249 +197,391 @@ fun SettingPage(navigateToHome: () -> Unit) {
     )
 }
 
-@InternalCoroutinesApi
-@ExperimentalMaterial3Api
 @Composable
-fun DeveloperMenu() {
-    var isColumnExpanded by remember { mutableStateOf(false) }
+fun SettingSectionCard(
+    title: String,
+    icon: ImageVector,
+    initialExpanded: Boolean = false,
+    content: @Composable () -> Unit
+) {
+    val isExpanded = UIStateManager.expandedSections.contains(title)
 
-    Column(
+    LaunchedEffect(title) {
+        if (initialExpanded && !UIStateManager.expandedSections.contains(title)) {
+            UIStateManager.expandedSections.add(title)
+        }
+    }
+
+    val anyExpanded = UIStateManager.expandedSections.isNotEmpty()
+    val targetAlpha = if (isExpanded || !anyExpanded) 1f else 0.5f
+
+    ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, Color.Black)
-            .verticalScroll(rememberScrollState())
-            .background(color = customColor)
-            .clickable { isColumnExpanded = !isColumnExpanded },
-        horizontalAlignment = Alignment.CenterHorizontally
+            .alpha(targetAlpha),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = customColor.copy(alpha = 0.9f)
+        )
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(color = customColor)
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = stringResource(R.string.developer_tools),
-                fontWeight = FontWeight.Bold,
-                fontSize = 24.sp,
-                color = White
-            )
-            Icon(
-                imageVector = if (isColumnExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = if (isColumnExpanded) "Collapse" else "Expand"
-            )
-        }
-        if (isColumnExpanded) {
-            DevInsert()
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (isExpanded) UIStateManager.expandedSections.remove(title)
+                        else UIStateManager.expandedSections.add(title)
+                    }
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = White
+                    )
+                }
+                Icon(
+                    imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = White
+                )
+            }
+
+            if (isExpanded) {
+                HorizontalDivider(color = White.copy(alpha = 0.2f))
+                Column(modifier = Modifier.padding(12.dp)) {
+                    content()
+                }
+            }
         }
     }
 }
 
 @Composable
+fun SettingRow(
+    title: String,
+    subtitle: String? = null,
+    content: @Composable () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = White,
+                fontWeight = FontWeight.Medium
+            )
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = White.copy(alpha = 0.7f)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        content()
+    }
+}
+
+@Composable
+fun GeneralSettingsSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
+
+    SettingSectionCard(
+        title = stringResource(R.string.launcher_settings),
+        icon = Icons.Default.Settings,
+        initialExpanded = launchedActivity
+    ) {
+        CodeGroupOptionSelector()
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        
+        SettingRow(
+            title = stringResource(R.string.enable_translation),
+            subtitle = stringResource(R.string.this_enables_language_translation_feat)
+        ) {
+            Switch(
+                checked = translationChecked,
+                onCheckedChange = { scope.launch { GameFilesPreferences.saveTranslationState(context, it) } }
+            )
+        }
+        
+        if (translationChecked) {
+            LanguageSelector(context)
+        }
+        
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        CharsetDropdownMenu { updateCharset(it) }
+    }
+}
+
+@Composable
+fun GraphicsSettingsSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val avoid16BitsChecked by GameFilesPreferences.readAvoid16Bits(context).collectAsState(initial = true)
+    val useAngle by GameFilesPreferences.readAngle(context).collectAsState(initial = true)
+    val useSPIRV by GameFilesPreferences.readSPIRV(context).collectAsState(initial = true)
+
+    SettingSectionCard(
+        title = "Graphics & Performance",
+        icon = Icons.Default.DisplaySettings
+    ) {
+        SettingRow(
+            title = "Use Angle driver",
+            subtitle = "Using this setting will enable newer shaders on older hardware like shadows."
+        ) {
+            Switch(checked = useAngle, onCheckedChange = { scope.launch { GameFilesPreferences.writeAngle(context, it) } })
+        }
+        
+        SettingRow(
+            title = "Enable SPIRV",
+            subtitle = "Using this setting will enable newer shaders on hardware that doesn't support it."
+        ) {
+            Switch(checked = useSPIRV, onCheckedChange = { scope.launch { GameFilesPreferences.writeSPIRV(context, it) } })
+        }
+        
+        SettingRow(
+            title = stringResource(R.string.avoid_16_bits),
+            subtitle = stringResource(R.string.helps_with_devices_that_have_less_memory_feat)
+        ) {
+            Switch(checked = avoid16BitsChecked, onCheckedChange = { scope.launch { GameFilesPreferences.writeAvoid16Bits(context, it) } })
+        }
+        
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        TextureShrinkingOptionSelector()
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        BackgroundAnimationOptionSelector()
+    }
+}
+
+@Composable
+fun ControlsSettingsSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
+    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
+    val quickSlot by getQuickSlot(context).collectAsState(initial = true)
+    val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
+    val buttonTint by GameFilesPreferences.loadButtonTint(context).collectAsState(initial = true)
+
+    SettingSectionCard(
+        title = stringResource(R.string.customize_controls),
+        icon = Icons.Default.Gamepad
+    ) {
+        SettingRow(title = stringResource(R.string.use_virtual_keyboard)) {
+            Switch(checked = virtualKeyboard, onCheckedChange = { scope.launch { GameFilesPreferences.setVirtualKeyboard(context, it) } })
+        }
+        
+        SettingRow(title = if (isVibrationOn) stringResource(R.string.vibration_enabled) else stringResource(R.string.vibration_disabled)) {
+            Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.saveVibrationState(context, it) } })
+        }
+        
+        SettingRow(title = "Quick Slot ${if (quickSlot) "Enabled" else "Disabled"}") {
+            Switch(checked = quickSlot, onCheckedChange = { scope.launch { GameFilesPreferences.setQuickSlot(context, it) } })
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        AutoMouseModeOptionSelector()
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        
+        SettingRow(title = stringResource(R.string.allow_button_groups), subtitle = stringResource(R.string.allow_btn_group_feat)) {
+            Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setButtonGroupSwitch(context, it) } })
+        }
+        
+        SettingRow(title = stringResource(R.string.allow_button_tint), subtitle = stringResource(R.string.allow_button_tint_feat)) {
+            Switch(checked = buttonTint, onCheckedChange = { scope.launch { GameFilesPreferences.saveButtonTint(context, it) } })
+        }
+        
+        ButtonShapeDropdownMenu { scope.launch { GameFilesPreferences.saveButtonShape(context, it) } }
+        
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        ControlsInsert()
+    }
+}
+
+@Composable
+fun InterfaceSettingsSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
+    val matchIconColorChecked by GameFilesPreferences.loadMatchIconColorState(context).collectAsState(initial = false)
+    val iconGlowChecked by GameFilesPreferences.loadIconGlow(context).collectAsState(initial = true)
+    val controllerConnected = isControllerConnected(context)
+
+    SettingSectionCard(
+        title = stringResource(R.string.interface_and_overlay),
+        icon = Icons.Default.ColorLens
+    ) {
+        SettingRow(
+            title = if (controllerConnected || !isUIHidden) stringResource(R.string.ui_is_visible) else stringResource(R.string.ui_is_hidden),
+            subtitle = stringResource(R.string.set_the_ui_visible_state_tip)
+        ) {
+            Switch(checked = isUIHidden, onCheckedChange = { scope.launch { GameFilesPreferences.saveUIState(context, it) } })
+        }
+        
+        SettingRow(
+            title = stringResource(R.string.match_icon_color_to_thumbstick),
+            subtitle = stringResource(R.string.thumbstick_share_its_color_feat)
+        ) {
+            Switch(checked = matchIconColorChecked, onCheckedChange = { scope.launch { GameFilesPreferences.saveMatchIconColorState(context, it) } })
+        }
+        
+        SettingRow(
+            title = stringResource(R.string.icon_glow),
+            subtitle = stringResource(R.string.glow_to_all_the_icons_feat)
+        ) {
+            Switch(checked = iconGlowChecked, onCheckedChange = { scope.launch { saveIconGlow(context, it) } })
+        }
+        
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        AnimationSettings(context, scope)
+    }
+}
+
+@Composable
+fun SystemSettingsSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val newFeatureEnabledChecked by GameFilesPreferences.loadNewFeatureEnabledState(context).collectAsState(initial = false)
+    var showWarningDialog by remember { mutableStateOf(false) }
+
+    SettingSectionCard(
+        title = stringResource(R.string.system_and_debug),
+        icon = Icons.Default.Computer
+    ) {
+        if (launchedActivity) {
+            SettingRow(title = stringResource(R.string.display_memory_info), subtitle = stringResource(R.string.create_a_window_showing_memory_info)) {
+                Switch(checked = UIStateManager.isMemoryInfoEnabled, onCheckedChange = { UIStateManager.isMemoryInfoEnabled = it })
+            }
+            SettingRow(title = stringResource(R.string.display_battery_info), subtitle = stringResource(R.string.create_a_window_showing_battery_info)) {
+                Switch(checked = UIStateManager.isBatteryStatusEnabled, onCheckedChange = { UIStateManager.isBatteryStatusEnabled = it })
+            }
+            SettingRow(title = stringResource(R.string.logcat), subtitle = stringResource(R.string.create_a_window_showing_logcat_info)) {
+                Switch(checked = UIStateManager.isLoggingEnabled, onCheckedChange = { UIStateManager.isLoggingEnabled = it })
+            }
+            SettingRow(title = stringResource(R.string.custom_log_output), subtitle = stringResource(R.string.create_a_window_showing_custom_log_output)) {
+                Switch(checked = UIStateManager.isAppLoggingEnabled, onCheckedChange = { UIStateManager.isAppLoggingEnabled = it })
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        }
+
+        if (!launchedActivity) {
+            SettingRow(
+                title = stringResource(R.string.enable_developer_options),
+                subtitle = stringResource(R.string.enable_developer_options_feat)
+            ) {
+                Switch(
+                    checked = newFeatureEnabledChecked,
+                    onCheckedChange = {
+                        if (it) showWarningDialog = true
+                        else scope.launch { GameFilesPreferences.saveNewFeatureEnabledState(context, false) }
+                    }
+                )
+            }
+        }
+    }
+
+    if (showWarningDialog) {
+        AlertDialog(
+            onDismissRequest = { showWarningDialog = false },
+            title = { Text(stringResource(R.string.warning)) },
+            text = { Text(stringResource(R.string.enable_dangerous_feature_tip)) },
+            confirmButton = {
+                Button(onClick = {
+                    scope.launch { GameFilesPreferences.saveNewFeatureEnabledState(context, true) }
+                    showWarningDialog = false
+                }) { Text(stringResource(R.string.btn_confirm)) }
+            },
+            dismissButton = {
+                Button(onClick = { showWarningDialog = false }) { Text(stringResource(R.string.btn_cancel)) }
+            }
+        )
+    }
+}
+
+@Composable
+fun DeveloperToolsSection() {
+    SettingSectionCard(
+        title = stringResource(R.string.developer_tools),
+        icon = Icons.Default.Build
+    ) {
+        DevInsert()
+    }
+}
+
+@Composable
 fun DevInsert() {
-    var showPopup by remember { mutableStateOf(false) }
-    var showFileBrowser by remember { mutableStateOf(false) }
-    var selectedInitialDirectory by remember { mutableStateOf<File?>(null) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val bypassGameCheck by GameFilesPreferences.loadBypassGameCheck(context).collectAsState(initial = false)
     val avoidInsertion by GameFilesPreferences.readResolutionInsertion(context).collectAsState(initial = false)
     val hideSystemBars by getSystemBars(context).collectAsState(initial = true)
     val screenStayOn by getScreenStayOn(context).collectAsState(initial = true)
+    var showPopup by remember { mutableStateOf(false) }
+    var showFileBrowser by remember { mutableStateOf(false) }
+    var selectedInitialDirectory by remember { mutableStateOf<File?>(null) }
 
     Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = stringResource(R.string.app_logging),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.enable_a_custom_logging_system_tip),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
+        SettingRow(title = stringResource(R.string.enable_logcat), subtitle = stringResource(R.string.enable_launcher_logcat)) {
+            Switch(checked = UIStateManager.isLogcatEnabled, onCheckedChange = { UIStateManager.isLogcatEnabled = it })
+        }
+        LogcatLevelSelector()
+        SettingRow(title = "Show / Hide system bars") {
+            Switch(checked = hideSystemBars, onCheckedChange = { scope.launch { GameFilesPreferences.setSystemBars(context, !it) } })
+        }
+        SettingRow(title = "Toggle screen stay on") {
+            Switch(checked = screenStayOn, onCheckedChange = { scope.launch { GameFilesPreferences.setScreenStayOn(context, !it) } })
+        }
+        SettingRow(title = stringResource(R.string.don_t_inject_resolution_settings_automatically), subtitle = stringResource(R.string.overwriting_resolution_settings_tip)) {
+            Switch(checked = avoidInsertion, onCheckedChange = { scope.launch { GameFilesPreferences.writeResolutionInsertion(context, it) } })
+        }
+        SettingRow(title = stringResource(R.string.bypass_the_game_files_check_tip), subtitle = stringResource(R.string.this_enables_disables_the_launcher_files_check_tip)) {
+            Switch(checked = bypassGameCheck, onCheckedChange = { scope.launch { GameFilesPreferences.saveBypassGameCheck(context, it) } })
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
 
-            Switch(
-                checked = UIStateManager.isAppLoggingEnabled,
-                onCheckedChange = { checked ->
-                    UIStateManager.isAppLoggingEnabled = checked
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = "Show / Hide system bars",
-                color = White,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            Switch(
-                checked = hideSystemBars,
-                onCheckedChange = { isChecked ->
-                    CoroutineScope(Dispatchers.Main).launch {
-                        GameFilesPreferences.setSystemBars(context, !isChecked)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = "Toggle screen stay on",
-                color = White,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            Switch(
-                checked = screenStayOn,
-                onCheckedChange = { isChecked ->
-                    CoroutineScope(Dispatchers.Main).launch {
-                        GameFilesPreferences.setScreenStayOn(context, !isChecked)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = stringResource(R.string.don_t_inject_resolution_settings_automatically),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.overwriting_resolution_settings_tip),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-
-            Switch(
-                checked = avoidInsertion,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.writeResolutionInsertion(context, !avoidInsertion)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = stringResource(R.string.bypass_the_game_files_check_tip),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.this_enables_disables_the_launcher_files_check_tip),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-
-            Switch(
-                checked = bypassGameCheck,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.saveBypassGameCheck(context, !bypassGameCheck)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
         Button(
             onClick = { showPopup = true },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            shape = RectangleShape,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.Transparent
-            )
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
         ) {
             Text(stringResource(R.string.show_datastore_content), color = White)
         }
-        HorizontalDivider(color = White, thickness = 1.dp)
+
         Button(
             onClick = {
                 selectedInitialDirectory = null
                 showFileBrowser = true
             },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            shape = RectangleShape,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.Transparent
-            )
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
         ) {
             Text(stringResource(R.string.open_file_browser), color = White)
         }
-        HorizontalDivider(color = White, thickness = 1.dp)
     }
 
     if (showPopup) {
-        DataStoreContentPopup(
-            context = context,
-            onDismiss = { showPopup = false })
+        DataStoreContentPopup(context = context, onDismiss = { showPopup = false })
     }
 
     if (showFileBrowser && selectedInitialDirectory == null) {
@@ -426,15 +595,168 @@ fun DevInsert() {
     }
 
     if (showFileBrowser && selectedInitialDirectory != null) {
-        FileBrowserPopup(
-            initialDirectory = selectedInitialDirectory!!,
-            onDismiss = { showFileBrowser = false }
+        FileBrowserPopup(initialDirectory = selectedInitialDirectory!!, onDismiss = { showFileBrowser = false })
+    }
+}
 
-        )
+@Composable
+fun ToggleFeatureSwitch() {
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(scrollState)
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (launchedActivity) {
+            InGameSettings()
+        } else {
+            FeaturesSwitches()
+        }
+    }
+}
+
+@Composable
+fun FeaturesSwitches() {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        GeneralSettingsSection()
+        GraphicsSettingsSection()
+        ControlsSettingsSection()
+        InterfaceSettingsSection()
+        SystemSettingsSection()
+    }
+}
+
+@Composable
+fun InGameSettings() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    
+    val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
+    val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
+    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
+    val quickSlot by getQuickSlot(context).collectAsState(initial = false)
+    val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
+    val controllerConnected = isControllerConnected(context)
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (configureControls) {
+            Button(
+                onClick = {
+                    launchedActivity = false
+                    configureControls = false
+                    context.startActivity(Intent(context, MainActivity::class.java))
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+                    .height(56.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFB71C1C).copy(alpha = 0.8f),
+                    contentColor = White
+                ),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.return_to_launcher),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // System & Debug Info
+        SettingRow(title = "Performance HUD") {
+            Switch(checked = UIStateManager.isPerformanceHudEnabled, onCheckedChange = { UIStateManager.isPerformanceHudEnabled = it })
+        }
+        SettingRow(title = stringResource(R.string.display_memory_info)) {
+            Switch(checked = UIStateManager.isMemoryInfoEnabled, onCheckedChange = { UIStateManager.isMemoryInfoEnabled = it })
+        }
+        SettingRow(title = stringResource(R.string.display_battery_info)) {
+            Switch(checked = UIStateManager.isBatteryStatusEnabled, onCheckedChange = { UIStateManager.isBatteryStatusEnabled = it })
+        }
+        SettingRow(title = stringResource(R.string.logcat)) {
+            Switch(checked = UIStateManager.isLoggingEnabled, onCheckedChange = { UIStateManager.isLoggingEnabled = it })
+        }
+        SettingRow(title = stringResource(R.string.custom_log_output)) {
+            Switch(checked = UIStateManager.isAppLoggingEnabled, onCheckedChange = { UIStateManager.isAppLoggingEnabled = it })
+        }
+        HorizontalDivider(color = White.copy(alpha = 0.1f))
+        
+        // Interface
+        SettingRow(
+            title = if (controllerConnected || !isUIHidden) stringResource(R.string.ui_is_visible) else stringResource(R.string.ui_is_hidden)
+        ) {
+            Switch(checked = isUIHidden, onCheckedChange = { scope.launch { GameFilesPreferences.saveUIState(context, it) } })
+        }
+        
+        // Controls
+        SettingRow(title = stringResource(R.string.use_virtual_keyboard)) {
+            Switch(checked = virtualKeyboard, onCheckedChange = { scope.launch { GameFilesPreferences.setVirtualKeyboard(context, it) } })
+        }
+        SettingRow(title = if (isVibrationOn) stringResource(R.string.vibration_enabled) else stringResource(R.string.vibration_disabled)) {
+            Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.saveVibrationState(context, it) } })
+        }
+        SettingRow(title = "Quick Slot ${if (quickSlot) "Enabled" else "Disabled"}") {
+            Switch(checked = quickSlot, onCheckedChange = { scope.launch { GameFilesPreferences.setQuickSlot(context, it) } })
+        }
+        SettingRow(title = stringResource(R.string.allow_button_groups)) {
+            Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setButtonGroupSwitch(context, it) } })
+        }
+        
+        HorizontalDivider(color = White.copy(alpha = 0.1f))
+        AutoMouseModeOptionSelector()
+        
+        HorizontalDivider(color = White.copy(alpha = 0.1f))
+        AnimationSettings(context, scope)
     }
 }
 
 @SuppressLint("MutableCollectionMutableState")
+@Composable
+fun LogcatLevelSelector() {
+    val levels = listOf(
+        "V" to "Verbose",
+        "D" to "Debug",
+        "I" to "Info",
+        "W" to "Warning",
+        "E" to "Error"
+    )
+    var expanded by remember { mutableStateOf(false) }
+    val currentLevel = UIStateManager.logcatLevel
+
+    SettingRow(
+        title = "Logcat Filter Level",
+        subtitle = "Select minimum priority level for logcat messages"
+    ) {
+        Box {
+            TextButton(onClick = { expanded = true }) {
+                Text(
+                    text = levels.find { it.first == currentLevel }?.second ?: "Verbose",
+                    color = Color.Green
+                )
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier.background(customColor)
+            ) {
+                levels.forEach { (code, label) ->
+                    DropdownMenuItem(
+                        text = { Text(label, color = White) },
+                        onClick = {
+                            UIStateManager.logcatLevel = code
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun DataStoreContentPopup(context: Context, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -526,829 +848,6 @@ fun DataStoreContentPopup(context: Context, onDismiss: () -> Unit) {
     )
 }
 
-@Composable
-fun ToggleFeatureSwitch(context: Context) {
-    var isColumnExpanded by remember { mutableStateOf(false) }
-    if (launchedActivity) {
-        isColumnExpanded = true
-    }
-
-    Column(
-        modifier = Modifier
-            .border(1.dp, Color.Black)
-            .background(color = customColor)
-            .verticalScroll(rememberScrollState())
-            .clickable { isColumnExpanded = !isColumnExpanded },
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        if (!launchedActivity) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(color = customColor)
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = stringResource(R.string.launcher_settings),
-                fontWeight = FontWeight.Bold,
-                fontSize = 24.sp,
-                color = White
-            )
-            Icon(
-                imageVector = if (isColumnExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = if (isColumnExpanded) "Collapse" else "Expand"
-            )
-        }
-        }
-        if (isColumnExpanded) {
-            FeaturesSwitches()
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun FeaturesSwitches() {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
-    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
-    val matchIconColorChecked by GameFilesPreferences.loadMatchIconColorState(context).collectAsState(initial = false)
-    val avoid16BitsChecked by GameFilesPreferences.readAvoid16Bits(context).collectAsState(initial = true)
-    val useAngle by GameFilesPreferences.readAngle(context).collectAsState(initial = true)
-    val useSPIRV by GameFilesPreferences.readSPIRV(context).collectAsState(initial = true)
-    val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
-    val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
-    val iconGlowChecked by GameFilesPreferences.loadIconGlow(context).collectAsState(initial = true)
-    var showDialog by remember { mutableStateOf(false) }
-    val controllerConnected = isControllerConnected(context)
-    val newFeatureEnabledChecked by GameFilesPreferences.loadNewFeatureEnabledState(context).collectAsState(initial = false)
-    val buttonTint by GameFilesPreferences.loadButtonTint(context).collectAsState(initial = true)
-    val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
-    val quickSlot by getQuickSlot(context).collectAsState(initial = true)
-    Column {
-        // Conditionally display the "Exit to Launcher" button at the bottom center
-        if (configureControls) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(),
-            ) {
-                Button(
-                    onClick = {
-                        launchedActivity = false
-                        configureControls = false
-                        /*(context as? Activity)?.finish()*/
-                        context.startActivity(Intent(context, MainActivity::class.java))
-                    }
-                ) {
-                    Text(stringResource(R.string.return_to_launcher))
-                }
-            }
-        }
-        if (!launchedActivity) {
-            OpenMW()
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        if (launchedActivity) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.display_memory_info),
-                        color = White
-                    )
-                    Text(
-                        text = stringResource(R.string.create_a_window_showing_memory_info),
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = UIStateManager.isMemoryInfoEnabled,
-                    onCheckedChange = { checked ->
-                        UIStateManager.isMemoryInfoEnabled = checked
-                    }
-                )
-            }
-            if (tempCodeGroup == "UQM") {
-                HorizontalDivider(color = White, thickness = 1.dp)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.Start,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(
-                            text = "Uqm Jni",
-                            color = White
-                        )
-                        Text(
-                            text = "Display jni info on screen",
-                            color = White,
-                            style = TextStyle(
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Serif
-                            )
-                        )
-                    }
-
-                    Switch(
-                        checked = uqmJNI,
-                        onCheckedChange = { checked ->
-                            uqmJNI = checked
-                        }
-                    )
-                }
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.display_battery_info),
-                        color = White
-                    )
-                    Text(
-                        text = stringResource(R.string.create_a_window_showing_battery_info),
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = UIStateManager.isBatteryStatusEnabled,
-                    onCheckedChange = { checked ->
-                        UIStateManager.isBatteryStatusEnabled = checked
-                    }
-                )
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.logcat),
-                        color = White
-                    )
-                    Text(
-                        text = stringResource(R.string.create_a_window_showing_logcat_info),
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = UIStateManager.isLoggingEnabled,
-                    onCheckedChange = { checked ->
-                        UIStateManager.isLoggingEnabled = checked
-                    }
-                )
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.custom_log_output),
-                        color = White
-                    )
-                    Text(
-                        text = stringResource(R.string.create_a_window_showing_custom_log_output),
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = UIStateManager.isAppLoggingEnabled,
-                    onCheckedChange = { checked ->
-                        UIStateManager.isAppLoggingEnabled = checked
-                    }
-                )
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Column to stack the two Text components on the left
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f) // This ensures the Column takes up available space on the left
-            ) {
-                Text(
-                    text = if (controllerConnected || !isUIHidden) {
-                        stringResource(R.string.ui_is_visible)
-                    } else {
-                        stringResource(R.string.ui_is_hidden)
-                    },
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.set_the_ui_visible_state_tip),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-            Switch(
-                checked = isUIHidden,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.saveUIState(context, !isUIHidden)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-        Column(
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.Start,
-            modifier = Modifier.weight(1f)
-        ) {
-            Text(
-                text = stringResource(R.string.use_virtual_keyboard),
-                color = White
-            )
-            Text(
-                text = "${stringResource(R.string.use_virtual_keyboard)}.",
-                color = White,
-                style = TextStyle(
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Serif
-                )
-            )
-        }
-
-        Switch(
-            checked = virtualKeyboard,
-            onCheckedChange = { checked ->
-                scope.launch {
-                    GameFilesPreferences.setVirtualKeyboard(context, !virtualKeyboard)
-                }
-            }
-        )
-    }
-
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Column to stack the two Text components on the left
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = if (!isVibrationOn) stringResource(R.string.vibration_disabled) else stringResource(
-                        R.string.vibration_enabled
-                    ),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.set_the_vibration_state_feat),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-            Switch(
-                checked = isVibrationOn,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.saveVibrationState(context, !isVibrationOn)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Column to stack the two Text components on the left
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f) // This ensures the Column takes up available space on the left
-            ) {
-                Text(
-                    text = if (quickSlot) {
-                        "Quick Slot enabled"
-                    } else {
-                        "Quick Slot Disabled"
-                    },
-                    color = White
-                )
-            }
-            Switch(
-                checked = quickSlot,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.setQuickSlot(context, !quickSlot)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        if (!launchedActivity) {
-            HorizontalDivider(color = White, thickness = 1.dp)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = "Use Angle driver",
-                        color = White
-                    )
-                    Text(
-                        text = "Using this setting will enable newer shaders on older hardware like shadows.",
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = useAngle,
-                    onCheckedChange = { checked ->
-                        scope.launch {
-                            GameFilesPreferences.writeAngle(context, !useAngle)
-                        }
-                    }
-                )
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = "Enable spirv",
-                        color = White
-                    )
-                    Text(
-                        text = "Using this setting will enable newer shaders on hardware that doesnt support it.",
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = useSPIRV,
-                    onCheckedChange = { checked ->
-                        scope.launch {
-                            GameFilesPreferences.writeSPIRV(context, !useSPIRV)
-                        }
-                    }
-                )
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.avoid_16_bits),
-                        color = White
-                    )
-                    Text(
-                        text = stringResource(R.string.helps_with_devices_that_have_less_memory_feat),
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = avoid16BitsChecked,
-                    onCheckedChange = { checked ->
-                        scope.launch {
-                            GameFilesPreferences.writeAvoid16Bits(context, !avoid16BitsChecked)
-                        }
-                    }
-                )
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-            CodeGroupOptionSelector()
-            HorizontalDivider(color = White, thickness = 1.dp)
-            // Add the new feature enabled switch
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.enable_translation),
-                        color = White
-                    )
-                    Text(
-                        text = stringResource(R.string.this_enables_language_translation_feat),
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = translationChecked,
-                    onCheckedChange = { checked ->
-                        scope.launch {
-                            GameFilesPreferences.saveTranslationState(context, !translationChecked)
-                        }
-                    }
-                )
-            }
-            if (translationChecked) {
-                HorizontalDivider(color = White, thickness = 1.dp)
-                LanguageSelector(context)
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-            BackgroundAnimationOptionSelector()
-            HorizontalDivider(color = White, thickness = 1.dp)
-            TextureShrinkingOptionSelector()
-            HorizontalDivider(color = White, thickness = 1.dp)
-            CharsetDropdownMenu { newEncoding ->
-                updateCharset(newEncoding)
-            }
-            HorizontalDivider(color = White, thickness = 1.dp)
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        AnimationSettings(context, scope)
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = stringResource(R.string.match_icon_color_to_thumbstick),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.thumbstick_share_its_color_feat),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-
-            Switch(
-                checked = matchIconColorChecked,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.saveMatchIconColorState(context, !matchIconColorChecked)
-                    }
-                }
-            )
-        }
-
-        HorizontalDivider(color = White, thickness = 1.dp)
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = stringResource(R.string.icon_glow),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.glow_to_all_the_icons_feat),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-
-            Switch(
-                checked = iconGlowChecked,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        saveIconGlow(context, !iconGlowChecked)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        AutoMouseModeOptionSelector()
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = stringResource(R.string.allow_button_groups),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.allow_btn_group_feat),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-
-            Switch(
-                checked = buttonGroupSwitch,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.setButtonGroupSwitch(context, !buttonGroupSwitch)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    text = stringResource(R.string.allow_button_tint),
-                    color = White
-                )
-                Text(
-                    text = stringResource(R.string.allow_button_tint_feat),
-                    color = White,
-                    style = TextStyle(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
-                )
-            }
-
-            Switch(
-                checked = buttonTint,
-                onCheckedChange = { checked ->
-                    scope.launch {
-                        GameFilesPreferences.saveButtonTint(context, !buttonTint)
-                    }
-                }
-            )
-        }
-        HorizontalDivider(color = White, thickness = 1.dp)
-        ButtonShapeDropdownMenu { selectedShape ->
-            scope.launch {
-                GameFilesPreferences.saveButtonShape(context, selectedShape)
-            }
-        }
-
-        if (!launchedActivity) {
-            HorizontalDivider(color = White, thickness = 1.dp)
-            // Add the new feature enabled switch
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.enable_developer_options),
-                        color = White
-                    )
-                    Text(
-                        text = stringResource(R.string.enable_developer_options_feat),
-                        color = White,
-                        style = TextStyle(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
-                    )
-                }
-
-                Switch(
-                    checked = newFeatureEnabledChecked,
-                    onCheckedChange = { checked ->
-                        if (checked) {
-                            showDialog = true
-                        } else {
-                            scope.launch {
-                                GameFilesPreferences.saveNewFeatureEnabledState(context, false)
-                            }
-                        }
-                    }
-                )
-            }
-
-            // Alert Dialog
-            if (showDialog) {
-                AlertDialog(
-                    onDismissRequest = {
-                        showDialog = false
-                    },
-                    title = {
-                        Text(text = stringResource(R.string.warning))
-                    },
-                    text = {
-                        Text(stringResource(R.string.enable_dangerous_feature_tip))
-                    },
-                    confirmButton = {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    GameFilesPreferences.saveNewFeatureEnabledState(context, true)
-                                }
-                                showDialog = false
-                            }
-                        ) {
-                            Text(stringResource(R.string.btn_confirm))
-                        }
-                    },
-                    dismissButton = {
-                        Button(
-                            onClick = {
-                                showDialog = false
-                            }
-                        ) {
-                            Text(stringResource(R.string.btn_cancel))
-                        }
-                    }
-                )
-            }
-        }
-    }
-}
 
 @SuppressLint("SuspiciousIndentation")
 @Composable
@@ -1681,44 +1180,6 @@ fun updateCharset(newEncoding: String) {
     println("Charset changed to $newEncoding")
 }
 
-@InternalCoroutinesApi
-@ExperimentalMaterial3Api
-@Composable
-fun ControlsMenu() {
-    var isColumnExpanded by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, Color.Black)
-            .background(color = customColor)
-            .clickable { isColumnExpanded = !isColumnExpanded },
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(color = customColor)
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = stringResource(R.string.customize_controls),
-                fontWeight = FontWeight.Bold,
-                fontSize = 24.sp,
-                color = White
-            )
-            Icon(
-                imageVector = if (isColumnExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = if (isColumnExpanded) "Collapse" else "Expand"
-            )
-        }
-        if (isColumnExpanded) {
-            ControlsInsert()
-        }
-    }
-}
 
 @Composable
 fun BackgroundAnimationOptionSelector() {
@@ -1878,7 +1339,6 @@ fun ControlsInsert() {
 
 @Composable
 fun UQM() {
-    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1887,18 +1347,8 @@ fun UQM() {
     ) {
         HorizontalDivider(color = White, thickness = 1.dp)
         CodeGroupOptionSelector()
-        /*
-        HorizontalDivider(color = White, thickness = 1.dp)
-        Button(onClick = {
-            UserManageAssets(context).installUQMResourceFiles()
-        }, colors = ButtonDefaults.buttonColors(Color.Transparent)) {
-            Text(stringResource(R.string.install_uqm_base_files), color = White)
-        }
-
-         */
     }
 }
-
 
 @Composable
 fun ButtonShapeDropdownMenu(updateShape: (String) -> Unit) {

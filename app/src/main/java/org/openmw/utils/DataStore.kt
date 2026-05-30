@@ -75,6 +75,10 @@ object GameFilesPreferences {
     val TUTORIAL_KEY = booleanPreferencesKey("tutorial_enable")
     val MENU_CORNER_KEY = intPreferencesKey("menu_corner")
 
+    val USER_SET_GPU_KEY = stringPreferencesKey("user_set_gpu")
+    val USER_SET_TEMP_KEY = stringPreferencesKey("user_set_temp")
+    val USER_SET_GPU_TEMP_KEY = stringPreferencesKey("user_set_gpu_temp")
+
     // Android 15 bug where game files not detected when launching
     val BYPASS_GAME_FILES_KEY = booleanPreferencesKey("bypass_game_files_check")
 
@@ -149,6 +153,14 @@ object GameFilesPreferences {
                         UIStateManager.languageSet = newLanguage
                     }
                 }
+        }
+
+        CoroutineScope(Dispatchers.Main).launch {
+            context.dataStore.data.collect { preferences ->
+                UIStateManager.userSetGPU = preferences[USER_SET_GPU_KEY] ?: "kgsl-3d0"
+                UIStateManager.userSetTemp = preferences[USER_SET_TEMP_KEY] ?: "thermal_zone0"
+                UIStateManager.userSetGPUTemp = preferences[USER_SET_GPU_TEMP_KEY] ?: "thermal_zone32"
+            }
         }
     }
 
@@ -465,7 +477,7 @@ object GameFilesPreferences {
     fun useVirtualKeyboard(context: Context): Flow<Boolean> {
         return context.dataStore.data
             .map { preferences ->
-                preferences[USE_VIRTUAL_KB] ?: false
+                preferences[USE_VIRTUAL_KB] ?: true
             }
     }
 
@@ -679,6 +691,24 @@ object GameFilesPreferences {
     fun getMenuCorner(context: Context): Flow<Int> {
         return context.dataStore.data.map { preferences ->
             preferences[MENU_CORNER_KEY] ?: 0 // Default to TopRight
+        }
+    }
+
+    suspend fun setUserSetGPU(context: Context, value: String) {
+        context.dataStore.edit { preferences ->
+            preferences[USER_SET_GPU_KEY] = value
+        }
+    }
+
+    suspend fun setUserSetTemp(context: Context, value: String) {
+        context.dataStore.edit { preferences ->
+            preferences[USER_SET_TEMP_KEY] = value
+        }
+    }
+
+    suspend fun setUserSetGPUTemp(context: Context, value: String) {
+        context.dataStore.edit { preferences ->
+            preferences[USER_SET_GPU_TEMP_KEY] = value
         }
     }
 }

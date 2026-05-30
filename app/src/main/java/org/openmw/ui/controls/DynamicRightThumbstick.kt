@@ -38,7 +38,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -198,7 +200,8 @@ fun ResizableDraggableRightThumbstick(
                 color = hexCode,
                 alpha = buttonAlpha,
                 uri = buttonUri.value,
-                group = 1
+                group = 1,
+                vibrate = false
             )
             updateButtonState(98, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
@@ -206,10 +209,12 @@ fun ResizableDraggableRightThumbstick(
 
         // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
+        var interact by remember { mutableStateOf(false) }
         var colors by remember { mutableStateOf(false) }
 
         fun resetStates() {
             options = false
+            interact = false
             colors = false
         }
 
@@ -484,7 +489,8 @@ fun ResizableDraggableRightThumbstick(
                                             ) {
                                                 val selectedTabIndex = when {
                                                     options -> 0
-                                                    colors -> 1
+                                                    interact -> 1
+                                                    colors -> 2
                                                     else -> 0
                                                 }
                                                 ScrollableTabRow(
@@ -507,6 +513,14 @@ fun ResizableDraggableRightThumbstick(
                                                             options = true
                                                         },
                                                         text = { Text(stringResource(R.string.options)) }
+                                                    )
+                                                    Tab(
+                                                        selected = interact,
+                                                        onClick = {
+                                                            resetStates()
+                                                            interact = true
+                                                        },
+                                                        text = { Text(stringResource(R.string.interact)) }
                                                     )
                                                     Tab(
                                                         selected = colors,
@@ -538,150 +552,6 @@ fun ResizableDraggableRightThumbstick(
                                                         .verticalScroll(scrollState)
                                                 ) {
                                                     if (options) {
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Spacer(modifier = Modifier.width(10.dp))
-                                                            Text(
-                                                                text = stringResource(R.string.disable_right_thumbstick),
-                                                                color = White,
-                                                                fontWeight = FontWeight.Bold
-                                                            )
-                                                            Spacer(modifier = Modifier.weight(1f))
-                                                            Switch(
-                                                                checked = enableRightThumb,
-                                                                onCheckedChange = { isChecked ->
-                                                                    enableRightThumb = isChecked
-                                                                    if (isChecked) {
-                                                                        // Logic to add ButtonID_98
-                                                                        val newButtonState = ButtonState(
-                                                                            id = 98,
-                                                                            size = 160f,
-                                                                            offsetX = 1199.7069f,
-                                                                            offsetY = 216.80106f,
-                                                                            isLocked = false,
-                                                                            blockMouse = false,
-                                                                            keyCode = 98,
-                                                                            color = "aafdfffe",
-                                                                            alpha = 0.25f,
-                                                                            uri = buttonUri.value,
-                                                                            group = state.group
-                                                                        )
-
-                                                                        // Update UIStateManager with the new button state
-                                                                        updateButtonState(newButtonState.id, newButtonState)
-                                                                    } else {
-
-                                                                        // Logic to remove ButtonID_98
-                                                                        UIStateManager.removeButtonState(98, context, containerWidth, containerHeight)
-                                                                    }
-
-                                                                    // Save the updated button states to the file
-                                                                    UIStateManager.saveButtonState(containerWidth, containerHeight)
-                                                                },
-                                                                colors = SwitchDefaults.colors(
-                                                                    checkedThumbColor = Color(202, 165, 96),
-                                                                    uncheckedThumbColor = Color.Red,
-                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
-                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
-                                                                    checkedBorderColor = White,
-                                                                    uncheckedBorderColor = White
-                                                                )
-                                                            )
-                                                        }
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                            modifier = Modifier
-                                                                .height(40.dp)
-                                                                .fillMaxWidth()
-                                                        ) {
-                                                            Text(
-
-                                                                text = "${stringResource(R.string.virtual_right_thumbstick)}:\n ${if (isVirtualRight) stringResource(
-                                                                    R.string.use_mouse_look_instead
-                                                                ) else stringResource(R.string.use_virtual_joystick_instead)}",
-                                                                color = White,
-                                                                fontWeight = FontWeight.Bold
-                                                            )
-                                                            Spacer(modifier = Modifier.weight(1f))
-                                                            Switch(
-                                                                checked = isVirtualRight,
-                                                                onCheckedChange = { isChecked ->
-                                                                    CoroutineScope(Dispatchers.IO).launch {
-                                                                        writeVirtualRightThumbstick(context, isChecked)
-                                                                    }
-                                                                },
-                                                                colors = SwitchDefaults.colors(
-                                                                    checkedThumbColor = Color(202, 165, 96),
-                                                                    uncheckedThumbColor = Color.Red,
-                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
-                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
-                                                                    checkedBorderColor = White,
-                                                                    uncheckedBorderColor = White
-                                                                )
-                                                            )
-                                                        }
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-                                                        Spacer(modifier = Modifier.height(16.dp))
-                                                        Column(
-                                                            modifier = Modifier
-                                                                .fillMaxWidth()
-                                                                .padding(horizontal = 16.dp) // Add padding on both sides
-                                                        ) {
-                                                            // Centered title
-                                                            Text(
-                                                                text = stringResource(R.string.adjust_sensitivity),
-                                                                color = White,
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .padding(bottom = 8.dp),
-                                                                textAlign = TextAlign.Center // Center the text
-                                                            )
-
-                                                            // Slider row with outer padding
-                                                            Row(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .padding(horizontal = 8.dp), // Inner padding for the slider row
-                                                                verticalAlignment = Alignment.CenterVertically,
-                                                                horizontalArrangement = Arrangement.SpaceBetween
-                                                            ) {
-                                                                Slider(
-                                                                    value = sensitivityRT,
-                                                                    onValueChange = { newValue ->
-                                                                        sensitivityRT = newValue
-                                                                        CoroutineScope(Dispatchers.Main).launch {
-                                                                            setSensitivityRT(context, newValue)
-                                                                        }
-                                                                    },
-                                                                    valueRange = 1000f..5000f,
-                                                                    steps = 49,
-                                                                    modifier = Modifier
-                                                                        .weight(1f)
-                                                                        .padding(end = 16.dp), // Space between slider and text
-                                                                    colors = SliderDefaults.colors(
-                                                                        thumbColor = White,
-                                                                        activeTrackColor = Color.Black,
-                                                                        inactiveTrackColor = Color.Black,
-                                                                        activeTickColor = Color.Red,
-                                                                        inactiveTickColor = Color.Red
-                                                                    )
-                                                                )
-
-                                                                Text(
-                                                                    text = "${sensitivityRT.roundToInt()}",
-                                                                    fontSize = 24.sp,
-                                                                    color = White,
-                                                                    modifier = Modifier.width(60.dp) // Fixed width for number display
-                                                                )
-                                                            }
-                                                        }
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-                                                        Spacer(modifier = Modifier.height(16.dp))
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-
                                                         CustomIconPickerButton(
                                                             context = context,
                                                             buttonId = 98,
@@ -763,6 +633,166 @@ fun ResizableDraggableRightThumbstick(
                                                                 }
                                                             }
                                                         }
+                                                    }
+                                                    if (interact) {
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Spacer(modifier = Modifier.width(10.dp))
+                                                            Text(
+                                                                text = stringResource(R.string.disable_right_thumbstick),
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            Switch(
+                                                                checked = enableRightThumb,
+                                                                onCheckedChange = { isChecked ->
+                                                                    enableRightThumb = isChecked
+                                                                    if (isChecked) {
+                                                                        // Logic to add ButtonID_98
+                                                                        val newButtonState = ButtonState(
+                                                                            id = 98,
+                                                                            size = 160f,
+                                                                            offsetX = 1199.7069f,
+                                                                            offsetY = 216.80106f,
+                                                                            isLocked = false,
+                                                                            blockMouse = false,
+                                                                            keyCode = 98,
+                                                                            color = "aafdfffe",
+                                                                            alpha = 0.25f,
+                                                                            uri = buttonUri.value,
+                                                                            group = state.group,
+                                                                            vibrate = false
+                                                                        )
+
+                                                                        // Update UIStateManager with the new button state
+                                                                        updateButtonState(newButtonState.id, newButtonState)
+                                                                    } else {
+
+                                                                        // Logic to remove ButtonID_98
+                                                                        UIStateManager.removeButtonState(98, context, containerWidth, containerHeight)
+                                                                    }
+
+                                                                    // Save the updated button states to the file
+                                                                    UIStateManager.saveButtonState(containerWidth, containerHeight)
+                                                                },
+                                                                colors = SwitchDefaults.colors(
+                                                                    checkedThumbColor = Color(202, 165, 96),
+                                                                    uncheckedThumbColor = Color.Red,
+                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                    checkedBorderColor = White,
+                                                                    uncheckedBorderColor = White
+                                                                )
+                                                            )
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                        Column(
+                                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 8.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = stringResource(R.string.virtual_right_thumbstick),
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold,
+                                                                modifier = Modifier.padding(bottom = 8.dp)
+                                                            )
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.Center,
+                                                                modifier = Modifier.fillMaxWidth()
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Gamepad,
+                                                                    contentDescription = null,
+                                                                    tint = if (isVirtualRight) Color(202, 165, 96) else White.copy(alpha = 0.3f),
+                                                                    modifier = Modifier.size(28.dp)
+                                                                )
+                                                                Spacer(modifier = Modifier.width(16.dp))
+                                                                Switch(
+                                                                    checked = !isVirtualRight,
+                                                                    onCheckedChange = { isChecked ->
+                                                                        CoroutineScope(Dispatchers.IO).launch {
+                                                                            writeVirtualRightThumbstick(context, !isChecked)
+                                                                        }
+                                                                    },
+                                                                    colors = SwitchDefaults.colors(
+                                                                        checkedThumbColor = Color(202, 165, 96),
+                                                                        uncheckedThumbColor = Color(202, 165, 96),
+                                                                        checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                        uncheckedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                        checkedBorderColor = White,
+                                                                        uncheckedBorderColor = White
+                                                                    )
+                                                                )
+                                                                Spacer(modifier = Modifier.width(16.dp))
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Mouse,
+                                                                    contentDescription = null,
+                                                                    tint = if (!isVirtualRight) Color(202, 165, 96) else White.copy(alpha = 0.3f),
+                                                                    modifier = Modifier.size(28.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                        Spacer(modifier = Modifier.height(16.dp))
+                                                        Column(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(horizontal = 16.dp) // Add padding on both sides
+                                                        ) {
+                                                            // Centered title
+                                                            Text(
+                                                                text = stringResource(R.string.adjust_sensitivity),
+                                                                color = White,
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(bottom = 8.dp),
+                                                                textAlign = TextAlign.Center // Center the text
+                                                            )
+
+                                                            // Slider row with outer padding
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(horizontal = 8.dp), // Inner padding for the slider row
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.SpaceBetween
+                                                            ) {
+                                                                Slider(
+                                                                    value = sensitivityRT,
+                                                                    onValueChange = { newValue ->
+                                                                        sensitivityRT = newValue
+                                                                        CoroutineScope(Dispatchers.Main).launch {
+                                                                            setSensitivityRT(context, newValue)
+                                                                        }
+                                                                    },
+                                                                    valueRange = 1000f..5000f,
+                                                                    steps = 49,
+                                                                    modifier = Modifier
+                                                                        .weight(1f)
+                                                                        .padding(end = 16.dp), // Space between slider and text
+                                                                    colors = SliderDefaults.colors(
+                                                                        thumbColor = White,
+                                                                        activeTrackColor = Color.Black,
+                                                                        inactiveTrackColor = Color.Black,
+                                                                        activeTickColor = Color.Red,
+                                                                        inactiveTickColor = Color.Red
+                                                                    )
+                                                                )
+
+                                                                Text(
+                                                                    text = "${sensitivityRT.roundToInt()}",
+                                                                    fontSize = 24.sp,
+                                                                    color = White,
+                                                                    modifier = Modifier.width(60.dp) // Fixed width for number display
+                                                                )
+                                                            }
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
                                                     }
                                                     if (colors) {
                                                         ColorPickerWheel(

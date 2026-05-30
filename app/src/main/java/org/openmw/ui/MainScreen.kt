@@ -74,7 +74,9 @@ fun MainScreen(
                         }
                     },
                     onClick = {
-                        navController.navigateSingleTopTo(it.route)
+                        if (it != MainPageDestination.StartGame) {
+                            navController.navigateSingleTopTo(it.route)
+                        }
                     },
                     label = if (it != MainPageDestination.StartGame) {
                         {

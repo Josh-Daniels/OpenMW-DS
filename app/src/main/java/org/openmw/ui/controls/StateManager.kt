@@ -45,6 +45,8 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -90,7 +92,10 @@ data class ButtonState(
     val color: String,
     val alpha: Float,
     val uri: Uri?,
-    val group: Int
+    val group: Int,
+    val vibrate: Boolean = true,
+    val isMouseButton: Boolean = false,
+    val mouseButton: Int = 1 // 1: Left, 2: Middle, 3: Right
 )
 
 val DeletedButtonState = ButtonState(
@@ -104,7 +109,10 @@ val DeletedButtonState = ButtonState(
     color = "",
     alpha = 0f,
     uri = null,
-    group = -1
+    group = -1,
+    vibrate = false,
+    isMouseButton = false,
+    mouseButton = 1
 )
 
 object UIStateManager {
@@ -150,7 +158,7 @@ object UIStateManager {
     val transparentBlack = Color(alpha = 0.6f, red = 0f, green = 0f, blue = 0f)
     val transparent = Color(alpha = 0.0f, red = 0f, green = 0f, blue = 0f)
     val darkGray = Color(alpha = 0.6f, red = 0f, green = 0f, blue = 0f)
-    val lightGray = Color(alpha = 0.4f, red = 0f, green = 0f, blue = 0f)
+    //val lightGray = Color(alpha = 0.4f, red = 0f, green = 0f, blue = 0f)
     val gold = Color(202, 165, 96)
 
     var containerGlobalHeight = mutableFloatStateOf(1.0f)
@@ -162,11 +170,15 @@ object UIStateManager {
     var isMemoryInfoEnabled by mutableStateOf(false)
     var isBatteryStatusEnabled by mutableStateOf(false)
     var isLoggingEnabled by mutableStateOf(false)
+    var isPerformanceHudEnabled by mutableStateOf(false)
+    var logcatLevel by mutableStateOf("V")
     // this is for MainPage.kt
     var showLogCat by mutableStateOf(false)
     var isTabExpanded by mutableStateOf(false)
 
     var isLogcatEnabled by mutableStateOf(false)
+    var activeSettingSection by mutableStateOf<String?>(null)
+    val expandedSections = mutableStateListOf<String>()
     var editMode by mutableStateOf(false)
     val gridSize = mutableIntStateOf(50)
     val gridVisible = mutableStateOf(false)
@@ -175,6 +187,20 @@ object UIStateManager {
     var menuAlpha by mutableFloatStateOf(1f)
     var menuColor by mutableStateOf(Color.Blue)
     var launchedActivity by mutableStateOf(false)
+    
+    // System path overrides for Performance HUD
+    var userSetGPU by mutableStateOf("kgsl-3d0")
+    var userSetTemp by mutableStateOf("thermal_zone0")
+    var userSetGPUTemp by mutableStateOf("thermal_zone32")
+    
+    // Performance History (last 30 seconds)
+    var totalMemoryMB by mutableLongStateOf(0L)
+    val cpuHistory = MutableStateFlow<List<Int>>(emptyList())
+    val gpuHistory = MutableStateFlow<List<Int>>(emptyList())
+    val memoryHistory = MutableStateFlow<List<Long>>(emptyList()) // MB
+    val cpuTempHistory = MutableStateFlow<List<Int>>(emptyList())
+    val gpuTempHistory = MutableStateFlow<List<Int>>(emptyList())
+
     var isRadialMenuExpanded by mutableStateOf(false)
     private val _buttonStates = MutableStateFlow<Map<Int, ButtonState>>(emptyMap())
     val buttonStates: StateFlow<Map<Int, ButtonState>> get() = _buttonStates
@@ -263,7 +289,10 @@ object UIStateManager {
                         color = button.color,
                         alpha = button.alpha,
                         uri = button.uri,
-                        group = button.group
+                        group = button.group,
+                        vibrate = button.vibrate,
+                        isMouseButton = button.isMouseButton,
+                        mouseButton = button.mouseButton
                     )
                 }
 
@@ -273,67 +302,18 @@ object UIStateManager {
             )
 
             configs.forEach { config ->
-                val log = "ButtonID_${config.id}(${config.size};${config.offsetX};${config.offsetY};${config.isLocked};${config.blockMouse};${config.keyCode};#${config.color};${config.alpha};${config.uri};${config.group})"
+                val log = "ButtonID_${config.id}(${config.size};${config.offsetX};${config.offsetY};${config.isLocked};${config.blockMouse};${config.keyCode};#${config.color};${config.alpha};${config.uri};${config.group};vibrate=${config.vibrate};mouse=${config.isMouseButton}:${config.mouseButton})"
                 println("Saved to JSON: $log")
                 addCustomLog("Saved to JSON: $log", textSize = 10, textColor = Color.Cyan)
             }
         }
     }
 
-    private fun migrateFromOldConfig(): List<ButtonConfig> {
-        val oldFile = File("${userUI}/UI.cfg")
-        if (!oldFile.exists()) return emptyList()
-
-        val configs = mutableListOf<ButtonConfig>()
-        try {
-            oldFile.readLines().forEach { line ->
-                val regex = """ButtonID_(\d+)\(([\d.]+);([\d.]+);([\d.]+);(true|false);(true|false);(\d+);#([A-Fa-f0-9]+);([\d.]+);(.+);(\d+)\)""".toRegex()
-                val matchResult = regex.find(line) ?: return@forEach
-
-                val buttonId = matchResult.groupValues[1].toInt()
-                val uriString = matchResult.groupValues[10]
-                val uri = if (uriString == "null") null else Uri.parse("file://${userUI}/${buttonId}.${uriString.substringAfterLast(".")}")
-
-                configs.add(ButtonConfig(
-                    type = when(buttonId) {
-                        99 -> "leftStick"
-                        98 -> "rightStick"
-                        else -> "dynamic"
-                    },
-                    keyCode = matchResult.groupValues[7].toInt(),
-                    id = buttonId,
-                    size = matchResult.groupValues[2].toFloat(),
-                    offsetX = matchResult.groupValues[3].toFloat(),
-                    offsetY = matchResult.groupValues[4].toFloat(),
-                    isLocked = matchResult.groupValues[5].toBoolean(),
-                    blockMouse = matchResult.groupValues[6].toBoolean(),
-                    color = matchResult.groupValues[8],
-                    alpha = matchResult.groupValues[9].toFloat(),
-                    uri = uri,
-                    group = matchResult.groupValues.getOrNull(11)?.toInt() ?: 1
-                ))
-            }
-            if (configs.isNotEmpty()) {
-                ButtonConfigManager.saveButtons(configs)
-                println("Successfully migrated ${configs.size} buttons from UI.cfg to JSON.")
-                // oldFile.renameTo(File("${userUI}/UI.cfg.bak"))
-            }
-        } catch (e: Exception) {
-            Log.e("UIStateManager", "Error during migration from UI.cfg", e)
-        }
-        return configs
-    }
-
     fun loadButtonState(context: Context, containerWidth: Float, containerHeight: Float) {
         val width = if (containerWidth > 1f) containerWidth else containerGlobalWidth.floatValue
         val height = if (containerHeight > 1f) containerHeight else containerGlobalHeight.floatValue
 
-        val jsonFile = File("${userUI}/button_configs.json")
-        val configs = if (jsonFile.exists()) {
-            ButtonConfigManager.loadAllButtons()
-        } else {
-            migrateFromOldConfig()
-        }
+        val configs = ButtonConfigManager.loadAllButtons()
 
         if (configs.isEmpty()) {
             println("No button configs found to load.")
@@ -362,7 +342,10 @@ object UIStateManager {
                 color = config.color,
                 alpha = config.alpha,
                 uri = config.uri,
-                group = config.group ?: 1
+                group = config.group ?: 1,
+                vibrate = config.vibrate ?: true,
+                isMouseButton = config.isMouseButton ?: false,
+                mouseButton = config.mouseButton ?: 1
             )
 
             println("Loaded button state: $buttonState")
@@ -825,7 +808,8 @@ fun KeySelectionMenu(context: Context, onKeySelected: (Int) -> Unit, usedKeys: L
                                     color = "aafdfffe",
                                     alpha = 0.25f,
                                     uri = null,
-                                    group = 1
+                                    group = 1,
+                                    vibrate = false
                                 )
 
                                 // Update UIStateManager with the new button state
@@ -954,7 +938,10 @@ fun DynamicButtonManager(
                         color = "000000FF",
                         alpha = 0.25f,
                         uri = null,
-                        group = buttonsGroup
+                        group = buttonsGroup,
+                        vibrate = true,
+                        isMouseButton = false,
+                        mouseButton = 1
                     )
 
                     onNewButtonAdded(newButtonState)

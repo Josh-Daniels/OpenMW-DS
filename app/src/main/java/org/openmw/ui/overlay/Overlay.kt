@@ -6,9 +6,13 @@ import android.content.Context
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.net.http.SslError
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
@@ -136,6 +140,7 @@ import org.openmw.ui.page.setting.ToggleFeatureSwitch
 import org.openmw.ui.theme.White
 import org.openmw.ui.view.LogRepository
 import org.openmw.ui.view.LogsBox
+import org.openmw.ui.view.PerformanceHud
 import org.openmw.ui.view.getBatteryStatus
 import org.openmw.ui.view.hasInternetPermission
 import org.openmw.ui.view.startLoggingUpdates
@@ -158,7 +163,9 @@ import kotlin.math.roundToInt
 data class MemoryInfo(
     val totalMemory: String,
     val availableMemory: String,
-    val usedMemory: String
+    val usedMemory: String,
+    val totalBytes: Long = 0,
+    val availableBytes: Long = 0
 )
 
 @DelicateCoroutinesApi
@@ -218,6 +225,10 @@ fun OverlayUI(
     }
     LaunchedEffect(sensitivityMouseFlow.value) {
         sensitivityMouse = sensitivityMouseFlow.value ?: 900f
+    }
+
+    LaunchedEffect(UIStateManager.isPerformanceHudEnabled) {
+        startResourceInfoUpdates(context)
     }
 
     // Collect in your UI layer
@@ -396,7 +407,6 @@ fun OverlayUI(
                             .padding(5.dp)
                     ) {
                         PopUpWindow(
-                            context = context,
                             onClose = { expanded = false }
                         )
                     }
@@ -927,7 +937,7 @@ fun OverlayUI(
             verticalArrangement = Arrangement.Center
         ) {
             if (UIStateManager.isMemoryInfoEnabled) {
-                DraggableBox { fontSize, textColor, boxWidth, boxHeight ->
+                DraggableBox { fontSize, textColor, _, _ ->
                     Text(
                         text = UIStateManager.memoryInfoText,
                         color = textColor,
@@ -937,7 +947,7 @@ fun OverlayUI(
                 }
             }
             if (UIStateManager.isBatteryStatusEnabled) {
-                DraggableBox { fontSize, textColor, boxWidth, boxHeight ->
+                DraggableBox { fontSize, textColor, _, _ ->
                     Text(
                         text = UIStateManager.batteryStatus,
                         color = textColor,
@@ -947,7 +957,7 @@ fun OverlayUI(
                 }
             }
             if (UIStateManager.isLoggingEnabled) {
-                DraggableBox { fontSize, textColor, boxWidth, boxHeight ->
+                DraggableBox { fontSize, textColor, _, _ ->
                     Text(
                         text = UIStateManager.logMessagesText,
                         color = textColor,
@@ -956,13 +966,17 @@ fun OverlayUI(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
             }
+            if (UIStateManager.isPerformanceHudEnabled) {
+                DraggableBox { fontSize, _, boxWidth, boxHeight ->
+                    PerformanceHud(boxWidth, boxHeight, fontSize)
+                }
+            }
             if (UIStateManager.isAppLoggingEnabled) {
-                DraggableBox { fontSize, textColor, boxWidth, boxHeight ->
+                DraggableBox { fontSize, _, boxWidth, boxHeight ->
                     LogsBox(logs = LogRepository.logs, fontSize = fontSize, boxWidth = boxWidth, boxHeight = boxHeight)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = UIStateManager.logMessagesText,
-                        //color = textColor,
                         fontSize = fontSize.sp
                     )
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1114,19 +1128,20 @@ fun DraggableBox(
 // This is the settings window while in-game when you hit the gear icon. (top left)
 @Composable
 fun PopUpWindow(
-    context: Context,
     onClose: () -> Unit
 ) {
    Dialog(onDismissRequest = onClose) {
     Column(
         modifier = Modifier
+            .fillMaxHeight(0.85f)
+            .fillMaxWidth(0.95f)
             .background(
-                Color(alpha = 0.6f, red = 0f, green = 0f, blue = 0f),
-                shape = RoundedCornerShape(8.dp)
+                Color(alpha = 0.8f, red = 0f, green = 0f, blue = 0f),
+                shape = RoundedCornerShape(12.dp)
             )
-            .padding(bottom = 32.dp)
+            .padding(8.dp)
     ) {
-        ToggleFeatureSwitch(context)
+        ToggleFeatureSwitch()
         }
     }
 }
@@ -1176,7 +1191,7 @@ fun GridOverlay(gridSize: Int, snapX: Float?, snapY: Float?, alpha: Float) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@SuppressLint("SetJavaScriptEnabled")
+@SuppressLint("SetJavaScriptEnabled", "AutoboxingStateCreation")
 @Composable
 fun WebViewComponent(onClose: () -> Unit) {
     val context = LocalContext.current
@@ -1184,8 +1199,8 @@ fun WebViewComponent(onClose: () -> Unit) {
     var webView by remember { mutableStateOf<WebView?>(null) }
 
     // Position state for dragging
-    var offsetX by remember { mutableStateOf(0f) }
-    var offsetY by remember { mutableStateOf(0f) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
+    var offsetY by remember { mutableFloatStateOf(0f) }
 
     // Size state
     var width by remember { mutableStateOf(600.dp) }
@@ -1290,18 +1305,91 @@ fun WebViewComponent(onClose: () -> Unit) {
                         factory = { ctx ->
                             WebView(ctx).apply {
                                 setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.setSupportZoom(true)
-                                settings.builtInZoomControls = true
-                                settings.displayZoomControls = false
-                                settings.useWideViewPort = true
-                                settings.loadWithOverviewMode = true
-                                settings.allowContentAccess = true
-                                settings.allowFileAccess = true
+                                
+                                settings.apply {
+                                    javaScriptEnabled = true
+                                    domStorageEnabled = true
+                                    databaseEnabled = true
+                                    setSupportZoom(true)
+                                    builtInZoomControls = true
+                                    displayZoomControls = false
+                                    useWideViewPort = true
+                                    loadWithOverviewMode = true
+                                    allowContentAccess = true
+                                    allowFileAccess = true
+                                    javaScriptCanOpenWindowsAutomatically = true
+                                    setSupportMultipleWindows(true)
+                                    
+                                    // Bypasses origin-mismatch errors in many cases for iframes
+                                    allowFileAccessFromFileURLs = true
+                                    allowUniversalAccessFromFileURLs = true
+                                    
+                                    // Disable Safe Browsing to prevent blocking resources needed for map tiles
+                                    safeBrowsingEnabled = false
+                                    setGeolocationEnabled(true)
+                                    
+                                    // Standard Desktop User Agent often works better for heavy map iframes
+                                    userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+                                    
+                                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                    cacheMode = WebSettings.LOAD_DEFAULT
+                                    
+                                    // Ensure images and data load automatically
+                                    loadsImagesAutomatically = true
+                                    mediaPlaybackRequiresUserGesture = false
+                                }
 
-                                webViewClient = WebViewClient()
-                                webChromeClient = WebChromeClient()
+                                webViewClient = object : WebViewClient() {
+                                    override fun onReceivedSslError(
+                                        view: WebView?,
+                                        handler: SslErrorHandler?,
+                                        error: SslError?
+                                    ) {
+                                        // Ignore SSL handshake failures (net_error -101)
+                                        handler?.proceed()
+                                    }
+
+                                    override fun onRenderProcessGone(
+                                        view: WebView?,
+                                        detail: android.webkit.RenderProcessGoneDetail?
+                                    ): Boolean {
+                                        // Prevents the app from crashing if the WebView process terminates
+                                        return true
+                                    }
+                                }
+
+                                webChromeClient = object : WebChromeClient() {
+                                    override fun onGeolocationPermissionsShowPrompt(
+                                        origin: String?,
+                                        callback: android.webkit.GeolocationPermissions.Callback?
+                                    ) {
+                                        callback?.invoke(origin, true, false)
+                                    }
+
+                                    override fun onCreateWindow(
+                                        view: WebView?,
+                                        isDialog: Boolean,
+                                        isUserGesture: Boolean,
+                                        resultMsg: android.os.Message?
+                                    ): Boolean {
+                                        val transport = resultMsg?.obj as? WebView.WebViewTransport
+                                        transport?.webView = view
+                                        resultMsg?.sendToTarget()
+                                        return true
+                                    }
+                                }
+                                webChromeClient = object : WebChromeClient() {
+                                    override fun onGeolocationPermissionsShowPrompt(
+                                        origin: String?,
+                                        callback: android.webkit.GeolocationPermissions.Callback?
+                                    ) {
+                                        callback?.invoke(origin, true, false)
+                                    }
+                                }
+
+                                // Fix for UESP Maps and other cross-origin iframe sites
+                                CookieManager.getInstance().setAcceptCookie(true)
+                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
                                 loadUrl(url)
                                 // Store the WebView instance

@@ -285,4 +285,10 @@
     <string name="btn_dismiss">取消</string>
     <string name="loading">加载中</string>
     <string name="failed_to_save_openmw_config">保存OpenMW配置失败</string>
+    <string name="graphics_and_performance">图形与性能</string>
+    <string name="interface_and_overlay">界面与覆盖层</string>
+    <string name="system_and_debug">系统与调试</string>
+    <string name="enable_launcher_logcat">启用/禁用启动器日志，用于排查启动器崩溃问题</string>
+    <string name="interact">交互</string>
+    <string name="vibration">振动</string>
 </resources>

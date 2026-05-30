@@ -209,13 +209,8 @@ class EngineActivity : SDLActivity() {
                     // Adds Overlay menu for buttons and edit mode
                     composeViewUI.setContent {
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
-                        val quickSlot by getQuickSlot(this@EngineActivity).collectAsState(initial = true)
+                        val quickSlot by getQuickSlot(this@EngineActivity).collectAsState(initial = false)
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
-
-                        BackHandler {
-                            // disable back exit
-                            Log.d(TAG, "onGlobalLayout: Back pressed")
-                        }
 
                         BackHandler {
                             // disable back exit

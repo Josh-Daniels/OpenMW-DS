@@ -1,0 +1,33 @@
+diff --git a/src/core/android/SDL_android.c b/src/core/android/SDL_android.c
+index 86f272e40..9542ca546 100644
+--- a/src/core/android/SDL_android.c
++++ b/src/core/android/SDL_android.c
+@@ -83,6 +83,20 @@ JNIEXPORT void JNICALL SDL_JAVA_INTERFACE(nativeSetScreenResolution)(
+     jint surfaceWidth, jint surfaceHeight,
+     jint deviceWidth, jint deviceHeight, jfloat rate);
+ 
++JNIEXPORT void JNICALL SDL_JAVA_INTERFACE(nativeAddDisplayMode)(JNIEnv *env, jclass jcls, jint w, jint h, jfloat rate)
++{
++    SDL_VideoDisplay *display = SDL_GetDisplay(0);
++    if (display) {
++        SDL_DisplayMode mode;
++        SDL_zero(mode);
++        mode.format = display->current_mode.format;
++        mode.w = w;
++        mode.h = h;
++        mode.refresh_rate = (int)rate;
++        SDL_AddDisplayMode(display, &mode);
++    }
++}
++
+ JNIEXPORT void JNICALL SDL_JAVA_INTERFACE(onNativeResize)(
+     JNIEnv *env, jclass cls);
+ 
+@@ -176,6 +190,7 @@ static JNINativeMethod SDLActivity_tab[] = {
+     { "nativeRunMain", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)I", SDL_JAVA_INTERFACE(nativeRunMain) },
+     { "onNativeDropFile", "(Ljava/lang/String;)V", SDL_JAVA_INTERFACE(onNativeDropFile) },
+     { "nativeSetScreenResolution", "(IIIIF)V", SDL_JAVA_INTERFACE(nativeSetScreenResolution) },
++    { "nativeAddDisplayMode", "(IIF)V", SDL_JAVA_INTERFACE(nativeAddDisplayMode) },
+     { "onNativeResize", "()V", SDL_JAVA_INTERFACE(onNativeResize) },
+     { "onNativeSurfaceCreated", "()V", SDL_JAVA_INTERFACE(onNativeSurfaceCreated) },
+     { "onNativeSurfaceChanged", "()V", SDL_JAVA_INTERFACE(onNativeSurfaceChanged) },

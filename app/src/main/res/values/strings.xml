@@ -141,7 +141,7 @@
     <string name="regenerate_navmesh">Regenerate Navmesh</string>
     <string name="generate_navmesh">Generate Navmesh</string>
     <string name="reset_settings">Reset Settings</string>
-    <string name="enable_logcat">Enable Logcat</string>
+    <string name="enable_logcat">Enable Logcat for launcher</string>
     <string name="total_device_memory">Total Device Memory</string>
     <string name="available_memory">Available Memory</string>
     <string name="total_used_memory">Total Used Memory</string>
@@ -165,6 +165,7 @@
     <string name="overwriting_resolution_settings_tip">This enables / disables the launcher overwriting resolution settings in settings.cfg on launch</string>
     <string name="bypass_the_game_files_check_tip">Bypass the game files check for the launcher button</string>
     <string name="this_enables_disables_the_launcher_files_check_tip">This enables / disables the launcher files check on game launch. Odd bug with Android 15?</string>
+    <string name="enable_launcher_logcat">This enables / disables the launcher logcat, use this for a crashing launcher</string>
     <string name="show_datastore_content">Show DataStore Content</string>
     <string name="open_file_browser">Open File Browser</string>
     <string name="datastore_content">DataStore Content</string>
@@ -242,7 +243,9 @@
     <string name="set_offset_y">Set Offset Y</string>
     <string name="enter_url">Enter URL</string>
     <string name="options">Options</string>
+    <string name="interact">Interact</string>
     <string name="colors">Colors</string>
+    <string name="vibration">Vibration</string>
     <string name="edit_each_btn_tip">This is where you can edit each button / thumbstick.\nScroll to the bottom of this box and\npress close to finish the tutorial.</string>
     <string name="show_in_mouse_ui">show in mouse UI?</string>
     <string name="toggleable">toggleable?</string>
@@ -284,5 +287,8 @@
     <string name="loading">Loading</string>
     <string name="failed_to_save_openmw_config">Failed to Save OpenMW config</string>
     <string name="cfg_key_data">Data</string>
+    <string name="graphics_and_performance">Graphics &amp; Performance</string>
+    <string name="interface_and_overlay">Interface &amp; Overlay</string>
+    <string name="system_and_debug">System &amp; Debug</string>
 
 </resources>

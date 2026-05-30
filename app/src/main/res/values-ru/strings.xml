@@ -285,5 +285,11 @@
     <string name="loading">Загрузка</string>
     <string name="failed_to_save_openmw_config">Не удалось сохранить конфиг OpenMW</string>
     <string name="cfg_key_data">Data</string>
+    <string name="graphics_and_performance">Графика и производительность</string>
+    <string name="interface_and_overlay">Интерфейс и оверлей</string>
+    <string name="system_and_debug">Система и отладка</string>
+    <string name="enable_launcher_logcat">Включает/выключает логкат лаунчера, используйте это при вылетах лаунчера</string>
+    <string name="interact">Взаимодействие</string>
+    <string name="vibration">Вибрация</string>
 
 </resources>

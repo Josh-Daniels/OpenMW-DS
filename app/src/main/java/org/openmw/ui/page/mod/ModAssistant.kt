@@ -1134,7 +1134,7 @@ fun ModValuesList(
 @Composable
 fun LandscapeSettings(isNewFeatureEnabledChecked: Boolean) {
     val newFeatureEnabledChecked by rememberUpdatedState(isNewFeatureEnabledChecked)
-    // Manage whats in the tabs here
+    // Manage what's in the tabs here
     var switches by remember { mutableStateOf(true) } // selected in default
     var iniValues by remember { mutableStateOf(false) }
     var controls by remember { mutableStateOf(false) }
@@ -1146,12 +1146,12 @@ fun LandscapeSettings(isNewFeatureEnabledChecked: Boolean) {
         controls = false
         dev = false
     }
-    Row(modifier = Modifier.fillMaxWidth()) {
+    Row(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
+                .fillMaxHeight()
                 .padding(4.dp)
-                .background(color = customColor)
-                .verticalScroll(rememberScrollState()),
+                .background(color = customColor),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Button(
@@ -1214,42 +1214,44 @@ fun LandscapeSettings(isNewFeatureEnabledChecked: Boolean) {
             }
         }
         Column(
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1f).fillMaxHeight()
         ) {
             if (switches) {
-                LazyColumn(
+                Column(
                     modifier = Modifier
+                        .fillMaxSize()
                         .padding(4.dp)
                         .background(color = customColor),
                 ) {
-                    item {
-                        FeaturesSwitches()
-                    }
+                    FeaturesSwitches()
                 }
             }
             if (iniValues) {
-                IniSettings()
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize(),
+                ) {
+                    IniSettings()
+                }
             }
             if (controls) {
-                LazyColumn(
+                Column(
                     modifier = Modifier
+                        .fillMaxSize()
                         .padding(4.dp)
                         .background(color = customColor),
                 ) {
-                    item {
-                        ControlsInsert()
-                    }
+                    ControlsInsert()
                 }
             }
             if (dev) {
-                LazyColumn(
+                Column(
                     modifier = Modifier
+                        .fillMaxSize()
                         .padding(4.dp)
                         .background(color = customColor),
                 ) {
-                    item {
-                        DevInsert()
-                    }
+                    DevInsert()
                 }
             }
         }

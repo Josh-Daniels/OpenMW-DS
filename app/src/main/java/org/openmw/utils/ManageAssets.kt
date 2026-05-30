@@ -128,8 +128,8 @@ class UserManageAssets(val context: Context) {
             }
         }
         copyIfNotExists("libopenmw/openmw/settings.fallback.cfg", Constants.SETTINGS_FILE)
-        copyIfNotExists("libopenmw/ui/input_v3.xml", Constants.USER_CONFIG + "/input_v3.xml")
         UserManageAssets(context).installUQMResourceFiles()
+        org.openmw.fragments.onFirstLaunch(context)
     }
 
     fun resourcePrepare() {

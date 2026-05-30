@@ -1,8 +1,6 @@
 package org.openmw.fragments
 
 import android.content.Context
-import android.os.Environment
-import android.widget.Toast
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.documentfile.provider.DocumentFile
@@ -10,7 +8,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.openmw.Constants
 import org.openmw.R
@@ -23,6 +20,11 @@ import java.io.File
 
 private val job = Job()
 private val scope = CoroutineScope(Dispatchers.IO + job)
+
+private data class GameFiles(
+    val esmContentLines: List<String>,
+    val bsaFallbackLines: List<String>
+)
 
 private fun findFilesWithExtensions(directory: DocumentFile?, extensions: Array<String>): List<DocumentFile> {
     return directory?.listFiles()?.filter { file ->
@@ -98,127 +100,152 @@ fun modifyFileLineExactMatch(
     return replacementMade
 }
 
+fun onFirstLaunch(context: Context) {
+    val dataStoreKey = stringPreferencesKey("game_files_uri")
+    scope.launch {
+        try {
+            val uriString = context.dataStore.data.first()[dataStoreKey]
+            if (!uriString.isNullOrBlank()) {
+                val folder = File(uriString)
+                val cfgFile = File(Constants.OPENMW_CFG)
+
+                val needsUpdate = if (!cfgFile.exists()) {
+                    true
+                } else {
+                    val content = cfgFile.readText()
+                    !content.contains("vfs-mw") || !content.contains("data-local=")
+                }
+
+                if (needsUpdate) {
+                    val selectedDirectory = DocumentFile.fromFile(folder)
+                    val iniFile = selectedDirectory.findFile("Morrowind.ini")
+                    val dataFilesFolder = selectedDirectory.findFile("Data Files")
+
+                    if (iniFile != null && dataFilesFolder?.isDirectory == true) {
+                        val gameFiles = scanForGameFiles(dataFilesFolder)
+                        val iniData = context.contentResolver.openInputStream(iniFile.uri)?.use {
+                            it.bufferedReader().readText()
+                        } ?: ""
+                        val convertedData = IniConverter(iniData).convert()
+
+                        updateMainConfig(folder.absolutePath, gameFiles, convertedData)
+                        updateUserConfig(folder.absolutePath, gameFiles)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+}
+
 fun processSelectedFolder(context: Context, folder: File, onUriPersisted: (String?) -> Unit) {
     val dataStoreKey = stringPreferencesKey("game_files_uri")
-    try {
-        scope.launch {
-            val savedPath = folder.absolutePath
+    scope.launch {
+        try {
             val selectedDirectory = DocumentFile.fromFile(folder)
             val iniFile = selectedDirectory.findFile("Morrowind.ini")
             val dataFilesFolder = selectedDirectory.findFile("Data Files")
-            val extensions = arrayOf("esm", "bsa")
-            val modDirectory = dataFilesFolder ?: selectedDirectory
-            val files = findFilesWithExtensions(modDirectory, extensions)
-            val fileName = Constants.OPENMW_CFG
-            val file = File(fileName)
-            val esmFile = File(Constants.USER_OPENMW_CFG)
-            val regexData = Regex("""^data\s*=\s*".*?"""")
-            val replacementStringData = """data="${savedPath}/Data Files""""
-            val overridePath = Constants.USER_FILE_STORAGE + "/OpenMW/Override"
-            val defaultLine = "# This is the user openmw.cfg. Feel free to modify it as you wish."
 
-            if (iniFile != null && dataFilesFolder != null && dataFilesFolder.isDirectory) {
-                // Get URI string from data store (simplified flow)
+            if (iniFile != null && dataFilesFolder?.isDirectory == true) {
+                // Persist URI and notify UI
                 val uriString = context.dataStore.data.first()[dataStoreKey]
                 onUriPersisted(uriString)
 
-                // Predefined file lists
-                val orderedEsmFiles = listOf("Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm")
-                val orderedBsaFiles = listOf("Morrowind.bsa", "Tribunal.bsa", "Bloodmoon.bsa")
+                val gameFiles = scanForGameFiles(dataFilesFolder)
 
-                // Create sets of existing files for faster lookup
-                val existingFiles = files.map { it.name }.toSet()
-
-                // Prepare content lines using intersection
-                val esmContentLines = orderedEsmFiles
-                    .intersect(existingFiles)
-                    .map { "content=$it" }
-
-                // Prepare fallback-archive lines using intersection
-                val fallbackArchiveLines = orderedBsaFiles
-                    .intersect(existingFiles)
-                    .map { "fallback-archive=$it" }
-
-                // Read and process lines in one pass
-                val modifiedLines = file.useLines { lines ->
-                    lines.map { line ->
-                        when {
-                            line.contains(regexData) -> line.replace(regexData, replacementStringData)
-                            line.contains("resources=./resources") -> line.replace(
-                                "resources=./resources",
-                                "resources=${Constants.USER_RESOURCES}"
-                            )
-                            else -> line
-                        }
-                    }.toList()
-                }
-
-                // Write everything in one operation
-                file.writeText(buildString {
-                    // Original modified content
-                    modifiedLines.forEach { appendLine(it) }
-
-                    // Append fallback-archive lines
-                    fallbackArchiveLines.forEach { appendLine(it) }
-                })
-
-
-                if (!customCFG || esmFile.readText().trim() == defaultLine) {
-                    esmFile.bufferedWriter().use { writer ->
-                        // Write replacementStringData at the top
-                        writer.write(replacementStringData)
-                        writer.newLine()
-
-                        // Write esm content lines
-                        esmContentLines.forEach { line ->
-                            writer.write(line)
-                            writer.newLine()
-                        }
-                    }
-                }
-
-                // Fix Calendar
-                val file2 = File(Constants.OPENMW_CFG)
-                file2.appendText("data=${Constants.USER_RESOURCES}/vfs-mw\n")
-
+                // 1. Process main openmw.cfg
                 val iniData = context.contentResolver.openInputStream(iniFile.uri)?.use {
                     it.bufferedReader().readText()
                 } ?: ""
+                val convertedData = IniConverter(iniData).convert()
 
-                val converter = IniConverter(iniData)
-                val convertedData = converter.convert()
+                updateMainConfig(folder.absolutePath, gameFiles, convertedData)
 
-                val outputFile = File(Constants.GLOBAL_CONFIG, "openmw.cfg")
-                val currentContent = outputFile.takeIf { it.exists() }?.readText() ?: ""
+                // 2. Process user openmw.cfg
+                updateUserConfig(folder.absolutePath, gameFiles)
 
-                // Prepare all content to append in one operation
-                val contentToAppend = buildString {
-                    if (!currentContent.contains(convertedData)) {
-                        append(convertedData)
-                        appendLine()
-                    }
-
-                    val dataLocalString = "data-local=$overridePath"
-                    if (!currentContent.contains(dataLocalString)) {
-                        append(dataLocalString)
-                        appendLine()
-                    }
-                }
-
-                // Only write if there's something to append
-                if (contentToAppend.isNotEmpty()) {
-                    outputFile.appendText(contentToAppend)
-                }
             } else {
-                context.dataStore.edit { preferences ->
-                    preferences[dataStoreKey] = ""
-                }
+                context.dataStore.edit { it[dataStoreKey] = "" }
                 onUriPersisted("")
             }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            onUriPersisted(null)
+            MToast(stringRes(R.string.an_error_occurred_while_selecting_the_folder))
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        onUriPersisted(null)
-        MToast(stringRes(R.string.an_error_occurred_while_selecting_the_folder))
+    }
+}
+
+private fun scanForGameFiles(dataFilesFolder: DocumentFile): GameFiles {
+    val extensions = arrayOf("esm", "bsa")
+    val files = findFilesWithExtensions(dataFilesFolder, extensions)
+    val existingFiles = files.mapNotNull { it.name }.toSet()
+
+    val orderedEsmFiles = listOf("Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm")
+    val orderedBsaFiles = listOf("Morrowind.bsa", "Tribunal.bsa", "Bloodmoon.bsa")
+
+    return GameFiles(
+        esmContentLines = orderedEsmFiles.intersect(existingFiles).map { "content=$it" },
+        bsaFallbackLines = orderedBsaFiles.intersect(existingFiles).map { "fallback-archive=$it" }
+    )
+}
+
+private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedData: String) {
+    val cfgFile = File(Constants.OPENMW_CFG)
+    val regexData = Regex("""^data\s*=\s*".*?"""")
+    val replacementStringData = """data="${savedPath}/Data Files""""
+    val vfsPathLine = "data=${Constants.USER_RESOURCES}/vfs-mw"
+    val overridePathLine = "data-local=${Constants.USER_FILE_STORAGE}/OpenMW/Override"
+
+    val currentLines = if (cfgFile.exists()) cfgFile.readLines() else emptyList()
+
+    val modifiedLines = currentLines.map { line ->
+        when {
+            line.contains(regexData) -> line.replace(regexData, replacementStringData)
+            line.contains("resources=./resources") -> line.replace(
+                "resources=./resources",
+                "resources=${Constants.USER_RESOURCES}"
+            )
+            else -> line
+        }
+    }
+
+    val finalContent = buildString {
+        modifiedLines.forEach { appendLine(it) }
+
+        // Append game-specific settings if not already present
+        gameFiles.bsaFallbackLines.forEach { line ->
+            if (!modifiedLines.contains(line)) appendLine(line)
+        }
+
+        if (!modifiedLines.contains(vfsPathLine)) appendLine(vfsPathLine)
+
+        if (convertedData.isNotBlank() && !modifiedLines.any { it.contains(convertedData.substringBefore("=")) }) {
+            appendLine(convertedData)
+        }
+
+        if (!modifiedLines.contains(overridePathLine)) appendLine(overridePathLine)
+    }
+
+    cfgFile.writeText(finalContent.trimEnd() + "\n")
+}
+
+private fun updateUserConfig(savedPath: String, gameFiles: GameFiles) {
+    val esmFile = File(Constants.USER_OPENMW_CFG)
+    val defaultLine = "# This is the user openmw.cfg. Feel free to modify it as you wish."
+    val replacementStringData = """data="${savedPath}/Data Files""""
+
+    val shouldOverwrite = !customCFG || (esmFile.exists() && esmFile.readText().trim() == defaultLine)
+
+    if (shouldOverwrite) {
+        esmFile.bufferedWriter().use { writer ->
+            writer.write(replacementStringData)
+            writer.newLine()
+            gameFiles.esmContentLines.forEach { line ->
+                writer.write(line)
+                writer.newLine()
+            }
+        }
     }
 }

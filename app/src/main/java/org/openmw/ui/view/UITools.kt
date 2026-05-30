@@ -145,7 +145,11 @@ fun LogsBox(logs: StateFlow<List<LogEntry>>, fontSize: Float, boxWidth: Float, b
             .background(Color.Transparent)
             .padding(8.dp)
     ) {
-        LazyColumn(state = lazyListState) {
+        LazyColumn(
+            state = lazyListState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Bottom
+        ) {
             items(logList) { log ->
                 Text(
                     text = log.message,
@@ -172,9 +176,14 @@ fun startLoggingUpdates() {
 }
 
 @DelicateCoroutinesApi
+private var resourceUpdateJob: kotlinx.coroutines.Job? = null
+
+@DelicateCoroutinesApi
 fun startResourceInfoUpdates(context: Context) {
-    GlobalScope.launch(Dispatchers.IO) {  // Better to use IO dispatcher for file reads
-        while (UIStateManager.isMemoryInfoEnabled) {
+    if (resourceUpdateJob?.isActive == true) return
+
+    resourceUpdateJob = GlobalScope.launch(Dispatchers.IO) {
+        while (UIStateManager.isMemoryInfoEnabled || UIStateManager.isPerformanceHudEnabled) {
             // Existing memory & CPU
             val memoryInfo = getMemoryInfo(context)
             val cpuUsage = getCpuProcessUsage()
@@ -184,72 +193,92 @@ fun startResourceInfoUpdates(context: Context) {
             var gpuTemp = "--°C"
             var gpuUtilization = "--%"
             var gpuClock = "--MHz"
+            var cpuTemp = "--°C"
 
             try {
-                // GPU Model (usually like "Adreno (TM) 750")
-                gpuModel = readProcessOutput("cat", "/sys/class/kgsl/kgsl-3d0/gpu_model")
+                // CPU Temperature
+                val cpuPath = "/sys/class/thermal/${UIStateManager.userSetTemp}/temp"
+                var cpuTempRaw = readProcessOutput("cat", cpuPath).trim().toDoubleOrNull() ?: 0.0
+                
+                cpuTemp = if (cpuTempRaw > 0) {
+                    val temp = if (cpuTempRaw > 1000) cpuTempRaw / 1000 else cpuTempRaw
+                    "${temp.toInt()}°C"
+                } else "--°C"
+
+                // GPU Node paths
+                val gpuNode = "/sys/class/kgsl/${UIStateManager.userSetGPU}"
+
+                // GPU Model
+                gpuModel = readProcessOutput("cat", "$gpuNode/gpu_model")
                     .trim()
                     .takeIf { it.isNotEmpty() } ?: "Unknown"
 
-                // Temperature (in milli-Celsius → divide by 1000)
-                val tempStr = readProcessOutput("cat", "/sys/class/kgsl/kgsl-3d0/temp")
+                // Temperature
+                val gpuTempPath = if (UIStateManager.userSetGPUTemp.startsWith("thermal_zone")) {
+                    "/sys/class/thermal/${UIStateManager.userSetGPUTemp}/temp"
+                } else {
+                    "$gpuNode/temp"
+                }
+                
+                val tempStr = readProcessOutput("cat", gpuTempPath)
                 val tempValue = tempStr.trim().toDoubleOrNull()?.div(1000) ?: 0.0
                 gpuTemp = if (tempValue > 0) {
                     "${tempValue.toInt()}°C"
                 } else {
-                    // Fallback to thermal_zone (common on some devices)
-                    val thermalStr = readProcessOutput("cat", "/sys/class/thermal/thermal_zone32/temp")
-                    val celsius = thermalStr.trim().toDoubleOrNull()?.div(1000) ?: 0.0
-                    if (celsius > 0) "${celsius.toInt()}°C" else "--°C"
+                    // One last attempt at direct kgsl temp if thermal zone failed
+                    val kgslTemp = readProcessOutput("cat", "$gpuNode/temp").trim().toDoubleOrNull()?.div(1000) ?: 0.0
+                    if (kgslTemp > 0) "${kgslTemp.toInt()}°C" else "--°C"
                 }
 
-                // Utilization (usually "XX" or "XX%" – normalize to XX%)
-                val busyStr = readProcessOutput("cat", "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage")
-                gpuUtilization = if (busyStr.isNotBlank()) {
-                    val clean = busyStr.trim().removeSuffix("%")
-                    "$clean%"
-                } else "--%"
+                // Utilization
+                val busyStr = readProcessOutput("cat", "$gpuNode/gpu_busy_percentage").trim()
+                gpuUtilization = if (busyStr.isNotEmpty() && busyStr != "0") {
+                    val clean = busyStr.removeSuffix("%").trim()
+                    if (clean.isNotEmpty()) "$clean%" else "0%"
+                } else {
+                    val gpuStats = readProcessOutput("cat", "$gpuNode/gpubusy")
+                    val statsParts = gpuStats.trim().split("\\s+".toRegex())
+                    if (statsParts.size >= 2) {
+                        val busy = statsParts[0].toDoubleOrNull() ?: 0.0
+                        val total = statsParts[1].toDoubleOrNull() ?: 1.0
+                        val utilization = if (total > 0) (busy / total) * 100 else 0.0
+                        "${utilization.toInt()}%"
+                    } else "0%"
+                }
 
-                // Clock in MHz
-                val clockStr = readProcessOutput("cat", "/sys/class/kgsl/kgsl-3d0/clock_mhz")
+                // Clock
+                val clockStr = readProcessOutput("cat", "$gpuNode/clock_mhz")
                 gpuClock = if (clockStr.isNotBlank()) {
                     "${clockStr.trim()} MHz"
                 } else "--MHz"
 
-            } catch (e: Exception) {
-                // Silent fail – keep previous or default values
-            }
+            } catch (_: Exception) {}
+
+            // Update Histories
+            UIStateManager.totalMemoryMB = memoryInfo.totalBytes / (1024 * 1024)
+            updateHistory(UIStateManager.cpuHistory, cpuUsage)
+            updateHistory(UIStateManager.gpuHistory, gpuUtilization.removeSuffix("%").trim().toIntOrNull() ?: 0)
+            updateHistory(UIStateManager.memoryHistory, (memoryInfo.totalBytes - memoryInfo.availableBytes) / (1024 * 1024))
+            updateHistory(UIStateManager.cpuTempHistory, cpuTemp.removeSuffix("°C").trim().toIntOrNull() ?: 0)
+            updateHistory(UIStateManager.gpuTempHistory, gpuTemp.removeSuffix("°C").trim().toIntOrNull() ?: 0)
 
             // Build the display string
-            memoryInfoFlow.value = """
-                ${stringRes(R.string.total_device_memory)}: ${memoryInfo.totalMemory}
-                ${stringRes(R.string.available_memory)}: ${memoryInfo.availableMemory}
-                ${stringRes(R.string.total_used_memory)}: ${memoryInfo.usedMemory}
-                ${stringRes(R.string.cpu_usage)}: $cpuUsage%                
-                GPU Model: $gpuModel
-                GPU Usage: $gpuUtilization
-                GPU Temp:  $gpuTemp
-                GPU Clock: $gpuClock
-            """.trimIndent()
-
-            cpuUsageFlow.value = cpuUsage  // unchanged
+            memoryInfoFlow.value = getDetailedSystemInfo(context, memoryInfo, cpuUsage, gpuModel, gpuUtilization, gpuTemp, gpuClock)
+            cpuUsageFlow.value = cpuUsage
 
             delay(1000)
         }
 
-        // Cleanup when disabled
+        // Cleanup
         memoryInfoFlow.value = ""
         cpuUsageFlow.value = 0
     }
 }
 
-@Suppress("DEPRECATION")
 fun vibrate(context: Context) {
     val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     if (vibrator.hasVibrator()) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
-        }
+        vibrator.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
     }
 }
 
@@ -298,6 +327,82 @@ fun getAvailableStorageSpace(): String {
     return humanReadableByteCountBin(availableBytes)
 }
 
+fun <T> updateHistory(flow: MutableStateFlow<List<T>>, newValue: T) {
+    val current = flow.value.toMutableList()
+    current.add(newValue)
+    if (current.size > 30) current.removeAt(0)
+    flow.value = current
+}
+
+fun scanSystemNodes(parentPath: String, valueFile: String): List<Triple<String, String, String>> {
+    val results = mutableListOf<Triple<String, String, String>>()
+    val root = File(parentPath)
+    if (!root.exists() || !root.isDirectory) return results
+
+    root.listFiles()?.sortedBy { it.name }?.forEach { folder ->
+        if (folder.isDirectory) {
+            val target = File(folder, valueFile)
+            if (target.exists() && target.canRead()) {
+                try {
+                    val value = target.readText().trim()
+                    val labelFile = if (parentPath.contains("thermal")) "type" else if (parentPath.contains("kgsl")) "gpu_model" else null
+                    val label = labelFile?.let { File(folder, it).takeIf { f -> f.exists() && f.canRead() }?.readText()?.trim() } ?: ""
+                    
+                    results.add(Triple(folder.name, value, label))
+                } catch (_: Exception) {
+                    // Permission denied or other error
+                }
+            }
+        }
+    }
+    return results
+}
+
+fun getDetailedSystemInfo(
+    context: Context,
+    mem: MemoryInfo,
+    cpu: Int,
+    gpuModel: String,
+    gpuUsage: String,
+    gpuTemp: String,
+    gpuClock: String
+): String {
+    val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    val runtime = Runtime.getRuntime()
+    val pid = Process.myPid()
+    val pMemInfo = am.getProcessMemoryInfo(intArrayOf(pid))[0]
+
+    return """
+        --- SYSTEM RESOURCES ---
+        CPU Usage: $cpu%
+        GPU: $gpuModel ($gpuClock)
+        GPU Load: $gpuUsage | Temp: $gpuTemp
+        
+        --- DEVICE MEMORY (ActivityManager) ---
+        Total: ${mem.totalMemory}
+        Available: ${mem.availableMemory}
+        Used: ${mem.usedMemory}
+        Low Memory State: ${am.isLowRamDevice} (Threshold: ${humanReadableByteCountBin(ActivityManager.MemoryInfo().apply { am.getMemoryInfo(this) }.threshold)})
+        
+        --- PROCESS MEMORY (PSS) ---
+        Total PSS: ${pMemInfo.totalPss / 1024} MB
+        Dalvik PSS: ${pMemInfo.dalvikPss / 1024} MB
+        Native PSS: ${pMemInfo.nativePss / 1024} MB
+        Other PSS: ${pMemInfo.otherPss / 1024} MB
+        Private Dirty: ${pMemInfo.totalPrivateDirty / 1024} MB
+        
+        --- JVM RUNTIME ---
+        Max Heap: ${humanReadableByteCountBin(runtime.maxMemory())}
+        Total Allocated: ${humanReadableByteCountBin(runtime.totalMemory())}
+        Free in Heap: ${humanReadableByteCountBin(runtime.freeMemory())}
+        
+        --- DEVICE INFO ---
+        Device: ${Build.MANUFACTURER} ${Build.MODEL}
+        OS: Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})
+        ABIs: ${Build.SUPPORTED_ABIS.joinToString(", ")}
+    """.trimIndent()
+}
+
 fun getMemoryInfo(context: Context): MemoryInfo {
     val memoryInfo = ActivityManager.MemoryInfo()
     val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -306,7 +411,7 @@ fun getMemoryInfo(context: Context): MemoryInfo {
     val availableMemory = humanReadableByteCountBin(memoryInfo.availMem)
     val usedMemory = humanReadableByteCountBin(memoryInfo.totalMem - memoryInfo.availMem)
 
-    return MemoryInfo(totalMemory, availableMemory, usedMemory)
+    return MemoryInfo(totalMemory, availableMemory, usedMemory, memoryInfo.totalMem, memoryInfo.availMem)
 }
 
 @SuppressLint("DefaultLocale")
@@ -342,12 +447,12 @@ fun getFolderSize(folder: File): Long {
 
 fun getMessages(): List<String> {
     return try {
-        val log = ProcessBuilder("logcat", "-d", "-T", "100", "--pid=${Process.myPid()}")
+        val log = ProcessBuilder("logcat", "-d", "-T", "100", "--pid=${Process.myPid()}", "*:${UIStateManager.logcatLevel}")
             .redirectErrorStream(true)
             .start()
 
         log.inputStream.bufferedReader().use { it.readLines() }
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         emptyList()
     }
 }
@@ -359,7 +464,7 @@ fun enableLogcat() {
     }
 
     val processBuilder = ProcessBuilder()
-    val commandToExecute = arrayOf("/system/bin/sh", "-c", "logcat *:W -d -f ${Constants.USER_CONFIG}/openmw_logcat.txt")
+    val commandToExecute = arrayOf("/system/bin/sh", "-c", "logcat *:${UIStateManager.logcatLevel} -d -f ${Constants.USER_CONFIG}/openmw_logcat.txt")
     processBuilder.command(*commandToExecute)
     processBuilder.redirectErrorStream(true)
     processBuilder.start()

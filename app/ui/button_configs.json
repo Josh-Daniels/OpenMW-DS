@@ -13,7 +13,10 @@
         "color": "#97afb1b0",
         "alpha": 0.5921569,
         "uri": null,
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "rightStick",
@@ -29,7 +32,10 @@
         "color": "#93888a89",
         "alpha": 0.5764706,
         "uri": null,
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "dynamic",
@@ -45,7 +51,10 @@
         "color": "#92ebf7ff",
         "alpha": 0.57254905,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/1.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "dynamic",
@@ -61,7 +70,10 @@
         "color": "#a0fefffb",
         "alpha": 0.627451,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/2.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": true,
+        "mouseButton": 1
     },
     {
         "type": "dynamic",
@@ -77,7 +89,10 @@
         "color": "#9bf1f7ff",
         "alpha": 0.60784316,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/3.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": true,
+        "mouseButton": 2
     },
     {
         "type": "dynamic",
@@ -93,7 +108,10 @@
         "color": "#a3fffdfc",
         "alpha": 0.6392157,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/4.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "dynamic",
@@ -109,7 +127,10 @@
         "color": "#a2f6f5ff",
         "alpha": 0.63529414,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/6.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "dynamic",
@@ -125,7 +146,10 @@
         "color": "#aafdfffe",
         "alpha": 0.6666667,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/7.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "dynamic",
@@ -141,7 +165,10 @@
         "color": "#b1fbfaff",
         "alpha": 0.69411767,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/8.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "dynamic",
@@ -157,7 +184,10 @@
         "color": "#a0f1fcff",
         "alpha": 0.627451,
         "uri": "file:///storage/emulated/0/Alpha3/OpenMW/ui/9.png",
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "utility",
@@ -173,7 +203,10 @@
         "color": "#64f3f8ff",
         "alpha": 0.39215687,
         "uri": null,
-        "group": 1
+        "group": 1,
+        "vibrate": true,
+        "isMouseButton": false,
+        "mouseButton": 1
     },
     {
         "type": "parent",
@@ -189,6 +222,9 @@
         "color": "#64f3f8ff",
         "alpha": 0.39215687,
         "uri": null,
-        "group": null
+        "group": null,
+        "vibrate": null,
+        "isMouseButton": null,
+        "mouseButton": null
     }
 ]

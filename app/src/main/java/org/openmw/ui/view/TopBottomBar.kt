@@ -201,14 +201,12 @@ fun BarOptions (context: Context) {
     val settingsFile = File(SETTINGS_FILE)
     val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
 
-    if (isAppLoggingEnabled) {
-        IconButton(onClick = { isTabExpanded = !isTabExpanded }) {
-            Icon(
-                imageVector = if (isTabExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = "Toggle Tab",
-                tint = Color.White
-            )
-        }
+    IconButton(onClick = { isTabExpanded = !isTabExpanded }) {
+        Icon(
+            imageVector = if (isTabExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+            contentDescription = "Toggle Tab",
+            tint = Color.White
+        )
     }
 
     IconButton(onClick = { expanded = true }) {
@@ -276,21 +274,6 @@ fun BarOptions (context: Context) {
                 }
             )
         }
-        DropdownMenuItem(
-            text = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.enable_logcat), color = Color.White)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Switch(
-                        checked = UIStateManager.isLogcatEnabled,
-                        onCheckedChange = {
-                            UIStateManager.isLogcatEnabled = it
-                        }
-                    )
-                }
-            },
-            onClick = { /* Handle click if necessary */ }
-        )
         CodeGroupOptionSelector()
         if (showDialog) {
             AlertDialog(

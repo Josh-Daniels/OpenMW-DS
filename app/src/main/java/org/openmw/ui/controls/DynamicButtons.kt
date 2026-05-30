@@ -1,10 +1,11 @@
 package org.openmw.ui.controls
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import android.view.KeyEvent
-import android.view.View
-import android.view.WindowManager
+import android.view.MotionEvent.ACTION_DOWN
+import android.view.MotionEvent.ACTION_UP
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -63,6 +64,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -145,6 +147,7 @@ fun stringToShape(shapeName: String): Shape {
     }
 }
 
+@SuppressLint("DefaultLocale")
 @OptIn(InternalCoroutinesApi::class)
 @Suppress("DEPRECATION")
 @Composable
@@ -177,6 +180,9 @@ fun ResizableDraggableButton(
         val isDragging = remember { mutableStateOf(false) }
         val isLocked = remember { mutableStateOf(state.isLocked) }
         val blockMouse = remember { mutableStateOf(state.blockMouse) }
+        val isMouseButton = remember { mutableStateOf(state.isMouseButton) }
+        val mouseButton = remember { mutableIntStateOf(state.mouseButton) }
+        val buttonVibrate = remember { mutableStateOf(state.vibrate) }
         val isToggle = remember { mutableStateOf(false) }
         val offsetX = remember { mutableFloatStateOf(state.offsetX) }
         val offsetY = remember { mutableFloatStateOf(state.offsetY) }
@@ -247,6 +253,22 @@ fun ResizableDraggableButton(
             isLocked.value = state.isLocked
         }
 
+        LaunchedEffect(state.vibrate) {
+            buttonVibrate.value = state.vibrate
+        }
+
+        LaunchedEffect(state.mouseButton) {
+            mouseButton.intValue = state.mouseButton
+            Log.d(
+                "SDLMouse",
+                "LaunchedEffect: ${mouseButton.intValue}"
+            )
+        }
+
+        LaunchedEffect(state.isMouseButton) {
+            isMouseButton.value = state.isMouseButton
+        }
+
         LaunchedEffect(state.blockMouse) {
             blockMouse.value = state.blockMouse
         }
@@ -292,12 +314,15 @@ fun ResizableDraggableButton(
                 size = buttonSize.value.value,
                 offsetX = offsetX.floatValue,
                 offsetY = offsetY.floatValue,
-                isLocked = state.isLocked,
-                blockMouse = state.blockMouse,
+                isLocked = isLocked.value,
+                blockMouse = blockMouse.value,
                 color = hexCode, // Use the hex string conversion
                 alpha = buttonAlpha,
                 uri = buttonUri.value,
-                group = state.group
+                group = state.group,
+                vibrate = buttonVibrate.value,
+                isMouseButton = isMouseButton.value,
+                mouseButton = mouseButton.intValue
             )
             updateButtonState(buttonState.id, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
@@ -305,10 +330,12 @@ fun ResizableDraggableButton(
 
         // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
+        var interaction by remember { mutableStateOf(false) }
         var colors by remember { mutableStateOf(false) }
 
         fun resetStates() {
             options = false
+            interaction = false
             colors = false
         }
 
@@ -319,14 +346,37 @@ fun ResizableDraggableButton(
             UIStateManager.saveButtonState(containerWidth, containerHeight)
         }
 
-        val saveToggle = { isLocked: Boolean ->
-            val updatedState = state.copy(isLocked = isLocked)
+        val saveToggle = { isLockedValue: Boolean ->
+            isLocked.value = isLockedValue
+            val updatedState = state.copy(isLocked = isLockedValue)
             updateButtonState(state.id, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
         }
 
-        val saveBlockToggle = { blockMouse: Boolean ->
-            val updatedState = state.copy(blockMouse = blockMouse)
+        val saveVibrateToggle = { vibrateValue: Boolean ->
+            buttonVibrate.value = vibrateValue
+            val updatedState = state.copy(vibrate = vibrateValue)
+            updateButtonState(state.id, updatedState)
+            UIStateManager.saveButtonState(containerWidth, containerHeight)
+        }
+
+        val saveMouseToggle = { isMouseButtonValue: Boolean ->
+            isMouseButton.value = isMouseButtonValue
+            val updatedState = state.copy(isMouseButton = isMouseButtonValue)
+            updateButtonState(state.id, updatedState)
+            UIStateManager.saveButtonState(containerWidth, containerHeight)
+        }
+
+        val saveMouseButton = { mouseButtonValue: Int ->
+            mouseButton.intValue = mouseButtonValue
+            val updatedState = state.copy(mouseButton = mouseButtonValue)
+            updateButtonState(state.id, updatedState)
+            UIStateManager.saveButtonState(containerWidth, containerHeight)
+        }
+
+        val saveBlockToggle = { blockMouseValue: Boolean ->
+            blockMouse.value = blockMouseValue
+            val updatedState = state.copy(blockMouse = blockMouseValue)
             updateButtonState(state.id, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
         }
@@ -378,7 +428,7 @@ fun ResizableDraggableButton(
                             .size(buttonSize.value)
                             .then(
                                 if (editMode) {
-                                    Modifier.pointerInput(Unit) {
+                                    Modifier.pointerInput(state) {
                                         detectDragGestures(
                                             onDragStart = {
                                                 isDragging.value = true
@@ -434,12 +484,10 @@ fun ResizableDraggableButton(
                                     },
                                     shape = stringToShape(buttonShape)
                                 )
-                                .pointerInput(Unit) {
+                                .pointerInput(state) {
                                     awaitPointerEventScope {
                                         if (!configureControls && !isDragging.value) {
-                                            val windowManager =
-                                                context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-                                            val (screenWidth, screenHeight) = windowManager.currentDeviceRealSize()
+
                                             val sdlWidth = EngineActivity.resolutionX.toFloat()
                                             val sdlHeight = EngineActivity.resolutionY.toFloat()
 
@@ -447,8 +495,8 @@ fun ResizableDraggableButton(
                                             var curY: Float = 0f
 
                                             if (UIStateManager.tempCodeGroup == "OpenMW") {
-                                                val startX = SDLActivity.getMouseX().toFloat() * (screenWidth / sdlWidth)
-                                                val startY = SDLActivity.getMouseY().toFloat() * (screenHeight / sdlHeight)
+                                                val startX = SDLActivity.getMouseX().toFloat() * (containerWidth / sdlWidth)
+                                                val startY = SDLActivity.getMouseY().toFloat() * (containerHeight / sdlHeight)
                                                 curX = startX
                                                 curY = startY
                                             }
@@ -462,6 +510,7 @@ fun ResizableDraggableButton(
                                                     event.changes.firstOrNull()?.pressed == true
 
                                                 if (down) {
+                                                    //event.changes.forEach { it.consume() }
                                                     downFrom = System.currentTimeMillis()
                                                     // Handle the onPress event
                                                     if (isLocked.value) {
@@ -474,36 +523,16 @@ fun ResizableDraggableButton(
                                                             onNativeKeyUp(keyCode)
                                                         }
                                                     } else {
-                                                        when (keyCode) {
-                                                            KeyEvent.KEYCODE_Z -> {
-                                                                if (isCursorVisible == 1 && UIStateManager.tempCodeGroup == "OpenMW") {
-                                                                    SDLActivity.onNativeMouse(
-                                                                        1,
-                                                                        0,
-                                                                        0f,
-                                                                        0f,
-                                                                        true
-                                                                    )
-                                                                } else {
-                                                                    if (isVibrationOn) {
-                                                                        vibrate(context)
-                                                                    }
-                                                                }
-                                                            }
-
-                                                            KeyEvent.KEYCODE_E -> {
-                                                                if (isVibrationOn) {
-                                                                    vibrate(context)
-                                                                }
-                                                            }
-                                                        }
-                                                        onNativeKeyDown(keyCode)
-                                                        Log.d(TAG, "keyCode: $keyCode")
-                                                        if (keyCode == KeyEvent.KEYCODE_B) {
-                                                            onNativeKeyUp(keyCode)
-                                                            if (isCursorVisible == 1) {
-                                                                SDLActivity.onNativeMouse(2, 0, 0f, 0f, true)
-                                                            }
+                                                        if (isMouseButton.value) {
+                                                            if (buttonVibrate.value && isVibrationOn) vibrate(context)
+                                                            SDLActivity.onNativeMouse(mouseButton.intValue, ACTION_DOWN, 0f, 0f, true)
+                                                            Log.d(
+                                                                "SDLMouse",
+                                                                "onNativeMouse button = ${mouseButton.intValue} Press with Vibration = ${state.vibrate}"
+                                                            )
+                                                        } else {
+                                                            onNativeKeyDown(keyCode)
+                                                            Log.d(TAG, "keyCode: $keyCode")
                                                         }
                                                     }
                                                     while (true) {
@@ -524,29 +553,27 @@ fun ResizableDraggableButton(
                                                             if (System.currentTimeMillis() - downFrom > 100) {
                                                                 val movementX =
                                                                     if (isCursorVisible != 0) {
-                                                                        (newX - curX) * sensitivityMouse / screenWidth
+                                                                        (newX - curX) * sensitivityMouse / containerWidth
                                                                     } else {
-                                                                        (newX - curX) * sensitivityRT / screenWidth
+                                                                        (newX - curX) * sensitivityRT / containerWidth
                                                                     }
                                                                 val movementY =
                                                                     if (isCursorVisible != 0) {
-                                                                        (newY - curY) * sensitivityMouse / screenWidth
+                                                                        (newY - curY) * sensitivityMouse / containerWidth
                                                                     } else {
-                                                                        (newY - curY) * sensitivityRT / screenWidth
+                                                                        (newY - curY) * sensitivityRT / containerWidth
                                                                     }
 
                                                                 // Call the native function with updated coordinates
                                                                 if (UIStateManager.tempCodeGroup == "OpenMW" && !blockMouse.value) {
                                                                     SDLActivity.onNativeMouse(
-                                                                        0,
+                                                                        mouseButton.intValue,
                                                                         2,
                                                                         movementX,
                                                                         movementY,
                                                                         true
                                                                     )
                                                                 }
-
-                                                                // Update current positions
                                                                 curX = newX
                                                                 curY = newY
                                                             }
@@ -559,16 +586,14 @@ fun ResizableDraggableButton(
                                                         }
                                                     }
                                                 }
-                                                // End the press event
                                                 if (isLocked.value) {
-                                                    // Do nothing for SHIFT or ALT keys as they toggle
+                                                    // Do nothing toggle
                                                 } else {
-                                                    onNativeKeyUp(keyCode)
-                                                    if (UIStateManager.tempCodeGroup == "OpenMW") {
-                                                        if (isMouseShown() == 1) {
-                                                            SDLActivity.onNativeMouse(1, 1, 0f, 0f, true)
-                                                            SDLActivity.onNativeMouse(2, 1, 0f, 0f, true)
-                                                        }
+                                                    if (!isMouseButton.value) {
+                                                        onNativeKeyUp(keyCode)
+                                                    } else {
+                                                        SDLActivity.onNativeMouse(0, ACTION_UP, 0f, 0f, true)
+                                                        Log.d("SDLMouse", "${mouseButton.intValue}")
                                                     }
                                                 }
                                             }
@@ -678,7 +703,8 @@ fun ResizableDraggableButton(
                                                 ) {
                                                     val selectedTabIndex = when {
                                                         options -> 0
-                                                        colors -> 1
+                                                        interaction -> 1
+                                                        colors -> 2
                                                         else -> 0
                                                     }
                                                     ScrollableTabRow(
@@ -703,6 +729,14 @@ fun ResizableDraggableButton(
                                                                 options = true
                                                             },
                                                             text = { Text(stringResource(R.string.options)) }
+                                                        )
+                                                        Tab(
+                                                            selected = interaction,
+                                                            onClick = {
+                                                                resetStates()
+                                                                interaction = true
+                                                            },
+                                                            text = { Text("Interact") }
                                                         )
                                                         Tab(
                                                             selected = colors,
@@ -1009,6 +1043,97 @@ fun ResizableDraggableButton(
                                                                 }
                                                             }
                                                         }
+                                                        if (interaction) {
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(
+                                                                    8.dp
+                                                                ),
+                                                                modifier = Modifier
+                                                                    .height(40.dp)
+                                                                    .fillMaxWidth()
+                                                            ) {
+                                                                Text(
+                                                                    text = "Vibrate on press?",
+                                                                    color = White,
+                                                                    fontWeight = FontWeight.Bold
+                                                                )
+                                                                Spacer(modifier = Modifier.weight(1f))
+                                                                Switch(
+                                                                    checked = state.vibrate,
+                                                                    onCheckedChange = {
+                                                                        saveVibrateToggle(it)
+                                                                    },
+                                                                    colors = SwitchDefaults.colors(
+                                                                        checkedThumbColor = Color(202,165,96),
+                                                                        uncheckedThumbColor = Color.Red,
+                                                                        checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                        uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                        checkedBorderColor = White,
+                                                                        uncheckedBorderColor = White
+                                                                    )
+                                                                )
+                                                            }
+                                                            HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                                modifier = Modifier.height(40.dp).fillMaxWidth()
+                                                            ) {
+                                                                Text("Is Mouse Button?", color = White, fontWeight = FontWeight.Bold)
+                                                                Spacer(modifier = Modifier.weight(1f))
+                                                                Switch(
+                                                                    checked = state.isMouseButton,
+                                                                    onCheckedChange = { saveMouseToggle(it) },
+                                                                    colors = SwitchDefaults.colors(
+                                                                        checkedThumbColor = Color(202,165,96),
+                                                                        uncheckedThumbColor = Color.Red,
+                                                                        checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                        uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                        checkedBorderColor = White,
+                                                                        uncheckedBorderColor = White
+                                                                    )
+                                                                )
+                                                            }
+                                                            if (state.isMouseButton) {
+                                                                HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                                                ) {
+                                                                    listOf(1 to "Left", 4 to "Middle", 3 to "Right").forEach { (index, label) ->
+                                                                Button(
+                                                                    onClick = { saveMouseButton(index) },
+                                                                    colors = ButtonDefaults.buttonColors(
+                                                                        containerColor = if (mouseButton.intValue == index) Color(202, 165, 96) else Color.DarkGray,
+                                                                        contentColor = White
+                                                                    ),
+                                                                            modifier = Modifier.weight(1f).padding(horizontal = 2.dp)
+                                                                        ) {
+                                                                            Text(label, fontSize = 10.sp, maxLines = 1)
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Text("DO NOT USE\nnot ready yet", color = White, fontWeight = FontWeight.Bold)
+                                                            }
+                                                            HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                            Spacer(modifier = Modifier.height(8.dp))
+                                                            Text("Button State Info:", color = Color(202, 165, 96), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                                            StateInfoRow("ID:", "${state.id}")
+                                                            StateInfoRow("Current Key:", keyCodeToChar(keyCode))
+                                                            StateInfoRow("Group:", "${state.group}")
+                                                            StateInfoRow("Size:", "${buttonSize.value}")
+                                                            StateInfoRow("Offset X:", "${offsetX.floatValue.roundToInt()}")
+                                                            StateInfoRow("Offset Y:", "${offsetY.floatValue.roundToInt()}")
+                                                            StateInfoRow("Color:", state.color)
+                                                            StateInfoRow("Alpha:", String.format("%.2f", buttonAlpha))
+                                                            StateInfoRow("Is Locked:", "${state.isLocked}")
+                                                            StateInfoRow("Block Mouse:", "${state.blockMouse}")
+                                                            StateInfoRow("isMouseButton:", "${state.isMouseButton}")
+                                                            StateInfoRow("Mouse Button Int:", "${state.mouseButton}")
+                                                            StateInfoRow("Vibrate:", "${state.vibrate}")
+                                                            StateInfoRow("URI:", state.uri?.path?.substringAfterLast("/") ?: "None")
+                                                        }
                                                         if (colors) {
                                                             ColorPickerWheel(
                                                                 initialColor = buttonColor,
@@ -1071,6 +1196,18 @@ fun ResizableDraggableButton(
                 }
             }
         }
+    }
+}
+
+@Composable
+fun StateInfoRow(label: String, value: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.height(30.dp).fillMaxWidth()
+    ) {
+        Text(label, color = White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+        Spacer(modifier = Modifier.weight(1f))
+        Text(value, color = White, modifier = Modifier.padding(end = 10.dp), fontSize = 12.sp)
     }
 }
 

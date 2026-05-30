@@ -39,6 +39,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Gamepad
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
@@ -209,10 +211,12 @@ fun ResizableDraggableThumbstick(
 
         // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
+        var interact by remember { mutableStateOf(false) }
         var colors by remember { mutableStateOf(false) }
 
         fun resetStates() {
             options = false
+            interact = false
             colors = false
         }
 
@@ -232,7 +236,8 @@ fun ResizableDraggableThumbstick(
                 color = hexCode,
                 alpha = buttonAlpha,
                 uri = buttonUri.value,
-                group = 1
+                group = 1,
+                vibrate = false
             )
             updateButtonState(99, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
@@ -516,7 +521,8 @@ fun ResizableDraggableThumbstick(
                                             ) {
                                                 val selectedTabIndex = when {
                                                     options -> 0
-                                                    colors -> 1
+                                                    interact -> 1
+                                                    colors -> 2
                                                     else -> 0
                                                 }
                                                 ScrollableTabRow(
@@ -539,6 +545,14 @@ fun ResizableDraggableThumbstick(
                                                             options = true
                                                         },
                                                         text = { Text(stringResource(R.string.options)) }
+                                                    )
+                                                    Tab(
+                                                        selected = interact,
+                                                        onClick = {
+                                                            resetStates()
+                                                            interact = true
+                                                        },
+                                                        text = { Text(stringResource(R.string.interact)) }
                                                     )
                                                     Tab(
                                                         selected = colors,
@@ -570,112 +584,6 @@ fun ResizableDraggableThumbstick(
                                                         .verticalScroll(scrollState)
                                                 ) {
                                                     if (options) {
-                                                        Spacer(modifier = Modifier.height(2.dp))
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                            modifier = Modifier
-                                                                .height(40.dp)
-                                                                .fillMaxWidth()
-                                                        ) {
-                                                            Text(
-                                                                text = stringResource(R.string.show_in_mouse_ui),
-                                                                color = White,
-                                                                fontWeight = FontWeight.Bold
-                                                            )
-                                                            Spacer(modifier = Modifier.weight(1f))
-                                                            Switch(
-                                                                checked = isOnMouseScreen,
-                                                                onCheckedChange = { isChecked ->
-                                                                    val updatedKeycodes = if (isChecked) {
-                                                                        selectedKeycodes + 99
-                                                                    } else {
-                                                                        selectedKeycodes - 99
-                                                                    }.joinToString(",")
-                                                                    CoroutineScope(Dispatchers.Main).launch {
-                                                                        GameFilesPreferences.setSelectedKeycodes(context, updatedKeycodes)
-                                                                    }
-                                                                },
-                                                                colors = SwitchDefaults.colors(
-                                                                    checkedThumbColor = Color(202, 165, 96),
-                                                                    uncheckedThumbColor = Color.Red,
-                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
-                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
-                                                                    checkedBorderColor = White,
-                                                                    uncheckedBorderColor = White
-                                                                )
-                                                            )
-                                                        }
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                            modifier = Modifier
-                                                                .height(40.dp)
-                                                                .fillMaxWidth()
-                                                        ) {
-                                                            Text(
-                                                                text = stringResource(R.string.auto_run),
-                                                                color = White,
-                                                                fontWeight = FontWeight.Bold
-                                                            )
-                                                            Spacer(modifier = Modifier.weight(1f))
-                                                            Switch(
-                                                                checked = autoRUN,
-                                                                onCheckedChange = { isChecked ->
-                                                                    CoroutineScope(Dispatchers.Main).launch {
-                                                                        GameFilesPreferences.setAutoRun(context, isChecked)
-                                                                    }
-                                                                },
-                                                                colors = SwitchDefaults.colors(
-                                                                    checkedThumbColor = Color(202, 165, 96),
-                                                                    uncheckedThumbColor = Color.Red,
-                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
-                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
-                                                                    checkedBorderColor = White,
-                                                                    uncheckedBorderColor = White
-                                                                )
-                                                            )
-                                                        }
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                            modifier = Modifier
-                                                                .height(40.dp)
-                                                                .fillMaxWidth()
-                                                        ) {
-                                                            Text(
-
-                                                                text = "${stringResource(R.string.virtual_left_thumbstick)}:\n ${if (isVirtualLeft) stringResource(
-                                                                    R.string.use_w_a_s_d_instead
-                                                                ) else stringResource(R.string.use_virtual_joystick_instead)
-                                                                }",
-                                                                color = White,
-                                                                fontWeight = FontWeight.Bold
-                                                            )
-                                                            Spacer(modifier = Modifier.weight(1f))
-                                                            Switch(
-                                                                checked = isVirtualLeft,
-                                                                onCheckedChange = { isChecked ->
-                                                                    CoroutineScope(Dispatchers.IO).launch {
-                                                                        writeVirtualLeftThumbstick(context, isChecked)
-                                                                    }
-                                                                },
-                                                                colors = SwitchDefaults.colors(
-                                                                    checkedThumbColor = Color(202, 165, 96),
-                                                                    uncheckedThumbColor = Color.Red,
-                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
-                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
-                                                                    checkedBorderColor = White,
-                                                                    uncheckedBorderColor = White
-                                                                )
-                                                            )
-                                                        }
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-                                                        Spacer(modifier = Modifier.height(16.dp))
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
-
                                                         CustomIconPickerButton(
                                                             context = context,
                                                             buttonId = 99,
@@ -757,6 +665,126 @@ fun ResizableDraggableThumbstick(
                                                                 }
                                                             }
                                                         }
+                                                    }
+                                                    if (interact) {
+                                                        Spacer(modifier = Modifier.height(2.dp))
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                            modifier = Modifier
+                                                                .height(40.dp)
+                                                                .fillMaxWidth()
+                                                        ) {
+                                                            Text(
+                                                                text = stringResource(R.string.show_in_mouse_ui),
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            Switch(
+                                                                checked = isOnMouseScreen,
+                                                                onCheckedChange = { isChecked ->
+                                                                    val updatedKeycodes = if (isChecked) {
+                                                                        selectedKeycodes + 99
+                                                                    } else {
+                                                                        selectedKeycodes - 99
+                                                                    }.joinToString(",")
+                                                                    CoroutineScope(Dispatchers.Main).launch {
+                                                                        GameFilesPreferences.setSelectedKeycodes(context, updatedKeycodes)
+                                                                    }
+                                                                },
+                                                                colors = SwitchDefaults.colors(
+                                                                    checkedThumbColor = Color(202, 165, 96),
+                                                                    uncheckedThumbColor = Color.Red,
+                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                    checkedBorderColor = White,
+                                                                    uncheckedBorderColor = White
+                                                                )
+                                                            )
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                            modifier = Modifier
+                                                                .height(40.dp)
+                                                                .fillMaxWidth()
+                                                        ) {
+                                                            Text(
+                                                                text = stringResource(R.string.auto_run),
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            Switch(
+                                                                checked = autoRUN,
+                                                                onCheckedChange = { isChecked ->
+                                                                    CoroutineScope(Dispatchers.Main).launch {
+                                                                        GameFilesPreferences.setAutoRun(context, isChecked)
+                                                                    }
+                                                                },
+                                                                colors = SwitchDefaults.colors(
+                                                                    checkedThumbColor = Color(202, 165, 96),
+                                                                    uncheckedThumbColor = Color.Red,
+                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                    checkedBorderColor = White,
+                                                                    uncheckedBorderColor = White
+                                                                )
+                                                            )
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                        Column(
+                                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(vertical = 8.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = stringResource(R.string.virtual_left_thumbstick),
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold,
+                                                                modifier = Modifier.padding(bottom = 8.dp)
+                                                            )
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.Center,
+                                                                modifier = Modifier.fillMaxWidth()
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Gamepad,
+                                                                    contentDescription = null,
+                                                                    tint = if (isVirtualLeft) Color(202, 165, 96) else White.copy(alpha = 0.3f),
+                                                                    modifier = Modifier.size(28.dp)
+                                                                )
+                                                                Spacer(modifier = Modifier.width(16.dp))
+                                                                Switch(
+                                                                    checked = !isVirtualLeft,
+                                                                    onCheckedChange = { isChecked ->
+                                                                        CoroutineScope(Dispatchers.IO).launch {
+                                                                            writeVirtualLeftThumbstick(context, !isChecked)
+                                                                        }
+                                                                    },
+                                                                    colors = SwitchDefaults.colors(
+                                                                        checkedThumbColor = Color(202, 165, 96),
+                                                                        uncheckedThumbColor = Color(202, 165, 96),
+                                                                        checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                        uncheckedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                        checkedBorderColor = White,
+                                                                        uncheckedBorderColor = White
+                                                                    )
+                                                                )
+                                                                Spacer(modifier = Modifier.width(16.dp))
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Keyboard,
+                                                                    contentDescription = null,
+                                                                    tint = if (!isVirtualLeft) Color(202, 165, 96) else White.copy(alpha = 0.3f),
+                                                                    modifier = Modifier.size(28.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
                                                     }
 
                                                     if (colors) {

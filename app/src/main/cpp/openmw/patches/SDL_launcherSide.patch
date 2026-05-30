@@ -1,0 +1,22 @@
+--- a/app/src/main/java/org/libsdl/app/SDLActivity.java
++++ b/app/src/main/java/org/libsdl/app/SDLActivity.java
+@@ -928,4 +928,5 @@
+     public static native void nativeSetScreenResolution(int surfaceWidth, int surfaceHeight, int deviceWidth, int deviceHeight, float rate);
++    public static native void nativeAddDisplayMode(int width, int height, float rate);
+     public static native void onNativeResize();
+--- a/app/src/main/java/org/libsdl/app/SDLSurface.java
++++ b/app/src/main/java/org/libsdl/app/SDLSurface.java
+@@ -179,4 +179,16 @@
+         SDLActivity.nativeSetScreenResolution(width, height, nDeviceWidth, nDeviceHeight, mDisplay.getRefreshRate());
++
++        int[][] standardModes = {
++                {1920, 1080}, {1280, 720}, {1280, 768}, {1024, 768}, {800, 600}, {640, 480}
++        };
++
++        for (int[] m : standardModes) {
++            if (m[0] <= nDeviceWidth && m[1] <= nDeviceHeight) {
++                SDLActivity.nativeAddDisplayMode(m[0], m[1], mDisplay.getRefreshRate());
++            }
++        }
++
+         SDLActivity.onNativeResize();

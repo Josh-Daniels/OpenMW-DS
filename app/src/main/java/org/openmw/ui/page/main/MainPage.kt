@@ -4,8 +4,8 @@ import android.annotation.SuppressLint
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -16,7 +16,9 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,13 +29,13 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,6 +44,7 @@ import androidx.compose.material3.FabPosition
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
@@ -52,19 +55,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -75,11 +78,7 @@ import org.openmw.R
 import org.openmw.fragments.processSelectedFolder
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.customCFG
-import org.openmw.ui.controls.UIStateManager.customColor
 import org.openmw.ui.controls.UIStateManager.gold
-import org.openmw.ui.controls.UIStateManager.isTabExpanded
-import org.openmw.ui.controls.UIStateManager.logMessagesFlow
-import org.openmw.ui.controls.UIStateManager.showLogCat
 import org.openmw.ui.controls.UIStateManager.transparentBlack
 import org.openmw.ui.navigation.LocalModAssistantViewModel
 import org.openmw.ui.page.mod.ModAssistantViewModel
@@ -88,7 +87,6 @@ import org.openmw.ui.page.mod.readModValues
 import org.openmw.ui.view.LogRepository
 import org.openmw.ui.view.LogsBox
 import org.openmw.ui.view.MyTopBar
-import org.openmw.ui.view.startLoggingUpdates
 import org.openmw.utils.FileBrowserMode
 import org.openmw.utils.FileBrowserPopup
 import org.openmw.utils.GameFilesPreferences
@@ -99,6 +97,7 @@ import org.openmw.utils.getLayoutType
 import org.openmw.utils.stringRes
 import org.openmw.utils.updateConsoleOutput
 import java.io.File
+import kotlin.math.roundToInt
 
 @InternalCoroutinesApi
 @DelicateCoroutinesApi
@@ -111,43 +110,31 @@ fun MainPage(
 ) {
     val modValues by lazy { readModValues() }
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val screenHeightPx = with(density) { screenHeight.toPx() }
+
+    // Drag state for the logs overlay
+    val offsetY = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    
+    // Sync isTabExpanded with offsetY
+    LaunchedEffect(UIStateManager.isTabExpanded) {
+        if (UIStateManager.isTabExpanded) {
+            if (offsetY.value < screenHeightPx / 3f) {
+                offsetY.animateTo(screenHeightPx / 3f)
+            }
+        } else {
+            offsetY.animateTo(0f)
+        }
+    }
+
     val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
     val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
     val layoutType = getLayoutType()
-    var showAppLog by rememberSaveable { mutableStateOf(false) }
-    var consoleOutput by remember { mutableStateOf("") }
-    val scrollState = rememberScrollState()
-    val coroutineScope = rememberCoroutineScope()
-    val animatedTabHeight by animateDpAsState(
-        targetValue = if (isTabExpanded) (LocalConfiguration.current.screenHeightDp * 0.75).dp else 1.dp,
-        animationSpec = tween(durationMillis = 300)
-    )
-    val animatedTabWidth by animateDpAsState(
-        targetValue = (LocalConfiguration.current.screenWidthDp * 0.95).dp,
-        animationSpec = tween(durationMillis = 300)
-    )
 
-    if (UIStateManager.isAppLoggingEnabled) {
-        updateConsoleOutput = { newOutput ->
-            consoleOutput += newOutput
-        }
-
-        LaunchedEffect(scrollState.maxValue) {
-            coroutineScope.launch {
-                scrollState.animateScrollTo(scrollState.maxValue)
-            }
-        }
-
-        LaunchedEffect(showLogCat) {
-            if (showLogCat) {
-                startLoggingUpdates()
-            }
-            launch {
-                logMessagesFlow.collect { logMessages ->
-                    UIStateManager.logMessagesText = logMessages
-                }
-            }
-        }
+    updateConsoleOutput = { _ ->
+        // Update logic if needed, but LogsBox uses StateFlow directly
     }
     val modAssistantViewModel: ModAssistantViewModel = LocalModAssistantViewModel.current
 
@@ -212,71 +199,107 @@ fun MainPage(
                         }
                     }
                 }
-
             }
         )
+
+        val handleHeight = 32.dp
+        val handleHeightPx = with(density) { handleHeight.toPx() }
         
-        if (UIStateManager.isAppLoggingEnabled) {
+        // The box is screenHeightPx tall.
+        // When offsetY is 0, the bottom of the handle should be at -1 (completely hidden).
+        // When offsetY is screenHeightPx, the top of the box is at 0.
+        // Offset = offsetY - screenHeightPx
+        
+        Box(
+            modifier = Modifier
+                .offset { 
+                    IntOffset(0, offsetY.value.roundToInt() - screenHeightPx.roundToInt()) 
+                }
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.95f))
+                .align(Alignment.TopCenter)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = handleHeight)
+            ) {
+                //Spacer(modifier = Modifier.height(WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Runtime Logs",
+                        color = gold,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                    
+                    IconButton(onClick = { UIStateManager.isTabExpanded = false }) {
+                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Close", tint = gold)
+                    }
+                }
+
+                Box(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+                    LogsBox(
+                        logs = LogRepository.logs,
+                        fontSize = 12f,
+                        boxWidth = Float.MAX_VALUE,
+                        boxHeight = Float.MAX_VALUE
+                    )
+                }
+            }
+
+            // Drag Handle at the bottom
             Box(
                 modifier = Modifier
-                    .height(animatedTabHeight)
-                    .width(animatedTabWidth)
-                    .background(
-                        color = customColor,
-                        shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp)
-                    )
-                    .clickable { isTabExpanded = !isTabExpanded }
-                    .align(Alignment.TopCenter)
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(handleHeight)
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .draggable(
+                        orientation = Orientation.Vertical,
+                        state = rememberDraggableState { delta ->
+                            val newValue = (offsetY.value + delta).coerceIn(0f, screenHeightPx)
+                            scope.launch { offsetY.snapTo(newValue) }
+                        },
+                        onDragStopped = {
+                            when {
+                                offsetY.value < screenHeightPx * 0.1f -> {
+                                    offsetY.animateTo(0f)
+                                    UIStateManager.isTabExpanded = false
+                                }
+                                offsetY.value < screenHeightPx * 0.5f -> {
+                                    offsetY.animateTo(screenHeightPx / 3f)
+                                    UIStateManager.isTabExpanded = true
+                                }
+                                else -> {
+                                    offsetY.animateTo(screenHeightPx)
+                                    UIStateManager.isTabExpanded = true
+                                }
+                            }
+                        }
+                    ),
+                contentAlignment = Alignment.Center
             ) {
-                // Content of the expanded tab
-                if (isTabExpanded) {
-                    Column(
+                // Visual indicator
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp, top = 48.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row {
-                            Button(onClick = {
-                                showLogCat = false
-                                showAppLog = true
-                            }) {
-                                Text("AppLog")
-                            }
-                            Button(onClick = {
-                                showAppLog = false
-                                showLogCat = true
-                            }) {
-                                Text("Logcat")
-                            }
-                        }
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .verticalScroll(scrollState),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (showAppLog) {
-                                LogsBox(
-                                    logs = LogRepository.logs,
-                                    fontSize = 10f,
-                                    boxWidth = Float.MAX_VALUE,
-                                    boxHeight = 600f
-                                )
-                            }
-                            if (showLogCat) {
-                                Text(
-                                    text = UIStateManager.logMessagesText,
-                                    color = gold,
-                                    style = TextStyle(
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Serif
-                                    )
-                                )
-                            }
-                        }
-                    }
+                            .size(40.dp, 4.dp)
+                            .clip(CircleShape)
+                            .background(gold.copy(alpha = 0.8f))
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp, 2.dp)
+                            .clip(CircleShape)
+                            .background(gold.copy(alpha = 0.4f))
+                    )
                 }
             }
         }
@@ -367,5 +390,3 @@ fun OpenMW(
         }
     }
 }
-
-
