@@ -208,6 +208,7 @@ class EngineActivity : SDLActivity() {
                 if (!UIStateManager.useNavmesh) {
                     // Adds Overlay menu for buttons and edit mode
                     composeViewUI.setContent {
+                        val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
                         val quickSlot by getQuickSlot(this@EngineActivity).collectAsState(initial = false)
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
@@ -259,7 +260,7 @@ class EngineActivity : SDLActivity() {
                         }
 
                         AnimatedVisibility(
-                            visible = isCursorVisible == 1 && UIStateManager.tempCodeGroup == "OpenMW",
+                            visible = isCursorVisible == 1 && UIStateManager.tempCodeGroup == "OpenMW" && !isUIHidden,
                             enter = fadeIn() + expandIn(),
                             exit = fadeOut() + shrinkOut()
                         ) {
@@ -271,11 +272,13 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
-                        OverlayUI(
-                            context = this@EngineActivity,
-                            virtualKeyboard = virtualKeyboard,
-                            onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
-                        )
+                        if (!isUIHidden) {
+                            OverlayUI(
+                                context = this@EngineActivity,
+                                virtualKeyboard = virtualKeyboard,
+                                onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
+                            )
+                        }
 
                         Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
 
@@ -323,7 +326,7 @@ class EngineActivity : SDLActivity() {
                         }
 
                         AnimatedVisibility(
-                            visible = UIStateManager.tempCodeGroup == "OpenMW",
+                            visible = UIStateManager.tempCodeGroup == "OpenMW"  && !isUIHidden,
                             enter = fadeIn() + expandIn(),
                             exit = fadeOut() + shrinkOut()
                         ) {

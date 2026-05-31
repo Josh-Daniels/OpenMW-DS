@@ -149,7 +149,7 @@ fun ResizableDraggableRightThumbstick(
         var hexCode by remember { mutableStateOf(state.color) }
         var buttonColor by remember { mutableStateOf(Color.fromHex(hexCode)) }
         var buttonAlpha by remember { mutableFloatStateOf(state.alpha) }
-        val buttonTint by GameFilesPreferences.loadButtonTint(context).collectAsState(initial = false)
+        val buttonTint = remember { mutableStateOf(state.buttonTint) }
         val offsetX = remember { mutableFloatStateOf(state.offsetX) }
         val offsetY = remember { mutableFloatStateOf(state.offsetY) }
         val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
@@ -201,7 +201,8 @@ fun ResizableDraggableRightThumbstick(
                 alpha = buttonAlpha,
                 uri = buttonUri.value,
                 group = 1,
-                vibrate = false
+                vibrate = false,
+                buttonTint = buttonTint.value
             )
             updateButtonState(98, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
@@ -403,7 +404,7 @@ fun ResizableDraggableRightThumbstick(
                                     .graphicsLayer(
                                         rotationZ = if (editMode) rotationThumb else 0f
                                     ),
-                                colorFilter = if (buttonTint) {
+                                colorFilter = if (buttonTint.value) {
                                     ColorFilter.tint(rightThumbColor)
                                 } else {
                                     null
@@ -795,16 +796,53 @@ fun ResizableDraggableRightThumbstick(
                                                         HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
                                                     }
                                                     if (colors) {
-                                                        ColorPickerWheel(
-                                                            initialColor = buttonColor,
-                                                            onColorSelected = { color, hex, alphaValue ->
-                                                                hexCode = hex
-                                                                buttonAlpha = alphaValue
-                                                                buttonColor = color
-                                                                saveState()
-                                                                Log.d("ColorWheel", "Selected Color: $color, Hex: $hex, Alpha: $alphaValue")
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                            modifier = Modifier
+                                                                .height(40.dp)
+                                                                .fillMaxWidth()
+                                                        ) {
+                                                            Text(
+                                                                text = "Colorize Icon?",
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            Switch(
+                                                                checked = buttonTint.value,
+                                                                onCheckedChange = {
+                                                                    buttonTint.value = it
+                                                                    saveState()
+                                                                },
+                                                                colors = SwitchDefaults.colors(
+                                                                    checkedThumbColor = Color(202, 165, 96),
+                                                                    uncheckedThumbColor = Color.Red,
+                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                    checkedBorderColor = White,
+                                                                    uncheckedBorderColor = White
+                                                                )
+                                                            )
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+
+                                                        if (buttonTint.value) {
+                                                            ColorPickerWheel(
+                                                                initialColor = buttonColor,
+                                                                onColorSelected = { color, hex, alphaValue ->
+                                                                    hexCode = hex
+                                                                    buttonAlpha = alphaValue
+                                                                    buttonColor = color
+                                                                    saveState()
+                                                                    Log.d("ColorWheel", "Selected Color: $color, Hex: $hex, Alpha: $alphaValue")
+                                                                }
+                                                            )
+                                                        } else {
+                                                            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                                                                Text("Colorize icon disabled", color = White)
                                                             }
-                                                        )
+                                                        }
                                                         Spacer(modifier = Modifier.height(2.dp))
                                                         Row {
                                                             Button(

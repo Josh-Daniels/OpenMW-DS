@@ -609,8 +609,8 @@ fun HiddenMenu(
         val snapX = remember { mutableStateOf<Float?>(null) }
         val snapY = remember { mutableStateOf<Float?>(null) }
         val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
-        val buttonTint by GameFilesPreferences.loadButtonTint(context).collectAsState(initial = true)
         val buttonUri = remember { mutableStateOf(parentButton.uri) } // Handling URI state
+        val buttonTint = remember { mutableStateOf(parentButton.buttonTint ?: true) }
         var hexCode by remember { mutableStateOf(parentButton.color) } // Set initial hex code directly from state
         var buttonColor by remember { mutableStateOf(Color.fromHex(hexCode)) }
         var buttonAlpha by remember { mutableFloatStateOf(parentButton.alpha) }
@@ -673,7 +673,8 @@ fun HiddenMenu(
                     size = buttonSize.value.value,
                     color = hexCode,
                     alpha = buttonAlpha,
-                    uri = buttonUri.value
+                    uri = buttonUri.value,
+                    buttonTint = buttonTint.value
                 )
                 ButtonConfigManager.saveParentButton(updatedParentButton)
             }
@@ -762,7 +763,7 @@ fun HiddenMenu(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .alpha(buttonAlpha),
-                            colorFilter = if (buttonTint) {
+                            colorFilter = if (buttonTint.value) {
                                 ColorFilter.tint(buttonColor.copy(alpha = buttonAlpha))
                             } else {
                                 null
@@ -922,7 +923,7 @@ fun HiddenMenu(
                                                                     modifier = Modifier
                                                                         .fillMaxSize()
                                                                         .alpha(buttonAlpha),
-                                                                    colorFilter = if (buttonTint) {
+                                                                    colorFilter = if (buttonTint.value) {
                                                                         ColorFilter.tint(
                                                                             buttonColor.copy(
                                                                                 alpha = buttonAlpha
@@ -1029,16 +1030,55 @@ fun HiddenMenu(
                                                     }
                                                 }
                                                 if (colors) {
-                                                    ColorPickerWheel(
-                                                        initialColor = buttonColor,
-                                                        onColorSelected = { color, hex, alphaValue ->
-                                                            hexCode = hex
-                                                            buttonAlpha = alphaValue
-                                                            buttonColor = color
-                                                            saveState()
-                                                            Log.d("ColorWheel", "Selected Color: $color, Hex: $hex, Alpha: $alphaValue")
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(
+                                                            8.dp
+                                                        ),
+                                                        modifier = Modifier
+                                                            .height(40.dp)
+                                                            .fillMaxWidth()
+                                                    ) {
+                                                        Text(
+                                                            text = "Colorize Icon?",
+                                                            color = White,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                        Spacer(modifier = Modifier.weight(1f))
+                                                        androidx.compose.material3.Switch(
+                                                            checked = buttonTint.value,
+                                                            onCheckedChange = {
+                                                                buttonTint.value = it
+                                                                saveState()
+                                                            },
+                                                            colors = androidx.compose.material3.SwitchDefaults.colors(
+                                                                checkedThumbColor = Color(202,165,96),
+                                                                uncheckedThumbColor = Color.Red,
+                                                                checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                checkedBorderColor = White,
+                                                                uncheckedBorderColor = White
+                                                            )
+                                                        )
+                                                    }
+                                                    HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+
+                                                    if (buttonTint.value) {
+                                                        ColorPickerWheel(
+                                                            initialColor = buttonColor,
+                                                            onColorSelected = { color, hex, alphaValue ->
+                                                                hexCode = hex
+                                                                buttonAlpha = alphaValue
+                                                                buttonColor = color
+                                                                saveState()
+                                                                Log.d("ColorWheel", "Selected Color: $color, Hex: $hex, Alpha: $alphaValue")
+                                                            }
+                                                        )
+                                                    } else {
+                                                        Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                                                            Text("Colorize icon disabled", color = White)
                                                         }
-                                                    )
+                                                    }
                                                 }
                                             }
                                             VerticalScrollbar(

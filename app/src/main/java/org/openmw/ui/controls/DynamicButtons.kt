@@ -2,6 +2,7 @@ package org.openmw.ui.controls
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent.ACTION_DOWN
@@ -90,6 +91,7 @@ import androidx.compose.ui.window.Popup
 import coil.compose.rememberAsyncImagePainter
 import coil.compose.rememberImagePainter
 import coil.decode.GifDecoder
+import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.composables.core.ScrollArea
 import com.composables.core.Thumb
@@ -189,12 +191,27 @@ fun ResizableDraggableButton(
         val snapX = remember { mutableStateOf<Float?>(null) }
         val snapY = remember { mutableStateOf<Float?>(null) }
         val painter: Painter? = state.uri?.let { uri ->
-            if (uri.toString().endsWith(".gif", ignoreCase = true)) {
-                // Use Coil's GIF decoder for animated GIFs
+            val uriString = uri.toString()
+            if (uriString.endsWith(".gif", ignoreCase = true) || uriString.endsWith(".apng", ignoreCase = true)) {
+                // Use Coil's animated decoders
                 rememberAsyncImagePainter(
                     ImageRequest.Builder(context)
                         .data(uri)
-                        .decoderFactory(GifDecoder.Factory())
+                        .decoderFactory(
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                ImageDecoderDecoder.Factory()
+                            } else {
+                                GifDecoder.Factory()
+                            }
+                        )
+                        .build()
+                )
+            } else if (uriString.endsWith(".png", ignoreCase = true) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                // APNGs often use .png extension, use ImageDecoder on API 28+ to support animation
+                rememberAsyncImagePainter(
+                    ImageRequest.Builder(context)
+                        .data(uri)
+                        .decoderFactory(ImageDecoderDecoder.Factory())
                         .build()
                 )
             } else {
@@ -203,6 +220,7 @@ fun ResizableDraggableButton(
             }
         }
         val buttonUri = remember { mutableStateOf(state.uri) } // Handling URI state
+        val buttonTint = remember { mutableStateOf(state.buttonTint) }
         var hexCode by remember { mutableStateOf(state.color) } // Set initial hex code directly from state
         var buttonColor by remember { mutableStateOf(Color.fromHex(hexCode)) }
         var buttonAlpha by remember { mutableFloatStateOf(state.alpha) }
@@ -210,7 +228,6 @@ fun ResizableDraggableButton(
         val stateSB = rememberScrollAreaState(scrollState)
         val autoMouseMode by loadAutoMouseMode(context).collectAsState(initial = "Hybrid")
         val buttonShape by loadButtonShape(context).collectAsState(initial = "CircleShape")
-        val buttonTint by GameFilesPreferences.loadButtonTint(context).collectAsState(initial = true)
         val selectedAnimation by getSelectedAnimation(context).collectAsState(initial = "None")
         val sensitivityMouseFlow = getSensitivityMouse(context).collectAsState(initial = 5000f)
         var sensitivityMouse by remember { mutableFloatStateOf(sensitivityMouseFlow.value ?: 5000f) }
@@ -322,7 +339,8 @@ fun ResizableDraggableButton(
                 group = state.group,
                 vibrate = buttonVibrate.value,
                 isMouseButton = isMouseButton.value,
-                mouseButton = mouseButton.intValue
+                mouseButton = mouseButton.intValue,
+                buttonTint = buttonTint.value
             )
             updateButtonState(buttonState.id, updatedState)
             UIStateManager.saveButtonState(containerWidth, containerHeight)
@@ -610,7 +628,7 @@ fun ResizableDraggableButton(
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .alpha(buttonAlpha),
-                                    colorFilter = if (buttonTint) {
+                                    colorFilter = if (buttonTint.value) {
                                         if (isToggle.value) {
                                             ColorFilter.tint(buttonColor.copy(alpha = 1.0f))
                                         } else {
@@ -1114,7 +1132,6 @@ fun ResizableDraggableButton(
                                                                         }
                                                                     }
                                                                 }
-                                                                Text("DO NOT USE\nnot ready yet", color = White, fontWeight = FontWeight.Bold)
                                                             }
                                                             HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
                                                             Spacer(modifier = Modifier.height(8.dp))
@@ -1135,16 +1152,55 @@ fun ResizableDraggableButton(
                                                             StateInfoRow("URI:", state.uri?.path?.substringAfterLast("/") ?: "None")
                                                         }
                                                         if (colors) {
-                                                            ColorPickerWheel(
-                                                                initialColor = buttonColor,
-                                                                onColorSelected = { color, hex, alphaValue ->
-                                                                    hexCode = hex
-                                                                    buttonAlpha = alphaValue
-                                                                    buttonColor = color
-                                                                    saveState()
-                                                                    Log.d("ColorWheel", "Selected Color: $color, Hex: $hex, Alpha: $alphaValue")
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(
+                                                                    8.dp
+                                                                ),
+                                                                modifier = Modifier
+                                                                    .height(40.dp)
+                                                                    .fillMaxWidth()
+                                                            ) {
+                                                                Text(
+                                                                    text = "Colorize Icon?",
+                                                                    color = White,
+                                                                    fontWeight = FontWeight.Bold
+                                                                )
+                                                                Spacer(modifier = Modifier.weight(1f))
+                                                                Switch(
+                                                                    checked = buttonTint.value,
+                                                                    onCheckedChange = {
+                                                                        buttonTint.value = it
+                                                                        saveState()
+                                                                    },
+                                                                    colors = SwitchDefaults.colors(
+                                                                        checkedThumbColor = Color(202,165,96),
+                                                                        uncheckedThumbColor = Color.Red,
+                                                                        checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                        uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                        checkedBorderColor = White,
+                                                                        uncheckedBorderColor = White
+                                                                    )
+                                                                )
+                                                            }
+                                                            HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+
+                                                            if (buttonTint.value) {
+                                                                ColorPickerWheel(
+                                                                    initialColor = buttonColor,
+                                                                    onColorSelected = { color, hex, alphaValue ->
+                                                                        hexCode = hex
+                                                                        buttonAlpha = alphaValue
+                                                                        buttonColor = color
+                                                                        saveState()
+                                                                        Log.d("ColorWheel", "Selected Color: $color, Hex: $hex, Alpha: $alphaValue")
+                                                                    }
+                                                                )
+                                                            } else {
+                                                                Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                                                                    Text("Colorize icon disabled", color = White)
                                                                 }
-                                                            )
+                                                            }
                                                             Spacer(modifier = Modifier.height(2.dp))
                                                             Row {
                                                                 Button(

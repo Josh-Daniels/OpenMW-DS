@@ -382,7 +382,6 @@ fun ControlsSettingsSection() {
     val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
     val quickSlot by getQuickSlot(context).collectAsState(initial = true)
     val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
-    val buttonTint by GameFilesPreferences.loadButtonTint(context).collectAsState(initial = true)
 
     SettingSectionCard(
         title = stringResource(R.string.customize_controls),
@@ -406,10 +405,6 @@ fun ControlsSettingsSection() {
         
         SettingRow(title = stringResource(R.string.allow_button_groups), subtitle = stringResource(R.string.allow_btn_group_feat)) {
             Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setButtonGroupSwitch(context, it) } })
-        }
-        
-        SettingRow(title = stringResource(R.string.allow_button_tint), subtitle = stringResource(R.string.allow_button_tint_feat)) {
-            Switch(checked = buttonTint, onCheckedChange = { scope.launch { GameFilesPreferences.saveButtonTint(context, it) } })
         }
         
         ButtonShapeDropdownMenu { scope.launch { GameFilesPreferences.saveButtonShape(context, it) } }

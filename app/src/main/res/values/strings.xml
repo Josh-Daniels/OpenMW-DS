@@ -57,8 +57,8 @@
     <string name="name">Name</string>
     <string name="category">Category</string>
     <string name="switch_to">Switch to</string>
-    <string name="groundcover">groundcover</string>
-    <string name="content">content</string>
+    <string name="groundcover">Groundcover</string>
+    <string name="content">Content</string>
     <string name="delete">Delete</string>
     <string name="move">Move</string>
     <string name="confirm_deletion">Confirm Deletion</string>

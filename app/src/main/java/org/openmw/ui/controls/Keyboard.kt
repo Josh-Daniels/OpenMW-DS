@@ -1,8 +1,9 @@
 package org.openmw.ui.controls
 
+import android.content.Context
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -36,7 +37,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -53,6 +57,17 @@ import org.openmw.R
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.TranslateText
 import org.openmw.utils.sendKeyEvent
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import org.openmw.utils.GameFilesPreferences.getKeyboardBacklight
+import org.openmw.utils.GameFilesPreferences.getKeyboardHeight
+import org.openmw.utils.GameFilesPreferences.getKeyboardTheme
+import org.openmw.utils.GameFilesPreferences.getKeyboardWidth
+import org.openmw.utils.GameFilesPreferences.setKeyboardBacklight
+import org.openmw.utils.GameFilesPreferences.setKeyboardHeight
+import org.openmw.utils.GameFilesPreferences.setKeyboardTheme
+import org.openmw.utils.GameFilesPreferences.setKeyboardWidth
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
@@ -60,39 +75,57 @@ object UIKeyboard {
     var showVKB by mutableStateOf(false)
     var isShiftPressed by mutableStateOf(false)
     var isCapsLock by mutableStateOf(false)
-    var themeMode by mutableStateOf("lightMode")
-    var backLight by mutableFloatStateOf(1f)
 }
 
-fun cycleBackLight() {
-    UIKeyboard.backLight = when (UIKeyboard.backLight) {
+fun cycleBackLight(context: Context, scope: CoroutineScope, currentBacklight: Float) {
+    val nextBacklight = when (currentBacklight) {
         1f -> 0.75f
         0.75f -> 0.50f
         0.50f -> 0.25f
         0.25f -> 1f
         else -> 1f // fallback for unexpected values
     }
+    scope.launch {
+        setKeyboardBacklight(context, nextBacklight)
+    }
 }
 
-fun cycleColorTheme() {
-    UIKeyboard.themeMode = when (UIKeyboard.themeMode) {
+fun cycleColorTheme(context: Context, scope: CoroutineScope, currentTheme: String) {
+    val nextTheme = when (currentTheme) {
         "darkMode" -> "lightMode"
         "lightMode" -> "RGB"
         "RGB" -> "gold"
         "gold" -> "darkMode"
         else -> "darkMode" // fallback
     }
+    scope.launch {
+        setKeyboardTheme(context, nextTheme)
+    }
 }
 
 @Composable
 fun VirtualKeyboard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    
+    val themeMode by getKeyboardTheme(context).collectAsState(initial = "lightMode")
+    val backLight by getKeyboardBacklight(context).collectAsState(initial = 1f)
+    
     var functionKEYS by remember { mutableStateOf(false) }
     var numROWS by remember { mutableIntStateOf(if (functionKEYS) 6 else 5) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
     var showSettingsDialog by remember { mutableStateOf(false) }
-    var boxHeight by remember { mutableFloatStateOf(numROWS* 40f) }
-    var boxWidth by remember { mutableFloatStateOf(boxHeight * 3.5f) }
+    
+    val storedWidth by getKeyboardWidth(context).collectAsState(initial = null)
+    val storedHeight by getKeyboardHeight(context).collectAsState(initial = null)
+    
+    var boxHeight by remember(storedHeight, numROWS) { 
+        mutableFloatStateOf(storedHeight ?: (numROWS * 40f)) 
+    }
+    var boxWidth by remember(storedWidth, boxHeight) { 
+        mutableFloatStateOf(storedWidth ?: (boxHeight * 3.5f)) 
+    }
     var expanded by remember { mutableStateOf(false) }
 
     Column(
@@ -111,36 +144,25 @@ fun VirtualKeyboard() {
                 }
             )
     ) {
-        // Define the colors for the RGB effect
-        val colors = listOf(
-            Color.Red, Color.Green, Color.Blue
+        // Efficient RGB Transition
+        val colors = listOf(Color.Red, Color.Green, Color.Blue)
+        val infiniteTransition = rememberInfiniteTransition(label = "RGB")
+        val colorFraction by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = colors.size.toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 3000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "fraction"
         )
-        // Animation state
-        var colorIndex by remember { mutableIntStateOf(0) }
-        var nextColorIndex by remember { mutableIntStateOf(1) }
-        var fraction by remember { mutableFloatStateOf(0f) }
 
-        // Launch a coroutine to gradually change the color fraction
-        LaunchedEffect(Unit) {
-            while (true) {
-                delay(20)  // Adjust delay for smoother transition
-                fraction += 0.01f
-                if (fraction >= 1f) {
-                    fraction = 0f
-                    colorIndex = nextColorIndex
-                    nextColorIndex = (nextColorIndex + 1) % colors.size
-                }
-            }
-        }
-
-        // Custom lerp function for Color
-        fun customLerp(start: Color, end: Color, fraction: Float): Color {
-            return androidx.compose.ui.graphics.lerp(start, end, fraction.coerceIn(0f, 1f))
-        }
-
-        // Function to get the current color based on fraction
-        fun getCurrentColor(offset: Float): Color {
-            return customLerp(colors[colorIndex], colors[nextColorIndex], fraction + offset)
+        fun getRGBColor(offset: Float): Color {
+            val total = colorFraction + offset
+            val idx = total.toInt() % colors.size
+            val nextIdx = (idx + 1) % colors.size
+            val lerpFraction = total % 1f
+            return lerp(colors[idx], colors[nextIdx], lerpFraction)
         }
 
         // Function to create rows of boxes with sizes
@@ -162,29 +184,24 @@ fun VirtualKeyboard() {
                     charsNormal.zip(sizes).forEach { (char, sizeModifier) ->
                         val keyEvent = mKeyCharacterMap.getEvents(char.toCharArray())
                         var isPressed by remember { mutableStateOf(false) }
-                        val offset = remember { Random.nextFloat() * 0.5f } // Cache random offset
-                        val animatedColor by animateColorAsState(
-                            targetValue = getCurrentColor(offset)
-                        )
+                        val keyOffset = remember { Random.nextFloat() * 0.5f }
 
                         Box(
                             modifier = sizeModifier
-                                .background(Color.Black.copy(alpha = 0.25f))
-                                .border(
-                                    width = 2.dp,
-                                    color = when (UIKeyboard.themeMode) {
-                                        "darkMode" -> Color.Black.copy(alpha = UIKeyboard.backLight)
-                                        "lightMode" -> Color.White.copy(alpha = UIKeyboard.backLight)
-                                        "RGB" -> animatedColor.copy(alpha = UIKeyboard.backLight)
-                                        "gold" -> Color(
-                                            202,
-                                            165,
-                                            96
-                                        ).copy(alpha = UIKeyboard.backLight)
-
-                                        else -> Color.LightGray.copy(alpha = UIKeyboard.backLight)
+                                .drawBehind {
+                                    val baseColor = when (themeMode) {
+                                        "darkMode" -> Color.Black
+                                        "lightMode" -> Color.White
+                                        "RGB" -> getRGBColor(keyOffset)
+                                        "gold" -> Color(202, 165, 96)
+                                        else -> Color.LightGray
                                     }
-                                )
+                                    drawRect(color = Color.Black.copy(alpha = 0.25f))
+                                    drawRect(
+                                        color = baseColor.copy(alpha = backLight),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
+                                }
                                 .pointerInput(char) {
                                     awaitPointerEventScope {
                                         while (true) {
@@ -194,7 +211,7 @@ fun VirtualKeyboard() {
                                             if (down && !isPressed) {
                                                 isPressed = true
                                                 when (char) {
-                                                    "ALPHA" -> cycleBackLight()
+                                                    "ALPHA" -> cycleBackLight(context, scope, backLight)
                                                     "␣" -> sendKeyEvent(KeyEvent.KEYCODE_SPACE)
                                                     "`" -> sendKeyEvent(KeyEvent.KEYCODE_GRAVE)
                                                     "TAB" -> {
@@ -229,7 +246,7 @@ fun VirtualKeyboard() {
                                                     }
 
                                                     "Fn" -> functionKEYS = !functionKEYS
-                                                    "⚙" -> cycleColorTheme() //showSettingsDialog = true
+                                                    "⚙" -> cycleColorTheme(context, scope, themeMode) //showSettingsDialog = true
 
                                                     else -> keyEvent?.firstOrNull()?.let {
                                                         onNativeKeyDown(it.keyCode)
@@ -260,7 +277,12 @@ fun VirtualKeyboard() {
                                                     boxWidth += dragAmount.x
                                                     boxHeight += dragAmount.y
                                                 },
-                                                onDragEnd = { }
+                                                onDragEnd = { 
+                                                    scope.launch {
+                                                        setKeyboardWidth(context, boxWidth)
+                                                        setKeyboardHeight(context, boxHeight)
+                                                    }
+                                                }
                                             )
                                         }
                                     } else {
@@ -283,13 +305,13 @@ fun VirtualKeyboard() {
                             }
                             Text(
                                 text = if (translationChecked) translatedText else char,
-                                color = when (UIKeyboard.themeMode) {
-                                    "darkMode" -> if (UIKeyboard.backLight == 1f) Color.Black else Color.Black.copy(alpha = UIKeyboard.backLight)
-                                    "lightMode" -> if (UIKeyboard.backLight == 1f) Color.White else Color.White.copy(alpha = UIKeyboard.backLight)
-                                    "RGB" -> if (UIKeyboard.backLight == 1f) animatedColor else animatedColor.copy(alpha = UIKeyboard.backLight)
-                                    "gold" -> if (UIKeyboard.backLight == 1f) Color(202, 165, 96) else Color(202, 165, 96).copy(alpha = UIKeyboard.backLight)
-                                    else -> if (UIKeyboard.backLight == 1f) Color.LightGray else Color.LightGray.copy(alpha = UIKeyboard.backLight)
-                                },
+                                color = when (themeMode) {
+                                    "darkMode" -> Color.Black
+                                    "lightMode" -> Color.White
+                                    "RGB" -> getRGBColor(keyOffset)
+                                    "gold" -> Color(202, 165, 96)
+                                    else -> Color.LightGray
+                                }.copy(alpha = if (backLight == 1f) 1f else backLight),
                                 fontSize = 16.sp,  // Set the text size
                                 fontWeight = FontWeight.Bold,  // Set the text style to bold
                                 modifier = Modifier.align(Alignment.Center)  // Center the text in the box
@@ -526,25 +548,25 @@ fun VirtualKeyboard() {
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.lightmode), color = Color.White) },
                                     onClick = {
-                                        UIKeyboard.themeMode = "lightMode"
+                                        scope.launch { setKeyboardTheme(context, "lightMode") }
                                         expanded = false
                                     })
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.darkmode), color = Color.White) },
                                     onClick = {
-                                        UIKeyboard.themeMode = "darkMode"
+                                        scope.launch { setKeyboardTheme(context, "darkMode") }
                                         expanded = false
                                     })
                                 DropdownMenuItem(
                                     text = { Text("RGB", color = Color.White) },
                                     onClick = {
-                                        UIKeyboard.themeMode = "RGB"
+                                        scope.launch { setKeyboardTheme(context, "RGB") }
                                         expanded = false
                                     })
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.gold), color = Color.White) },
                                     onClick = {
-                                        UIKeyboard.themeMode = "gold"
+                                        scope.launch { setKeyboardTheme(context, "gold") }
                                         expanded = false
                                     })
                             }
@@ -567,4 +589,3 @@ fun VirtualKeyboard() {
         }
     }
 }
-

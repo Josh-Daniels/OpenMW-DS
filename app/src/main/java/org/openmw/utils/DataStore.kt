@@ -27,9 +27,10 @@ import org.openmw.ui.controls.UIStateManager
 
 // Singleton instance to avoid multiple DataStore instances for the same file
 private var dataStoreInstance: DataStore<Preferences>? = null
+private val dataStoreLock = Any()
 
 val Context.dataStore: DataStore<Preferences>
-    get() = dataStoreInstance ?: synchronized(this) {
+    get() = synchronized(dataStoreLock) {
         dataStoreInstance ?: PreferenceDataStoreFactory.create(
             produceFile = { File(Constants.USER_FILE_STORAGE, "game_files_prefs.preferences_pb") }
         ).also { dataStoreInstance = it }
@@ -79,6 +80,11 @@ object GameFilesPreferences {
     val USER_SET_TEMP_KEY = stringPreferencesKey("user_set_temp")
     val USER_SET_GPU_TEMP_KEY = stringPreferencesKey("user_set_gpu_temp")
 
+    val KEYBOARD_BACKLIGHT = floatPreferencesKey("keyboard_backlight")
+    val KEYBOARD_THEME = stringPreferencesKey("keyboard_theme")
+    val KEYBOARD_WIDTH = floatPreferencesKey("keyboard_width")
+    val KEYBOARD_HEIGHT = floatPreferencesKey("keyboard_height")
+
     // Android 15 bug where game files not detected when launching
     val BYPASS_GAME_FILES_KEY = booleanPreferencesKey("bypass_game_files_check")
 
@@ -95,7 +101,6 @@ object GameFilesPreferences {
     val SELECTED_MOD_LIST_KEY = stringPreferencesKey("selected_mod_list")
 
     val BUTTON_SHAPE = stringPreferencesKey("button_shape")
-    val BUTTON_TINT = booleanPreferencesKey("button_tint")
 
     // Enable Virtual Left Thumbstick
     val VIRTUAL_LEFT_THUMBSTICK = booleanPreferencesKey("enable_virtual_left_thumbstick")
@@ -362,18 +367,6 @@ object GameFilesPreferences {
     fun loadIconGlow(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
             preferences[ICON_GLOW_KEY] ?: true
-        }
-    }
-
-    suspend fun saveButtonTint(context: Context, buttonTint: Boolean) {
-        context.dataStore.edit { preferences ->
-            preferences[BUTTON_TINT] = buttonTint
-        }
-    }
-
-    fun loadButtonTint(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
-            preferences[BUTTON_TINT] ?: true
         }
     }
 
@@ -710,5 +703,29 @@ object GameFilesPreferences {
         context.dataStore.edit { preferences ->
             preferences[USER_SET_GPU_TEMP_KEY] = value
         }
+    }
+
+    fun getKeyboardBacklight(context: Context): Flow<Float> = context.dataStore.data.map { it[KEYBOARD_BACKLIGHT] ?: 1f }
+
+    suspend fun setKeyboardBacklight(context: Context, value: Float) {
+        context.dataStore.edit { it[KEYBOARD_BACKLIGHT] = value }
+    }
+
+    fun getKeyboardTheme(context: Context): Flow<String> = context.dataStore.data.map { it[KEYBOARD_THEME] ?: "lightMode" }
+
+    suspend fun setKeyboardTheme(context: Context, value: String) {
+        context.dataStore.edit { it[KEYBOARD_THEME] = value }
+    }
+
+    fun getKeyboardWidth(context: Context): Flow<Float?> = context.dataStore.data.map { it[KEYBOARD_WIDTH] }
+
+    suspend fun setKeyboardWidth(context: Context, value: Float) {
+        context.dataStore.edit { it[KEYBOARD_WIDTH] = value }
+    }
+
+    fun getKeyboardHeight(context: Context): Flow<Float?> = context.dataStore.data.map { it[KEYBOARD_HEIGHT] }
+
+    suspend fun setKeyboardHeight(context: Context, value: Float) {
+        context.dataStore.edit { it[KEYBOARD_HEIGHT] = value }
     }
 }

@@ -35,7 +35,8 @@ data class ButtonConfig(
     val group: Int? = null,
     val vibrate: Boolean? = null,
     val isMouseButton: Boolean? = null,
-    val mouseButton: Int? = null
+    val mouseButton: Int? = null,
+    val buttonTint: Boolean? = null
 )
 
 object UriSerializer : KSerializer<Uri> {

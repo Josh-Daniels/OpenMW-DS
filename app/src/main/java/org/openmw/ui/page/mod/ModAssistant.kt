@@ -730,7 +730,7 @@ fun ModValuesList(
                                                         val updatedList = categorizedModValues[selectedTabIndex].toMutableList()
                                                         val index = updatedList.indexOfFirst { it.id == modValue.id }
                                                         if (index != -1) {
-                                                            val newCategory = if (modValue.category == "content") "groundcover" else "content"
+                                                            val newCategory = if (modValue.category == "Content") "Groundcover" else "Content"
                                                             updatedList[index] = updatedList[index].copy(category = newCategory)
                                                             categorizedModValues = categorizedModValues.toMutableList().apply {
                                                                 this[selectedTabIndex] = updatedList
@@ -773,7 +773,7 @@ fun ModValuesList(
                                                 ) {
                                                     Text(
 
-                                                        text = "${stringResource(R.string.switch_to)} ${if (modValue.category == "content") 
+                                                        text = "${stringResource(R.string.switch_to)} ${if (modValue.category == "Content") 
                                                             stringResource(R.string.groundcover) 
                                                         else 
                                                             stringResource(R.string.content)
@@ -1051,7 +1051,7 @@ fun ModValuesList(
                                                     val updatedList = categorizedModValues[selectedTabIndex].toMutableList()
                                                     val index = updatedList.indexOfFirst { it.id == modValue.id }
                                                     if (index != -1) {
-                                                        val newCategory = if (modValue.category == "content") "groundcover" else "content"
+                                                        val newCategory = if (modValue.category == "Content") "Groundcover" else "Content"
                                                         updatedList[index] = updatedList[index].copy(category = newCategory)
                                                         categorizedModValues = categorizedModValues.toMutableList().apply {
                                                             this[selectedTabIndex] = updatedList
@@ -1101,7 +1101,7 @@ fun ModValuesList(
                                             }
                                         },
                                         title = { Text(stringResource(R.string.confirm_action)) },
-                                        text = { Text(String.format(stringResource(R.string.switch_the_category_to_tip), if (modValue.category == "content") stringRes(
+                                        text = { Text(String.format(stringResource(R.string.switch_the_category_to_tip), if (modValue.category == "Content") stringRes(
                                             R.string.groundcover
                                         ) else stringRes(R.string.content)
                                         )) }

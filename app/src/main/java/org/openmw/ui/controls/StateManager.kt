@@ -95,7 +95,8 @@ data class ButtonState(
     val group: Int,
     val vibrate: Boolean = true,
     val isMouseButton: Boolean = false,
-    val mouseButton: Int = 1 // 1: Left, 2: Middle, 3: Right
+    val mouseButton: Int = 1, // 1: Left, 2: Middle, 3: Right
+    val buttonTint: Boolean = true
 )
 
 val DeletedButtonState = ButtonState(
@@ -112,7 +113,8 @@ val DeletedButtonState = ButtonState(
     group = -1,
     vibrate = false,
     isMouseButton = false,
-    mouseButton = 1
+    mouseButton = 1,
+    buttonTint = true
 )
 
 object UIStateManager {
@@ -292,7 +294,8 @@ object UIStateManager {
                         group = button.group,
                         vibrate = button.vibrate,
                         isMouseButton = button.isMouseButton,
-                        mouseButton = button.mouseButton
+                        mouseButton = button.mouseButton,
+                        buttonTint = button.buttonTint
                     )
                 }
 
@@ -302,7 +305,7 @@ object UIStateManager {
             )
 
             configs.forEach { config ->
-                val log = "ButtonID_${config.id}(${config.size};${config.offsetX};${config.offsetY};${config.isLocked};${config.blockMouse};${config.keyCode};#${config.color};${config.alpha};${config.uri};${config.group};vibrate=${config.vibrate};mouse=${config.isMouseButton}:${config.mouseButton})"
+                val log = "ButtonID_${config.id}(${config.size};${config.offsetX};${config.offsetY};${config.isLocked};${config.blockMouse};${config.keyCode};#${config.color};${config.alpha};${config.uri};${config.group};vibrate=${config.vibrate};mouse=${config.isMouseButton}:${config.mouseButton};tint=${config.buttonTint})"
                 println("Saved to JSON: $log")
                 addCustomLog("Saved to JSON: $log", textSize = 10, textColor = Color.Cyan)
             }
@@ -345,7 +348,8 @@ object UIStateManager {
                 group = config.group ?: 1,
                 vibrate = config.vibrate ?: false,
                 isMouseButton = config.isMouseButton ?: false,
-                mouseButton = config.mouseButton ?: 1
+                mouseButton = config.mouseButton ?: 1,
+                buttonTint = config.buttonTint ?: true
             )
 
             println("Loaded button state: $buttonState")
@@ -941,7 +945,8 @@ fun DynamicButtonManager(
                         group = buttonsGroup,
                         vibrate = true,
                         isMouseButton = false,
-                        mouseButton = 1
+                        mouseButton = 1,
+                        buttonTint = true
                     )
 
                     onNewButtonAdded(newButtonState)
