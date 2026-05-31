@@ -2,6 +2,8 @@ import org.gradle.kotlin.dsl.coreLibraryDesugaring
 import java.util.Properties
 import java.util.Random
 import java.io.FileInputStream
+import java.text.SimpleDateFormat
+import java.util.Date
 
 plugins {
     alias(libs.plugins.android.application)
@@ -40,7 +42,7 @@ android {
 
         targetSdk = 36
         versionCode = 2
-        versionName = "2.7.4"
+        versionName = SimpleDateFormat("MM/dd/yyyy").format(Date())
 
         buildConfigField("int", "RANDOMIZER", "${Random().nextInt(999).let { if (it < 0) -it else it }}")
 
