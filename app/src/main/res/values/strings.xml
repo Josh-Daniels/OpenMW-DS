@@ -272,6 +272,7 @@
     <string name="select_a_controller_button">Select a Virtual Controller button.</string>
     <string name="select_a_numpad_button">Select a Numpad button.</string>
     <string name="enable_right_thumbstick">Enable Right Thumbstick.</string>
+    <string name="enable_quickSlot">Enable Quick Slot.</string>
     <string name="remove_icons">Remove Icons</string>
     <string name="download_file">Download File</string>
     <string name="deleting">Deleting</string>

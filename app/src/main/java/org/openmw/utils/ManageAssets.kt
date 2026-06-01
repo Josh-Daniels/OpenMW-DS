@@ -151,6 +151,7 @@ class UserManageAssets(val context: Context) {
         // Write the new stamp after successful copy
         try {
             stampFile.writeText(targetStamp)
+            patchShaders()
             Log.d("ManageAssets", "Successfully updated resources and stamp: $targetStamp")
         } catch (e: Exception) {
             Log.e("ManageAssets", "Failed to write version stamp", e)

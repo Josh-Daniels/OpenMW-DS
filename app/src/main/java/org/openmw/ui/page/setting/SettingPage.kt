@@ -99,7 +99,6 @@ import org.openmw.utils.FileBrowserPopup
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getBackgroundAnimationFlow
 import org.openmw.utils.GameFilesPreferences.getLanguageFlow
-import org.openmw.utils.GameFilesPreferences.getQuickSlot
 import org.openmw.utils.GameFilesPreferences.getScreenStayOn
 import org.openmw.utils.GameFilesPreferences.getSystemBars
 import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
@@ -380,7 +379,6 @@ fun ControlsSettingsSection() {
     val scope = rememberCoroutineScope()
     val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
     val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
-    val quickSlot by getQuickSlot(context).collectAsState(initial = true)
     val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
 
     SettingSectionCard(
@@ -393,10 +391,6 @@ fun ControlsSettingsSection() {
         
         SettingRow(title = if (isVibrationOn) stringResource(R.string.vibration_enabled) else stringResource(R.string.vibration_disabled)) {
             Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.saveVibrationState(context, it) } })
-        }
-        
-        SettingRow(title = "Quick Slot ${if (quickSlot) "Enabled" else "Disabled"}") {
-            Switch(checked = quickSlot, onCheckedChange = { scope.launch { GameFilesPreferences.setQuickSlot(context, it) } })
         }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
@@ -631,7 +625,6 @@ fun InGameSettings() {
     val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
     val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
     val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
-    val quickSlot by getQuickSlot(context).collectAsState(initial = false)
     val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
     val controllerConnected = isControllerConnected(context)
 
@@ -693,9 +686,6 @@ fun InGameSettings() {
         }
         SettingRow(title = if (isVibrationOn) stringResource(R.string.vibration_enabled) else stringResource(R.string.vibration_disabled)) {
             Switch(checked = isVibrationOn, onCheckedChange = { scope.launch { GameFilesPreferences.saveVibrationState(context, it) } })
-        }
-        SettingRow(title = "Quick Slot ${if (quickSlot) "Enabled" else "Disabled"}") {
-            Switch(checked = quickSlot, onCheckedChange = { scope.launch { GameFilesPreferences.setQuickSlot(context, it) } })
         }
         SettingRow(title = stringResource(R.string.allow_button_groups)) {
             Switch(checked = buttonGroupSwitch, onCheckedChange = { scope.launch { GameFilesPreferences.setButtonGroupSwitch(context, it) } })

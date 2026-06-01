@@ -106,6 +106,7 @@ import org.openmw.modDownloader.SevenZip.isInitialized
 import org.openmw.ui.controls.UIStateManager.customColor
 import org.openmw.ui.controls.UIStateManager.gold
 import org.openmw.ui.view.ProgressDialog
+import org.openmw.ui.view.addCustomLog
 import org.openmw.ui.view.getAvailableStorageSpace
 import org.openmw.ui.view.getMessages
 import org.openmw.utils.GameFilesPreferences.IS_NEXUS_PREMIUM
@@ -173,17 +174,11 @@ fun OnboardingScreen() {
                 TextButton(
                     onClick = {
                         scope.launch(Dispatchers.Default) {
-                            /*
-                            context.dataStore.edit { preferences ->
-                                preferences.remove(IS_NEXUS_PREMIUM)
-                                preferences.remove(NEXUS_API_KEY)
-                            }
-                             */
                             try {
                                 validate(context)
                             } catch (e: Exception) {
                                 Log.e("VALIDATE_ERROR", "Validation failed: ${e.message}")
-                                // Handle error appropriately
+                                addCustomLog("VALIDATE_ERROR: Validation failed: ${e.message}", textSize = 10, textColor = Color.Cyan)
                             } finally {
                                 context.dataStore.edit { preferences ->
                                     preferences[NEXUS_API_KEY] = apiKey
@@ -292,6 +287,7 @@ fun SSOHome() {
             if (potiFile.exists()) {
                 val count = importPotiModlistStructured(context, potiFile.path)
                 Log.d("MAIN", "Imported $count POTI mods")
+                addCustomLog("SSOHome: Imported $count POTI mods", textSize = 10, textColor = Color.Cyan)
 
                 // Append to the list
                 if (!availableLists.contains("poti")) {
@@ -299,6 +295,7 @@ fun SSOHome() {
                 }
             } else {
                 Log.w("MAIN", "POTI.modlist file not found at ${potiFile.path}")
+                addCustomLog("SSOHome: POTI.modlist file not found at ${potiFile.path}", textSize = 10, textColor = Color.Cyan)
             }
         }
 

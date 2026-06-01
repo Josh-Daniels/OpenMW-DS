@@ -270,6 +270,7 @@
     <string name="select_a_controller_button">Выберите кнопку виртуального контроллера.</string>
     <string name="select_a_numpad_button">Выберите клавишу цифровой панели.</string>
     <string name="enable_right_thumbstick">Включить правый джойстик.</string>
+    <string name="enable_quickSlot">Слот быстрого доступа</string>
     <string name="remove_icons">Удалить иконки</string>
     <string name="download_file">Загрузить файл</string>
     <string name="deleting">Удаление</string>

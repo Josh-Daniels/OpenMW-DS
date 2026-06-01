@@ -1,5 +1,6 @@
 package org.openmw.ui.overlay
 
+import android.content.Context
 import android.util.Log
 import android.view.KeyEvent
 import androidx.compose.animation.AnimatedVisibility
@@ -111,6 +112,7 @@ import org.openmw.ui.controls.UIStateManager.editMode
 import org.openmw.ui.controls.UIStateManager.globalColorChange
 import org.openmw.ui.controls.UIStateManager.gold
 import org.openmw.ui.controls.UIStateManager.isRadialMenuExpanded
+import org.openmw.ui.controls.UIStateManager.updateButtonState
 import org.openmw.ui.controls.keyCodeToChar
 import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
@@ -584,36 +586,35 @@ fun SimpleKeySelectionDialog(
 
 @Composable
 fun HiddenMenu(
+    context: Context,
     containerWidth: Float,
     containerHeight: Float
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        val context = LocalContext.current
-        val coroutineScope = rememberCoroutineScope()
-        val scrollState = rememberScrollState()
-        val stateSB = rememberScrollAreaState(scrollState)
-        val parentButton by remember { mutableStateOf(ButtonConfigManager.getOrCreateParentButton()) }
+    val scrollState = rememberScrollState()
+    val stateSB = rememberScrollAreaState(scrollState)
+    val buttonStates by UIStateManager.buttonStates.collectAsState()
+    val buttonState = buttonStates[201]
+    buttonState?.let { state ->
         val isDragging = remember { mutableStateOf(false) }
         var showControlsPopup by remember { mutableStateOf(false) }
         var offset by remember { mutableStateOf(IntOffset.Zero) }
-        val offsetX = remember { mutableFloatStateOf(parentButton.offsetX ?: 200f) }
-        val offsetY = remember { mutableFloatStateOf(parentButton.offsetY ?: 200f) }
-        val buttonSize = remember { mutableStateOf((parentButton.size ?: 60f).dp) }
+        val offsetX = remember { mutableFloatStateOf(state.offsetX) }
+        val offsetY = remember { mutableFloatStateOf(state.offsetY) }
+        var buttonSize by remember { mutableStateOf(state.size.dp) }
         val selectedAnimation by getSelectedAnimation(context).collectAsState(initial = "None")
-        val animations = getAnimations().toMutableMap().apply { put("None", EnterTransition.None to ExitTransition.None) }
-        val (currentEnterAnimation, currentExitAnimation) = animations[selectedAnimation] ?: (animations["None"] ?: error("Default animation not found"))
+        val animations = getAnimations().toMutableMap()
+            .apply { put("None", EnterTransition.None to ExitTransition.None) }
+        val (currentEnterAnimation, currentExitAnimation) = animations[selectedAnimation]
+            ?: (animations["None"] ?: error("Default animation not found"))
         val snapX = remember { mutableStateOf<Float?>(null) }
         val snapY = remember { mutableStateOf<Float?>(null) }
-        val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
-        val buttonUri = remember { mutableStateOf(parentButton.uri) } // Handling URI state
-        val buttonTint = remember { mutableStateOf(parentButton.buttonTint ?: true) }
-        var hexCode by remember { mutableStateOf(parentButton.color) } // Set initial hex code directly from state
+        val isUIHidden by GameFilesPreferences.loadUIState(context)
+            .collectAsState(initial = false)
+        val buttonUri = remember { mutableStateOf(state.uri) }
+        var hexCode by remember { mutableStateOf(state.color) }
         var buttonColor by remember { mutableStateOf(Color.fromHex(hexCode)) }
-        var buttonAlpha by remember { mutableFloatStateOf(parentButton.alpha) }
+        var buttonAlpha by remember { mutableFloatStateOf(state.alpha) }
+        val buttonTint = remember { mutableStateOf(state.buttonTint) }
         val infiniteTransition = rememberInfiniteTransition(label = "")
         val rotation by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -624,19 +625,15 @@ fun HiddenMenu(
             ), label = ""
         )
 
-        LaunchedEffect(containerWidth, containerHeight, parentButton) {
-            offsetX.value = parentButton.offsetX ?: (200f / containerWidth)
-            offsetY.value = parentButton.offsetY ?: (200f / containerHeight)
-        }
         LaunchedEffect(globalColorChange) {
             if (globalColorChange) {
                 hexCode = UIStateManager.globalColor
                 buttonColor = Color.fromHex(hexCode)
                 buttonAlpha = UIStateManager.globalAlpha
             } else {
-                hexCode = parentButton.color
+                hexCode = state.color
                 buttonColor = Color.fromHex(hexCode)
-                buttonAlpha = parentButton.alpha
+                buttonAlpha = state.alpha
             }
         }
 
@@ -655,7 +652,7 @@ fun HiddenMenu(
             }
         }
 
-        // Manage whats in the tabs here
+        // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
         var colors by remember { mutableStateOf(false) }
 
@@ -664,20 +661,20 @@ fun HiddenMenu(
             colors = false
         }
 
-        fun saveState() {
-            coroutineScope.launch {
-                // Save the parent button position to JSON
-                val updatedParentButton = parentButton.copy(
-                    offsetX = offsetX.value,
-                    offsetY = offsetY.value,
-                    size = buttonSize.value.value,
-                    color = hexCode,
-                    alpha = buttonAlpha,
-                    uri = buttonUri.value,
-                    buttonTint = buttonTint.value
-                )
-                ButtonConfigManager.saveParentButton(updatedParentButton)
-            }
+        val saveState = {
+            val updatedState = state.copy(
+                size = buttonSize.value,
+                offsetX = offsetX.floatValue,
+                offsetY = offsetY.floatValue,
+                color = hexCode,
+                alpha = buttonAlpha,
+                uri = buttonUri.value,
+                group = 1,
+                vibrate = false,
+                buttonTint = buttonTint.value
+            )
+            updateButtonState(201, updatedState)
+            UIStateManager.saveButtonState(containerWidth, containerHeight)
         }
 
         AnimatedVisibility(
@@ -687,424 +684,477 @@ fun HiddenMenu(
         ) {
             Box(
                 modifier = Modifier
+                    .size(buttonSize)
                     .background(Color.Transparent)
-                    .offset {
-                        IntOffset(
-                            (offsetX.value).roundToInt(),
-                            (offsetY.value).roundToInt()
-                        )
-                    }
-                    .border(
-                        2.dp,
-                        if (isDragging.value && painter == null) Color.Red else Color.Transparent,
-                        shape = CircleShape
-                    )
-                    .then(
-                        if (editMode) {
-                            Modifier.pointerInput(Unit) {
-                                detectDragGestures(
-                                    onDragStart = {
-                                        isDragging.value = true
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        offsetX.floatValue += dragAmount.x
-                                        offsetY.floatValue += dragAmount.y
-
-                                        // Calculate snap points with current grid size
-                                        val currentGridSize =
-                                            UIStateManager.gridSize.intValue
-                                        snapX.value =
-                                            ((offsetX.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
-                                        snapY.value =
-                                            ((offsetY.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
-                                    },
-                                    onDragEnd = {
-                                        isDragging.value = false
-                                        val currentGridSize =
-                                            UIStateManager.gridSize.intValue
-                                        offsetX.floatValue =
-                                            ((offsetX.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
-                                        offsetY.floatValue =
-                                            ((offsetY.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
-                                        saveState()
-                                    },
-                                    onDragCancel = {
-                                        isDragging.value = false
-                                        saveState()
-                                    }
-                                )
-                            }
-                        } else Modifier
-                    )
             ) {
                 Box(
+                    contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(buttonSize.value)
-                        .background(
-                            if (painter != null) {
-                                Color.Transparent
-                            } else {
-                                buttonColor.copy(alpha = buttonAlpha)
-                            },
-                            shape = CircleShape
-                        )
-                        .clickable(enabled = !editMode) {
-                            Log.d("PieChart", "Before toggle Line 729 - isRadialMenuExpanded: $isRadialMenuExpanded")
-                            isRadialMenuExpanded = !isRadialMenuExpanded
-                            Log.d("PieChart", "After toggle - isRadialMenuExpanded: $isRadialMenuExpanded")
-                        },
-                    contentAlignment = Alignment.Center
+                        .size(buttonSize)
+                        .background(Color.Transparent)
                 ) {
-                    if (painter != null) {
-                        Image(
-                            painter = painter,
-                            contentDescription = null,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .alpha(buttonAlpha),
-                            colorFilter = if (buttonTint.value) {
-                                ColorFilter.tint(buttonColor.copy(alpha = buttonAlpha))
-                            } else {
-                                null
-                            }
-                        )
-                    } else {
-                        Icon(
-                            Icons.Default.Menu,
-                            contentDescription = "Expand menu",
-                            tint = (buttonColor.copy(alpha = buttonAlpha))
-                        )
-                    }
-                }
-                if (editMode) {
                     Box(
                         modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .size(30.dp)
-                            .background(Color.Black, shape = CircleShape)
-                            .clickable { showControlsPopup = true }
+                            .background(Color.Transparent)
+                            .size(buttonSize)
+                            .graphicsLayer {
+                                translationX = offsetX.floatValue
+                                translationY = offsetY.floatValue
+                            }
                             .border(
                                 2.dp,
-                                Color.DarkGray,
+                                if (isDragging.value && painter == null) Color.Red else Color.Transparent,
                                 shape = CircleShape
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "More",
-                            tint = Color.Red,
-                            modifier = Modifier.graphicsLayer(
-                                rotationZ = rotation
                             )
-                        )
-                    }
-                }
-                if (showControlsPopup) {
-                        Popup(
-                            alignment = Alignment.Center
+                            .then(
+                                if (editMode) {
+                                    Modifier.pointerInput(Unit) {
+                                        detectDragGestures(
+                                            onDragStart = {
+                                                isDragging.value = true
+                                            },
+                                            onDrag = { change, dragAmount ->
+                                                change.consume()
+                                                offsetX.floatValue += dragAmount.x
+                                                offsetY.floatValue += dragAmount.y
+
+                                                // Calculate snap points with current grid size
+                                                val currentGridSize =
+                                                    UIStateManager.gridSize.intValue
+                                                snapX.value =
+                                                    ((offsetX.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
+                                                snapY.value =
+                                                    ((offsetY.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
+                                            },
+                                            onDragEnd = {
+                                                isDragging.value = false
+                                                val currentGridSize =
+                                                    UIStateManager.gridSize.intValue
+                                                offsetX.floatValue =
+                                                    ((offsetX.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
+                                                offsetY.floatValue =
+                                                    ((offsetY.floatValue / currentGridSize).roundToInt() * currentGridSize).toFloat()
+                                                saveState()
+                                            },
+                                            onDragCancel = {
+                                                isDragging.value = false
+                                                saveState()
+                                            }
+                                        )
+                                    }
+                                } else Modifier
+                            )
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(buttonSize)
+                                .background(
+                                    if (painter != null) {
+                                        Color.Transparent
+                                    } else {
+                                        buttonColor.copy(alpha = buttonAlpha)
+                                    },
+                                    shape = CircleShape
+                                )
+                                .clickable(enabled = !editMode) {
+                                    Log.d(
+                                        "PieChart",
+                                        "Before toggle Line 729 - isRadialMenuExpanded: $isRadialMenuExpanded"
+                                    )
+                                    isRadialMenuExpanded = !isRadialMenuExpanded
+                                    Log.d(
+                                        "PieChart",
+                                        "After toggle - isRadialMenuExpanded: $isRadialMenuExpanded"
+                                    )
+                                },
+                            contentAlignment = Alignment.Center
                         ) {
+                            if (painter != null) {
+                                Image(
+                                    painter = painter,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .alpha(buttonAlpha),
+                                    colorFilter = if (buttonTint.value) {
+                                        ColorFilter.tint(buttonColor.copy(alpha = buttonAlpha))
+                                    } else {
+                                        null
+                                    }
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.Menu,
+                                    contentDescription = "Expand menu",
+                                    tint = (buttonColor.copy(alpha = buttonAlpha))
+                                )
+                            }
+                        }
+                        if (editMode) {
                             Box(
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color.Transparent),
+                                    .align(Alignment.TopStart)
+                                    .size(30.dp)
+                                    .background(Color.Black, shape = CircleShape)
+                                    .clickable { showControlsPopup = true }
+                                    .border(
+                                        2.dp,
+                                        Color.DarkGray,
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "More",
+                                    tint = Color.Red,
+                                    modifier = Modifier.graphicsLayer(
+                                        rotationZ = rotation
+                                    )
+                                )
+                            }
+                        }
+                        if (showControlsPopup) {
+                            Popup(
+                                alignment = Alignment.Center
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .fillMaxHeight()
-                                        .width(300.dp)
-                                        .offset { offset }
-                                        .padding(top = 5.dp)
-                                        .background(
-                                            Color.Black.copy(alpha = 0.8f),
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .border(
-                                            2.dp,
-                                            Color(202, 165, 96),
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .pointerInput(Unit) {
-                                            detectDragGestures { change, dragAmount ->
-                                                change.consume()
-                                                offset = IntOffset(
-                                                    offset.x + dragAmount.x.roundToInt(),
-                                                    offset.y // + dragAmount.y.roundToInt()
-                                                )
-                                            }
-                                        }
+                                        .fillMaxSize()
+                                        .background(Color.Transparent),
                                 ) {
-                                    Column {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            val selectedTabIndex = when {
-                                                options -> 0
-                                                colors -> 1
-                                                else -> 0
-                                            }
-                                            ScrollableTabRow(
-                                                selectedTabIndex = selectedTabIndex,
-                                                edgePadding = 1.dp,
-                                                contentColor = White,
-                                                containerColor = Color.Transparent,
-                                                modifier = Modifier.weight(1f),
-                                                indicator = { tabPositions ->
-                                                    TabRowDefaults.Indicator(
-                                                        Modifier.tabIndicatorOffset(
-                                                            tabPositions[selectedTabIndex]
-                                                        ),
-                                                        color = Color(202, 165, 96)
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxHeight()
+                                            .width(300.dp)
+                                            .offset { offset }
+                                            .padding(top = 5.dp)
+                                            .background(
+                                                Color.Black.copy(alpha = 0.8f),
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .border(
+                                                2.dp,
+                                                Color(202, 165, 96),
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .pointerInput(Unit) {
+                                                detectDragGestures { change, dragAmount ->
+                                                    change.consume()
+                                                    offset = IntOffset(
+                                                        offset.x + dragAmount.x.roundToInt(),
+                                                        offset.y // + dragAmount.y.roundToInt()
                                                     )
                                                 }
-                                            ) {
-                                                Tab(
-                                                    selected = options,
-                                                    onClick = {
-                                                        resetStates()
-                                                        options = true
-                                                    },
-                                                    text = { Text(stringResource(R.string.options)) }
-                                                )
-                                                Tab(
-                                                    selected = colors,
-                                                    onClick = {
-                                                        resetStates()
-                                                        colors = true
-                                                    },
-                                                    text = { Text(stringResource(R.string.colors)) }
-                                                )
                                             }
-                                            IconButton(
-                                                onClick = {
-                                                    showControlsPopup = false
-                                                    saveState()
+                                    ) {
+                                        Column {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                val selectedTabIndex = when {
+                                                    options -> 0
+                                                    colors -> 1
+                                                    else -> 0
                                                 }
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Close,
-                                                    contentDescription = "Close",
-                                                    tint = White
-                                                )
-                                            }
-                                        }
-
-                                        ScrollArea(state = stateSB) {
-                                            Column(
-                                                modifier = Modifier
-                                                    .padding(8.dp)
-                                                    .verticalScroll(scrollState)
-                                            ) {
-                                                if (options) {
-                                                    HorizontalDivider(
-                                                        color = Color(202, 165, 96),
-                                                        thickness = 1.dp
-                                                    )
-                                                    if (buttonUri.value != null) {
-                                                        Row {
-                                                            TextButton(
-                                                                onClick = {
-                                                                    buttonUri.value = null
-                                                                    saveState()
-                                                                },
-                                                                colors = ButtonDefaults.buttonColors(
-                                                                    containerColor = gold,
-                                                                    contentColor = Color.Red
-                                                                )
-                                                            ) {
-                                                                Text("Remove Icon")
-                                                            }
-                                                            if (painter != null) {
-                                                                Image(
-                                                                    painter = painter,
-                                                                    contentDescription = null,
-                                                                    modifier = Modifier
-                                                                        .fillMaxSize()
-                                                                        .alpha(buttonAlpha),
-                                                                    colorFilter = if (buttonTint.value) {
-                                                                        ColorFilter.tint(
-                                                                            buttonColor.copy(
-                                                                                alpha = buttonAlpha
-                                                                            )
-                                                                        )
-                                                                    } else {
-                                                                        null
-                                                                    }
-                                                                )
-                                                            }
-                                                        }
-                                                        Text(
-                                                            text = "${buttonUri.value}",
-                                                            color = White,
-                                                            fontWeight = FontWeight.Bold,
-                                                            modifier = Modifier.padding(bottom = 8.dp)
-                                                        )
-                                                    } else {
-                                                        CustomIconPickerButton(
-                                                            context = context,
-                                                            buttonId = 100,
-                                                            buttonUri = buttonUri,
-                                                            containerWidth = containerWidth,
-                                                            containerHeight = containerHeight
+                                                ScrollableTabRow(
+                                                    selectedTabIndex = selectedTabIndex,
+                                                    edgePadding = 1.dp,
+                                                    contentColor = White,
+                                                    containerColor = Color.Transparent,
+                                                    modifier = Modifier.weight(1f),
+                                                    indicator = { tabPositions ->
+                                                        TabRowDefaults.Indicator(
+                                                            Modifier.tabIndicatorOffset(
+                                                                tabPositions[selectedTabIndex]
+                                                            ),
+                                                            color = Color(202, 165, 96)
                                                         )
                                                     }
-                                                    Spacer(modifier = Modifier.height(4.dp))
-                                                    Column(
-                                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(8.dp)
-                                                    ) {
-                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
+                                                ) {
+                                                    Tab(
+                                                        selected = options,
+                                                        onClick = {
+                                                            resetStates()
+                                                            options = true
+                                                        },
+                                                        text = { Text(stringResource(R.string.options)) }
+                                                    )
+                                                    Tab(
+                                                        selected = colors,
+                                                        onClick = {
+                                                            resetStates()
+                                                            colors = true
+                                                        },
+                                                        text = { Text(stringResource(R.string.colors)) }
+                                                    )
+                                                }
+                                                IconButton(
+                                                    onClick = {
+                                                        showControlsPopup = false
+                                                        saveState()
+                                                    }
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Close,
+                                                        contentDescription = "Close",
+                                                        tint = White
+                                                    )
+                                                }
+                                            }
 
-
-                                                        Text(
-                                                            text = stringResource(R.string.increase_size_delete_decrease_size),
-                                                            color = White,
-                                                            fontWeight = FontWeight.Bold,
-                                                            modifier = Modifier.padding(bottom = 8.dp)
+                                            ScrollArea(state = stateSB) {
+                                                Column(
+                                                    modifier = Modifier
+                                                        .padding(8.dp)
+                                                        .verticalScroll(scrollState)
+                                                ) {
+                                                    if (options) {
+                                                        HorizontalDivider(
+                                                            color = Color(202, 165, 96),
+                                                            thickness = 1.dp
                                                         )
+                                                        if (buttonUri.value != null) {
+                                                            Row {
+                                                                TextButton(
+                                                                    onClick = {
+                                                                        buttonUri.value = null
+                                                                        saveState()
+                                                                    },
+                                                                    colors = ButtonDefaults.buttonColors(
+                                                                        containerColor = gold,
+                                                                        contentColor = Color.Red
+                                                                    )
+                                                                ) {
+                                                                    Text("Remove Icon")
+                                                                }
+                                                                if (painter != null) {
+                                                                    Image(
+                                                                        painter = painter,
+                                                                        contentDescription = null,
+                                                                        modifier = Modifier
+                                                                            .fillMaxSize()
+                                                                            .alpha(buttonAlpha),
+                                                                        colorFilter = if (buttonTint.value) {
+                                                                            ColorFilter.tint(
+                                                                                buttonColor.copy(
+                                                                                    alpha = buttonAlpha
+                                                                                )
+                                                                            )
+                                                                        } else {
+                                                                            null
+                                                                        }
+                                                                    )
+                                                                }
+                                                            }
+                                                            Text(
+                                                                text = "${buttonUri.value}",
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold,
+                                                                modifier = Modifier.padding(
+                                                                    bottom = 8.dp
+                                                                )
+                                                            )
+                                                        } else {
+                                                            CustomIconPickerButton(
+                                                                context = context,
+                                                                buttonId = 100,
+                                                                buttonUri = buttonUri,
+                                                                containerWidth = containerWidth,
+                                                                containerHeight = containerHeight
+                                                            )
+                                                        }
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        Column(
+                                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(8.dp)
+                                                        ) {
+                                                            HorizontalDivider(
+                                                                color = Color(
+                                                                    202,
+                                                                    165,
+                                                                    96
+                                                                ), thickness = 1.dp
+                                                            )
+
+
+                                                            Text(
+                                                                text = stringResource(R.string.increase_size_delete_decrease_size),
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold,
+                                                                modifier = Modifier.padding(
+                                                                    bottom = 8.dp
+                                                                )
+                                                            )
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.SpaceEvenly, // Even spacing
+                                                                modifier = Modifier
+                                                                    .height(48.dp)
+                                                                    .fillMaxWidth()
+                                                            ) {
+                                                                // Increase size button (+)
+                                                                IconButton(
+                                                                    onClick = {
+                                                                        buttonSize += 10.dp
+                                                                        saveState()
+                                                                    },
+                                                                    modifier = Modifier
+                                                                        .size(40.dp)
+                                                                        .background(
+                                                                            Color.Black,
+                                                                            CircleShape
+                                                                        )
+                                                                        .border(
+                                                                            2.dp,
+                                                                            White,
+                                                                            CircleShape
+                                                                        )
+                                                                ) {
+                                                                    Icon(
+                                                                        imageVector = Icons.Default.Add,
+                                                                        contentDescription = "Increase size",
+                                                                        tint = White,
+                                                                        modifier = Modifier.size(
+                                                                            24.dp
+                                                                        )
+                                                                    )
+                                                                }
+
+                                                                // Decrease size button (-)
+                                                                IconButton(
+                                                                    onClick = {
+                                                                        buttonSize -= 10.dp
+                                                                        if (buttonSize < 50.dp) buttonSize =
+                                                                            30.dp
+                                                                        saveState()
+                                                                    },
+                                                                    modifier = Modifier
+                                                                        .size(40.dp)
+                                                                        .background(
+                                                                            Color.Black,
+                                                                            CircleShape
+                                                                        )
+                                                                        .border(
+                                                                            2.dp,
+                                                                            White,
+                                                                            CircleShape
+                                                                        )
+                                                                ) {
+                                                                    Icon(
+                                                                        imageVector = Icons.Default.Remove,
+                                                                        contentDescription = "Decrease size",
+                                                                        tint = White,
+                                                                        modifier = Modifier.size(
+                                                                            24.dp
+                                                                        )
+                                                                    )
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if (colors) {
                                                         Row(
                                                             verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.SpaceEvenly, // Even spacing
+                                                            horizontalArrangement = Arrangement.spacedBy(
+                                                                8.dp
+                                                            ),
                                                             modifier = Modifier
-                                                                .height(48.dp)
+                                                                .height(40.dp)
                                                                 .fillMaxWidth()
                                                         ) {
-                                                            // Increase size button (+)
-                                                            IconButton(
-                                                                onClick = {
-                                                                    buttonSize.value += 10.dp
-                                                                    saveState()
-                                                                },
-                                                                modifier = Modifier
-                                                                    .size(40.dp)
-                                                                    .background(
-                                                                        Color.Black,
-                                                                        CircleShape
-                                                                    )
-                                                                    .border(
-                                                                        2.dp,
-                                                                        White,
-                                                                        CircleShape
-                                                                    )
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = Icons.Default.Add,
-                                                                    contentDescription = "Increase size",
-                                                                    tint = White,
-                                                                    modifier = Modifier.size(24.dp)
-                                                                )
-                                                            }
-
-                                                            // Decrease size button (-)
-                                                            IconButton(
-                                                                onClick = {
-                                                                    buttonSize.value -= 10.dp
-                                                                    if (buttonSize.value < 50.dp) buttonSize.value =
-                                                                        30.dp
-                                                                    saveState()
-                                                                },
-                                                                modifier = Modifier
-                                                                    .size(40.dp)
-                                                                    .background(
-                                                                        Color.Black,
-                                                                        CircleShape
-                                                                    )
-                                                                    .border(
-                                                                        2.dp,
-                                                                        White,
-                                                                        CircleShape
-                                                                    )
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = Icons.Default.Remove,
-                                                                    contentDescription = "Decrease size",
-                                                                    tint = White,
-                                                                    modifier = Modifier.size(24.dp)
-                                                                )
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                if (colors) {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(
-                                                            8.dp
-                                                        ),
-                                                        modifier = Modifier
-                                                            .height(40.dp)
-                                                            .fillMaxWidth()
-                                                    ) {
-                                                        Text(
-                                                            text = "Colorize Icon?",
-                                                            color = White,
-                                                            fontWeight = FontWeight.Bold
-                                                        )
-                                                        Spacer(modifier = Modifier.weight(1f))
-                                                        androidx.compose.material3.Switch(
-                                                            checked = buttonTint.value,
-                                                            onCheckedChange = {
-                                                                buttonTint.value = it
-                                                                saveState()
-                                                            },
-                                                            colors = androidx.compose.material3.SwitchDefaults.colors(
-                                                                checkedThumbColor = Color(202,165,96),
-                                                                uncheckedThumbColor = Color.Red,
-                                                                checkedTrackColor = Color.Black.copy(alpha = 0.9f),
-                                                                uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
-                                                                checkedBorderColor = White,
-                                                                uncheckedBorderColor = White
+                                                            Text(
+                                                                text = "Colorize Icon?",
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold
                                                             )
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            androidx.compose.material3.Switch(
+                                                                checked = buttonTint.value,
+                                                                onCheckedChange = {
+                                                                    buttonTint.value = it
+                                                                    saveState()
+                                                                },
+                                                                colors = androidx.compose.material3.SwitchDefaults.colors(
+                                                                    checkedThumbColor = Color(
+                                                                        202,
+                                                                        165,
+                                                                        96
+                                                                    ),
+                                                                    uncheckedThumbColor = Color.Red,
+                                                                    checkedTrackColor = Color.Black.copy(
+                                                                        alpha = 0.9f
+                                                                    ),
+                                                                    uncheckedTrackColor = Color.Black.copy(
+                                                                        alpha = 0.5f
+                                                                    ),
+                                                                    checkedBorderColor = White,
+                                                                    uncheckedBorderColor = White
+                                                                )
+                                                            )
+                                                        }
+                                                        HorizontalDivider(
+                                                            color = Color(202, 165, 96),
+                                                            thickness = 1.dp
                                                         )
-                                                    }
-                                                    HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
 
-                                                    if (buttonTint.value) {
-                                                        ColorPickerWheel(
-                                                            initialColor = buttonColor,
-                                                            onColorSelected = { color, hex, alphaValue ->
-                                                                hexCode = hex
-                                                                buttonAlpha = alphaValue
-                                                                buttonColor = color
-                                                                saveState()
-                                                                Log.d("ColorWheel", "Selected Color: $color, Hex: $hex, Alpha: $alphaValue")
+                                                        if (buttonTint.value) {
+                                                            ColorPickerWheel(
+                                                                initialColor = buttonColor,
+                                                                onColorSelected = { color, hex, alphaValue ->
+                                                                    hexCode = hex
+                                                                    buttonAlpha = alphaValue
+                                                                    buttonColor = color
+                                                                    saveState()
+                                                                    Log.d(
+                                                                        "ColorWheel",
+                                                                        "Selected Color: $color, Hex: $hex, Alpha: $alphaValue"
+                                                                    )
+                                                                }
+                                                            )
+                                                        } else {
+                                                            Box(
+                                                                modifier = Modifier.fillMaxWidth()
+                                                                    .height(150.dp),
+                                                                contentAlignment = Alignment.Center
+                                                            ) {
+                                                                Text(
+                                                                    "Colorize icon disabled",
+                                                                    color = White
+                                                                )
                                                             }
-                                                        )
-                                                    } else {
-                                                        Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                                                            Text("Colorize icon disabled", color = White)
                                                         }
                                                     }
                                                 }
-                                            }
-                                            VerticalScrollbar(
-                                                modifier = Modifier
-                                                    .align(Alignment.TopEnd)
-                                                    .fillMaxHeight()
-                                                    .width(10.dp)
-                                            ) {
-                                                Thumb(
-                                                    modifier = Modifier.background(
-                                                        Color(202, 165, 96).copy(0.3f),
-                                                        RoundedCornerShape(100)
-                                                    ),
-                                                )
+                                                VerticalScrollbar(
+                                                    modifier = Modifier
+                                                        .align(Alignment.TopEnd)
+                                                        .fillMaxHeight()
+                                                        .width(10.dp)
+                                                ) {
+                                                    Thumb(
+                                                        modifier = Modifier.background(
+                                                            Color(202, 165, 96).copy(0.3f),
+                                                            RoundedCornerShape(100)
+                                                        ),
+                                                    )
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-
+                    }
                 }
             }
         }
     }
 }
+
 
 @Composable
 fun KeyButton(label: String, onClick: () -> Unit) {

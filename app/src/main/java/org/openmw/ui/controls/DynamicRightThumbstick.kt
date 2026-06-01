@@ -267,11 +267,9 @@ fun ResizableDraggableRightThumbstick(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .size(buttonSize)
-                        .offset {
-                            IntOffset(
-                                offsetX.floatValue.roundToInt(),
-                                offsetY.floatValue.roundToInt()
-                            )
+                        .graphicsLayer {
+                            translationX = offsetX.floatValue
+                            translationY = offsetY.floatValue
                         }
                         .background(Color.Transparent)
                         .then(

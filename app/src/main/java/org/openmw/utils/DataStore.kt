@@ -70,7 +70,6 @@ object GameFilesPreferences {
     val SUPPORTED_LANGUAGES = stringPreferencesKey("supported_languages")
     val WHATS_NEW_KEY = booleanPreferencesKey("whats_new")
     val AUTO_RUN = booleanPreferencesKey("auto_run")
-    val QUICK_SLOT = booleanPreferencesKey("quick_slot")
     val HIDE_SYSTEM_BARS = booleanPreferencesKey("hide_system_bars")
     val SCREEN_STAY_ON = booleanPreferencesKey("screen_stay_on")
     val TUTORIAL_KEY = booleanPreferencesKey("tutorial_enable")
@@ -624,18 +623,6 @@ object GameFilesPreferences {
     fun getAutoRun(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
             preferences[AUTO_RUN] != false
-        }
-    }
-
-    suspend fun setQuickSlot(context: Context, isEnabled: Boolean) {
-        context.dataStore.edit { preferences ->
-            preferences[QUICK_SLOT] = isEnabled
-        }
-    }
-
-    fun getQuickSlot(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
-            preferences[QUICK_SLOT] != false
         }
     }
 

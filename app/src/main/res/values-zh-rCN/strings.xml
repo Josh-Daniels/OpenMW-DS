@@ -271,6 +271,7 @@
     <string name="select_a_controller_button">选择一个虚拟控制器按钮</string>
     <string name="select_a_numpad_button">选择一个小键盘按钮</string>
     <string name="enable_right_thumbstick">启用右摇杆</string>
+    <string name="enable_quickSlot">启用快捷栏</string>
     <string name="remove_icons">移除图标</string>
     <string name="download_file">下载文件</string>
     <string name="deleting">删除中</string>

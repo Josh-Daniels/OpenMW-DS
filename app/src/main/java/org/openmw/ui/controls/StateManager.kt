@@ -71,6 +71,7 @@ import org.openmw.ui.controls.UIStateManager.buttonsGroup
 import org.openmw.ui.controls.UIStateManager.configureControls
 import org.openmw.ui.controls.UIStateManager.containerGlobalHeight
 import org.openmw.ui.controls.UIStateManager.containerGlobalWidth
+import org.openmw.ui.controls.UIStateManager.enableQuickSlot
 import org.openmw.ui.controls.UIStateManager.enableRightThumb
 import org.openmw.ui.controls.UIStateManager.highlightStep
 import org.openmw.ui.controls.UIStateManager.menuAlpha
@@ -95,7 +96,7 @@ data class ButtonState(
     val group: Int,
     val vibrate: Boolean = true,
     val isMouseButton: Boolean = false,
-    val mouseButton: Int = 1, // 1: Left, 2: Middle, 3: Right
+    val mouseButton: Int = 1, // 1: Left, 4: Middle, 2: Right
     val buttonTint: Boolean = true
 )
 
@@ -149,6 +150,7 @@ object UIStateManager {
 
     // Is the Right thumb visible?
     var enableRightThumb by mutableStateOf(false)
+    var enableQuickSlot by mutableStateOf(false)
     // isMouseShown() toggles this on and off at EngineActivity line 372.
     var isCursorVisible by mutableIntStateOf(0)
 
@@ -275,13 +277,21 @@ object UIStateManager {
                     val type = when (button.id) {
                         99 -> "leftStick"
                         98 -> "rightStick"
-                        101 -> "utility"
+                        101 -> "scroll_Wheel"
+                        201 -> "quickSlot"
+                        else -> "dynamic"
+                    }
+                    val label = when (button.id) {
+                        99 -> "Left Thumbstick"
+                        98 -> "Right Thumbstick"
+                        101 -> "Scroll Wheel1"
+                        201 -> "quickSlot"
                         else -> "dynamic"
                     }
                     ButtonConfig(
                         type = type,
                         keyCode = button.keyCode,
-                        label = if (button.id == 99) "Left Thumbstick" else "",
+                        label = label,
                         id = button.id,
                         size = button.size,
                         offsetX = button.offsetX / width,
@@ -300,7 +310,7 @@ object UIStateManager {
                 }
 
             ButtonConfigManager.updateMultipleButtonsByTypes(
-                listOf("parent", "leftStick", "rightStick", "utility", "dynamic"),
+                listOf("quickSlot", "leftStick", "rightStick", "scroll_Wheel", "dynamic"),
                 configs
             )
 
@@ -325,10 +335,12 @@ object UIStateManager {
 
         val buttonStateMap = mutableMapOf<Int, ButtonState>()
         var foundButton98 = false
+        var foundQuickSlot = false
 
         configs.forEach { config ->
             val buttonId = config.id ?: return@forEach
             if (buttonId == 98) foundButton98 = true
+            if (buttonId == 201) foundQuickSlot = true
 
             // Calculate absolute offsets based on the container dimensions
             val absoluteOffsetX = (config.offsetX ?: 0f) * width
@@ -357,6 +369,7 @@ object UIStateManager {
         }
         _buttonStates.value = buttonStateMap
         enableRightThumb = foundButton98
+        enableQuickSlot = foundQuickSlot
     }
 }
 
@@ -832,6 +845,50 @@ fun KeySelectionMenu(context: Context, onKeySelected: (Int) -> Unit, usedKeys: L
                             uncheckedThumbColor = Color.Gray
                         )
                     )
+                    HorizontalDivider(color = Color.White, thickness = 1.dp, modifier = Modifier.padding(vertical = 16.dp))
+                    Text(
+                        text = stringResource(R.string.enable_quickSlot),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    )
+                    Switch(
+                        checked = enableQuickSlot,
+                        onCheckedChange = { isChecked ->
+                            enableQuickSlot = isChecked
+                            if (isChecked) {
+                                // Logic to add ButtonID_98
+                                val newButtonState = ButtonState(
+                                    id = 201,
+                                    size = 160f,
+                                    offsetX = 200f,
+                                    offsetY = 200f,
+                                    isLocked = false,
+                                    blockMouse = false,
+                                    keyCode = 201,
+                                    color = "aafdfffe",
+                                    alpha = 0.25f,
+                                    uri = null,
+                                    group = 1,
+                                    vibrate = false
+                                )
+
+                                // Update UIStateManager with the new button state
+                                UIStateManager.updateButtonState(newButtonState.id, newButtonState)
+                            } else {
+                                // Logic to remove ButtonID_98
+                                UIStateManager.removeButtonState(201, context, containerWidth, containerHeight)
+                            }
+
+                            // Save the updated button states to the file
+                            UIStateManager.saveButtonState(containerWidth, containerHeight)
+
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Green,
+                            uncheckedThumbColor = Color.Gray
+                        )
+                    )
 
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(
@@ -955,15 +1012,15 @@ fun DynamicButtonManager(
 
                     // Update the UIStateManager with the new button state
                     UIStateManager.updateButtonState(newButtonState.id, newButtonState)
-                    addCustomLog("Saving with containerWidth=${containerGlobalWidth.value}, containerHeight=${containerGlobalHeight.value}", textSize = 10, textColor = Color.Yellow)
+                    addCustomLog("Saving with containerWidth=${containerGlobalWidth.floatValue}, containerHeight=${containerGlobalHeight.floatValue}", textSize = 10, textColor = Color.Yellow)
 
-                    UIStateManager.saveButtonState(containerGlobalWidth.value, containerGlobalHeight.value)
+                    UIStateManager.saveButtonState(containerGlobalWidth.floatValue, containerGlobalHeight.floatValue)
 
                 },
                 usedKeys = buttonStates.values.map { it.keyCode },
                 context = context,
-                containerWidth = containerGlobalWidth.value,
-                containerHeight = containerGlobalHeight.value
+                containerWidth = containerGlobalWidth.floatValue,
+                containerHeight = containerGlobalHeight.floatValue
             )
         }
     }

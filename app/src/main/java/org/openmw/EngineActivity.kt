@@ -66,6 +66,7 @@ import org.openmw.ui.controls.UIStateManager.configureControls
 import org.openmw.ui.controls.UIStateManager.containerGlobalHeight
 import org.openmw.ui.controls.UIStateManager.containerGlobalWidth
 import org.openmw.ui.controls.UIStateManager.editMode
+import org.openmw.ui.controls.UIStateManager.enableQuickSlot
 import org.openmw.ui.controls.UIStateManager.enableRightThumb
 import org.openmw.ui.controls.UIStateManager.gridAlpha
 import org.openmw.ui.controls.UIStateManager.gridVisible
@@ -86,11 +87,9 @@ import org.openmw.ui.view.enableLogcat
 import org.openmw.utils.DebugOverlayBox
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getENVLine
-import org.openmw.utils.GameFilesPreferences.getQuickSlot
 import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
 import org.openmw.utils.GameFilesPreferences.readAngle
 import org.openmw.utils.GameFilesPreferences.readSPIRV
-import org.openmw.utils.patchShaders
 import kotlin.math.roundToInt
 
 @Suppress("DEPRECATION")
@@ -202,15 +201,12 @@ class EngineActivity : SDLActivity() {
 
                 // Load button states into UIStateManager with container dimensions
                 UIStateManager.loadButtonState(this@EngineActivity, containerWidth, containerHeight)
-                ButtonConfigManager.getOrCreateParentButton()
-                ButtonConfigManager.getUtilityButtons()
 
                 if (!UIStateManager.useNavmesh) {
                     // Adds Overlay menu for buttons and edit mode
                     composeViewUI.setContent {
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
-                        val quickSlot by getQuickSlot(this@EngineActivity).collectAsState(initial = false)
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
 
                         BackHandler {
@@ -305,11 +301,12 @@ class EngineActivity : SDLActivity() {
                         }
 
                         AnimatedVisibility(
-                            visible = isCursorVisible == 0 && quickSlot,
+                            visible = isCursorVisible == 0 && enableQuickSlot,
                             enter = fadeIn() + expandIn(),
                             exit = fadeOut() + shrinkOut()
                         ) {
                             HiddenMenu(
+                                context = this@EngineActivity,
                                 containerWidth = containerWidth,
                                 containerHeight = containerHeight
                             )
@@ -325,18 +322,11 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
-                        AnimatedVisibility(
-                            visible = UIStateManager.tempCodeGroup == "OpenMW"  && !isUIHidden,
-                            enter = fadeIn() + expandIn(),
-                            exit = fadeOut() + shrinkOut()
-                        ) {
-                            Box(modifier = Modifier.wrapContentSize()) {
-                                ScrollWheelIndicator(
-                                    containerWidth = containerWidth,
-                                    containerHeight = containerHeight
-                                )
-                            }
-                        }
+                        ScrollWheelIndicator(
+                            context = this@EngineActivity,
+                            containerWidth = containerWidth,
+                            containerHeight = containerHeight
+                        )
 
                         AnimatedVisibility(
                             visible = UIStateManager.tempCodeGroup == "UQM" && uqmJNI,
@@ -448,7 +438,6 @@ class EngineActivity : SDLActivity() {
             Os.setenv("HARNESS_OPENGL", "1", true)
 
             CoroutineScope(Dispatchers.IO).launch {
-                patchShaders()
                 GameFilesPreferences.readAvoid16Bits(context).collect { avoid16bits ->
                     if (avoid16bits) {
                         Os.setenv("LIBGL_AVOID16BITS", "1", true)
@@ -564,7 +553,7 @@ fun Buttons(context: Context, containerWidth: Float, containerHeight: Float) {
     val buttonStates by UIStateManager.buttonStates.collectAsState()
 
     buttonStates.values
-        .filter { it.id !in listOf(99, 98) }
+        .filter { it.id !in listOf(99, 98, 101, 201) }
         .forEach { button ->
             ResizableDraggableButton(
                 context = context,
