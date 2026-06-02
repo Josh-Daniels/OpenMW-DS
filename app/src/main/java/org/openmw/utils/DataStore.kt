@@ -64,7 +64,6 @@ object GameFilesPreferences {
     val NEW_FEATURE_ENABLED_KEY = booleanPreferencesKey("new_feature_enabled")
     val TRANSLATION_ENABLED_KEY = booleanPreferencesKey("translation_enabled")
     private val _gameFilesUri = MutableStateFlow<String?>(null)
-    val gameFilesUri: StateFlow<String?> = _gameFilesUri
     val BACKGROUND_ANIMATION_KEY = stringPreferencesKey("background_animation")
     val LANGUAGE_KEY = stringPreferencesKey("language")
     val SUPPORTED_LANGUAGES = stringPreferencesKey("supported_languages")
@@ -96,8 +95,6 @@ object GameFilesPreferences {
     val SENSITIVITY_MOUSE = floatPreferencesKey("sensitivity_mouse")
 
     val SENSITIVITY_RT = floatPreferencesKey("sensitivity_right_thumb")
-
-    val SELECTED_MOD_LIST_KEY = stringPreferencesKey("selected_mod_list")
 
     val BUTTON_SHAPE = stringPreferencesKey("button_shape")
 

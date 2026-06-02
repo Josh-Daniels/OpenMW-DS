@@ -1,4 +1,4 @@
-@file:Suppress("NULLABILITY_MISMATCH_BASED_ON_JAVA_ANNOTATIONS")
+@file:Suppress("NULLABILITY_MISMATCH_BASED_ON_JAVA_ANNOTATIONS", "DEPRECATION")
 
 package org.openmw.utils
 
@@ -7,12 +7,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.os.FileObserver
-import android.os.FileObserver.CREATE
-import android.os.FileObserver.DELETE
-import android.os.FileObserver.MODIFY
 import android.os.storage.StorageManager
 import android.util.Log
 import android.widget.Toast
@@ -21,11 +17,12 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,11 +30,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.*
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
@@ -80,10 +79,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
+import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import coil.compose.AsyncImage
 import coil.compose.rememberAsyncImagePainter
-import coil.compose.rememberImagePainter
 import coil.decode.GifDecoder
 import coil.request.ImageRequest
 import kotlinx.coroutines.CoroutineScope
@@ -164,7 +163,7 @@ fun InitialDirectorySelection(
 fun FileBrowser(directory: File, onFileClick: (File) -> Unit, onNavigate: (File) -> Unit) {
     val files = directory.listFiles()?.toList() ?: listOf()
     val sortedFiles = files.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
-    val imageExtensions = listOf("jpg", "jpeg", "png", "gif", "bmp", "webp")
+    val imageExtensions = listOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "apng")
 
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         items(sortedFiles) { file ->
@@ -299,7 +298,7 @@ fun CustomIconPickerButton(
             }
         } else {
             {
-                buttonState.uri?.let { uri ->
+                buttonState.uri.let { uri ->
                     val file = File(uri.path ?: "")
                     if (file.exists()) {
                         file.delete()
@@ -318,7 +317,7 @@ fun CustomIconPickerButton(
             }
         }
 
-        val buttonText = if (buttonState?.uri == null) "Choose Icon (png, jpg, gif)" else "Remove Icon"
+        val buttonText = if (buttonState?.uri == null) "Choose Icon (png, jpg, gif, apng)" else "Remove Icon"
         val buttonTextColor = if (buttonState?.uri == null) Color.White else Color.Red
 
         Button(
@@ -390,8 +389,8 @@ fun CustomIconPickerButton(
                         textColor = Color.Cyan
                     )
                     Log.d("ImageCopy", "Image copied to: ${copiedFile.absolutePath}")
-                    UIStateManager.saveImageUri(buttonId, Uri.parse(copiedFile.absolutePath))
-                    buttonUri.value = Uri.parse(copiedFile.absolutePath)
+                    UIStateManager.saveImageUri(buttonId, copiedFile.absolutePath.toUri())
+                    buttonUri.value = copiedFile.absolutePath.toUri()
                     val updatedState = UIStateManager.buttonStates.value[buttonId]?.copy(uri = buttonUri.value)
                     updatedState?.let {
                         updateButtonState(buttonId, it)
@@ -410,7 +409,7 @@ fun CustomIconPickerButton(
     }
 }
 
-@SuppressLint("NewApi")
+@SuppressLint("NewApi", "FlowOperatorInvokedInComposition", "LocalContextGetResourceValueCall")
 @Composable
 fun FileBrowserPopup(
     initialDirectory: File = File(Environment.getExternalStorageDirectory().toString()),
@@ -561,11 +560,7 @@ fun TextEditor(file: File, onDismiss: () -> Unit) {
     LaunchedEffect(file) {
         textContent = if (isBase64File) {
             val base64Content = file.readText()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                String(Base64.getDecoder().decode(base64Content))
-            } else {
-                TODO("VERSION.SDK_INT < O")
-            }
+            String(Base64.getDecoder().decode(base64Content))
         } else {
             file.readText()
         }
@@ -626,7 +621,8 @@ fun TextEditor(file: File, onDismiss: () -> Unit) {
                                         Text(
                                             text = "${index + 1}",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = LocalContentColor.current
+                                            color = LocalContentColor.current,
+                                            fontSize = 14.sp
                                         )
                                     }
                                 }
@@ -745,67 +741,6 @@ fun TextEditor(file: File, onDismiss: () -> Unit) {
                 }
             }
         }
-    }
-}
-
-/**
- * Observe all folders in Alpha3, to log the file create/modify/delete
- * very slow if there are too many mods in Alpha3 folder
- * some device will crash when there are too much folders
- */
-class MultiPathFileObserver(
-    private val rootPaths: List<String>
-) {
-
-    private val observers = mutableListOf<FileObserver>()
-
-    init {
-        rootPaths.forEach { rootPath ->
-            addObservers(File(rootPath))
-        }
-    }
-
-    private fun addObservers(file: File) {
-        if (file.isDirectory) {
-            val observer = object : FileObserver(file.absolutePath, ALL_EVENTS) {
-                override fun onEvent(event: Int, path: String?) {
-                    handleEvent(event, file, path)
-                }
-            }
-            observers.add(observer)
-            // observer.startWatching()
-
-            file.listFiles()?.forEach {
-                addObservers(it)
-            }
-        }
-    }
-
-    private fun handleEvent(event: Int, file: File, path: String?) {
-        if (path != null) {
-            val fullPath = "${file.absolutePath}/$path"
-            val message = when (event) {
-                CREATE -> "File created: $fullPath"
-                DELETE -> "File deleted: $fullPath"
-                MODIFY -> "File modified: $fullPath"
-                else -> null
-            }
-
-            message?.let {
-                // Use addCustomLog instead of Toast
-                CoroutineScope(Dispatchers.Main).launch {
-                    addCustomLog(it, textSize = 16, textColor = Color.Red)
-                }
-            }
-        }
-    }
-
-    fun startWatching() {
-        observers.forEach { it.startWatching() }
-    }
-
-    fun stopWatching() {
-        observers.forEach { it.stopWatching() }
     }
 }
 

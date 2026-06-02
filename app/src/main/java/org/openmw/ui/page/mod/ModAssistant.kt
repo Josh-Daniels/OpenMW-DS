@@ -180,22 +180,6 @@ private fun ModTabRow(
                     text = { Text(category.tag) }
                 )
             }
-            /*Tab(
-                selected = selectedTabIndex == categories.size,
-                onClick = { showFileBrowser = true },
-                text = { Text(stringResource(R.string.add_mod)) }
-            )*/
-            /*if (newFeatureEnabledChecked) {
-                Tab(
-                    selected = selectedTabIndex == 3,
-                    onClick = {
-                        resetStates()
-                        autoMods = true
-                        selectedTabIndex = 3
-                    },
-                    text = { Text(stringResource(R.string.search_repair)) }
-                )
-            }*/
             Tab(
                 selected = selectedTabIndex == 3,
                 onClick = {
@@ -300,7 +284,7 @@ fun ModValuesList(
 
     val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
 
-    // Manage whats in the tabs here
+    // Manage what's in the tabs here
     var showMods by viewModel.showMods
     var showNav by viewModel.showNav
     var showDelta by viewModel.showDelta

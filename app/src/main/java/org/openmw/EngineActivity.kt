@@ -36,7 +36,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,7 +53,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.libsdl.app.SDLActivity
-import org.openmw.ui.controls.ButtonConfigManager
 import org.openmw.ui.controls.MouseIcon
 import org.openmw.ui.controls.ResizableDraggableButton
 import org.openmw.ui.controls.ResizableDraggableRightThumbstick
@@ -200,7 +198,7 @@ class EngineActivity : SDLActivity() {
                 containerGlobalWidth.floatValue = sdlContainer.width.toFloat()
 
                 // Load button states into UIStateManager with container dimensions
-                UIStateManager.loadButtonState(this@EngineActivity, containerWidth, containerHeight)
+                UIStateManager.loadButtonState(containerWidth, containerHeight)
 
                 if (!UIStateManager.useNavmesh) {
                     // Adds Overlay menu for buttons and edit mode
@@ -433,7 +431,7 @@ class EngineActivity : SDLActivity() {
             Os.setenv("OSG_GL_TEXTURE_STORAGE", "OFF", true)
             Os.setenv("LIBGL_INSTANCING", "1", true)
 
-            Os.setenv("DETHRACE_ROOT_DIR", "${Constants.USER_FILE_STORAGE}/dethrace/", true);
+            Os.setenv("DETHRACE_ROOT_DIR", "${Constants.USER_FILE_STORAGE}/dethrace/", true)
 
             Os.setenv("HARNESS_OPENGL", "1", true)
 
@@ -562,7 +560,7 @@ fun Buttons(context: Context, containerWidth: Float, containerHeight: Float) {
                 containerWidth = containerWidth,
                 containerHeight = containerHeight,
                 onDelete = {
-                    UIStateManager.removeButtonState(button.id, context, containerWidth, containerHeight)
+                    UIStateManager.removeButtonState(button.id, containerWidth, containerHeight)
                 }
             )
         }

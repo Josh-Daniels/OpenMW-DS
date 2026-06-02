@@ -646,34 +646,9 @@ fun ResizableDraggableRightThumbstick(
                                                             Spacer(modifier = Modifier.weight(1f))
                                                             Switch(
                                                                 checked = enableRightThumb,
-                                                                onCheckedChange = { isChecked ->
-                                                                    enableRightThumb = isChecked
-                                                                    if (isChecked) {
-                                                                        // Logic to add ButtonID_98
-                                                                        val newButtonState = ButtonState(
-                                                                            id = 98,
-                                                                            size = 160f,
-                                                                            offsetX = 1199.7069f,
-                                                                            offsetY = 216.80106f,
-                                                                            isLocked = false,
-                                                                            blockMouse = false,
-                                                                            keyCode = 98,
-                                                                            color = "aafdfffe",
-                                                                            alpha = 0.25f,
-                                                                            uri = buttonUri.value,
-                                                                            group = state.group,
-                                                                            vibrate = false
-                                                                        )
-
-                                                                        // Update UIStateManager with the new button state
-                                                                        updateButtonState(newButtonState.id, newButtonState)
-                                                                    } else {
-
-                                                                        // Logic to remove ButtonID_98
-                                                                        UIStateManager.removeButtonState(98, context, containerWidth, containerHeight)
-                                                                    }
-
-                                                                    // Save the updated button states to the file
+                                                                onCheckedChange = { _ ->
+                                                                    enableRightThumb = false
+                                                                    UIStateManager.removeButtonState(98, containerWidth, containerHeight)
                                                                     UIStateManager.saveButtonState(containerWidth, containerHeight)
                                                                 },
                                                                 colors = SwitchDefaults.colors(

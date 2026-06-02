@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">Alpha-3启动器</string>
-    <string name="searching_for_morrowind_esm">正在搜索Morrowind.esm...</string>
+    <string name="searching_for_morrowind_esm" tools:ignore="TypographyEllipsis">正在搜索Morrowind.esm...</string>
     <string name="config_file_missing">配置文件缺失</string>
     <string name="openmw_config_file_not_found_msg">未找到OpenMW配置文件\n请手动选择游戏文件</string>
     <string name="ok">确定</string>
@@ -9,7 +9,7 @@
     <string name="morrowind_esm_not_in_cfg_msg">配置文件中未列出Morrowind.esm\n是否要手动选择文件夹？</string>
     <string name="morrowind_esm_not_found">未找到Morrowind.esm</string>
     <string name="cancel">取消</string>
-    <string name="checking_data_paths">正在检查数据路径...</string>
+    <string name="checking_data_paths" tools:ignore="TypographyEllipsis">正在检查数据路径...</string>
     <string name="game_files_found">已找到游戏文件</string>
     <string name="found_morrowind_esm_msg">在以下位置找到Morrowind.esm：\n\n%s\n\n使用此位置？</string>
     <string name="no">否</string>
@@ -49,7 +49,7 @@
     <string name="enable_internet_for_the_options_here">为此处选项启用网络连接</string>
     <string name="this_is_extremely_experimental">这是高度实验性功能！！</string>
     <string name="path_corrector">路径校正器</string>
-    <string name="searching">搜索中...</string>
+    <string name="searching" tools:ignore="TypographyEllipsis">搜索中...</string>
     <string name="found_">已找到：</string>
     <string name="search_completed_found_s_files">搜索完成，找到%s个文件。</string>
     <string name="paths_corrected_and_updated">路径已校正并更新</string>
@@ -238,7 +238,7 @@
     <string name="editmode_tip_drag_tip">添加按钮后，您可以按住并拖动它</string>
     <string name="now_you_try">现在请尝试</string>
     <string name="click_the_spinning_yellow_dots_tip">很好！现在点击旋转的黄色圆点\n来编辑按钮</string>
-    <string name="ui_toturial_finish_tip">基础UI教程已完成。将在%d秒后关闭...</string>
+    <string name="ui_toturial_finish_tip" tools:ignore="TypographyEllipsis">基础UI教程已完成。将在%d秒后关闭...</string>
     <string name="size_transform">尺寸变换</string>
     <string name="set_offset_x">设置X偏移</string>
     <string name="set_offset_y">设置Y偏移</string>

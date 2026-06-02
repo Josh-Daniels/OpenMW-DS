@@ -2,8 +2,6 @@ package org.openmw.ui.controls
 
 import android.net.Uri
 import android.util.Log
-import android.view.KeyEvent
-import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.descriptors.PrimitiveKind
@@ -12,11 +10,11 @@ import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
-import org.openmw.EngineActivity
 import org.openmw.ui.controls.UIStateManager.userUI
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import androidx.core.net.toUri
 
 @Serializable
 data class ButtonConfig(
@@ -49,17 +47,23 @@ object UriSerializer : KSerializer<Uri> {
     }
 
     override fun deserialize(decoder: Decoder): Uri {
-        return Uri.parse(decoder.decodeString())
+        return decoder.decodeString().toUri()
     }
 }
 
 object ButtonConfigManager {
+    private val jsonFormat = Json {
+        encodeDefaults = true
+        prettyPrint = true
+        ignoreUnknownKeys = true
+    }
+
     fun saveButtons(allConfigs: List<ButtonConfig>) {
         try {
-            val json = Json { encodeDefaults = true; prettyPrint = true }.encodeToString(allConfigs)
+            val jsonString = jsonFormat.encodeToString(allConfigs)
             val file = File("${userUI}/button_configs.json")
             FileOutputStream(file).use { output ->
-                output.write(json.toByteArray())
+                output.write(jsonString.toByteArray())
             }
             //println("Saved buttons: $allConfigs")
         } catch (e: Exception) {
@@ -83,10 +87,10 @@ object ButtonConfigManager {
         return try {
             val file = File("${userUI}/button_configs.json")
             if (file.exists()) {
-                val json = FileInputStream(file).use { input ->
+                val jsonString = FileInputStream(file).use { input ->
                     input.bufferedReader().use { it.readText() }
                 }
-                val buttons = Json.decodeFromString<List<ButtonConfig>>(json)
+                val buttons = jsonFormat.decodeFromString<List<ButtonConfig>>(jsonString)
                 //println("Loaded buttons: $buttons")
                 buttons
             } else {

@@ -214,7 +214,7 @@ dependencies {
     implementation(libs.junrar)
     implementation(libs.zip4j)
     implementation(libs.androidp7zip)
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation(libs.bcprov.jdk18on)
 
     // rooms
     implementation(libs.androidx.room.runtime)

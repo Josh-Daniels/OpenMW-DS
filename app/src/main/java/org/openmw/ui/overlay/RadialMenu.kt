@@ -42,8 +42,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -52,7 +54,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
@@ -68,7 +74,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,7 +85,6 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -100,6 +104,8 @@ import com.composables.core.ScrollArea
 import com.composables.core.Thumb
 import com.composables.core.VerticalScrollbar
 import com.composables.core.rememberScrollAreaState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.libsdl.app.SDLActivity
 import org.openmw.R
@@ -109,6 +115,8 @@ import org.openmw.ui.controls.ButtonConfigManager.filterButtonsByType
 import org.openmw.ui.controls.ButtonConfigManager.loadAllButtons
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.editMode
+import org.openmw.ui.controls.UIStateManager.enableQuickSlot
+import org.openmw.ui.controls.UIStateManager.enableRightThumb
 import org.openmw.ui.controls.UIStateManager.globalColorChange
 import org.openmw.ui.controls.UIStateManager.gold
 import org.openmw.ui.controls.UIStateManager.isRadialMenuExpanded
@@ -118,6 +126,8 @@ import org.openmw.utils.ColorPickerWheel
 import org.openmw.utils.CustomIconPickerButton
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getSelectedAnimation
+import org.openmw.utils.GameFilesPreferences.setSensitivityRT
+import org.openmw.utils.GameFilesPreferences.writeVirtualRightThumbstick
 import org.openmw.utils.fromHex
 import kotlin.math.PI
 import kotlin.math.cos
@@ -275,7 +285,7 @@ fun ExpandableCircleButton() {
                     ) {
                         Text(
                             text = "No buttons added",
-                            color = Color.White,
+                            color = White,
                             fontSize = 16.sp,
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
@@ -291,13 +301,13 @@ fun ExpandableCircleButton() {
                             Icon(
                                 Icons.Default.Add,
                                 contentDescription = "Add button",
-                                tint = Color.White,
+                                tint = White,
                                 modifier = Modifier.size(40.dp)
                             )
                         }
                         Text(
                             text = "Tap + to add a button",
-                            color = Color.White,
+                            color = White,
                             fontSize = 12.sp,
                             modifier = Modifier.padding(top = 8.dp)
                         )
@@ -352,7 +362,7 @@ fun PieChart(
             Icon(
                 Icons.Default.Add,
                 contentDescription = "Add button",
-                tint = Color.White,
+                tint = White,
                 modifier = Modifier.size(24.dp)
             )
         }
@@ -399,7 +409,7 @@ private fun SectionButton(
         ) {
             Text(
                 text = "✕",
-                color = Color.White,
+                color = White,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -423,7 +433,7 @@ private fun SectionButton(
     ) {
         Text(
             text = label,
-            color = Color.White,
+            color = White,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
@@ -452,14 +462,14 @@ fun SimpleKeySelectionDialog(
                 Text(
                     text = "Select a Key",
                     style = MaterialTheme.typography.titleLarge,
-                    color = Color.White,
+                    color = White,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
 
                 TabRow(
                     selectedTabIndex = selectedTabIndex,
                     containerColor = Color.DarkGray,
-                    contentColor = Color.White
+                    contentColor = White
                 ) {
                     tabTitles.forEachIndexed { index, title ->
                         Tab(
@@ -654,10 +664,12 @@ fun HiddenMenu(
 
         // Manage what's in the tabs here
         var options by remember { mutableStateOf(true) }
+        var interact by remember { mutableStateOf(false) }
         var colors by remember { mutableStateOf(false) }
 
         fun resetStates() {
             options = false
+            interact = false
             colors = false
         }
 
@@ -855,7 +867,8 @@ fun HiddenMenu(
                                             ) {
                                                 val selectedTabIndex = when {
                                                     options -> 0
-                                                    colors -> 1
+                                                    interact -> 1
+                                                    colors -> 2
                                                     else -> 0
                                                 }
                                                 ScrollableTabRow(
@@ -880,6 +893,14 @@ fun HiddenMenu(
                                                             options = true
                                                         },
                                                         text = { Text(stringResource(R.string.options)) }
+                                                    )
+                                                    Tab(
+                                                        selected = interact,
+                                                        onClick = {
+                                                            resetStates()
+                                                            interact = true
+                                                        },
+                                                        text = { Text(stringResource(R.string.interact)) }
                                                     )
                                                     Tab(
                                                         selected = colors,
@@ -1055,6 +1076,36 @@ fun HiddenMenu(
                                                                 }
                                                             }
                                                         }
+                                                    }
+                                                    if (interact) {
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Spacer(modifier = Modifier.width(10.dp))
+                                                            Text(
+                                                                text = stringResource(R.string.enable_quickSlot),
+                                                                color = White,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            Switch(
+                                                                checked = enableQuickSlot,
+                                                                onCheckedChange = { _ ->
+                                                                    enableQuickSlot = false
+                                                                    UIStateManager.removeButtonState(201, containerWidth, containerHeight)
+                                                                    UIStateManager.saveButtonState(containerWidth, containerHeight)
+                                                                },
+                                                                colors = SwitchDefaults.colors(
+                                                                    checkedThumbColor = Color(202, 165, 96),
+                                                                    uncheckedThumbColor = Color.Red,
+                                                                    checkedTrackColor = Color.Black.copy(alpha = 0.9f),
+                                                                    uncheckedTrackColor = Color.Black.copy(alpha = 0.5f),
+                                                                    checkedBorderColor = White,
+                                                                    uncheckedBorderColor = White
+                                                                )
+                                                            )
+                                                        }
+                                                        HorizontalDivider(color = Color(202, 165, 96), thickness = 1.dp)
                                                     }
                                                     if (colors) {
                                                         Row(

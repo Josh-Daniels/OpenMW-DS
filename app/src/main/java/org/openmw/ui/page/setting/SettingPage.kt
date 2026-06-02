@@ -53,7 +53,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -1339,7 +1338,7 @@ fun UQM() {
 fun ButtonShapeDropdownMenu(updateShape: (String) -> Unit) {
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
-    val shapes = listOf("CircleShape", "RoundedCornerShape", "RectangleShape", "StadiumShape", "ChamferedShape")
+    val shapes = listOf("CircleShape", "RoundedCornerShape", "RectangleShape", "StadiumShape")
     val currentShape by loadButtonShape(context).collectAsState(initial = "StadiumShape")
     var feedbackMessage by remember { mutableStateOf("") }
     val buttonShape = stringToShape(currentShape)

@@ -76,10 +76,9 @@ import org.openmw.ui.controls.UIStateManager.enableRightThumb
 import org.openmw.ui.controls.UIStateManager.highlightStep
 import org.openmw.ui.controls.UIStateManager.menuAlpha
 import org.openmw.ui.controls.UIStateManager.menuColor
-import org.openmw.utils.GameFilesPreferences
 import org.openmw.ui.view.addCustomLog
+import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.stringRes
-import java.io.BufferedWriter
 import java.io.File
 
 data class ButtonState(
@@ -181,7 +180,6 @@ object UIStateManager {
     var isTabExpanded by mutableStateOf(false)
 
     var isLogcatEnabled by mutableStateOf(false)
-    var activeSettingSection by mutableStateOf<String?>(null)
     val expandedSections = mutableStateListOf<String>()
     var editMode by mutableStateOf(false)
     val gridSize = mutableIntStateOf(50)
@@ -233,14 +231,18 @@ object UIStateManager {
         }
     }
 
-    fun removeButtonState(buttonId: Int, context: Context, containerWidth: Float, containerHeight: Float) {
+    fun removeButtonState(buttonId: Int, containerWidth: Float, containerHeight: Float) {
         // Update the state by removing the button
-        _buttonStates.value = _buttonStates.value.toMutableMap().apply { this[buttonId] = DeletedButtonState }
+        if (buttonId == 98) {
+            _buttonStates.value = _buttonStates.value.toMutableMap().apply { remove(buttonId) }
+        } else {
+            _buttonStates.value = _buttonStates.value.toMutableMap().apply { this[buttonId] = DeletedButtonState }
+        }
 
-        //Log.d("RemoveButtonState", "Button with ID $buttonId removed from state.")
+        Log.d("RemoveButtonState", "Button with ID $buttonId removed from state.")
 
         // Delete the associated image file
-        val imageExtensions = listOf("png", "gif")
+        val imageExtensions = listOf("png", "gif", "apng")
         imageExtensions.forEach { extension ->
             val imageFile = File(userUI, "$buttonId.$extension")
             if (imageFile.exists()) {
@@ -322,7 +324,7 @@ object UIStateManager {
         }
     }
 
-    fun loadButtonState(context: Context, containerWidth: Float, containerHeight: Float) {
+    fun loadButtonState(containerWidth: Float, containerHeight: Float) {
         val width = if (containerWidth > 1f) containerWidth else containerGlobalWidth.floatValue
         val height = if (containerHeight > 1f) containerHeight else containerGlobalHeight.floatValue
 
@@ -830,10 +832,10 @@ fun KeySelectionMenu(context: Context, onKeySelected: (Int) -> Unit, usedKeys: L
                                 )
 
                                 // Update UIStateManager with the new button state
-                                UIStateManager.updateButtonState(newButtonState.id, newButtonState)
+                                UIStateManager.updateButtonState(98, newButtonState)
                             } else {
                                 // Logic to remove ButtonID_98
-                                UIStateManager.removeButtonState(98, context, containerWidth, containerHeight)
+                                UIStateManager.removeButtonState(98, containerWidth, containerHeight)
                             }
 
                             // Save the updated button states to the file
@@ -857,10 +859,9 @@ fun KeySelectionMenu(context: Context, onKeySelected: (Int) -> Unit, usedKeys: L
                         onCheckedChange = { isChecked ->
                             enableQuickSlot = isChecked
                             if (isChecked) {
-                                // Logic to add ButtonID_98
                                 val newButtonState = ButtonState(
                                     id = 201,
-                                    size = 160f,
+                                    size = 60f,
                                     offsetX = 200f,
                                     offsetY = 200f,
                                     isLocked = false,
@@ -874,10 +875,9 @@ fun KeySelectionMenu(context: Context, onKeySelected: (Int) -> Unit, usedKeys: L
                                 )
 
                                 // Update UIStateManager with the new button state
-                                UIStateManager.updateButtonState(newButtonState.id, newButtonState)
+                                UIStateManager.updateButtonState(201, newButtonState)
                             } else {
-                                // Logic to remove ButtonID_98
-                                UIStateManager.removeButtonState(201, context, containerWidth, containerHeight)
+                                UIStateManager.removeButtonState(201, containerWidth, containerHeight)
                             }
 
                             // Save the updated button states to the file

@@ -1,6 +1,6 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">Alpha-3 Launcher</string>
-    <string name="searching_for_morrowind_esm">Searching for Morrowind.esm...</string>
+    <string name="searching_for_morrowind_esm" tools:ignore="TypographyEllipsis">Searching for Morrowind.esm...</string>
     <string name="config_file_missing">Config File Missing</string>
     <string name="openmw_config_file_not_found_msg">OpenMW config file not found.\nPlease select your game files manually.</string>
     <string name="ok">OK</string>
@@ -8,7 +8,7 @@
     <string name="morrowind_esm_not_in_cfg_msg">The config file doesn\'t list Morrowind.esm.\nWould you like to select the folder manually?</string>
     <string name="morrowind_esm_not_found">Morrowind.esm Not Found</string>
     <string name="cancel">Cancel</string>
-    <string name="checking_data_paths">Checking data paths...</string>
+    <string name="checking_data_paths" tools:ignore="TypographyEllipsis">Checking data paths...</string>
     <string name="game_files_found">Game Files Found</string>
     <string name="found_morrowind_esm_msg">Found Morrowind.esm at:\n\n%s\n\nUse this location?</string>
     <string name="no">No</string>
@@ -48,7 +48,7 @@
     <string name="enable_internet_for_the_options_here">Enable internet for the options here.</string>
     <string name="this_is_extremely_experimental">This is extremely experimental!!</string>
     <string name="path_corrector">Path Corrector</string>
-    <string name="searching">Searching...</string>
+    <string name="searching" tools:ignore="TypographyEllipsis">Searching...</string>
     <string name="found_">Found: </string>
     <string name="search_completed_found_s_files">Search completed. Found %s files.</string>
     <string name="paths_corrected_and_updated">Paths corrected and updated.</string>
@@ -237,7 +237,7 @@
     <string name="editmode_tip_drag_tip">Now that a button is added, you can drag it by\nholding down and swiping it.</string>
     <string name="now_you_try">Now you try.</string>
     <string name="click_the_spinning_yellow_dots_tip">Perfect!. Now click the spinning Yellow dots\nto edit the button.</string>
-    <string name="ui_toturial_finish_tip">That\'s it for now, you have the basic UI tutorial finished. Closing in %d...</string>
+    <string name="ui_toturial_finish_tip" tools:ignore="TypographyEllipsis">That\'s it for now, you have the basic UI tutorial finished. Closing in %d...</string>
     <string name="size_transform">size transform</string>
     <string name="set_offset_x">Set Offset X</string>
     <string name="set_offset_y">Set Offset Y</string>

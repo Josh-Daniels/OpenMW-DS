@@ -476,7 +476,7 @@ fun SSOHome() {
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = customColor, // Background color
-                                    contentColor = Color.White   // Text color
+                                    contentColor = White   // Text color
                                 )
                             ) {
                                 Text(stringResource(R.string.remove_api_key), color = gold)
@@ -503,7 +503,7 @@ fun SSOHome() {
                             },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = customColor, // Background color
-                                contentColor = Color.White   // Text color
+                                contentColor = White   // Text color
                             )
                         ) {
                             Text(stringResource(R.string.save), color = gold)
@@ -670,7 +670,7 @@ fun AvailableModLists(modDao: ModDao) {
             onDismissRequest = { expanded = false },
             modifier = Modifier
                 .background(customColor)
-                .border(1.dp, Color.White)
+                .border(1.dp, White)
         ) {
             filteredLists.forEach { option ->
                 val count = modCounts[option] ?: 0
@@ -694,7 +694,7 @@ fun AvailableModLists(modDao: ModDao) {
 
                             Text(
                                 text = if (isCustomList) "📁 $option (Mods: $count)" else "$option (Mods: $count)",
-                                color = if (isCustomList) Color(0xFF4CAF50) else Color.White
+                                color = if (isCustomList) Color(0xFF4CAF50) else White
                             )
                             Text(
                                 "Download Size: ${formatSize(sizeForThisListKb)}",
@@ -809,10 +809,10 @@ fun RateLimitDisplay() {
 
             Text(
                 text = "Free Space: $availableSpace    Cached Mods: $totalMods    $selectedThreadCount Threads Detected",
-                color = Color.White,
+                color = White,
                 fontSize = 12.sp
             )
-            HorizontalDivider(color = Color.White, thickness = 1.dp)
+            HorizontalDivider(color = White, thickness = 1.dp)
 
             val statusPriority = mapOf(
                 ModStatus.DOWNLOADING to 0,

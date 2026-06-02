@@ -83,7 +83,7 @@ class MegaDownloader {
 
         return client.newCall(req).execute().use {
             if (!it.isSuccessful) throw Exception("MEGA API error ${it.code}")
-            JSONArray(it.body?.string().orEmpty()).getJSONObject(0)
+            JSONArray(it.body.string()).getJSONObject(0)
         }
     }
 
@@ -91,7 +91,7 @@ class MegaDownloader {
         var downloaded = 0L
         val req = Request.Builder().url(url).build()
         client.newCall(req).execute().use { resp ->
-            resp.body?.byteStream()?.use { input ->
+            resp.body.byteStream().use { input ->
                 dest.outputStream().use { output ->
                     val buffer = ByteArray(8192)
                     var read: Int

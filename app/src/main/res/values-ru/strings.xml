@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">Alpha-3 Launcher</string>
-    <string name="searching_for_morrowind_esm">Поиск Morrowind.esm...</string>
+    <string name="searching_for_morrowind_esm" tools:ignore="TypographyEllipsis">Поиск Morrowind.esm...</string>
     <string name="config_file_missing">Конфигурационный файл отсутствует</string>
     <string name="openmw_config_file_not_found_msg">Конфигурационный файл OpenMW не найден.\nПожалуйста, выберите файлы игры вручную.</string>
     <string name="ok">ОК</string>
@@ -9,7 +9,7 @@
     <string name="morrowind_esm_not_in_cfg_msg">Конфигурационный файл не содержит Morrowind.esm.\nХотите выбрать папку вручную?</string>
     <string name="morrowind_esm_not_found">Morrowind.esm не найден</string>
     <string name="cancel">Отмена</string>
-    <string name="checking_data_paths">Проверка путей к данным...</string>
+    <string name="checking_data_paths" tools:ignore="TypographyEllipsis">Проверка путей к данным...</string>
     <string name="game_files_found">Файлы игры найдены</string>
     <string name="found_morrowind_esm_msg">Найден Morrowind.esm по адресу:\n\n%s\n\nИспользовать это расположение?</string>
     <string name="no">Нет</string>
@@ -49,7 +49,7 @@
     <string name="enable_internet_for_the_options_here">Включите интернет для этих опций.</string>
     <string name="this_is_extremely_experimental">Это крайне экспериментально!!</string>
     <string name="path_corrector">Корректор путей</string>
-    <string name="searching">Поиск...</string>
+    <string name="searching" tools:ignore="TypographyEllipsis">Поиск...</string>
     <string name="found_">Найдено: </string>
     <string name="search_completed_found_s_files">Поиск завершен. Найдено %s файлов.</string>
     <string name="paths_corrected_and_updated">Пути исправлены и обновлены.</string>
@@ -237,7 +237,7 @@
     <string name="editmode_tip_drag_tip">Теперь, когда кнопка добавлена, вы можете перетаскивать её,\nудерживая и перемещая.</string>
     <string name="now_you_try">Теперь ваша очередь.</string>
     <string name="click_the_spinning_yellow_dots_tip">Отлично! Теперь нажмите на вращающиеся жёлтые точки,\nчтобы редактировать кнопку.</string>
-    <string name="ui_toturial_finish_tip">На этом пока всё, вы завершили базовое обучение интерфейсу. Закрытие через %d...</string>
+    <string name="ui_toturial_finish_tip" tools:ignore="TypographyEllipsis">На этом пока всё, вы завершили базовое обучение интерфейсу. Закрытие через %d...</string>
     <string name="size_transform">изменение размера</string>
     <string name="set_offset_x">Установить смещение X</string>
     <string name="set_offset_y">Установить смещение Y</string>

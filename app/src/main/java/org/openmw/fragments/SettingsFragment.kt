@@ -129,7 +129,7 @@ fun onFirstLaunch(context: Context) {
                         val convertedData = IniConverter(iniData).convert()
 
                         updateMainConfig(folder.absolutePath, gameFiles, convertedData)
-                        updateUserConfig(folder.absolutePath, gameFiles)
+                        //updateUserConfig(folder.absolutePath, gameFiles)
                     }
                 }
             }
@@ -161,10 +161,7 @@ fun processSelectedFolder(context: Context, folder: File, onUriPersisted: (Strin
                 val convertedData = IniConverter(iniData).convert()
 
                 updateMainConfig(folder.absolutePath, gameFiles, convertedData)
-
-                // 2. Process user openmw.cfg
                 updateUserConfig(folder.absolutePath, gameFiles)
-
             } else {
                 context.dataStore.edit { it[dataStoreKey] = "" }
                 onUriPersisted("")

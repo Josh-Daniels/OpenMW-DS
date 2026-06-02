@@ -50,7 +50,7 @@ class ManageAssets(private val context: Context) {
                         return
                     }
                 }
-            } catch (e: IOException) {
+            } catch (_: IOException) {
                 // Fallback to copy if size check fails
             }
         }

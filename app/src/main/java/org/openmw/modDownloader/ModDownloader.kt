@@ -343,19 +343,6 @@ object ModListManager {
 
     var remainingMods by mutableIntStateOf(0)
 
-    /*
-    val availableLists = mutableListOf(
-        "i-heart-vanilla",
-        "starwind-modded",
-        "i-heart-vanilla-directors-cut",
-        "just-good-morrowind",
-        "graphics-overhaul",
-        "expanded-vanilla",
-        "total-overhaul",
-        "just-beautiful-morrowind"
-    )
-     */
-
     val availableLists = runBlocking { fetchAvailableLists() }
     suspend fun fetchAvailableLists(): MutableList<String> = withContext(Dispatchers.IO) {
         try {
@@ -438,8 +425,10 @@ object ModListManager {
                 preferences[GameFilesPreferences.IS_NEXUS_PREMIUM] = premiumStatus
             }
             Log.i("Validate", "Raw JSON: $jsonString")
+            addCustomLog("Validate: Raw JSON: $jsonString", textSize = 10, textColor = Color.Yellow)
         } catch (e: Exception) {
             Log.e("VALIDATE_ERROR", "Validation failed: ${e.message}")
+            addCustomLog("Validate: Validation failed: ${e.message}", textSize = 10, textColor = Color.Yellow)
         }
     }
 
