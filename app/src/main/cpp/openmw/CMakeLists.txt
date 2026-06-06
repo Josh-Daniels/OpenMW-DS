@@ -59,7 +59,7 @@ set(LIBICU_VERSION 70-1)
 set(LIBICU_HASH SHA256=4013d7aff8a34bae410664bdb16554d7eda03654b22627b9284ab55a685492d4)
 
 # https://github.com/sisah2/openmw/commits/clean
-set(OPENMW_VERSION dbbd9456e8d3d643ec41bb1331ef4b607db20a04)
+set(OPENMW_VERSION 6eae10346cb26bf1856e6b4368f986fb40054b76)
 set(OPENMW_HASH SHA256=44d044ad0a5546216fe611fe92c37065bb07e2efeeeaac4f049dae03df313186)
 
 project(openmw-android)
@@ -124,7 +124,7 @@ endif()
 
 set(GLOBAL_CFLAGS "-w -fPIC -O3 -flto=thin")
 set(GLOBAL_CXXFLAGS "-w -fPIC -O3 -frtti -fexceptions -flto=thin")
-set(GLOBAL_LDFLAGS "-w -fPIC -Wl,--undefined-version -flto=thin -fuse-ld=lld")
+set(GLOBAL_LDFLAGS "-w -fPIC -Wl,--undefined-version -flto=thin -fuse-ld=lld -L${CMAKE_BINARY_DIR}/prefix/lib")
 
 set(ndk_triplet ${NDK_TRIPLET})
 set(download_dir ${CMAKE_BINARY_DIR}/downloads/)
@@ -503,28 +503,28 @@ ExternalProject_Add(libxml
 )
 
 ExternalProject_Add(libogg
-		URL https://github.com/xiph/ogg/releases/download/v1.3.5/libogg-1.3.5.tar.gz
-		DOWNLOAD_DIR ${download_dir}
+	URL https://github.com/xiph/ogg/releases/download/v1.3.5/libogg-1.3.5.tar.gz
+	DOWNLOAD_DIR ${download_dir}
 
-		CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
-		${COMMON_CMAKE_ARGS}
-		-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+	CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
+	${COMMON_CMAKE_ARGS}
+	-DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
-		BUILD_COMMAND ${wrapper_command} make -j${NPROC}
-		INSTALL_COMMAND ${wrapper_command} make install
+	BUILD_COMMAND ${wrapper_command} make -j${NPROC}
+	INSTALL_COMMAND ${wrapper_command} make install
 )
 
 ExternalProject_Add(libvorbis
-		DEPENDS libogg
-		URL https://github.com/xiph/vorbis/releases/download/v1.3.7/libvorbis-1.3.7.tar.gz
-		DOWNLOAD_DIR ${download_dir}
+	DEPENDS libogg
+	URL https://github.com/xiph/vorbis/releases/download/v1.3.7/libvorbis-1.3.7.tar.gz
+	DOWNLOAD_DIR ${download_dir}
 
-		CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
-		${COMMON_CMAKE_ARGS}
-		-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+	CONFIGURE_COMMAND ${wrapper_command} cmake <SOURCE_DIR>
+	${COMMON_CMAKE_ARGS}
+	-DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
-		BUILD_COMMAND ${wrapper_command} make -j${NPROC}
-		INSTALL_COMMAND ${wrapper_command} make install
+	BUILD_COMMAND ${wrapper_command} make -j${NPROC}
+	INSTALL_COMMAND ${wrapper_command} make install
 )
 
 ExternalProject_Add(uqm
@@ -533,7 +533,7 @@ ExternalProject_Add(uqm
 	GIT_REPOSITORY https://github.com/JHGuitarFreak/UQM-MegaMod.git
 	GIT_TAG master
 	DOWNLOAD_DIR ${download_dir}
-	BUILD_ALWAYS 1
+#	BUILD_ALWAYS 1
 
 	UPDATE_COMMAND ""
 

@@ -569,7 +569,6 @@ fun ProgressWithNavmesh(onComplete: () -> Unit) {
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-
                 if (progress < 1f) {
                     Text("${stringRes(R.string.cpu_usage)}: $cpuUsage%", color = Color.White)
                     CustomProgressIndicator(progress = progress)
