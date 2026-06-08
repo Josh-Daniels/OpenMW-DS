@@ -146,6 +146,7 @@ class UserManageAssets(val context: Context) {
 
         // Copy the resources with overwrite enabled
         Log.d("ManageAssets", "Smart copying resources from libopenmw/resources to ${Constants.USER_RESOURCES}")
+        assetCopier.copy("libopenmw/openmw/defaults.bin", Constants.DEFAULTS_BIN, overwrite = true)
         assetCopier.copy("libopenmw/resources", Constants.USER_RESOURCES, overwrite = true)
 
         // Write the new stamp after successful copy
