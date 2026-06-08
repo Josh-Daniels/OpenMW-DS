@@ -216,7 +216,8 @@ object UIStateManager {
     val soundHaptics = mapOf(
         "bodyfallmed" to HapticEffect(amplitude = 180, duration = 120),
         "body hit"    to HapticEffect(amplitude = 255, duration = 80),
-        "punch"       to HapticEffect(amplitude = 200, duration = 60)
+        "punch"       to HapticEffect(amplitude = 200, duration = 60),
+        "swoosh"       to HapticEffect(amplitude = 50, duration = 30)
     )
 
     // Function to change all button colors and alpha

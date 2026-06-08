@@ -326,9 +326,9 @@ object GameFilesPreferences {
         }
     }
 
-    suspend fun saveVibrationState(context: Context, isHidden: Boolean) {
+    suspend fun saveVibrationState(context: Context, isVibrate: Boolean) {
         context.dataStore.edit { preferences ->
-            preferences[VIBRATION_STATE_KEY] = isHidden.toString()
+            preferences[VIBRATION_STATE_KEY] = isVibrate.toString()
         }
     }
 

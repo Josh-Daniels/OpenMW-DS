@@ -212,10 +212,11 @@ class EngineActivity : SDLActivity() {
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
+                        val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
 
                         SoundWatcher { name ->
                             val effect = findHapticForSound(name)
-                            if (effect != null) {
+                            if (effect != null && isVibrationOn) {
                                 vibrateHelper(this@EngineActivity, effect.amplitude, effect.duration)
                                 Log.d("OpenMW", "Haptic: $name → amp=${effect.amplitude}, dur=${effect.duration}")
                             }
