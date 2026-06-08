@@ -6,18 +6,16 @@ default:
 
 variables:
 
-  ANDROID_COMPILE_SDK: "28"
+  ANDROID_COMPILE_SDK: "36"
 
-  ANDROID_BUILD_TOOLS: "29.0.2"
+  ANDROID_BUILD_TOOLS: "35.0.0"
 
   # It's what version of the command line tools we're going to download from the official site.
   # Official Site-> https://developer.android.com/studio/index.html
   # There, look down below at the cli tools only, sdk tools package is of format:
   #        commandlinetools-os_type-ANDROID_SDK_TOOLS_latest.zip
   # when the script was last modified for latest compileSdkVersion, it was which is written down below
-  ANDROID_SDK_TOOLS: "11076708"
-
-  JAVA_HOME: "/usr/lib/jvm/java-17-openjdk-17.0.9.0.9-3.fc39.x86_64"
+  ANDROID_SDK_TOOLS: "14742923"
 
 stages:
   - building
@@ -34,13 +32,15 @@ buildingJob:
   interruptible: true
   stage: building
   
-  image: fedora:39
+  image: fedora:44
 
   before_script:
   - echo $CI_COMMIT_TAG
   - dnf upgrade -y
-  - dnf groupinstall -y development-tools
-  - dnf install -y wget glibc-devel.i686 glibc-devel java-17-openjdk java-17-openjdk-devel gcc gcc-c++ libstdc++-devel unzip bzip2 cmake make which pkgconf pkg-config java-11-openjdk java-11-openjdk-devel 
+  - dnf groupinstall -y @development-tools
+  - dnf install -y wget glibc-devel.i686 glibc-devel gcc gcc-c++ libstdc++-devel unzip bzip2 cmake make which pkgconf pkg-config 
+  # Only needed until JDK 21 isn't used anymore:
+  - dnf install -y adoptium-temurin-java-repository && fedora-third-party enable && dnf install temurin-21-jdk
 
   # Setup path as android_home for moving/exporting the downloaded sdk into it
   - export ANDROID_HOME="${PWD}/android-sdk-root"
@@ -60,7 +60,7 @@ buildingJob:
   # use yes to accept all licenses
   - yes | sdkmanager --licenses > /dev/null || true
   - sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}"
-  - sdkmanager "ndk;26.1.10909125"
+  - sdkmanager "ndk;29.0.14206865"
   - sdkmanager "platform-tools"
   - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
 
@@ -68,8 +68,8 @@ buildingJob:
   - chmod +x ./gradlew
 
   script:
-    - ./gradlew assembleNightlyDebug -Dorg.gradle.java.home=/usr/lib/jvm/java-11-openjdk-11.0.22.0.7-1.fc39.x86_64 &> ./gradle.log
-    - cp app/build/outputs/apk/nightly/debug/*.apk openmw-android-$CI_COMMIT_TAG.apk
+    - ./gradlew assembleDebug -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ &> ./gradle.log
+    - cp app/build/outputs/apk/debug/*.apk openmw-android-alpha3-$CI_COMMIT_TAG.apk
 
   # So we can access the artifacts in the next job:
   after_script:
@@ -81,7 +81,7 @@ buildingJob:
     paths:
       - ./buildscript.log
       - ./gradle.log
-      - openmw-android-$CI_COMMIT_TAG.apk
+      - openmw-android-alpha3$CI_COMMIT_TAG.apk
     expire_in: never
     reports:
       dotenv: job.env
@@ -108,5 +108,5 @@ releaseJob:
     description: 'Release $CI_COMMIT_TAG'
     assets:
       links:
-        - name: "openmw-android-$CI_COMMIT_TAG.apk"
-          url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-$CI_COMMIT_TAG.apk"
+        - name: "openmw-android-alpha3$CI_COMMIT_TAG.apk"
+          url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-alpha3$CI_COMMIT_TAG.apk"
