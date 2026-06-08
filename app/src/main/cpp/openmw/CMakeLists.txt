@@ -713,7 +713,8 @@ set(OPENMW_PATCH
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/ktx.patch &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/bsatool-extract-dds-only.patch &&
     patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/base-changes.patch &&
-	patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/allow-more-es-versions.patch
+	patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/allow-more-es-versions.patch &&
+	patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/hackyRumble.patch
 )
 
 ExternalProject_Add(openmw
@@ -724,6 +725,7 @@ ExternalProject_Add(openmw
 	DOWNLOAD_DIR ${download_dir}
 
 	UPDATE_COMMAND ""
+	BUILD_ALWAYS 1
 
 	PATCH_COMMAND ${OPENMW_PATCH}
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/androidmain.cpp <SOURCE_DIR>/apps/openmw/androidmain.cpp

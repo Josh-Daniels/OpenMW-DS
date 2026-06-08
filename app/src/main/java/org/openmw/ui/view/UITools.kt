@@ -275,11 +275,15 @@ fun startResourceInfoUpdates(context: Context) {
     }
 }
 
-fun vibrate(context: Context) {
+fun vibrate(context: Context, amplitude: Int = VibrationEffect.DEFAULT_AMPLITUDE, duration: Long = 100L) {
     val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     if (vibrator.hasVibrator()) {
-        vibrator.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
+        vibrator.vibrate(VibrationEffect.createOneShot(duration, amplitude))
     }
+}
+
+fun vibrateHelper(context: Context, amplitude: Int, duration: Long) {
+    vibrate(context, amplitude, duration)
 }
 
 fun getDirectorySize(directory: File): Long {

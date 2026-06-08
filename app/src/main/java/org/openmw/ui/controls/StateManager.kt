@@ -81,6 +81,11 @@ import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.stringRes
 import java.io.File
 
+data class HapticEffect(
+    val amplitude: Int,
+    val duration: Long
+)
+
 data class ButtonState(
     val id: Int,
     val size: Float,
@@ -206,6 +211,13 @@ object UIStateManager {
     var isRadialMenuExpanded by mutableStateOf(false)
     private val _buttonStates = MutableStateFlow<Map<Int, ButtonState>>(emptyMap())
     val buttonStates: StateFlow<Map<Int, ButtonState>> get() = _buttonStates
+
+    // Rumble patterns
+    val soundHaptics = mapOf(
+        "bodyfallmed" to HapticEffect(amplitude = 180, duration = 120),
+        "body hit"    to HapticEffect(amplitude = 255, duration = 80),
+        "punch"       to HapticEffect(amplitude = 200, duration = 60)
+    )
 
     // Function to change all button colors and alpha
     fun changeAllButtonColorsAndAlpha(newColor: String, newAlpha: Float) {

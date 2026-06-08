@@ -34,12 +34,14 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
@@ -53,6 +55,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.libsdl.app.SDLActivity
+import org.openmw.ui.controls.HapticEffect
 import org.openmw.ui.controls.MouseIcon
 import org.openmw.ui.controls.ResizableDraggableButton
 import org.openmw.ui.controls.ResizableDraggableRightThumbstick
@@ -73,6 +76,7 @@ import org.openmw.ui.controls.UIStateManager.isRadialMenuExpanded
 import org.openmw.ui.controls.UIStateManager.launchedActivity
 import org.openmw.ui.controls.UIStateManager.offsetXFlow
 import org.openmw.ui.controls.UIStateManager.offsetYFlow
+import org.openmw.ui.controls.UIStateManager.soundHaptics
 import org.openmw.ui.controls.UIStateManager.uqmJNI
 import org.openmw.ui.controls.VirtualKeyboard
 import org.openmw.ui.overlay.ExpandableCircleButton
@@ -82,6 +86,7 @@ import org.openmw.ui.overlay.OverlayUI
 import org.openmw.ui.view.BackgroundAnimation
 import org.openmw.ui.view.NavmeshScreen
 import org.openmw.ui.view.enableLogcat
+import org.openmw.ui.view.vibrateHelper
 import org.openmw.utils.DebugOverlayBox
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getENVLine
@@ -96,6 +101,7 @@ import kotlin.math.roundToInt
 class EngineActivity : SDLActivity() {
     private lateinit var sdlView: View
     private external fun getPathToJni(path_global: String, path_user: String)
+    external fun getLastResourceName(): String
     external fun initAlpha3()
 
     init {
@@ -206,6 +212,14 @@ class EngineActivity : SDLActivity() {
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
+
+                        SoundWatcher { name ->
+                            val effect = findHapticForSound(name)
+                            if (effect != null) {
+                                vibrateHelper(this@EngineActivity, effect.amplitude, effect.duration)
+                                Log.d("OpenMW", "Haptic: $name → amp=${effect.amplitude}, dur=${effect.duration}")
+                            }
+                        }
 
                         BackHandler {
                             // disable back exit
@@ -493,6 +507,30 @@ class EngineActivity : SDLActivity() {
 
         var resolutionX = 0
         var resolutionY = 0
+    }
+
+    fun findHapticForSound(name: String): HapticEffect? {
+        val lower = name.lowercase()
+        return soundHaptics.entries.firstOrNull { (pattern, _) ->
+            lower.contains(pattern)
+        }?.value
+    }
+
+    @Composable
+    fun SoundWatcher(onSound: (String) -> Unit) {
+        var last by remember { mutableStateOf("") }
+
+        LaunchedEffect(Unit) {
+            while (true) {
+                withFrameNanos {
+                    val name = getLastResourceName()
+                    if (name.isNotEmpty() && name != last) {
+                        last = name
+                        onSound(name)
+                    }
+                }
+            }
+        }
     }
 
     override fun getArguments(): Array<String> {
