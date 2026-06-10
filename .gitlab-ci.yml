@@ -59,10 +59,10 @@ buildingJob:
 
   # use yes to accept all licenses
   - yes | sdkmanager --licenses > /dev/null || true
-  - sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}"
-  - sdkmanager "ndk;29.0.14206865"
-  - sdkmanager "platform-tools"
-  - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
+  # - sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}"
+  # - sdkmanager "ndk;29.0.14206865"
+  # - sdkmanager "platform-tools"
+  # - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
 
   # Not necessary, but just for surity
   - chmod +x ./gradlew
@@ -81,7 +81,7 @@ buildingJob:
     paths:
       - ./buildscript.log
       - ./gradle.log
-      - openmw-android-alpha3$CI_COMMIT_TAG.apk
+      - openmw-android-alpha3-$CI_COMMIT_TAG.apk
     expire_in: never
     reports:
       dotenv: job.env
@@ -108,5 +108,5 @@ releaseJob:
     description: 'Release $CI_COMMIT_TAG'
     assets:
       links:
-        - name: "openmw-android-alpha3$CI_COMMIT_TAG.apk"
-          url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-alpha3$CI_COMMIT_TAG.apk"
+        - name: "openmw-android-alpha3-$CI_COMMIT_TAG.apk"
+          url: "https://gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/-/jobs/$JOB_ID/artifacts/file/openmw-android-alpha3-$CI_COMMIT_TAG.apk"
