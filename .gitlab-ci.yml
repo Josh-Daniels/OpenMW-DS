@@ -2,20 +2,13 @@ default:
   tags:
     - selfhosted-1
 
-# Use of a smaller runner model is possible but not cheaper because it takes proportionally longer. If using full lto "large" runner is required.
+# Set to "selfhosted-1" for no-billing 12C/20GB or use "saas-linux-medium-amd64"
 
 variables:
 
   ANDROID_COMPILE_SDK: "36"
 
   ANDROID_BUILD_TOOLS: "35.0.0"
-
-  # It's what version of the command line tools we're going to download from the official site.
-  # Official Site-> https://developer.android.com/studio/index.html
-  # There, look down below at the cli tools only, sdk tools package is of format:
-  #        commandlinetools-os_type-ANDROID_SDK_TOOLS_latest.zip
-  # when the script was last modified for latest compileSdkVersion, it was which is written down below
-  ANDROID_SDK_TOOLS: "14742923"
 
 stages:
   - building
@@ -42,29 +35,26 @@ buildingJob:
   # Only needed until JDK 21 isn't used anymore:
   - dnf install -y adoptium-temurin-java-repository && fedora-third-party enable && dnf install -y temurin-21-jdk
 
-  # Setup path as android_home for moving/exporting the downloaded sdk into it
+  # Set path for ANDROID_home and create directory:
   - export ANDROID_HOME="${PWD}/android-sdk-root"
-  # Create a new directory at specified location
   - mkdir $ANDROID_HOME
-  # Here we are installing androidSDK tools from official source,
-  # after that unzipping those tools and
-  # then running a series of SDK manager commands to install necessary android SDK packages that'll allow the app to build
-  - wget --no-verbose --output-document=$ANDROID_HOME/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_SDK_TOOLS}_latest.zip
+
+  # Download, unzip, move and add to path the latest android sdk cli tools:
+  - wget --no-verbose --output-document=$ANDROID_HOME/cmdline-tools.zip $(curl https://developer.android.com/studio | grep -o "https://dl.google.com/android/repository/commandlinetools-linux-[0-9]*_latest.zip")
   - unzip -q -d "$ANDROID_HOME/cmdline-tools" "$ANDROID_HOME/cmdline-tools.zip"
   - mv -T "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/tools"
   - export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/cmdline-tools/tools/bin
 
-  # Nothing fancy here, just checking sdkManager version
-  - sdkmanager --version
-
-  # use yes to accept all licenses
+  #Accept all sdk licenses preemptively:
   - yes | sdkmanager --licenses > /dev/null || true
-  # - sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}"
-  # - sdkmanager "ndk;29.0.14206865"
-  # - sdkmanager "platform-tools"
-  # - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
 
-  # Not necessary, but just for surity
+  # Install Android Tooling
+  - sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}"
+  - sdkmanager "ndk;29.0.14206865"
+  - sdkmanager "platform-tools"
+  - sdkmanager "build-tools;${ANDROID_BUILD_TOOLS}"
+
+  # Not necessary, just in case someone changed the flag:
   - chmod +x ./gradlew
 
   script:
