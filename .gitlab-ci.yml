@@ -37,7 +37,7 @@ buildingJob:
   before_script:
   - echo $CI_COMMIT_TAG
   - dnf upgrade -y
-  - dnf groupinstall -y @development-tools
+  - dnf install -y @development-tools
   - dnf install -y wget glibc-devel.i686 glibc-devel gcc gcc-c++ libstdc++-devel unzip bzip2 cmake make which pkgconf pkg-config 
   # Only needed until JDK 21 isn't used anymore:
   - dnf install -y adoptium-temurin-java-repository && fedora-third-party enable && dnf install temurin-21-jdk
