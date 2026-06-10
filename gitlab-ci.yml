@@ -1,6 +1,6 @@
 default:
   tags:
-    - saas-linux-large-amd64
+    - selfhosted-1
 
 # Use of a smaller runner model is possible but not cheaper because it takes proportionally longer. If using full lto "large" runner is required.
 
