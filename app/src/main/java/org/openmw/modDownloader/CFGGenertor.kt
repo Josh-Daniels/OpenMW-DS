@@ -23,6 +23,7 @@ suspend fun loadPluginsToCommentOut() {
     withContext(Dispatchers.IO) {
         try {
             val url = URL("https://gitlab.com/cavebros/openmw-android-docker/-/raw/main/patches/linesToCommentOut.txt")
+            //val url = URL("https://gitlab.com/duron27/alpha3/-/raw/main/app/linesToCommentOut.txt")
             val text = url.readText()
 
             val lines = text.lines()
