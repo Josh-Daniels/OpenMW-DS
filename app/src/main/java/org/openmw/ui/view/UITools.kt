@@ -115,7 +115,7 @@ object LogRepository {
 
     fun addLog(message: String, textSize: Int = 12, textColor: Color = Color.White) {
         val logEntry = LogEntry(message, textSize, textColor)
-        _logs.value = _logs.value + logEntry
+        _logs.value += logEntry
     }
 }
 

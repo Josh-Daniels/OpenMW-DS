@@ -1,0 +1,14 @@
+# Plugins to comment out / disable when generating OpenMW config
+# These are mostly cleaned versions of Vennin's overhauls that can conflict or be redundant
+# Last updated: 2026-01 (add date when you edit)
+
+content=Clean_Mines and Caverns.ESP
+content=RPNR_WHO.ESP
+content=RPNR_WHO_BCOM.ESP
+content=RepopulatedTheWolverineHall.esp
+content=MOMW Sadrith Mora Pathgrid Reset.esp
+content=OAAB_Grazelands_Mines_and_Caverns_patch.esp
+content=MC_MOMW_Patch.esp
+content=quarraclan_refreshed.esp
+content=quarraclan_refreshed - Morrowind Anti-Cheese.esp
+content=quarraclan_refreshed - Tamriel_Data.esp

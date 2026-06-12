@@ -62,6 +62,13 @@ suspend fun importPotiModlistStructured(context: Context, filePath: String): Int
 
                     Log.d("POTI_IMPORT", "Detected modID=$modId, fileID=$fileId, Name=$stateName, Filename=$fullName, FileSize=$fileSize")
 
+                    val downloadInfo = DownloadInfo(
+                        nexusFileId = fileId,
+                        fileName = fullName,
+                        fileSize = (fileSize / 1024).toString(), // Store as KB string
+                        sourceLists = listOf("poti")
+                    )
+
                     val modDesc = ModDesc(
                         modId = "poti_$modId",
                         slug = "poti_$modId",
@@ -70,7 +77,7 @@ suspend fun importPotiModlistStructured(context: Context, filePath: String): Int
                         description = description,
                         url = "https://www.nexusmods.com/morrowind/mods/$modId",
                         dlUrl = "https://www.nexusmods.com/morrowind/mods/$modId?tab=files&file_id=$fileId",
-                        downloadInfo = emptyList(),
+                        downloadInfo = listOf(downloadInfo),
                         gitlabProjectId = null,
                         gitlabPackageId = null,
                         onLists = listOf("poti") // Add "poti" to onLists

@@ -3,6 +3,8 @@ package org.openmw.modDownloader
 import android.content.Context
 import android.util.Log
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -38,14 +40,14 @@ data class WebTab(
 
 object NexusInfo {
     var isNexusExpanded by mutableStateOf(false)
-    val hourlylimit by mutableStateOf(500)
-    var hourlyremaining by mutableStateOf(0)
-    val dailylimit by mutableStateOf(20000)
-    var dailyremaining by mutableStateOf(0)
+    val hourlylimit by mutableIntStateOf(2000)
+    var hourlyremaining by mutableIntStateOf(0)
+    val dailylimit by mutableIntStateOf(20000)
+    var dailyremaining by mutableIntStateOf(0)
     var hourlyResetTime by mutableStateOf<ZonedDateTime?>(null)
     var dailyResetTime by mutableStateOf<ZonedDateTime?>(null)
-    var hourlyResetInMinutes by mutableStateOf(0L)
-    var dailyResetInMinutes by mutableStateOf(0L)
+    var hourlyResetInMinutes by mutableLongStateOf(0L)
+    var dailyResetInMinutes by mutableLongStateOf(0L)
     val downloadProgressMap = mutableStateMapOf<String, String>()
     val downloadProgressPercentMap = mutableStateMapOf<String, Int>()
     val downloadSpeedMap = mutableStateMapOf<String, Int>()
@@ -158,7 +160,7 @@ suspend fun fetchResponseBody(url: String): String? {
         val client = ModListManager.client
         val request = Request.Builder().url(url).build()
         client.newCall(request).execute().use { response ->
-            return@withContext if (!response.isSuccessful) null else response.body?.string()
+            return@withContext if (!response.isSuccessful) null else response.body.string()
         }
     }
 }
@@ -190,7 +192,7 @@ suspend fun getUpdatedModGallery(mod: ModDesc): ModDesc {
     }
 }
 
-suspend fun getFileIds(context: Context, mod: ModDesc): List<DownloadInfo> = withContext(Dispatchers.IO) {
+suspend fun getFileIds(mod: ModDesc): List<DownloadInfo> = withContext(Dispatchers.IO) {
     // Initial setup and Nexus Mods check
     if (!mod.url.contains("nexusmods.com/morrowind/mods/")) {
         return@withContext mod.downloadInfo // Return unchanged list

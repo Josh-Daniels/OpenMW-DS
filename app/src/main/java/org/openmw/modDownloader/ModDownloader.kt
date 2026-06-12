@@ -78,7 +78,11 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
         mod.onLists.contains(modList)
     }
 
+    Log.d("ProcessModList", "Found ${mods.size} mods for list: $modList")
+    addCustomLog("Found ${mods.size} mods for list: $modList", textSize = 10, textColor = Color.Cyan)
+
     remainingMods = mods.size
+    StatusInfo.activeMods = mods.size
 
     coroutineScope {
         validate(context)
@@ -88,7 +92,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                     "ProcessModList",
                     "Processing mod ${index + 1}/${mods.size} (${mod.slug}) with ${mod.downloadInfo.size} download links and Premium statue of $isPremium"
                 )
-                addCustomLog("Processing mod ${index + 1}/${mods.size} (${mod.slug})", textSize = 10, textColor = Color.White)
+                addCustomLog("Processing mod ${index + 1}/${mods.size} (${mod.slug}) [Premium: $isPremium]", textSize = 10, textColor = Color.Cyan)
                 when {
                     mod.url.contains("nexusmods.com") -> {
                         val currentUnixTimestamp = Instant.now().epochSecond
@@ -99,7 +103,8 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                         val updatedInfoList = if (hasMissingFileIds) {
                             try {
                                 Log.i("ProcessModList", "Fetching file IDs for ${mod.slug}")
-                                getFileIds(context, mod)
+                                addCustomLog("Nexus: Fetching file IDs for ${mod.slug}", textSize = 10, textColor = Color.Cyan)
+                                getFileIds(mod)
                             } catch (e: Exception) {
                                 Log.i("ProcessModList", "Failed to fetch file IDs for ${mod.slug}: ${e.message}")
                                 addCustomLog("Failed to fetch file IDs for ${mod.slug}: ${e.message}", textSize = 10, textColor = Color.Red)
@@ -125,6 +130,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                                         updatedInfo = getDirectDownload(context, mod, updatedInfo)
                                     } catch (e: Exception) {
                                         Log.i("ProcessModList", "Failed to fetch direct download for ${mod.slug}: ${e.message}")
+                                        addCustomLog("Failed to fetch direct download for ${mod.slug}: ${e.message}", textSize = 10, textColor = Color.Red)
                                     }
                                 }
                             }
@@ -141,6 +147,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                             "ProcessModList",
                             "Processing local file for ${mod.slug}: ${mod.url}"
                         )
+                        addCustomLog("Processing local file: ${mod.slug}", textSize = 10, textColor = Color.Cyan)
                         try {
                             val directDownloadUrl = "https://modding-openmw.com${mod.url}"
                             val fileName =
@@ -165,6 +172,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                                 "ProcessModList",
                                 "Failed to fetch a direct download link: ${e.message}"
                             )
+                            addCustomLog("Error: Failed to fetch local download link: ${e.message}", textSize = 10, textColor = Color.Red)
                         }
                     }
                     mod.url.contains("web.archive.org") -> {
@@ -175,6 +183,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                         val cleanedDlUrl = mod.dlUrl?.replace("/files/", "")
                         if (updatedUrl != null) {
                             println("Download link: $updatedUrl")
+                            addCustomLog("Archive.org Link: $updatedUrl", textSize = 10, textColor = Color.Cyan)
                             val updatedDownloadInfo = mod.downloadInfo.map { info ->
                                 info.copy(
                                     directDownload = updatedUrl,
@@ -189,6 +198,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                             modDao.insertOrUpdateMod(updatedMod)
                         } else {
                             println("Mod not found or error occurred")
+                            addCustomLog("Archive.org error: Mod not found for ${mod.slug}", textSize = 10, textColor = Color.Red)
                         }
                     }
 
@@ -196,11 +206,13 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                         mod.downloadInfo.forEach { info ->
                             if (info.directDownload.isNullOrEmpty()) {
                                 fetchGitProjectId(mod, modDao)
+                                addCustomLog("Fetching GitLab ID for ${mod.slug}", textSize = 10, textColor = Color.Cyan)
                             } else {
                                 Log.d(
                                     "fetchGitLabProjectId",
                                     "Download Link and Filename already exists for ${mod.slug}, skipping"
                                 )
+                                addCustomLog("GitLab: Skipping ${mod.slug} (Exists)", textSize = 10, textColor = Color.Green)
                             }
                         }
                     }
@@ -240,7 +252,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                                 "ProcessModList",
                                 "Failed to fetch a direct download link: ${e.message}"
                             )
-                            addCustomLog("Failed to fetch a direct download link: ${e.message}", textSize = 10, textColor = Color.Red)
+                            addCustomLog("Error: Failed to fetch local download link: ${e.message}", textSize = 10, textColor = Color.Red)
                         }
                     }
                     else  -> {
@@ -267,6 +279,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                                         "DownloadSkip",
                                         "File already exists for ${mod.slug}, skipping download"
                                     )
+                                    addCustomLog("Cache Hit: ${info.fileName}", textSize = 10, textColor = Color.Green)
 
                                     NexusInfo.downloadProgressMap[mod.slug] =
                                         "${mod.name} Downloaded"
@@ -292,6 +305,19 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                                                 }
                                             }
                                         }
+                                        /*
+                                        mod.url.contains("mega.nz") -> {
+                                            val mega = MegaDownloader()
+                                            val cacheDir = File("${Constants.USER_FILE_STORAGE}/OpenMW/CACHE")
+                                            val success = mega.download(mod.url, cacheDir)
+                                            if (success && allowExtract) {
+                                                // After MEGA download, we need to find the real file it created
+                                                // since we don't know the name in advance
+                                                extractModFile(mod, info)
+                                                remainingMods--
+                                            }
+                                        }
+                                         */
                                         else -> {
                                             if (!info.directDownload.isNullOrEmpty()) {
                                                 downloadModFile(mod, info)
@@ -305,6 +331,7 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
                                     "Failed to download file for ${mod.slug}: ${e.message}",
                                     e
                                 )
+                                addCustomLog("Download Error (${mod.slug}): ${e.message}", textSize = 10, textColor = Color.Red)
                                 NexusInfo.downloadProgressMap[mod.slug] =
                                     "Failed to download ${mod.name}"
                                 NexusInfo.downloadProgressPercentMap[mod.slug] = 0
@@ -318,7 +345,10 @@ fun processModList(context: Context, isPremium: Boolean): Flow<List<ModDesc>> = 
         }.awaitAll()
     }
     Log.d("ProcessModList", "Total updated mods: ${mods.size}")
+    addCustomLog("Processing complete. Total updated: ${mods.size}", textSize = 10, textColor = Color.Green)
     processing = false
+    StatusInfo.showProcessCompleteDialog = true
+    emit(mods)
 }
 
 object ModListManager {
@@ -353,6 +383,7 @@ object ModListManager {
                 .toMutableList()
         } catch (e: Exception) {
             println("Failed to fetch/parse mod lists: ${e.message}")
+            addCustomLog("Failed to fetch/parse mod lists: ${e.message}", textSize = 10, textColor = Color.Cyan)
             mutableListOf(
                 "i-heart-vanilla",
                 "total-overhaul"
@@ -448,9 +479,9 @@ object ModListManager {
         val modDao = ModDatabase.getDatabase(applicationContext).modDao()
 
         // Process online mod lists
-        for (modList in availableLists) {
+        for (currentListName in availableLists) {
             try {
-                val url = URL("https://modding-openmw.com/lists/$modList/json")
+                val url = URL("https://modding-openmw.com/lists/$currentListName/json")
                 val modListData = json.decodeFromString<List<ModDesc>>(url.readText())
 
                 val filteredModList = modListData
@@ -472,25 +503,27 @@ object ModListManager {
                         }
 
                         val downloadInfoWithSources = modDesc.downloadInfo.map { info ->
-                            info.copy(sourceLists = listOf(modList))
+                            info.copy(sourceLists = listOf(currentListName))
                         }
 
                         modDesc.copy(
                             modId = finalModId.toString(),
                             downloadInfo = downloadInfoWithSources,
-                            onLists = listOf(modList)
+                            onLists = listOf(currentListName)
                         )
                     }
 
                 try {
-                    modDao.insertOrAppendMods(filteredModList, modList, context)
+                    modDao.insertOrAppendMods(filteredModList, currentListName, context)
                     allFilteredMods.addAll(filteredModList) // This was missing!
+                    addCustomLog("Merged $currentListName (${filteredModList.size} mods)", textSize = 10, textColor = Color.Cyan)
                 } catch (e: Exception) {
                     Log.w("ModListManager", "Partial failure processing Nexus data for $modList: ${e.message}")
                     addCustomLog("Partial failure processing Nexus data for $modList: ${e.message}", textSize = 10, textColor = Color.Yellow)
                 }
             } catch (e: Exception) {
                 Log.e("ModListManager", "Critical error loading mod list $modList: ${e.message}")
+                addCustomLog("Critical error loading $modList: ${e.message}", textSize = 10, textColor = Color.Red)
             }
         }
 
@@ -499,15 +532,20 @@ object ModListManager {
 
         // Debug logging
         Log.d("ModListManager", "Looking for custom lists in: ${directory.absolutePath}")
+        addCustomLog("Looking for custom lists in: ${directory.absolutePath}", textSize = 10, textColor = Color.Cyan)
         Log.d("ModListManager", "Directory exists: ${directory.exists()}")
+        addCustomLog("Directory exists: ${directory.exists()}", textSize = 10, textColor = Color.Cyan)
         Log.d("ModListManager", "Is directory: ${directory.isDirectory}")
+        addCustomLog("Is directory: ${directory.isDirectory}", textSize = 10, textColor = Color.Cyan)
 
         if (directory.exists() && directory.isDirectory) {
             val jsonFiles = directory.listFiles { _, name -> name.endsWith(".json") }
             Log.d("ModListManager", "Found ${jsonFiles?.size ?: 0} JSON files")
+            addCustomLog("Found ${jsonFiles?.size ?: 0} JSON files", textSize = 10, textColor = Color.Cyan)
 
             jsonFiles?.forEach { file ->
                 Log.d("ModListManager", "Processing file: ${file.name}")
+                addCustomLog("Processing file: ${file.name}", textSize = 10, textColor = Color.Cyan)
                 try {
                     val jsonText = file.readText()
                     Log.d("ModListManager", "File content length: ${jsonText.length}")
@@ -515,6 +553,7 @@ object ModListManager {
                     val modListData = json.decodeFromString<List<ModDesc>>(jsonText)
                     Log.d("ModListManager", "Parsed ${modListData.size} mods from ${file.name}")
 
+                    val listNameFromFileName = file.nameWithoutExtension
                     val filteredModList = modListData
                         .filter { it.name !in blockedModNames }
                         .map { modDesc ->
@@ -528,16 +567,27 @@ object ModListManager {
                                 }
                                 else -> (100000..999999).random()
                             }
-                            modDesc.copy(modId = finalModId.toString())
+                            
+                            val downloadInfoWithSources = modDesc.downloadInfo.map { info ->
+                                info.copy(sourceLists = listOf(listNameFromFileName))
+                            }
+
+                            modDesc.copy(
+                                modId = finalModId.toString(),
+                                downloadInfo = downloadInfoWithSources,
+                                onLists = listOf(listNameFromFileName)
+                            )
                         }
 
                     Log.d("ModListManager", "Filtered to ${filteredModList.size} mods")
-                    modDao.insertOrAppendMods(filteredModList, modList, context)
+                    modDao.insertOrAppendMods(filteredModList, listNameFromFileName, context)
                     allFilteredMods.addAll(filteredModList)
                     Log.d("ModListManager", "Successfully processed ${file.name}")
+                    addCustomLog("Processed local file: ${file.name}", textSize = 10, textColor = Color.Green)
 
                 } catch (e: Exception) {
                     Log.e("ModListManager", "Error processing local file ${file.name}: ${e.message}")
+                    addCustomLog("Error processing local file ${file.name}: ${e.message}", textSize = 10, textColor = Color.Red)
                     e.printStackTrace()
                 }
             }
@@ -600,6 +650,7 @@ object ModListManager {
             return response.body.use { body ->
                 val contentLength = body.contentLength()
                 Log.d("HTTP_DEBUG", "Received $contentLength bytes")
+                addCustomLog("Received: $contentLength bytes", textSize = 10, textColor = Color.Cyan)
                 body.string()
             }
         } catch (e: TimeoutCancellationException) {

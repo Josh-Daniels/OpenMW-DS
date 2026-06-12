@@ -2,43 +2,44 @@ package org.openmw.modDownloader
 
 import android.util.Base64
 import android.util.Log
+import androidx.compose.ui.graphics.Color
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import org.openmw.ui.view.addCustomLog
 import java.io.File
+import java.io.FileOutputStream
 import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 private const val TAG = "MegaDownloader"
 
 class MegaDownloader {
 
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
 
-    fun download(megaUrl: String, destFile: File): Boolean {
+    fun download(megaUrl: String, targetDir: File): Boolean {
         Log.i(TAG, "Starting MEGA download: $megaUrl")
-        Log.i(TAG, "Destination: ${destFile.absolutePath}")
+        addCustomLog("Starting MEGA download...", textSize = 10, textColor = Color.Cyan)
 
         try {
-            val parts = megaUrl.split("!")
-            if (parts.size < 3) {
-                Log.e(TAG, "Invalid MEGA URL")
-                return false
-            }
-
-            val fileHandle = parts[1]
-            val fileKeyB64 = parts[2]
+            // 1. Parse URL
+            val parts = parseMegaUrl(megaUrl)
+            val fileHandle = parts[0]
+            val fileKeyB64 = parts[1]
 
             val fileKey = base64UrlDecode(fileKeyB64)
-            val paddedKey = if (fileKey.size % 4 != 0) {
-                ByteArray((fileKey.size + 3) / 4 * 4).also { System.arraycopy(fileKey, 0, it, 0, fileKey.size) }
-            } else fileKey
-            val keyInt = bytesToA32(paddedKey)
+            if (fileKey.size != 32) throw Exception("Invalid key length: ${fileKey.size} bytes, expected 32")
 
+            val keyInt = bytesToA32(fileKey)
+
+            // k = [k[0] ^ k[4], k[1] ^ k[5], k[2] ^ k[6], k[3] ^ k[7]]
             val k = intArrayOf(
                 keyInt[0] xor keyInt[4],
                 keyInt[1] xor keyInt[5],
@@ -46,205 +47,296 @@ class MegaDownloader {
                 keyInt[3] xor keyInt[7]
             )
             val iv = intArrayOf(keyInt[4], keyInt[5], 0, 0)
-            val expectedMetaMac = intArrayOf(keyInt[6], keyInt[7])
+            val metaMac = intArrayOf(keyInt[6], keyInt[7])
 
-            Log.i(TAG, "AES key (k): ${k.contentToString()}")
-            Log.i(TAG, "IV: ${iv[0]}, ${iv[1]}")
-            Log.i(TAG, "Expected meta MAC: ${expectedMetaMac[0]}, ${expectedMetaMac[1]}")
+            // 2. Get File Info and Download URL
+            val fileInfo = getFileInfo(fileHandle)
+            val fileSize = fileInfo.getLong("s")
+            val atB64 = fileInfo.getString("at")
 
-            val info = getFileInfo(fileHandle)
-            val dlUrl = info.getString("g")
-            val fileSize = info.getLong("s")
-            Log.i(TAG, "File size: $fileSize bytes")
+            // Get the actual download URL and ensure it's HTTPS
+            var downloadUrl = getDownloadUrl(fileHandle)
 
-            val tempFile = File(destFile.parentFile, "${destFile.name}.mega")
-            downloadFile(dlUrl, tempFile, fileSize)
+            // Force HTTPS
+            if (downloadUrl.startsWith("http://")) {
+                downloadUrl = downloadUrl.replace("http://", "https://")
+                Log.d(TAG, "Converted to HTTPS: $downloadUrl")
+            }
 
-            decryptAndVerify(tempFile, destFile, k, iv, expectedMetaMac, fileSize)
+            // 3. Decrypt Filename
+            val realFileName = decryptAttributes(atB64, k) ?: "mega_download_${fileHandle}.bin"
 
-            tempFile.delete()
-            Log.i(TAG, "SUCCESS! File downloaded and verified: ${destFile.name}")
-            return true
+            // Ensure target is a directory and exists
+            val workingDir = if (targetDir.isFile) targetDir.parentFile ?: targetDir else targetDir
+            if (!workingDir.exists()) workingDir.mkdirs()
+
+            val finalDest = File(workingDir, realFileName)
+
+            Log.i(TAG, "File identified: $realFileName ($fileSize bytes)")
+            addCustomLog("MEGA: $realFileName (${fileSize / 1024} KB)", textSize = 10, textColor = Color.White)
+
+            // 4. Download and Decrypt on the fly
+            val success = downloadAndDecrypt(downloadUrl, finalDest, k, iv, metaMac, fileSize)
+
+            if (success) {
+                Log.i(TAG, "SUCCESS! File verified: ${finalDest.name}")
+                addCustomLog("MEGA SUCCESS: ${finalDest.name}", textSize = 10, textColor = Color.Green)
+            } else {
+                if (finalDest.exists()) finalDest.delete()
+                throw Exception("Integrity verification failed (MAC mismatch)")
+            }
+            return success
         } catch (e: Exception) {
-            Log.e(TAG, "Download failed", e)
+            Log.e(TAG, "Download failed: ${e.message}", e)
+            addCustomLog("MEGA Error: ${e.message}", textSize = 10, textColor = Color.Red)
             return false
         }
     }
 
-    private fun getFileInfo(handle: String): JSONObject {
-        val payload = JSONArray().put(JSONObject().apply {
-            put("a", "g"); put("g", 1); put("p", handle)
-        })
+    private fun parseMegaUrl(url: String): Array<String> {
+        return when {
+            url.contains("!") -> {
+                val parts = url.split("!")
+                if (parts.size < 3) throw Exception("Invalid legacy MEGA URL")
+                arrayOf(parts[1], parts[2])
+            }
+            url.contains("#") -> {
+                val base = url.substringBefore("#")
+                val key = url.substringAfter("#")
+                val handle = base.substringAfterLast("/")
+                if (handle.isEmpty() || key.isEmpty()) throw Exception("Invalid modern MEGA URL")
+                arrayOf(handle, key)
+            }
+            else -> throw Exception("Unsupported MEGA URL format")
+        }
+    }
 
+    private fun getFileInfo(handle: String): JSONObject {
+        val payload = "[{\"a\":\"g\",\"g\":1,\"p\":\"$handle\"}]"
         val req = Request.Builder()
             .url("https://g.api.mega.co.nz/cs")
-            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .post(payload.toRequestBody("application/json".toMediaType()))
             .build()
 
-        return client.newCall(req).execute().use {
-            if (!it.isSuccessful) throw Exception("MEGA API error ${it.code}")
-            JSONArray(it.body.string()).getJSONObject(0)
+        client.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("MEGA API HTTP error ${response.code}")
+            val bodyString = response.body!!.string()
+            Log.d(TAG, "API Response: ${bodyString.take(200)}...")
+            val array = JSONArray(bodyString)
+            val first = array.get(0)
+            if (first is Int && first < 0) throw Exception("MEGA API error code: $first")
+            return array.getJSONObject(0)
         }
     }
 
-    private fun downloadFile(url: String, dest: File, totalSize: Long) {
-        var downloaded = 0L
-        val req = Request.Builder().url(url).build()
-        client.newCall(req).execute().use { resp ->
-            resp.body.byteStream().use { input ->
-                dest.outputStream().use { output ->
-                    val buffer = ByteArray(8192)
-                    var read: Int
-                    while (input.read(buffer).also { read = it } != -1) {
-                        output.write(buffer, 0, read)
-                        downloaded += read
-                        if (downloaded % (1024 * 1024) < 8192) {
-                            Log.i(TAG, "Downloaded: ${downloaded / 1024 / 1024} MB / ${totalSize / 1024 / 1024} MB")
-                        }
-                    }
-                }
+    private fun getDownloadUrl(handle: String): String {
+        val payload = "[{\"a\":\"g\",\"g\":1,\"p\":\"$handle\"}]"
+        val req = Request.Builder()
+            .url("https://g.api.mega.co.nz/cs")
+            .post(payload.toRequestBody("application/json".toMediaType()))
+            .build()
+
+        client.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("MEGA API HTTP error ${response.code}")
+            val bodyString = response.body!!.string()
+            val array = JSONArray(bodyString)
+            val obj = array.getJSONObject(0)
+
+            // Check for error
+            if (obj.has("e")) {
+                throw Exception("MEGA API error: ${obj.get("e")}")
             }
+
+            // Get the download URL
+            return obj.getString("g")
         }
-        Log.i(TAG, "Encrypted download complete: $downloaded bytes")
     }
 
-    private fun decryptAndVerify(
-        encrypted: File,
-        output: File,
+    private fun decryptAttributes(atB64: String, k: IntArray): String? {
+        try {
+            val at = base64UrlDecode(atB64)
+            val aesKey = SecretKeySpec(a32ToBytes(k), "AES")
+            val cipher = Cipher.getInstance("AES/ECB/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, aesKey)
+
+            val decrypted = ByteArray(at.size)
+            var iv = ByteArray(16)
+            for (i in 0 until at.size step 16) {
+                val block = ByteArray(16)
+                val len = minOf(16, at.size - i)
+                System.arraycopy(at, i, block, 0, len)
+
+                val out = cipher.doFinal(block)
+                for (j in 0 until len) {
+                    decrypted[i + j] = (out[j].toInt() xor iv[j].toInt()).toByte()
+                }
+                iv = block
+            }
+
+            val str = String(decrypted, Charsets.UTF_8).trim()
+            if (str.startsWith("MEGA")) {
+                val jsonStr = str.substring(4).substringBeforeLast("}") + "}"
+                return JSONObject(jsonStr).optString("n")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decrypt attributes", e)
+        }
+        return null
+    }
+
+    private fun downloadAndDecrypt(
+        downloadUrl: String,
+        finalDest: File,
         k: IntArray,
         iv: IntArray,
         expectedMetaMac: IntArray,
         fileSize: Long
-    ) {
-        Log.i(TAG, "Starting decryption + MAC verification")
+    ): Boolean {
+        val aesKey = SecretKeySpec(a32ToBytes(k), "AES")
+        val cipher = Cipher.getInstance("AES/ECB/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, aesKey)
 
-        val keyBytes = a32ToBytes(k)
-        val aesKey = SecretKeySpec(keyBytes, "AES")
+        // Initialize MAC with copy of IV
+        var macState = intArrayOf(iv[0], iv[1], iv[2], iv[3])
 
-        // CTR IV: first 8 bytes = iv[0], iv[1] in big-endian
-        val ctrIv = ByteArray(16).apply {
-            for (i in 0..3) this[i] = (iv[0] shr (24 - i * 8)).toByte()
-            for (i in 0..3) this[4 + i] = (iv[1] shr (24 - i * 8)).toByte()
-        }
-        val ctrCipher = Cipher.getInstance("AES/CTR/NoPadding")
-        ctrCipher.init(Cipher.DECRYPT_MODE, aesKey, IvParameterSpec(ctrIv))
+        val req = Request.Builder()
+            .url(downloadUrl)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity")
+            .build()
 
-        // MAC calculation - initialize with zeros
-        var macState = ByteArray(16)
-        val macCipher = Cipher.getInstance("AES/CBC/NoPadding")
-        macCipher.init(Cipher.ENCRYPT_MODE, aesKey, IvParameterSpec(ByteArray(16)))
+        Log.d(TAG, "Downloading from: $downloadUrl")
 
-        var decryptedBytes = 0L
+        client.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: "No error body"
+                Log.e(TAG, "Download failed with code ${response.code}: $errorBody")
+                throw Exception("Download failed with code ${response.code}")
+            }
 
-        encrypted.inputStream().use { input ->
-            output.outputStream().use { out ->
-                val buffer = ByteArray(16384)
+            val contentLength = response.header("Content-Length")?.toLongOrNull()
+            Log.d(TAG, "Content-Length: $contentLength, Expected: $fileSize")
+
+            val contentType = response.header("Content-Type", "")
+            Log.d(TAG, "Content-Type: $contentType")
+
+            val input = response.body!!.byteStream()
+            FileOutputStream(finalDest).use { out ->
+                val buffer = ByteArray(65536)
                 var bytesRead: Int
+                var totalBytesProcessed = 0L
 
                 while (input.read(buffer).also { bytesRead = it } != -1) {
-                    // === DECRYPTION ===
-                    val decryptedChunk = if (bytesRead == buffer.size)
-                        ctrCipher.update(buffer)
-                    else
-                        ctrCipher.update(buffer, 0, bytesRead)
-                    out.write(decryptedChunk)
-                    decryptedBytes += decryptedChunk.size
+                    // Process chunk
+                    val result = processChunk(buffer, bytesRead, totalBytesProcessed, cipher, out, macState, iv)
+                    macState = result
+                    totalBytesProcessed += bytesRead
 
-                    // === MAC: feed ENCRYPTED bytes (not decrypted!) ===
-                    var pos = 0
-                    while (pos < bytesRead) {
-                        val blockSize = minOf(16, bytesRead - pos)
-                        val block = ByteArray(16)
-                        System.arraycopy(buffer, pos, block, 0, blockSize)
-
-                        // Pad the block if necessary
-                        if (blockSize < 16) {
-                            // For the last block, pad with zeros
-                            for (i in blockSize until 16) {
-                                block[i] = 0
-                            }
-                        }
-
-                        // Update MAC state
-                        val updateResult = macCipher.update(block)
-                        if (updateResult != null) {
-                            macState = updateResult
-                        }
-                        pos += 16
-                    }
-
-                    if (decryptedBytes % (1024 * 1024) < 16384) {
-                        Log.i(TAG, "Decrypted: ${decryptedBytes / 1024 / 1024} MB")
+                    // Log progress
+                    if (totalBytesProcessed % (1024 * 1024) == 0L) {
+                        Log.d(TAG, "Downloaded: ${totalBytesProcessed / 1024} KB / ${fileSize / 1024} KB")
                     }
                 }
 
-                // Final CTR block
-                val finalDecrypted = ctrCipher.doFinal()
-                if (finalDecrypted.isNotEmpty()) {
-                    out.write(finalDecrypted)
-                    decryptedBytes += finalDecrypted.size
-                }
+                Log.d(TAG, "Total bytes processed: $totalBytesProcessed, Expected: $fileSize")
 
-                // Finalize MAC - handle potential null return
-                val finalMac = macCipher.doFinal()
-                if (finalMac != null && finalMac.isNotEmpty()) {
-                    macState = finalMac
+                if (totalBytesProcessed != fileSize) {
+                    Log.w(TAG, "File size mismatch! Expected: $fileSize, Got: $totalBytesProcessed")
                 }
             }
         }
 
-        // Safety check - ensure macState is valid
-        if (macState.isEmpty()) {
-            Log.e(TAG, "MAC state is empty - verification failed")
-            output.delete()
-            throw SecurityException("MEGA MAC verification failed - empty MAC state")
-        }
-
-        // Calculate meta MAC
-        val computedMac = bytesToA32(macState)
+        // Compute final MAC: [mac[0] ^ mac[1], mac[2] ^ mac[3]]
         val computedMetaMac = intArrayOf(
-            computedMac[0] xor computedMac[1],
-            computedMac[2] xor computedMac[3]
+            macState[0] xor macState[1],
+            macState[2] xor macState[3]
         )
 
-        Log.i(TAG, "Computed meta MAC: ${computedMetaMac[0]}, ${computedMetaMac[1]}")
-        Log.i(TAG, "Expected meta MAC: ${expectedMetaMac[0]}, ${expectedMetaMac[1]}")
+        Log.d(TAG, "MAC verification - Expected: [${expectedMetaMac[0]}, ${expectedMetaMac[1]}], Got: [${computedMetaMac[0]}, ${computedMetaMac[1]}]")
 
-        if (computedMetaMac[0] == expectedMetaMac[0] && computedMetaMac[1] == expectedMetaMac[1]) {
-            Log.i(TAG, "MAC VERIFICATION PASSED!")
-        } else {
-            Log.e(TAG, "MAC VERIFICATION FAILED!")
-            output.delete()
-            throw SecurityException("MEGA MAC verification failed — file corrupted or wrong key")
+        val macMatches = computedMetaMac[0] == expectedMetaMac[0] && computedMetaMac[1] == expectedMetaMac[1]
+        Log.d(TAG, "MAC verification ${if (macMatches) "PASSED" else "FAILED"}")
+
+        return macMatches
+    }
+
+    private fun processChunk(
+        data: ByteArray,
+        len: Int,
+        fileOffset: Long,
+        cipher: Cipher,
+        out: FileOutputStream,
+        macState: IntArray,
+        iv: IntArray
+    ): IntArray {
+        var mac = macState.copyOf()
+        val decrypted = ByteArray(len)
+
+        for (i in 0 until len step 16) {
+            val blockSize = minOf(16, len - i)
+            val blockIndex = (fileOffset / 16).toInt() + (i / 16)
+
+            // Create block nonce: [iv[0], iv[1], iv[2] + blockIndex, iv[3]]
+            val blockNonce = intArrayOf(
+                iv[0],
+                iv[1],
+                iv[2] + blockIndex,
+                iv[3]
+            )
+
+            Log.d(TAG, "blockIndex=$blockIndex fileOffset=$fileOffset i=$i")
+
+            // Encrypt nonce to get keystream
+            val encryptedNonce = cipher.doFinal(a32ToBytes(blockNonce))
+
+            // XOR encrypted data with keystream to decrypt
+            for (j in 0 until blockSize) {
+                decrypted[i + j] = (data[i + j].toInt() xor encryptedNonce[j].toInt()).toByte()
+            }
+
+            // Update MAC with decrypted data
+            val macBlock = ByteArray(16)
+            System.arraycopy(decrypted, i, macBlock, 0, blockSize)
+
+            val blockInt = bytesToA32(macBlock)
+            for (m in 0 until 4) {
+                mac[m] = mac[m] xor blockInt[m]
+            }
+
+            // Encrypt MAC state
+            mac = bytesToA32(cipher.doFinal(a32ToBytes(mac)))
         }
+
+        out.write(decrypted)
+        return mac
     }
 
     private fun base64UrlDecode(s: String): ByteArray {
         var str = s.replace('-', '+').replace('_', '/')
-        str += when (str.length % 4) { 2 -> "=="; 3 -> "="; else -> "" }
+        while (str.length % 4 != 0) str += "="
         return Base64.decode(str, Base64.DEFAULT)
     }
 
     private fun bytesToA32(b: ByteArray): IntArray {
-        val len = (b.size + 3) / 4
-        val result = IntArray(len)
-        for (i in 0 until len) {
-            result[i] =
-                ((b.getOrElse(i*4) { 0 }.toInt() and 0xFF) shl 24) or
-                        ((b.getOrElse(i*4+1) { 0 }.toInt() and 0xFF) shl 16) or
-                        ((b.getOrElse(i*4+2) { 0 }.toInt() and 0xFF) shl 8) or
-                        (b.getOrElse(i*4+3) { 0 }.toInt() and 0xFF)
+        val result = IntArray(b.size / 4)
+        for (i in result.indices) {
+            result[i] = ((b[i*4].toInt() and 0xFF) shl 24) or
+                    ((b[i*4+1].toInt() and 0xFF) shl 16) or
+                    ((b[i*4+2].toInt() and 0xFF) shl 8) or
+                    (b[i*4+3].toInt() and 0xFF)
         }
         return result
     }
 
     private fun a32ToBytes(a: IntArray): ByteArray {
         val b = ByteArray(a.size * 4)
-        a.forEachIndexed { i, v ->
-            b[i*4]     = (v shr 24).toByte()
-            b[i*4 + 1] = (v shr 16).toByte()
-            b[i*4 + 2] = (v shr  8).toByte()
-            b[i*4 + 3] = v.toByte()
+        for (i in a.indices) {
+            val v = a[i]
+            b[i*4] = (v shr 24).toByte()
+            b[i*4+1] = (v shr 16).toByte()
+            b[i*4+2] = (v shr 8).toByte()
+            b[i*4+3] = v.toByte()
         }
         return b
     }

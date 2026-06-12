@@ -678,7 +678,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
                     val updatedInfoList = if (!allNexusFileIdsPresent) {
                         Log.i("GetFileID_Debug", "Started for ${mod.modId}")
                         try {
-                            getFileIds(context, mod)
+                            getFileIds(mod)
                         } catch (e: Exception) {
                             errorMessage = "Failed to fetch nexusId: ${e.message}"
                             mod.downloadInfo // Fallback to original list
@@ -731,15 +731,11 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
                         "ProcessModList",
                         "Processing mega link: ${mod.url}"
                     )
-                    val fileName = mod.url.substringAfterLast('/')
-                        .takeIf { it.isNotBlank() }
-                        ?: "${mod.slug}.zip"
                     scope.launch(Dispatchers.IO) {
                         val downloader = MegaDownloader()
-                        downloader.download(mod.url, File("${Constants.USER_FILE_STORAGE}/OpenMW/", fileName))
+                        // Pass the CACHE directory explicitly, the downloader will name the file correctly
+                        downloader.download(mod.url, File("${Constants.USER_FILE_STORAGE}/OpenMW/CACHE"))
                     }
-
-
                 }
                 if (currentMod.url.contains("https://baturin.org")) {
                     Log.d(
@@ -854,7 +850,7 @@ fun ModItem(mod: ModDesc, onDelete: () -> Unit, modDao: ModDao) {
                     }
                     val folderExists = remember(mod.downloadInfo) {
                         mod.downloadInfo.any { info ->
-                            val extractFolder = File("${Constants.USER_FILE_STORAGE}/OpenMW/${modList}/${mod.category}", info.extractTo)
+                            val extractFolder = File("${Constants.USER_FILE_STORAGE}/OpenMW/${modList}/${mod.category}", "${info.extractTo}")
                             extractFolder.exists() && extractFolder.listFiles()?.isNotEmpty() == true
                         }
                     }

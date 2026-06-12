@@ -119,7 +119,9 @@ import java.io.File
 
 object StatusInfo {
     var processing by mutableStateOf(false)
+    var showProcessCompleteDialog by mutableStateOf(false)
     var activeMods by mutableIntStateOf(0)
+    var pendingConfigPath: String? by mutableStateOf(null)
 }
 
 @Composable
@@ -300,8 +302,11 @@ fun SSOHome() {
         }
 
         println("Entry nexusAPI: $fetchNexusAPI")
+        addCustomLog("Entry nexusAPI: $fetchNexusAPI", textSize = 10, textColor = Color.Cyan)
         println("Entry isNowPremium: $isPremium")
+        addCustomLog("Entry isNowPremium: $isPremium", textSize = 10, textColor = Color.Cyan)
         println("Entry isValidated: $isValidated")
+        addCustomLog("Entry isValidated: $isValidated", textSize = 10, textColor = Color.Cyan)
     }
 
     LaunchedEffect(fetchNexusAPI, isPremium) {
@@ -315,6 +320,13 @@ fun SSOHome() {
     isInitialized()
 
     Log.d("MainActivity", "Current webViewUrls: $webViewTabs, currentTabIndex: $currentTabIndex")
+    if (isPremium == false) {
+        addCustomLog(
+            "Current webViewUrls: $webViewTabs, currentTabIndex: $currentTabIndex",
+            textSize = 10,
+            textColor = Color.Cyan
+        )
+    }
     LaunchedEffect(webViewTabs) {
         if (webViewTabs.isEmpty()) {
             currentTabIndex = 0
@@ -322,6 +334,13 @@ fun SSOHome() {
             currentTabIndex = webViewTabs.size - 1
         }
         Log.d("MainActivity", "Updated currentTabIndex: $currentTabIndex, tabs size: ${webViewTabs.size}")
+        if (isPremium == false) {
+            addCustomLog(
+                "Updated currentTabIndex: $currentTabIndex, tabs size: ${webViewTabs.size}",
+                textSize = 10,
+                textColor = Color.Cyan
+            )
+        }
     }
     if (showInitiatingDialog) {
         ProgressDialog(
@@ -331,6 +350,83 @@ fun SSOHome() {
 
     if (showLogs) {
         LogViewerDialog(onDismiss = { showLogs = false })
+    }
+
+    if (StatusInfo.showProcessCompleteDialog) {
+        AlertDialog(
+            onDismissRequest = { StatusInfo.showProcessCompleteDialog = false },
+            title = { Text("Processing Complete", color = gold) },
+            text = {
+                Column {
+                    Text("All selected mods have been processed.", color = White)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Total mods processed: ${StatusInfo.activeMods}", color = gold)
+                    if (brokenMods.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(brokenMods, color = Color.Red, fontSize = 12.sp)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Would you like to review the logs or continue?", color = White)
+
+                    if (StatusInfo.pendingConfigPath != null) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        HorizontalDivider(color = White.copy(alpha = 0.3f))
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("New config file generated for $modList:", color = White)
+                        Text("$modList.cfg", color = gold, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("If you choose not to apply it now, you can find it at:", color = White, fontSize = 12.sp)
+                        Text("${Constants.USER_FILE_STORAGE}/OpenMW/$modList.cfg", color = gold, fontSize = 10.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("To use it manually, rename it to 'openmw.cfg' and move it to your config folder.", color = White.copy(alpha = 0.8f), fontSize = 11.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Row {
+                    if (StatusInfo.pendingConfigPath != null) {
+                        TextButton(onClick = {
+                            val pending = StatusInfo.pendingConfigPath
+                            if (pending != null) {
+                                val srcFile = File(pending)
+                                val destFile = File(Constants.USER_OPENMW_CFG)
+                                try {
+                                    if (srcFile.exists()) {
+                                        srcFile.copyTo(destFile, overwrite = true)
+                                        Log.d("ConfigApply", "Applied $pending to ${Constants.USER_OPENMW_CFG}")
+                                        addCustomLog("Applied new config for $modList", textSize = 10, textColor = Color.Green)
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("ConfigApply", "Error applying config", e)
+                                    addCustomLog("Error applying config: ${e.message}", textSize = 10, textColor = Color.Red)
+                                }
+                            }
+                            StatusInfo.pendingConfigPath = null
+                            StatusInfo.showProcessCompleteDialog = false
+                        }) {
+                            Text("Apply Config", color = Color.Green)
+                        }
+                    }
+
+                    TextButton(onClick = { 
+                        StatusInfo.showProcessCompleteDialog = false 
+                        showModsLog = true
+                    }) {
+                        Text("Review Logs", color = gold)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { 
+                    StatusInfo.pendingConfigPath = null
+                    StatusInfo.showProcessCompleteDialog = false 
+                }) {
+                    Text("Continue", color = White)
+                }
+            },
+            containerColor = customColor,
+            textContentColor = White
+        )
     }
 
     if (
@@ -568,6 +664,7 @@ fun SSOHome() {
                                             "$modList.cfg",
                                             formattedConfig
                                         )
+                                        StatusInfo.pendingConfigPath = savedFile.absolutePath
                                         Log.d("ConfigSave", "Saved to ${savedFile.absolutePath}")
                                     } catch (e: Exception) {
                                         Log.e("ConfigFetch", "Error fetching config: ${e.message}")
@@ -717,7 +814,6 @@ fun AvailableModLists(modDao: ModDao) {
     }
 }
 
-// Add this function to get all available lists (hardcoded + JSON)
 @Composable
 fun getAllAvailableLists(modDao: ModDao): List<String> {
 
@@ -740,7 +836,7 @@ fun RateLimitDisplay() {
     val context = LocalContext.current
     val availableSpace = getAvailableStorageSpace()
     val modDao = remember { ModDatabase.getDatabase(context).modDao() }
-    var totalMods by remember { mutableStateOf(0) }
+    var totalMods by remember { mutableIntStateOf(0) }
     val isPremium by loadIsPremiumTier(context).collectAsState(initial = null)
 
     LaunchedEffect(Unit) {
