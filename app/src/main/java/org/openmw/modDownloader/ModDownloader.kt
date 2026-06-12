@@ -399,6 +399,23 @@ object ModListManager {
         coerceInputValues = true
     }
 
+    // Centralized client with high-concurrency limits and optimized connection pooling
+    /*
+    val client = OkHttpClient.Builder()
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 128
+            maxRequestsPerHost = 16
+        })
+        .connectionPool(ConnectionPool(20, 5, TimeUnit.MINUTES))
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.MINUTES)
+        .retryOnConnectionFailure(true)
+        .addInterceptor(RetryInterceptor(3))
+        .build()        
+     */
+
     // Replace all individual client creations with this:
     val client = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
