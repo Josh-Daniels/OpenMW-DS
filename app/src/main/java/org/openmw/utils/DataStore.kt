@@ -667,7 +667,7 @@ object GameFilesPreferences {
 
     fun getMenuCorner(context: Context): Flow<Int> {
         return context.dataStore.data.map { preferences ->
-            preferences[MENU_CORNER_KEY] ?: 0 // Default to TopRight
+            preferences[MENU_CORNER_KEY] ?: 1 // Default to TopLeft
         }
     }
 

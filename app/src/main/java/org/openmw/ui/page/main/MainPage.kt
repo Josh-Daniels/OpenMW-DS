@@ -189,7 +189,7 @@ fun MainPage(
                 ) {
                     when (codeGroupOption) {
                         "OpenMW" -> {
-                            if (layoutType == NavigationSuiteType.NavigationBar && (savedPath.isNullOrEmpty() || savedPath == "Game Files: ")) {
+                            if (savedPath.isNullOrEmpty() || savedPath == "Game Files: ") {
                                 OpenMW()
                             }
                             ModValuesList(modValues)
@@ -213,11 +213,17 @@ fun MainPage(
         Box(
             modifier = Modifier
                 .offset { 
-                    IntOffset(0, offsetY.value.roundToInt() - screenHeightPx.roundToInt()) 
+                    // Add handleHeightPx to the negative offset so that when offsetY is 0, 
+                    // the handle is also fully off-screen.
+                    IntOffset(0, (offsetY.value - screenHeightPx - (if (!UIStateManager.isTabExpanded && offsetY.value == 0f) handleHeightPx else 0f)).roundToInt()) 
                 }
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = 0.95f))
                 .align(Alignment.TopCenter)
+                .graphicsLayer {
+                    // Fade out as it gets close to the top
+                    alpha = (offsetY.value / (handleHeightPx * 2)).coerceIn(0f, 1f)
+                }
         ) {
             Column(
                 modifier = Modifier
@@ -268,17 +274,23 @@ fun MainPage(
                         },
                         onDragStopped = {
                             when {
-                                offsetY.value < screenHeightPx * 0.1f -> {
-                                    offsetY.animateTo(0f)
-                                    UIStateManager.isTabExpanded = false
+                                offsetY.value < screenHeightPx * 0.25f -> {
+                                    scope.launch {
+                                        offsetY.animateTo(0f)
+                                        UIStateManager.isTabExpanded = false
+                                    }
                                 }
-                                offsetY.value < screenHeightPx * 0.5f -> {
-                                    offsetY.animateTo(screenHeightPx / 3f)
-                                    UIStateManager.isTabExpanded = true
+                                offsetY.value < screenHeightPx * 0.6f -> {
+                                    scope.launch {
+                                        offsetY.animateTo(screenHeightPx / 3f)
+                                        UIStateManager.isTabExpanded = true
+                                    }
                                 }
                                 else -> {
-                                    offsetY.animateTo(screenHeightPx)
-                                    UIStateManager.isTabExpanded = true
+                                    scope.launch {
+                                        offsetY.animateTo(screenHeightPx)
+                                        UIStateManager.isTabExpanded = true
+                                    }
                                 }
                             }
                         }
