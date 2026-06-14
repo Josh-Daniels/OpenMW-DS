@@ -466,7 +466,7 @@ set(LUAJIT_MAKE_FLAGS
 )
 
 ExternalProject_Add(luajit
-	URL https://github.com/luaJit/LuaJIT/archive/v${LUAJIT_VERSION}.tar.gz
+	URL https://github.com/DreamWeave-MP/rubic0n/archive/refs/tags/development.tar.gz
 	DOWNLOAD_DIR ${download_dir}
 
 	BUILD_IN_SOURCE 1
