@@ -9,4 +9,4 @@ cmake_minimum_required(VERSION 3.22.1)
 add_subdirectory(Alpha3)
 add_subdirectory(openmw)
 
-add_dependencies(Alpha3 openmw copy_jni_libs)
+add_dependencies(Alpha3 copy_jni_libs)
