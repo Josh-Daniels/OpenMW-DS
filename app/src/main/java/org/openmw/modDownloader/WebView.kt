@@ -249,8 +249,6 @@ fun WebViewScreen(
                                 loadWithOverviewMode = true
                                 allowContentAccess = true
                                 allowFileAccess = true
-                                allowFileAccessFromFileURLs = true
-                                allowUniversalAccessFromFileURLs = true
                             }
 
                             webChromeClient = object : WebChromeClient() {

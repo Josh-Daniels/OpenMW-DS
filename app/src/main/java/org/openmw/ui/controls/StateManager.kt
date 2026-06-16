@@ -30,11 +30,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Vibration
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -57,14 +62,17 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.buttonsGroup
@@ -73,6 +81,7 @@ import org.openmw.ui.controls.UIStateManager.containerGlobalHeight
 import org.openmw.ui.controls.UIStateManager.containerGlobalWidth
 import org.openmw.ui.controls.UIStateManager.enableQuickSlot
 import org.openmw.ui.controls.UIStateManager.enableRightThumb
+import org.openmw.ui.controls.UIStateManager.gold
 import org.openmw.ui.controls.UIStateManager.highlightStep
 import org.openmw.ui.controls.UIStateManager.menuAlpha
 import org.openmw.ui.controls.UIStateManager.menuColor
@@ -81,6 +90,7 @@ import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.stringRes
 import java.io.File
 
+@Serializable
 data class HapticEffect(
     val amplitude: Int,
     val duration: Long
@@ -209,16 +219,12 @@ object UIStateManager {
     val gpuTempHistory = MutableStateFlow<List<Int>>(emptyList())
 
     var isRadialMenuExpanded by mutableStateOf(false)
+    var showHapticsDialog by mutableStateOf(false)
     private val _buttonStates = MutableStateFlow<Map<Int, ButtonState>>(emptyMap())
     val buttonStates: StateFlow<Map<Int, ButtonState>> get() = _buttonStates
 
     // Rumble patterns
-    val soundHaptics = mapOf(
-        "bodyfallmed" to HapticEffect(amplitude = 180, duration = 120),
-        "body hit"    to HapticEffect(amplitude = 255, duration = 80),
-        "punch"       to HapticEffect(amplitude = 200, duration = 60),
-        "swoosh"       to HapticEffect(amplitude = 50, duration = 30)
-    )
+    var soundHaptics by mutableStateOf<Map<String, HapticEffect>>(emptyMap())
 
     // Function to change all button colors and alpha
     fun changeAllButtonColorsAndAlpha(newColor: String, newAlpha: Float) {
@@ -324,10 +330,11 @@ object UIStateManager {
                     )
                 }
 
-            ButtonConfigManager.updateMultipleButtonsByTypes(
-                listOf("quickSlot", "leftStick", "rightStick", "scroll_Wheel", "dynamic"),
-                configs
-            )
+            val currentConfig = ButtonConfigManager.loadConfig()
+            ButtonConfigManager.saveConfig(currentConfig.copy(
+                buttons = configs,
+                soundHaptics = soundHaptics
+            ))
 
             configs.forEach { config ->
                 val log = "ButtonID_${config.id}(${config.size};${config.offsetX};${config.offsetY};${config.isLocked};${config.blockMouse};${config.keyCode};#${config.color};${config.alpha};${config.uri};${config.group};vibrate=${config.vibrate};mouse=${config.isMouseButton}:${config.mouseButton};tint=${config.buttonTint})"
@@ -341,7 +348,13 @@ object UIStateManager {
         val width = if (containerWidth > 1f) containerWidth else containerGlobalWidth.floatValue
         val height = if (containerHeight > 1f) containerHeight else containerGlobalHeight.floatValue
 
-        val configs = ButtonConfigManager.loadAllButtons()
+        val config = ButtonConfigManager.loadConfig()
+        val configs = config.buttons
+        
+        // Load haptics if available
+        if (config.soundHaptics.isNotEmpty()) {
+            soundHaptics = config.soundHaptics
+        }
 
         if (configs.isEmpty()) {
             println("No button configs found to load.")
@@ -1035,6 +1048,153 @@ fun DynamicButtonManager(
                 containerWidth = containerGlobalWidth.floatValue,
                 containerHeight = containerGlobalHeight.floatValue
             )
+            
+            // Added Haptics Editor Button
+            IconButton(onClick = { UIStateManager.showHapticsDialog = true }) {
+                Icon(
+                    imageVector = Icons.Default.Vibration,
+                    contentDescription = "Sound Haptics",
+                    modifier = Modifier.size(30.dp),
+                    tint = Color.Yellow
+                )
+            }
+        }
+    }
+
+    if (UIStateManager.showHapticsDialog) {
+        HapticEditorDialog(onDismiss = { UIStateManager.showHapticsDialog = false })
+    }
+}
+
+@Composable
+fun HapticEditorDialog(onDismiss: () -> Unit) {
+    var newPattern by remember { mutableStateOf("") }
+    var newAmplitude by remember { mutableStateOf("255") }
+    var newDuration by remember { mutableStateOf("100") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = MaterialTheme.shapes.medium,
+            color = Color.Black.copy(alpha = 0.9f),
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Sound Haptics Editor",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // List existing haptics
+                UIStateManager.soundHaptics.forEach { (pattern, effect) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = pattern, color = UIStateManager.gold, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = "Amp: ${effect.amplitude}, Dur: ${effect.duration}ms",
+                                color = Color.LightGray,
+                                fontSize = 12.sp
+                            )
+                        }
+                        IconButton(onClick = {
+                            val mutableHaptics = UIStateManager.soundHaptics.toMutableMap()
+                            mutableHaptics.remove(pattern)
+                            UIStateManager.soundHaptics = mutableHaptics
+                            UIStateManager.saveButtonState(1f, 1f)
+                        }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red)
+                        }
+                    }
+                    HorizontalDivider(color = Color.DarkGray)
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text(
+                    text = "Add New Rumble Pattern",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = newPattern,
+                    onValueChange = { newPattern = it },
+                    label = { Text("Sound Pattern (e.g. 'hit')") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = UIStateManager.gold,
+                        unfocusedBorderColor = Color.Gray
+                    )
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newAmplitude,
+                        onValueChange = { if (it.all { char -> char.isDigit() }) newAmplitude = it },
+                        label = { Text("Amp (0-255)") },
+                        modifier = Modifier.weight(1f),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                    OutlinedTextField(
+                        value = newDuration,
+                        onValueChange = { if (it.all { char -> char.isDigit() }) newDuration = it },
+                        label = { Text("Dur (ms)") },
+                        modifier = Modifier.weight(1f),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Button(
+                    onClick = {
+                        if (newPattern.isNotBlank()) {
+                            val amp = newAmplitude.toIntOrNull() ?: 255
+                            val dur = newDuration.toLongOrNull() ?: 100L
+                            val mutableHaptics = UIStateManager.soundHaptics.toMutableMap()
+                            mutableHaptics[newPattern] = HapticEffect(amp, dur)
+                            UIStateManager.soundHaptics = mutableHaptics
+                            UIStateManager.saveButtonState(1f, 1f)
+                            newPattern = ""
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = UIStateManager.gold)
+                ) {
+                    Text("Add Pattern", color = Color.Black)
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("Close")
+                }
+            }
         }
     }
 }

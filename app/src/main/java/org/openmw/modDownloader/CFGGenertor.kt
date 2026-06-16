@@ -60,7 +60,7 @@ suspend fun loadPluginsToCommentOut() {
     }
 }
 
-fun saveConfigToFile(context: Context, fileName: String, content: String): File {
+fun saveConfigToFile(fileName: String, content: String): File {
     val file = File("${Constants.USER_FILE_STORAGE}/OpenMW/", fileName)
     FileOutputStream(file).use { output ->
         output.write(content.toByteArray())
@@ -73,7 +73,7 @@ fun fetchJsonFromUrl(url: String): String {
     val request = Request.Builder().url(url).build()
     client.newCall(request).execute().use { response ->
         if (response.isSuccessful) {
-            return response.body?.string() ?: throw Exception("Empty response")
+            return response.body.string()
         } else {
             throw Exception("Failed to fetch JSON: ${response.code}")
         }

@@ -76,7 +76,7 @@
     <string name="openmw_settings">OpenMW Settings</string>
     <string name="enter_value">Enter value</string>
     <string name="file_s_imported_successfully">File %s imported successfully</string>
-    <string name="save_file_s_imported_successfully_to_s">Save file %s imported successfully to %s</string>
+    <string name="save_file_s_imported_successfully_to_s">Save file %1$s imported successfully to %2$s</string>
     <string name="file_matching_pattern_s_not_found_for_import">File matching pattern %s not found for import</string>
     <string name="import_failed">Import failed</string>
     <string name="crash_file_exported_successfully">Crash file exported successfully</string>
@@ -120,7 +120,7 @@
     <string name="installing">Installing</string>
     <string name="installed">Installed!</string>
     <string name="install">Install</string>
-    <string name="total_storage_used_by_s_s">Total storage used by %s: %s</string>
+    <string name="total_storage_used_by_s_s">Total storage used by %1$s: %2$s</string>
     <string name="download_and_install">Download and Install</string>
     <string name="working_on_it">Working on it!</string>
     <string name="less_info">Less Info</string>

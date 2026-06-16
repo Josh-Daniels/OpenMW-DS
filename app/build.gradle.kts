@@ -1,3 +1,4 @@
+import com.android.build.gradle.tasks.MergeSourceSetFolders
 import org.gradle.kotlin.dsl.coreLibraryDesugaring
 import java.util.Properties
 import java.util.Random
@@ -7,12 +8,10 @@ import java.util.Date
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
     kotlin("plugin.serialization") version "2.2.0"
-    id("com.google.devtools.ksp")
+    id("com.google.devtools.ksp") version "2.3.9"
     id("com.google.dagger.hilt.android")
-    id("kotlin-kapt")
 }
 
 val keystoreProperties = Properties()
@@ -21,11 +20,13 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
+val generatedAssetsDir = layout.buildDirectory.dir("generated_assets")
+
 android {
     namespace = "org.openmw"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = "29.0.14206865"
-    buildToolsVersion = "35.0.0"
+    buildToolsVersion = "36.0.0"
 
     signingConfigs {
         create("release") {
@@ -53,8 +54,11 @@ android {
 
         externalNativeBuild {
             cmake {
+                val generatedAssetsPath =
+                    generatedAssetsDir.get().asFile.invariantSeparatorsPath
                 arguments(
-                    "-DANDROID_STL=c++_shared"
+                    "-DANDROID_STL=c++_shared",
+                    "-DGENERATED_ASSETS_DIR=$generatedAssetsPath"
                 )
             }
         }
@@ -84,8 +88,11 @@ android {
             )
             externalNativeBuild {
                 cmake {
+                    val generatedAssetsPath =
+                        generatedAssetsDir.get().asFile.invariantSeparatorsPath
                     arguments(
-                        "-DANDROID_STL=c++_shared"
+                        "-DANDROID_STL=c++_shared",
+                        "-DGENERATED_ASSETS_DIR=$generatedAssetsPath"
                     )
                 }
             }
@@ -121,18 +128,32 @@ android {
         }
         jniLibs {
             useLegacyPackaging = true
-            //pickFirsts += "**/libc++_shared.so"
             //keepDebugSymbols += "**/*.so"
         }
     }
     sourceSets {
         getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
+            jniLibs.directories.add("src/main/jniLibs")
+            assets.directories.add(generatedAssetsDir.get().asFile.absolutePath)
         }
     }
     dependenciesInfo {
         includeInApk = true
         includeInBundle = true
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        val cap = variant.name.replaceFirstChar { it.uppercase() }
+
+        tasks.withType<MergeSourceSetFolders>().configureEach {
+            if (name == "merge${cap}Assets") {
+                dependsOn("buildCMake${cap}")
+                dependsOn("configureCMake${cap}")
+                outputs.upToDateWhen { false }
+            }
+        }
     }
 }
 
@@ -175,6 +196,7 @@ dependencies {
     implementation(libs.androidx.compose.adaptive.navigation)
 
     // Hilt injector
+    ksp(libs.kotlin.metadata.jvm)
     implementation(libs.hilt.android)
     ksp(libs.hilt.android.compiler)
     implementation(libs.androidx.hilt.navigation.compose)
@@ -183,10 +205,6 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.datastore)
-    implementation(libs.okkv2.core)
-    implementation(libs.okkv2.mmkv)
-    implementation(libs.okkv2.compose)
-    implementation(libs.okkv2.serialization)
 
     // web/parse
     implementation(libs.androidx.webkit)
@@ -199,27 +217,20 @@ dependencies {
     // lazy to organize XD
     implementation(libs.relinker)
     implementation(libs.androidx.window)
-    implementation(libs.apache.commons.compress)
     implementation(libs.animate.compose)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
-    //implementation(libs.mosaic.runtime)
     implementation(libs.core)
-    implementation(libs.xz)
     implementation(libs.org.eclipse.jgit)
     implementation(libs.translate)
     implementation(libs.androidx.sqlite.bundled)
     implementation(libs.accompanist.pager)
     implementation(libs.accompanist.pager.indicators)
     implementation(libs.x.zip.jbinding.xandroid)
-    implementation(libs.junrar)
-    implementation(libs.zip4j)
-    implementation(libs.androidp7zip)
     implementation(libs.bcprov.jdk18on)
 
     // rooms
     implementation(libs.androidx.room.runtime)
     ksp(libs.androidx.room.compiler)
-    implementation(libs.androidx.room.ktx.v272)
 
     // test
     testImplementation(libs.junit)
@@ -229,5 +240,4 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
-
 }

@@ -133,6 +133,15 @@ set(host ${ndk_triplet})
 set(android_platform android-${ANDROID_API})
 set(app_abi ${ANDROID_ABI})
 set(jni_libs_dir "${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")
+get_filename_component(PROJECT_ROOT ${CMAKE_SOURCE_DIR}/../../.. ABSOLUTE)
+message(STATUS "PROJECT_ROOT: ${APP_DIR}")
+
+if(NOT DEFINED GENERATED_ASSETS_DIR)
+	message(FATAL_ERROR "GENERATED_ASSETS_DIR not set (should be passed from Gradle)")
+endif()
+
+file(MAKE_DIRECTORY "${GENERATED_ASSETS_DIR}")
+file(MAKE_DIRECTORY "${jni_libs_dir}")
 
 set(wrapper_command ${CMAKE_BINARY_DIR}/command_wrapper.sh)
 file(WRITE ${wrapper_command}
@@ -290,6 +299,7 @@ ExternalProject_Add(openal
 
 	BUILD_COMMAND ${wrapper_command} make -j${NPROC}
 	INSTALL_COMMAND ${wrapper_command} make install
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libopenal.so ${jni_libs_dir}/
 )
 
 ExternalProject_Add(boost
@@ -368,6 +378,7 @@ ExternalProject_Add(sdl2
 
 	BUILD_COMMAND ${wrapper_command} make -j${NPROC} PROGRAMS=
 	INSTALL_COMMAND ${wrapper_command} make install
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libSDL2.so ${jni_libs_dir}/
 )
 
 ExternalProject_Add(bullet
@@ -415,6 +426,7 @@ ExternalProject_Add(NG-GL4ES
 	COMMAND ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/include ${prefix}/include/gl4es/
 	COMMAND ${CMAKE_COMMAND} -E make_directory ${prefix}/include/
 	COMMAND ${CMAKE_COMMAND} -E copy_directory <SOURCE_DIR>/include ${prefix}/include/
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libng_gl4es.so ${jni_libs_dir}/
 )
 
 ExternalProject_Add(mygui
@@ -463,6 +475,7 @@ set(LUAJIT_MAKE_FLAGS
 	TARGET_LD=${host}${ANDROID_API}-clang
 	PREFIX=${prefix}
 	BUILDMODE=static
+	XCFLAGS=-DLUAJIT_ENABLE_SANDBOX_BYPASS
 )
 
 ExternalProject_Add(luajit
@@ -545,7 +558,7 @@ ExternalProject_Add(uqm
 	${COMMON_CMAKE_ARGS}
 
 	BUILD_COMMAND ${wrapper_command} make -C <BINARY_DIR> -j${NPROC}
-	INSTALL_COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/libUrQuanMasters.so ${prefix}/lib/libuqm.so
+	INSTALL_COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/libUrQuanMasters.so ${jni_libs_dir}/libuqm.so
 )
 
 ExternalProject_Add(dethrace
@@ -567,7 +580,7 @@ ExternalProject_Add(dethrace
 	-DSDL2_LIBRARY=${prefix}/lib/libSDL2.so
 
 	BUILD_COMMAND ${wrapper_command} make -C <BINARY_DIR> -j${NPROC}
-	INSTALL_COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/src/DETHRACE/libdethrace.so ${prefix}/lib/libdethrace.so
+	INSTALL_COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/src/DETHRACE/libdethrace.so ${jni_libs_dir}/
 )
 
 set(LIBCOLLADA_PATCH
@@ -593,6 +606,7 @@ ExternalProject_Add(libcollada
 
 	BUILD_COMMAND ${wrapper_command} make -j${NPROC}
 	INSTALL_COMMAND ${wrapper_command} make install
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libcollada-dom2.5-dp.so ${jni_libs_dir}/
 )
 
 set(OSG_COMMON
@@ -677,7 +691,7 @@ ExternalProject_Add(kram
 	BUILD_COMMAND ${wrapper_command} make -j${NPROC}
 
 	INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${prefix}/lib/
-	COMMAND ${CMAKE_COMMAND} -E copy kramc/kram ${prefix}/lib/libkram.so
+	COMMAND ${CMAKE_COMMAND} -E copy kramc/kram ${jni_libs_dir}/libkram.so
 )
 
 set(OPENMW_COMMON
@@ -736,35 +750,22 @@ ExternalProject_Add(openmw
 	${OPENMW_COMMON}
 	BUILD_COMMAND ${wrapper_command} make -j${NPROC}
 
-	INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/../assets/libopenmw/openmw
-	COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${CMAKE_SOURCE_DIR}/../assets/libopenmw/resources
-	COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt ${CMAKE_SOURCE_DIR}/../assets/libopenmw/openmw/
-	COMMAND ${CMAKE_COMMAND} -E copy libopenmw.so ${prefix}/lib/
-	COMMAND ${CMAKE_COMMAND} -E copy bsatool ${prefix}/lib/libbsatool.so
+	INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${GENERATED_ASSETS_DIR}/libopenmw/openmw
+	COMMAND ${CMAKE_COMMAND} -E copy_directory resources ${GENERATED_ASSETS_DIR}/libopenmw/resources
+	COMMAND ${CMAKE_COMMAND} -E copy defaults.bin gamecontrollerdb.txt ${GENERATED_ASSETS_DIR}/libopenmw/openmw/
+	COMMAND ${CMAKE_COMMAND} -E copy libopenmw.so ${jni_libs_dir}/
+	COMMAND ${CMAKE_COMMAND} -E copy bsatool ${jni_libs_dir}/libbsatool.so
 )
 
-add_custom_target(copy_jni_libs ALL
-	DEPENDS openmw kram uqm dethrace
+add_custom_target(copy_final ALL
+	DEPENDS openmw
 
-	COMMAND ${CMAKE_COMMAND} -E make_directory ${jni_libs_dir}
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libopenmw.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libbsatool.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libSDL2.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libng_gl4es.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libkram.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libopenal.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libcollada-dom2.5-dp.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libuqm.so ${jni_libs_dir}/
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${prefix}/lib/libdethrace.so ${jni_libs_dir}/
-
-	#Copy tools
-	COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/openmw/angle/ ${jni_libs_dir}/
+	#Copy extras
+	COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/openmw/extras/ ${jni_libs_dir}/
 
 	#Final Copy of assets
-	COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/../../../settings.fallback.cfg ${CMAKE_SOURCE_DIR}/../assets/libopenmw/openmw/
-	COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/../../../openmw.cfg ${CMAKE_SOURCE_DIR}/../assets/libopenmw/openmw/
-	COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/../../../ui ${CMAKE_SOURCE_DIR}/../assets/libopenmw/ui
-	COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/../../../../3rdparty-licenses.txt ${CMAKE_SOURCE_DIR}/../assets/libopenmw/
+	COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/settings.fallback.cfg ${GENERATED_ASSETS_DIR}/libopenmw/openmw/
+	COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/openmw.cfg ${GENERATED_ASSETS_DIR}/libopenmw/openmw/
+	COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_ROOT}/ui ${GENERATED_ASSETS_DIR}/libopenmw/ui
+	COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_ROOT}/../3rdparty-licenses.txt ${GENERATED_ASSETS_DIR}/libopenmw/
 )
-
-

@@ -39,6 +39,12 @@ data class ButtonConfig(
     val buttonTint: Boolean? = null
 )
 
+@Serializable
+data class UIConfig(
+    val buttons: List<ButtonConfig> = emptyList(),
+    val soundHaptics: Map<String, HapticEffect> = emptyMap()
+)
+
 object UriSerializer : KSerializer<Uri> {
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Uri", PrimitiveKind.STRING)
 
@@ -58,21 +64,26 @@ object ButtonConfigManager {
         ignoreUnknownKeys = true
     }
 
-    fun saveButtons(allConfigs: List<ButtonConfig>) {
+    fun saveConfig(config: UIConfig) {
         try {
-            val jsonString = jsonFormat.encodeToString(allConfigs)
+            val jsonString = jsonFormat.encodeToString(config)
             val file = File("${userUI}/button_configs.json")
             FileOutputStream(file).use { output ->
                 output.write(jsonString.toByteArray())
             }
-            //println("Saved buttons: $allConfigs")
         } catch (e: Exception) {
-            Log.e("ButtonConfigManager", "Error saving buttons to file", e)
+            Log.e("ButtonConfigManager", "Error saving config to file", e)
         }
     }
 
+    fun saveButtons(allConfigs: List<ButtonConfig>) {
+        val currentConfig = loadConfig()
+        saveConfig(currentConfig.copy(buttons = allConfigs))
+    }
+
     fun updateMultipleButtonsByTypes(types: List<String>, newConfigs: List<ButtonConfig>) {
-        val allButtons = loadAllButtons().toMutableList()
+        val currentConfig = loadConfig()
+        val allButtons = currentConfig.buttons.toMutableList()
 
         // Remove existing buttons of the specified types
         allButtons.removeAll { it.type in types }
@@ -80,27 +91,39 @@ object ButtonConfigManager {
         // Add the new buttons
         allButtons.addAll(newConfigs)
 
-        saveButtons(allButtons)
+        saveConfig(currentConfig.copy(buttons = allButtons))
     }
 
-    fun loadAllButtons(): List<ButtonConfig> {
+    fun loadConfig(): UIConfig {
         return try {
             val file = File("${userUI}/button_configs.json")
             if (file.exists()) {
                 val jsonString = FileInputStream(file).use { input ->
                     input.bufferedReader().use { it.readText() }
                 }
-                val buttons = jsonFormat.decodeFromString<List<ButtonConfig>>(jsonString)
-                //println("Loaded buttons: $buttons")
-                buttons
+                try {
+                    jsonFormat.decodeFromString<UIConfig>(jsonString)
+                } catch (e: Exception) {
+                    // Backward compatibility: if it's a list, wrap it in UIConfig
+                    try {
+                        val buttons = jsonFormat.decodeFromString<List<ButtonConfig>>(jsonString)
+                        UIConfig(buttons = buttons)
+                    } catch (e2: Exception) {
+                        Log.e("ButtonConfigManager", "Failed to decode as UIConfig or List<ButtonConfig>", e2)
+                        UIConfig()
+                    }
+                }
             } else {
-                println("No button config file found")
-                emptyList()
+                UIConfig()
             }
         } catch (e: Exception) {
-            Log.e("ButtonConfigManager", "Error loading buttons from file", e)
-            emptyList()
+            Log.e("ButtonConfigManager", "Error loading config from file", e)
+            UIConfig()
         }
+    }
+
+    fun loadAllButtons(): List<ButtonConfig> {
+        return loadConfig().buttons
     }
 
     // Helper functions

@@ -43,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.lifecycleScope
@@ -85,6 +86,7 @@ import org.openmw.ui.overlay.HiddenMenu
 import org.openmw.ui.overlay.OverlayUI
 import org.openmw.ui.view.BackgroundAnimation
 import org.openmw.ui.view.NavmeshScreen
+import org.openmw.ui.view.addCustomLog
 import org.openmw.ui.view.enableLogcat
 import org.openmw.ui.view.vibrateHelper
 import org.openmw.utils.DebugOverlayBox
@@ -218,8 +220,12 @@ class EngineActivity : SDLActivity() {
                             val effect = findHapticForSound(name)
                             if (effect != null && isVibrationOn) {
                                 vibrateHelper(this@EngineActivity, effect.amplitude, effect.duration)
-                                Log.d("OpenMW", "Haptic: $name → amp=${effect.amplitude}, dur=${effect.duration}")
                             }
+                            addCustomLog(
+                                "Sound: $name",
+                                textSize = 10,
+                                textColor = Color.Cyan
+                            )
                         }
 
                         BackHandler {

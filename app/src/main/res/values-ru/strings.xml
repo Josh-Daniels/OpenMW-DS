@@ -77,7 +77,7 @@
     <string name="openmw_settings">Настройки OpenMW</string>
     <string name="enter_value">Введите значение</string>
     <string name="file_s_imported_successfully">Файл %s успешно импортирован</string>
-    <string name="save_file_s_imported_successfully_to_s">Файл сохранения %s успешно импортирован в %s</string>
+    <string name="save_file_s_imported_successfully_to_s">Файл сохранения %1$s успешно импортирован в %2$s</string>
     <string name="file_matching_pattern_s_not_found_for_import">Файл, соответствующий шаблону %s, не найден для импорта</string>
     <string name="import_failed">Ошибка импорта</string>
     <string name="crash_file_exported_successfully">Файл аварии успешно экспортирован</string>
@@ -121,7 +121,7 @@
     <string name="installing">Установка</string>
     <string name="installed">Установлено!</string>
     <string name="install">Установить</string>
-    <string name="total_storage_used_by_s_s">Всего занято места %s: %s</string>
+    <string name="total_storage_used_by_s_s">Всего занято места %1$s: %2$s</string>
     <string name="download_and_install">Загрузить и установить</string>
     <string name="working_on_it">В процессе!</string>
     <string name="less_info">Меньше информации</string>

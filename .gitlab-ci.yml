@@ -58,8 +58,6 @@ buildingJob:
   - chmod +x ./gradlew
 
   script:
-    # run twice until i solve the gradle asset issue.
-    - ./gradlew assembleDebug -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ &> ./gradle.log
     - ./gradlew assembleDebug -Dorg.gradle.java.home=/usr/lib/jvm/temurin-21-jdk/ &> ./gradle.log
     - cp app/build/outputs/apk/debug/*.apk openmw-android-alpha3-$CI_COMMIT_TAG.apk
 

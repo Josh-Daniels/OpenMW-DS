@@ -120,7 +120,7 @@ class MegaDownloader {
 
         client.newCall(req).execute().use { response ->
             if (!response.isSuccessful) throw Exception("MEGA API HTTP error ${response.code}")
-            val bodyString = response.body!!.string()
+            val bodyString = response.body.string()
             Log.d(TAG, "API Response: ${bodyString.take(200)}...")
             val array = JSONArray(bodyString)
             val first = array.get(0)
@@ -138,7 +138,7 @@ class MegaDownloader {
 
         client.newCall(req).execute().use { response ->
             if (!response.isSuccessful) throw Exception("MEGA API HTTP error ${response.code}")
-            val bodyString = response.body!!.string()
+            val bodyString = response.body.string()
             val array = JSONArray(bodyString)
             val obj = array.getJSONObject(0)
 
@@ -210,7 +210,7 @@ class MegaDownloader {
 
         client.newCall(req).execute().use { response ->
             if (!response.isSuccessful) {
-                val errorBody = response.body?.string() ?: "No error body"
+                val errorBody = response.body.string()
                 Log.e(TAG, "Download failed with code ${response.code}: $errorBody")
                 throw Exception("Download failed with code ${response.code}")
             }
@@ -221,7 +221,7 @@ class MegaDownloader {
             val contentType = response.header("Content-Type", "")
             Log.d(TAG, "Content-Type: $contentType")
 
-            val input = response.body!!.byteStream()
+            val input = response.body.byteStream()
             FileOutputStream(finalDest).use { out ->
                 val buffer = ByteArray(65536)
                 var bytesRead: Int

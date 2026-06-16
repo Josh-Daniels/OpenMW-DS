@@ -78,7 +78,7 @@
     <string name="openmw_settings">OpenMW设置</string>
     <string name="enter_value">输入值</string>
     <string name="file_s_imported_successfully">文件%s导入成功</string>
-    <string name="save_file_s_imported_successfully_to_s">存档文件%s已成功导入到%s</string>
+    <string name="save_file_s_imported_successfully_to_s">存档文件%1$s已成功导入到%2$s</string>
     <string name="file_matching_pattern_s_not_found_for_import">未找到匹配模式%s的文件用于导入</string>
     <string name="import_failed">导入失败</string>
     <string name="crash_file_exported_successfully">崩溃文件导出成功</string>
@@ -122,7 +122,7 @@
     <string name="installing">安装中</string>
     <string name="installed">已安装！</string>
     <string name="install">安装</string>
-    <string name="total_storage_used_by_s_s">%s占用的总存储空间：%s</string>
+    <string name="total_storage_used_by_s_s">%1$s占用的总存储空间：%2$s</string>
     <string name="download_and_install">下载并安装</string>
     <string name="working_on_it">正在处理！</string>
     <string name="less_info">隐藏信息</string>

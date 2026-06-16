@@ -1,27 +1,3 @@
-From 9579412a719c5bbb2c577f8680b98a8c1632ab22 Mon Sep 17 00:00:00 2001
-From: Duron27 <duron27@gmail.com>
-Date: Sun, 7 Jun 2026 23:50:16 -0400
-Subject: [PATCH] hackyRumble JNI for android.
-
----
- apps/openmw/mwsound/soundbridge.hpp     | 7 +++++++
- apps/openmw/mwsound/soundmanagerimp.cpp | 4 ++++
- 2 files changed, 11 insertions(+)
- create mode 100644 apps/openmw/mwsound/soundbridge.hpp
-
-diff --git a/apps/openmw/mwsound/soundbridge.hpp b/apps/openmw/mwsound/soundbridge.hpp
-new file mode 100644
-index 0000000000..e85a7ed5c9
---- /dev/null
-+++ b/apps/openmw/mwsound/soundbridge.hpp
-@@ -0,0 +1,7 @@
-+#pragma once
-+#include <string>
-+
-+namespace MWSound
-+{
-+    extern std::string g_lastResourceName;
-+}
 diff --git a/apps/openmw/mwsound/soundmanagerimp.cpp b/apps/openmw/mwsound/soundmanagerimp.cpp
 index 8471dbe0be..b28f94b676 100644
 --- a/apps/openmw/mwsound/soundmanagerimp.cpp

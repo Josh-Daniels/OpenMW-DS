@@ -660,7 +660,6 @@ fun SSOHome() {
                                         val config = parseOpenMWConfig(jsonString)
                                         val formattedConfig = formatOpenMWConfig(context, config)
                                         val savedFile = saveConfigToFile(
-                                            context,
                                             "$modList.cfg",
                                             formattedConfig
                                         )
