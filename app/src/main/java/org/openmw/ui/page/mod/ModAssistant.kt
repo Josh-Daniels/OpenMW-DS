@@ -1,5 +1,6 @@
 package org.openmw.ui.page.mod
 
+import android.content.Context
 import android.os.Build
 import android.util.Log
 import android.view.HapticFeedbackConstants
@@ -250,6 +251,7 @@ private fun ModTabRow(
 @ExperimentalFoundationApi
 @Composable
 fun ModValuesList(
+    context: Context,
     modValues: List<ModValue>,
     viewModel: ModAssistantViewModel = LocalModAssistantViewModel.current
 ) {
@@ -264,7 +266,6 @@ fun ModValuesList(
         })
     }
     val lazyListState = rememberLazyListState()
-    val context = LocalContext.current
     var selectedCategory by remember { mutableStateOf<String?>(null) }
     var selectedIndex by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
