@@ -60,6 +60,7 @@ import org.openmw.utils.sendKeyEvent
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import org.openmw.ui.view.vibrateHelper
 import org.openmw.utils.GameFilesPreferences.getKeyboardBacklight
 import org.openmw.utils.GameFilesPreferences.getKeyboardHeight
 import org.openmw.utils.GameFilesPreferences.getKeyboardTheme
@@ -175,6 +176,7 @@ fun VirtualKeyboard() {
             val context = LocalContext.current
             val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
             val mKeyCharacterMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+            val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
 
             Box(
                 modifier = modifier
@@ -210,6 +212,9 @@ fun VirtualKeyboard() {
 
                                             if (down && !isPressed) {
                                                 isPressed = true
+                                                if (isVibrationOn) {
+                                                    vibrateHelper(context, 50, 50)
+                                                }
                                                 when (char) {
                                                     "ALPHA" -> cycleBackLight(context, scope, backLight)
                                                     "␣" -> sendKeyEvent(KeyEvent.KEYCODE_SPACE)
