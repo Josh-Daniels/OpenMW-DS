@@ -1,6 +1,5 @@
 package org.openmw.ui.page.mod
 
-import android.content.Context
 import android.os.Build
 import android.util.Log
 import android.view.HapticFeedbackConstants
@@ -32,9 +31,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.rounded.Menu
@@ -251,10 +248,10 @@ private fun ModTabRow(
 @ExperimentalFoundationApi
 @Composable
 fun ModValuesList(
-    context: Context,
     modValues: List<ModValue>,
     viewModel: ModAssistantViewModel = LocalModAssistantViewModel.current
 ) {
+    val context = LocalContext.current
     var selectedTabIndex by viewModel.selectedTabIndex
     var showFileBrowser by viewModel.showFileBrowser
 

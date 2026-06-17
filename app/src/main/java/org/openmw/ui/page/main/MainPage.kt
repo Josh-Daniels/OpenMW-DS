@@ -192,7 +192,7 @@ fun MainPage(
                             if (savedPath.isNullOrEmpty() || savedPath == "Game Files: ") {
                                 OpenMW()
                             }
-                            ModValuesList(context, modValues)
+                            ModValuesList(modValues)
                         }
                         "UQM" -> {
                             UqmDownloads()

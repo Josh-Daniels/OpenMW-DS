@@ -41,6 +41,7 @@ android {
         applicationId = "com.alpha3.launcher"
         minSdk = 26
 
+        //noinspection OldTargetApi
         targetSdk = 36
         versionCode = 2
         versionName = SimpleDateFormat("MM/dd/yyyy").format(Date())
@@ -52,6 +53,7 @@ android {
             abiFilters += listOf("arm64-v8a")
         }
 
+        @Suppress("UnstableApiUsage")
         externalNativeBuild {
             cmake {
                 val generatedAssetsPath =
@@ -70,6 +72,17 @@ android {
         multiDexEnabled = true
     }
 
+    androidComponents.onVariants { variant ->
+        val cap = variant.name.replaceFirstChar { it.uppercase() }
+
+        tasks.withType<MergeSourceSetFolders>().configureEach {
+            if (name == "merge${cap}Assets") {
+                dependsOn("externalNativeBuild$cap")
+                inputs.dir(generatedAssetsDir)
+            }
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -86,16 +99,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            externalNativeBuild {
-                cmake {
-                    val generatedAssetsPath =
-                        generatedAssetsDir.get().asFile.invariantSeparatorsPath
-                    arguments(
-                        "-DANDROID_STL=c++_shared",
-                        "-DGENERATED_ASSETS_DIR=$generatedAssetsPath"
-                    )
-                }
-            }
         }
         debug {
             signingConfig = signingConfigs.getByName("debug")
@@ -140,20 +143,6 @@ android {
     dependenciesInfo {
         includeInApk = true
         includeInBundle = true
-    }
-}
-
-androidComponents {
-    onVariants { variant ->
-        val cap = variant.name.replaceFirstChar { it.uppercase() }
-
-        tasks.withType<MergeSourceSetFolders>().configureEach {
-            if (name == "merge${cap}Assets") {
-                dependsOn("buildCMake${cap}")
-                dependsOn("configureCMake${cap}")
-                outputs.upToDateWhen { false }
-            }
-        }
     }
 }
 
