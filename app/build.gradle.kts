@@ -3,8 +3,6 @@ import org.gradle.kotlin.dsl.coreLibraryDesugaring
 import java.util.Properties
 import java.util.Random
 import java.io.FileInputStream
-import java.text.SimpleDateFormat
-import java.util.Date
 
 plugins {
     alias(libs.plugins.android.application)
@@ -21,6 +19,12 @@ if (keystorePropertiesFile.exists()) {
 }
 
 val generatedAssetsDir = layout.buildDirectory.dir("generated_assets")
+val generateOpenMWAssets = tasks.register("generateOpenMWAssets") {
+    outputs.dir(generatedAssetsDir)
+    doLast {
+        generatedAssetsDir.get().asFile.mkdirs()
+    }
+}
 
 android {
     namespace = "org.openmw"
@@ -44,7 +48,9 @@ android {
         //noinspection OldTargetApi
         targetSdk = 36
         versionCode = 2
-        versionName = SimpleDateFormat("MM/dd/yyyy").format(Date())
+        versionName = providers.exec {
+            commandLine("git", "rev-parse", "--short", "HEAD")
+        }.standardOutput.asText.get().trim()
 
         buildConfigField("int", "RANDOMIZER", "${Random().nextInt(999).let { if (it < 0) -it else it }}")
 
@@ -60,7 +66,8 @@ android {
                     generatedAssetsDir.get().asFile.invariantSeparatorsPath
                 arguments(
                     "-DANDROID_STL=c++_shared",
-                    "-DGENERATED_ASSETS_DIR=$generatedAssetsPath"
+                    "-DGENERATED_ASSETS_DIR=$generatedAssetsPath",
+                    "-DOPENMW_SRC=${project.findProperty("OPENMW_SRC") ?: ""}"
                 )
             }
         }
@@ -74,11 +81,10 @@ android {
 
     androidComponents.onVariants { variant ->
         val cap = variant.name.replaceFirstChar { it.uppercase() }
-
         tasks.withType<MergeSourceSetFolders>().configureEach {
             if (name == "merge${cap}Assets") {
+                dependsOn(generateOpenMWAssets)
                 dependsOn("externalNativeBuild$cap")
-                inputs.dir(generatedAssetsDir)
             }
         }
     }

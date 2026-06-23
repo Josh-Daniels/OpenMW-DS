@@ -133,6 +133,7 @@ set(host ${ndk_triplet})
 set(android_platform android-${ANDROID_API})
 set(app_abi ${ANDROID_ABI})
 set(jni_libs_dir "${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")
+set(OPENMW_SRC "" CACHE PATH "Path to a local OpenMW source checkout")
 get_filename_component(PROJECT_ROOT ${CMAKE_SOURCE_DIR}/../../.. ABSOLUTE)
 message(STATUS "PROJECT_ROOT: ${APP_DIR}")
 
@@ -237,6 +238,9 @@ ExternalProject_Add(libicu-host
 	URL https://github.com/unicode-org/icu/archive/refs/tags/release-${LIBICU_VERSION}.zip
 	URL_HASH ${LIBICU_HASH}
 	DOWNLOAD_DIR ${download_dir}
+	LOG_CONFIGURE 1
+	LOG_BUILD 1
+	LOG_INSTALL 1
 
 	CONFIGURE_COMMAND <SOURCE_DIR>/icu4c/source/configure
     --enable-static
@@ -732,12 +736,23 @@ set(OPENMW_PATCH
 	patch -d <SOURCE_DIR> -p1 -t -N < ${CMAKE_SOURCE_DIR}/openmw/patches/openmw/hackyRumble.patch
 )
 
+if(OPENMW_SRC)
+	set(OPENMW_SOURCE_DIR "${OPENMW_SRC}")
+	set(OPENMW_GIT_ARGS "")
+else()
+	set(OPENMW_SOURCE_DIR "")
+	set(OPENMW_GIT_ARGS
+			GIT_REPOSITORY https://github.com/OpenMW/openmw
+			GIT_TAG ${OPENMW_VERSION}
+			DOWNLOAD_DIR ${download_dir}
+	)
+endif()
+
 ExternalProject_Add(openmw
 	DEPENDS boost openal osg mygui ffmpeg sdl2 bullet lz4 luajit libicu
 
-	GIT_REPOSITORY https://github.com/OpenMW/openmw
-	GIT_TAG ${OPENMW_VERSION}
-	DOWNLOAD_DIR ${download_dir}
+	${OPENMW_GIT_ARGS}
+	SOURCE_DIR ${OPENMW_SOURCE_DIR}
 
 	UPDATE_COMMAND ""
 	BUILD_ALWAYS 1

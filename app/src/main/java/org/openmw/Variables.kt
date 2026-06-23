@@ -3,7 +3,6 @@ package org.openmw
 import android.app.Application
 import android.os.Environment
 import dagger.hilt.android.HiltAndroidApp
-import org.openmw.ui.controls.UIStateManager
 import java.io.File
 
 const val OPENMW_MAIN_LIB = "libopenmw.so"

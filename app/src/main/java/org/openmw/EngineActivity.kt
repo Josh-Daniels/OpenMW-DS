@@ -216,18 +216,6 @@ class EngineActivity : SDLActivity() {
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
                         val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
 
-                        SoundWatcher { name ->
-                            val effect = findHapticForSound(name)
-                            if (effect != null && isVibrationOn) {
-                                vibrateHelper(this@EngineActivity, effect.amplitude, effect.duration)
-                            }
-                            addCustomLog(
-                                "Sound: $name",
-                                textSize = 10,
-                                textColor = Color.Cyan
-                            )
-                        }
-
                         BackHandler {
                             // disable back exit
                             Log.d(TAG, "onGlobalLayout: Back pressed")
@@ -235,6 +223,17 @@ class EngineActivity : SDLActivity() {
 
                         if (UIStateManager.tempCodeGroup == "OpenMW") {
                             AutoMouseModeComposable()
+                            SoundWatcher { name ->
+                                val effect = findHapticForSound(name)
+                                if (effect != null && isVibrationOn) {
+                                    vibrateHelper(this@EngineActivity, effect.amplitude, effect.duration)
+                                }
+                                addCustomLog(
+                                    "Sound: $name",
+                                    textSize = 10,
+                                    textColor = Color.White
+                                )
+                            }
                         } else {
                             Box(
                                 modifier = Modifier
