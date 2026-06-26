@@ -32,6 +32,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.window.PopupProperties
 
 /**
  * SECOND-SCREEN UI - the real layout shell.
@@ -209,7 +213,17 @@ private fun InventoryPanel(state: GameState) {
             ListRow(
                 title = prettify(item.id),
                 trailing = if (item.count > 1) "x${item.count}" else "",
-                highlighted = worn
+                highlighted = worn,
+                showItemMenu = true,
+                onTap = {
+                    if (worn) CompanionActions.unequipItem(item.id)
+                    else CompanionActions.equipItem(item.id)
+                },
+                onEquipToggle = {
+                    if (worn) CompanionActions.unequipItem(item.id)
+                    else CompanionActions.equipItem(item.id)
+                },
+                onDrop = { CompanionActions.dropItem(item.id, item.count) }
             )
         }
     }
@@ -231,7 +245,13 @@ private fun MagicPanel(state: GameState) {
         )
     ) {
         items(state.spells) { spell ->
-            ListRow(title = prettify(spell), trailing = "", highlighted = false)
+            ListRow(
+                title = prettify(spell),
+                trailing = "",
+                highlighted = false,
+                showItemMenu = false,
+                onTap = { CompanionActions.selectSpell(spell) }
+            )
         }
     }
 }
@@ -248,14 +268,28 @@ private fun EmptyPanel(message: String) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun ListRow(title: String, trailing: String, highlighted: Boolean) {
+private fun ListRow(
+    title: String,
+    trailing: String,
+    highlighted: Boolean,
+    onTap: () -> Unit = {},
+    showItemMenu: Boolean = false,
+    onEquipToggle: () -> Unit = {},
+    onDrop: () -> Unit = {}
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .clickable { /* action stub - inbound channel later */ }
+                .combinedClickable(
+                    onClick = { onTap() },
+                    onLongClick = { if (showItemMenu) menuOpen = true }
+                )
                 .padding(horizontal = 8.dp, vertical = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
@@ -275,6 +309,29 @@ private fun ListRow(title: String, trailing: String, highlighted: Boolean) {
                     color = TextDim,
                     fontSize = 14.sp,
                     fontFamily = FontFamily.Monospace
+                )
+            }
+
+            // Long-press menu anchored here
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+                properties = PopupProperties(focusable = false)
+
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (highlighted) "Unequip" else "Equip") },
+                    onClick = {
+                        menuOpen = false
+                        onEquipToggle()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Drop") },
+                    onClick = {
+                        menuOpen = false
+                        onDrop()
+                    }
                 )
             }
         }

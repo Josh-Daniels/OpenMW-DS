@@ -199,7 +199,7 @@ class EngineActivity : SDLActivity() {
         enableScreenStayOn(this)
 
         // MorrowindDS Second screen
-        testSecondScreen()
+        startCompanionScreen()
 
         // Add SDL view programmatically
         val sdlContainer = findViewById<FrameLayout>(R.id.sdl_container)
@@ -591,7 +591,7 @@ class EngineActivity : SDLActivity() {
     }
 
     // MorrowindDS Second screen function.
-    private fun testSecondScreen() {
+    private fun startCompanionScreen() {
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         val displays = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
         Log.d(TAG, "Second-screen: found ${displays.size} presentation display(s)")
@@ -615,6 +615,11 @@ class EngineActivity : SDLActivity() {
             decor.setViewTreeLifecycleOwner(this@EngineActivity)
             decor.setViewTreeViewModelStoreOwner(this@EngineActivity)
             decor.setViewTreeSavedStateRegistryOwner(this@EngineActivity)
+        }
+
+        presentation.window?.apply {
+            addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
         }
 
         presentation.setContentView(composeView)
