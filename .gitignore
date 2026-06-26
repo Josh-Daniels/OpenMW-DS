@@ -18,3 +18,10 @@ app/mainline
 app/release
 .kotlin
 .cxx
+.DS_Store
+**/.DS_Store
+
+.cxx/
+app/.cxx/
+build/
+app/build/
