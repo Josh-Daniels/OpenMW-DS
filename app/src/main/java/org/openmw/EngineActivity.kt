@@ -2,6 +2,16 @@
 
 package org.openmw
 
+// For MorrowindDS
+import android.app.Presentation
+import android.hardware.display.DisplayManager
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import org.openmw.companion.CompanionScreen
+import org.openmw.companion.GameStateRepository
+import org.openmw.companion.LogReader
+
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
@@ -103,6 +113,11 @@ import kotlin.math.roundToInt
 class EngineActivity : SDLActivity() {
     private lateinit var sdlView: View
     private external fun getPathToJni(path_global: String, path_user: String)
+
+    // For MorrowindDS
+    private val companionLogReader = LogReader("/storage/emulated/0/Alpha3/config/openmw.log")
+    private var companionPresentation: Presentation? = null
+
     external fun getLastResourceName(): String
     external fun initAlpha3()
 
@@ -144,6 +159,11 @@ class EngineActivity : SDLActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+
+        // MorrowindDS
+        companionPresentation?.dismiss()
+        companionLogReader.stop()
+        
         finishAffinity() // kill all activity
         Process.killProcess(Process.myPid())
 //        exitProcess(0)
@@ -177,6 +197,9 @@ class EngineActivity : SDLActivity() {
 
         hideSystemBars(this)
         enableScreenStayOn(this)
+
+        // MorrowindDS Second screen
+        testSecondScreen()
 
         // Add SDL view programmatically
         val sdlContainer = findViewById<FrameLayout>(R.id.sdl_container)
@@ -564,6 +587,43 @@ class EngineActivity : SDLActivity() {
             args.toTypedArray()
         } catch (_: Exception) {
             super.getArguments()
+        }
+    }
+
+    // MorrowindDS Second screen function.
+    private fun testSecondScreen() {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val displays = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+        Log.d(TAG, "Second-screen: found ${displays.size} presentation display(s)")
+
+        if (displays.isEmpty()) {
+            Log.e(TAG, "Second-screen: NO presentation display found")
+            return
+        }
+
+        // Start reading the engine's log so GameStateRepository gets populated
+        companionLogReader.start(lifecycleScope)
+
+        val presentation = Presentation(this, displays[0])
+        val composeView = ComposeView(presentation.context).apply {
+            setContent { CompanionScreen() }
+        }
+
+        // Compose needs these owners wired onto the presentation's window decor.
+        // EngineActivity is a ComponentActivity (via SDLActivity), so it can serve as all three.
+        presentation.window?.decorView?.let { decor ->
+            decor.setViewTreeLifecycleOwner(this@EngineActivity)
+            decor.setViewTreeViewModelStoreOwner(this@EngineActivity)
+            decor.setViewTreeSavedStateRegistryOwner(this@EngineActivity)
+        }
+
+        presentation.setContentView(composeView)
+        runCatching {
+            presentation.show()
+            companionPresentation = presentation
+            Log.d(TAG, "Second-screen: companion UI shown on display ${displays[0].displayId}")
+        }.onFailure {
+            Log.e(TAG, "Second-screen: show() failed", it)
         }
     }
 }
