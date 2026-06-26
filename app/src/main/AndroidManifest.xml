@@ -44,7 +44,7 @@
 
     <!-- Allow access to the vibrator -->
     <uses-permission android:name="android.permission.VIBRATE" />
-
+    
     <application
         android:appCategory="game"
         android:hasFragileUserData="true"

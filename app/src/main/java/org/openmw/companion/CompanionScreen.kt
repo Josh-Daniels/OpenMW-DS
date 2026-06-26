@@ -1,20 +1,32 @@
 package org.openmw.companion
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -32,44 +44,59 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.window.PopupProperties
 
+// Map
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.viewinterop.AndroidView
+import kotlin.math.abs
+
 /**
- * SECOND-SCREEN UI - the real layout shell.
+ * SECOND-SCREEN UI — Morrowind-styled.
  *
- *  +---------------------------------+
- *  | HP ###o  MP ##o  SP ####  (top) |  floating, translucent
- *  |                                 |
- *  |        central content          |  Map / Inventory / Magic / Journal
- *  |        (fills screen)           |
- *  |                                 |
- *  | [Map][Inventory][Magic][Journal]|  floating tab row (bottom)
- *  +---------------------------------+
- *
- * Top stat bar and bottom tabs are persistent overlays; only the central
- * area swaps when you tap a tab. Map is a placeholder for now.
+ *  Carved-stone panels, bronze frames, bone serif text.
+ *  Top stat bar (HP/MP/SP) floats over EVERY tab; bottom tab row switches
+ *  the central panel. Inventory is a grid of framed slots (ready for icons)
+ *  with a paper-doll placeholder beside it.
  */
 
-// ---- palette ----
-private val Bg = Color(0xFF0B0B0D)
-private val FloatBg = Color(0xCC16161A)   // translucent panel for floating bars
-private val Divider = Color(0xFF26262C)
-private val TextDim = Color(0xFF8A8A93)
-private val TextBright = Color(0xFFEDEDF0)
-private val Accent = Color(0xFFB8893A)     // muted gold, selected tab
-private val HealthCol = Color(0xFFC0392B)
-private val MagickaCol = Color(0xFF2E6FB0)
-private val FatigueCol = Color(0xFF2E9E5B)
+// ---- palette: warm stone & bronze ----
+private val StoneDark   = Color(0xFF15120D)   // deep warm background
+private val StonePanel  = Color(0xFF252017)   // raised panel fill
+private val SlotBg      = Color(0xFF1C1812)   // item slot fill
+private val SlotWorn    = Color(0xFF3A2E1A)   // equipped slot fill (bronze-tinted)
+private val Bronze      = Color(0xFF8C6D3F)   // frame border
+private val BronzeDark  = Color(0xFF5A4528)   // inner border / dividers
+private val BronzeLight = Color(0xFFC9A063)   // highlights, selected
+private val Bone        = Color(0xFFD8CBB0)   // primary text
+private val BoneDim     = Color(0xFF9A8C70)   // secondary text
+private val FloatStone  = Color(0xF02A2318)   // near-opaque stone for floating bars
 
-private const val TOP_BAR_SPACE = 92        // dp reserved so content clears the top bar
-private const val BOTTOM_BAR_SPACE = 84     // dp reserved so content clears the tabs
+private val HealthCol   = Color(0xFF8E2B20)   // blood red
+private val MagickaCol  = Color(0xFF35608F)   // arcane blue
+private val FatigueCol  = Color(0xFF4E7A3A)   // earthy green
+
+// ---- type roles (swap to bundled Morrowind fonts later in one place) ----
+private val MwDisplay = FontFamily.Serif
+private val MwBody    = FontFamily.Serif
+private val MwData    = FontFamily.Monospace
+
+private const val TOP_BAR_SPACE = 96
+private const val BOTTOM_BAR_SPACE = 84
 
 private enum class Tab(val label: String) {
     MAP("Map"), INVENTORY("Inventory"), MAGIC("Magic"), JOURNAL("Journal")
 }
+
+/** Stone panel with a bronze frame — the signature Morrowind window look. */
+private fun Modifier.mwPanel(): Modifier = this
+    .clip(RoundedCornerShape(3.dp))
+    .background(StonePanel)
+    .border(2.dp, Bronze, RoundedCornerShape(3.dp))
 
 @Composable
 fun CompanionScreen() {
@@ -79,9 +106,8 @@ fun CompanionScreen() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Bg)
+            .background(StoneDark)
     ) {
-        // central content fills the whole screen, behind the floating bars
         when (tab) {
             Tab.MAP -> MapPanel(state)
             Tab.INVENTORY -> InventoryPanel(state)
@@ -89,7 +115,6 @@ fun CompanionScreen() {
             Tab.JOURNAL -> JournalPanel()
         }
 
-        // floating top stat bar
         TopStatBar(
             state = state,
             modifier = Modifier
@@ -98,7 +123,6 @@ fun CompanionScreen() {
                 .padding(12.dp)
         )
 
-        // floating bottom tab row
         BottomTabBar(
             selected = tab,
             onSelect = { tab = it },
@@ -110,20 +134,21 @@ fun CompanionScreen() {
     }
 }
 
-/* ---- Top stat bar ---- */
+/* ---- Top stat bar (floats over all tabs) ---- */
 
 @Composable
 private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(FloatBg)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .clip(RoundedCornerShape(3.dp))
+            .background(FloatStone)
+            .border(2.dp, Bronze, RoundedCornerShape(3.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        CompactStat("HP", state.health, HealthCol, Modifier.weight(1f))
-        CompactStat("MP", state.magicka, MagickaCol, Modifier.weight(1f))
-        CompactStat("SP", state.fatigue, FatigueCol, Modifier.weight(1f))
+        CompactStat("Health", state.health, HealthCol, Modifier.weight(1f))
+        CompactStat("Magicka", state.magicka, MagickaCol, Modifier.weight(1f))
+        CompactStat("Fatigue", state.fatigue, FatigueCol, Modifier.weight(1f))
     }
 }
 
@@ -139,208 +164,381 @@ private fun CompactStat(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(label, color = color, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(label, color = BronzeLight, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold)
             Text(
                 "${value.current.toInt()}/${value.max.toInt()}",
-                color = TextBright,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace
+                color = Bone, fontSize = 12.sp, fontFamily = MwData
             )
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(5.dp))
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(8.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color(0xFF000000))
+                .height(9.dp)
+                .clip(RoundedCornerShape(1.dp))
+                .background(Color(0xFF0E0B07))
+                .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(value.ratio)
-                    .height(8.dp)
-                    .clip(RoundedCornerShape(4.dp))
+                    .height(9.dp)
+                    .clip(RoundedCornerShape(1.dp))
                     .background(color)
             )
         }
     }
 }
 
-/* ---- Central panels ---- */
+/* ---- Map: UESP web map in a WebView, follows the player ---- */
+
+/*
+// The map URL builder. If centering doesn't work, this is the ONE place to change
+// the parameter scheme (e.g. oblocx/oblocy instead of x/y, or a different zoom range).
+private fun uespMapUrl(x: Int, y: Int, zoom: Int): String =
+    "https://kezyma.github.io/map/morrowind/map.html"
+
+// Only recenter when the player has moved at least this far (world units),
+// to avoid constant reloads. One cell is 8192 units.
+private const val RECENTER_THRESHOLD = 1500f
 
 @Composable
 private fun MapPanel(state: GameState) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("MAP", color = TextDim, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                if (state.hasData) state.cell else "-",
-                color = TextBright,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "x ${state.pos.x.toInt()}   y ${state.pos.y.toInt()}   z ${state.pos.z.toInt()}",
-                color = TextDim,
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace
-            )
-            Spacer(Modifier.height(24.dp))
-            Text("(local map goes here)", color = Color(0xFF3A3A42), fontSize = 12.sp)
+    var follow by remember { mutableStateOf(true) }
+    var zoom by remember { mutableIntStateOf(5) }
+
+    // Hold the WebView so we can reload it on demand.
+    val webViewRef = remember { mutableStateOf<WebView?>(null) }
+    // Last position we centered on, to throttle reloads.
+    var lastX by remember { mutableStateOf(Int.MIN_VALUE) }
+    var lastY by remember { mutableStateOf(Int.MIN_VALUE) }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+    ) {
+        Column(Modifier.fillMaxSize().mwPanel().padding(4.dp)) {
+
+            // The web map itself
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(2.dp)),
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            webViewClient = WebViewClient()
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.builtInZoomControls = true
+                            settings.displayZoomControls = false
+                            settings.loadWithOverviewMode = true
+                            settings.useWideViewPort = true
+                            settings.userAgentString =
+                                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                            webViewRef.value = this
+                            val px = state.pos.x.toInt()
+                            val py = state.pos.y.toInt()
+                            loadUrl(uespMapUrl(px, py, zoom))
+                            lastX = px; lastY = py
+                        }
+                    }
+                )
+            }
+
+            // Control strip
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MapButton(if (follow) "Following" else "Free", filled = follow) {
+                    follow = !follow
+                    if (follow) {
+                        // snap back to player immediately
+                        val px = state.pos.x.toInt(); val py = state.pos.y.toInt()
+                        webViewRef.value?.loadUrl(uespMapUrl(px, py, zoom))
+                        lastX = px; lastY = py
+                    }
+                }
+                MapButton("Recenter", filled = false) {
+                    val px = state.pos.x.toInt(); val py = state.pos.y.toInt()
+                    webViewRef.value?.loadUrl(uespMapUrl(px, py, zoom))
+                    lastX = px; lastY = py
+                }
+            }
+        }
+    }
+
+    // When following, recenter on meaningful movement.
+    LaunchedEffect(state.pos.x, state.pos.y, follow) {
+        if (!follow) return@LaunchedEffect
+        val px = state.pos.x.toInt()
+        val py = state.pos.y.toInt()
+        if (abs(px - lastX) > RECENTER_THRESHOLD || abs(py - lastY) > RECENTER_THRESHOLD) {
+            webViewRef.value?.loadUrl(uespMapUrl(px, py, zoom))
+            lastX = px; lastY = py
         }
     }
 }
+
+*/
+/* ---- Map: coordinate readout (web/bundled map deferred) ---- */
+
+@Composable
+private fun MapPanel(state: GameState) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+    ) {
+        Column(
+            Modifier.fillMaxSize().mwPanel().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                if (state.hasData) state.cell else "—",
+                color = Bone, fontSize = 24.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "x ${state.pos.x.toInt()}    y ${state.pos.y.toInt()}    z ${state.pos.z.toInt()}",
+                color = BoneDim, fontSize = 14.sp, fontFamily = MwData
+            )
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "Local map to be inscribed here",
+                color = BronzeDark, fontSize = 12.sp, fontFamily = MwBody
+            )
+        }
+    }
+}
+
+
+@Composable
+private fun MapButton(label: String, filled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(2.dp))
+            .background(if (filled) Bronze else Color.Transparent)
+            .border(1.dp, if (filled) BronzeLight else BronzeDark, RoundedCornerShape(2.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Text(
+            label,
+            color = if (filled) StoneDark else Bone,
+            fontSize = 12.sp,
+            fontFamily = MwDisplay,
+            fontWeight = if (filled) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+/* ---- Inventory: paper-doll + grid of framed slots ---- */
 
 @Composable
 private fun InventoryPanel(state: GameState) {
-    if (state.inventory.isEmpty()) {
-        EmptyPanel("No inventory data yet")
-        return
-    }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            top = TOP_BAR_SPACE.dp,
-            bottom = BOTTOM_BAR_SPACE.dp,
-            start = 16.dp,
-            end = 16.dp
-        )
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        items(state.inventory) { item ->
-            val worn = state.equipment.values.contains(item.id)
-            ListRow(
-                title = prettify(item.id),
-                trailing = if (item.count > 1) "x${item.count}" else "",
-                highlighted = worn,
-                showItemMenu = true,
-                onTap = {
-                    if (worn) CompanionActions.unequipItem(item.id)
-                    else CompanionActions.equipItem(item.id)
-                },
-                onEquipToggle = {
-                    if (worn) CompanionActions.unequipItem(item.id)
-                    else CompanionActions.equipItem(item.id)
-                },
-                onDrop = { CompanionActions.dropItem(item.id, item.count) }
+        PaperDoll(Modifier.weight(0.38f).fillMaxHeight())
+
+        Box(Modifier.weight(0.62f).fillMaxHeight().mwPanel().padding(6.dp)) {
+            if (state.inventory.isEmpty()) {
+                EmptyPanel("No inventory recorded")
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(64.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    gridItems(state.inventory) { item ->
+                        val worn = state.equipment.values.contains(item.id)
+                        ItemCell(
+                            label = prettify(item.id),
+                            count = item.count,
+                            worn = worn,
+                            onTap = {
+                                if (worn) CompanionActions.unequipItem(item.id)
+                                else CompanionActions.equipItem(item.id)
+                            },
+                            onEquipToggle = {
+                                if (worn) CompanionActions.unequipItem(item.id)
+                                else CompanionActions.equipItem(item.id)
+                            },
+                            onDrop = { CompanionActions.dropItem(item.id, item.count) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Empty character frame — where the paper-doll image will go. */
+@Composable
+private fun PaperDoll(modifier: Modifier = Modifier) {
+    Box(modifier = modifier.mwPanel().padding(8.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // simple silhouette placeholder
+            Box(Modifier.size(30.dp).clip(CircleShape).background(BronzeDark))
+            Spacer(Modifier.height(5.dp))
+            Box(
+                Modifier
+                    .size(width = 46.dp, height = 58.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(BronzeDark)
+            )
+            Spacer(Modifier.height(12.dp))
+            Text("Character", color = BoneDim, fontSize = 12.sp, fontFamily = MwDisplay)
+            Text("paper doll", color = BronzeDark, fontSize = 10.sp, fontFamily = MwBody)
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ItemCell(
+    label: String,
+    count: Int,
+    worn: Boolean,
+    onTap: () -> Unit,
+    onEquipToggle: () -> Unit,
+    onDrop: () -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = Modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(2.dp))
+            .background(if (worn) SlotWorn else SlotBg)
+            .border(
+                if (worn) 2.dp else 1.dp,
+                if (worn) BronzeLight else BronzeDark,
+                RoundedCornerShape(2.dp)
+            )
+            .combinedClickable(onClick = onTap, onLongClick = { menuOpen = true })
+            .padding(4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        // Icon placeholder: the item name for now (replaced by real icons later)
+        Text(
+            label,
+            color = if (worn) BronzeLight else Bone,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            textAlign = TextAlign.Center,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            lineHeight = 11.sp
+        )
+        if (count > 1) {
+            Text(
+                "$count",
+                color = BoneDim,
+                fontSize = 9.sp,
+                fontFamily = MwData,
+                modifier = Modifier.align(Alignment.BottomEnd)
+            )
+        }
+
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+            properties = PopupProperties(focusable = false)
+        ) {
+            DropdownMenuItem(
+                text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody) },
+                onClick = { menuOpen = false; onEquipToggle() }
+            )
+            DropdownMenuItem(
+                text = { Text("Drop", fontFamily = MwBody) },
+                onClick = { menuOpen = false; onDrop() }
             )
         }
     }
 }
+
+/* ---- Magic (list of spells) ---- */
 
 @Composable
 private fun MagicPanel(state: GameState) {
-    if (state.spells.isEmpty()) {
-        EmptyPanel("No spell data yet")
-        return
-    }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            top = TOP_BAR_SPACE.dp,
-            bottom = BOTTOM_BAR_SPACE.dp,
-            start = 16.dp,
-            end = 16.dp
-        )
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
     ) {
-        items(state.spells) { spell ->
-            ListRow(
-                title = prettify(spell),
-                trailing = "",
-                highlighted = false,
-                showItemMenu = false,
-                onTap = { CompanionActions.selectSpell(spell) }
-            )
+        if (state.spells.isEmpty()) {
+            EmptyPanel("No spells known")
+        } else {
+            Column(Modifier.fillMaxSize().mwPanel().padding(8.dp)) {
+                Text("Spells", color = BronzeLight, fontSize = 14.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(state.spells) { spell ->
+                        SpellRow(prettify(spell)) { CompanionActions.selectSpell(spell) }
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
+private fun SpellRow(title: String, onTap: () -> Unit) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onTap() }
+                .padding(horizontal = 8.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, color = Bone, fontSize = 15.sp, fontFamily = MwBody,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+    }
+}
+
+/* ---- Journal (deferred: no readable-journal data via stable Lua yet) ---- */
+
+@Composable
 private fun JournalPanel() {
-    EmptyPanel("Journal - coming soon")
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+    ) {
+        Column(
+            Modifier.fillMaxSize().mwPanel().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("Journal", color = Bone, fontSize = 20.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Text("Awaiting a way to read quest entries",
+                color = BoneDim, fontSize = 13.sp, fontFamily = MwBody,
+                textAlign = TextAlign.Center)
+        }
+    }
 }
 
 @Composable
 private fun EmptyPanel(message: String) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text(message, color = TextDim, fontSize = 16.sp)
-    }
-}
-
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-@Composable
-private fun ListRow(
-    title: String,
-    trailing: String,
-    highlighted: Boolean,
-    onTap: () -> Unit = {},
-    showItemMenu: Boolean = false,
-    onEquipToggle: () -> Unit = {},
-    onDrop: () -> Unit = {}
-) {
-    var menuOpen by remember { mutableStateOf(false) }
-
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .combinedClickable(
-                    onClick = { onTap() },
-                    onLongClick = { if (showItemMenu) menuOpen = true }
-                )
-                .padding(horizontal = 8.dp, vertical = 14.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                title,
-                color = if (highlighted) Accent else TextBright,
-                fontSize = 16.sp,
-                fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            if (trailing.isNotEmpty()) {
-                Text(
-                    trailing,
-                    color = TextDim,
-                    fontSize = 14.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-
-            // Long-press menu anchored here
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = { menuOpen = false },
-                properties = PopupProperties(focusable = false)
-
-            ) {
-                DropdownMenuItem(
-                    text = { Text(if (highlighted) "Unequip" else "Equip") },
-                    onClick = {
-                        menuOpen = false
-                        onEquipToggle()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Drop") },
-                    onClick = {
-                        menuOpen = false
-                        onDrop()
-                    }
-                )
-            }
-        }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Divider)
-        )
+        Text(message, color = BoneDim, fontSize = 15.sp, fontFamily = MwBody)
     }
 }
 
@@ -354,8 +552,9 @@ private fun BottomTabBar(
 ) {
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(FloatBg)
+            .clip(RoundedCornerShape(3.dp))
+            .background(FloatStone)
+            .border(2.dp, Bronze, RoundedCornerShape(3.dp))
             .padding(6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -364,16 +563,22 @@ private fun BottomTabBar(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (isSel) Accent else Color.Transparent)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(if (isSel) Bronze else Color.Transparent)
+                    .border(
+                        1.dp,
+                        if (isSel) BronzeLight else BronzeDark,
+                        RoundedCornerShape(2.dp)
+                    )
                     .clickable { onSelect(t) }
-                    .padding(vertical = 14.dp),
+                    .padding(vertical = 13.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     t.label,
-                    color = if (isSel) Color(0xFF0B0B0D) else TextBright,
+                    color = if (isSel) StoneDark else Bone,
                     fontSize = 14.sp,
+                    fontFamily = MwDisplay,
                     fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
                     textAlign = TextAlign.Center
                 )
@@ -385,7 +590,7 @@ private fun BottomTabBar(
 /* ---- Helpers ---- */
 
 /** Stopgap readability: "pick_journeyman_01" -> "Pick Journeyman 01".
- *  Real display names will come from a future Lua export or a lookup table. */
+ *  Real display names will come from a future export or lookup table. */
 private fun prettify(id: String): String =
     id.replace('_', ' ')
         .split(' ')
