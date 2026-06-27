@@ -23,6 +23,7 @@ data class GameState(
     val spells: List<String> = emptyList(),
     val inventory: List<InventoryItem> = emptyList(),
     val equipment: Map<String, String> = emptyMap(),
+    val selectedSpell: String? = null,
     /** Wall-clock time we last parsed a STATS line; 0 = no data yet. */
     val lastUpdateMs: Long = 0L
 ) {

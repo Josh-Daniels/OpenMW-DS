@@ -14,6 +14,7 @@ object LogParser {
 
     private const val P_STATS = "COMPANION_STATS:"
     private const val P_SPELLS = "COMPANION_SPELLS:"
+    private const val P_SELECTED_SPELL = "COMPANION_SELECTED_SPELL:"
     private const val P_INVENTORY = "COMPANION_INVENTORY:"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
 
@@ -23,6 +24,8 @@ object LogParser {
             when {
                 line.contains(P_STATS) ->
                     parseStats(after(line, P_STATS), current)
+                line.contains(P_SELECTED_SPELL) ->
+                    current.copy(selectedSpell = parseSelectedSpell(after(line, P_SELECTED_SPELL)))
                 line.contains(P_SPELLS) ->
                     current.copy(spells = parseStringArray(after(line, P_SPELLS)))
                 line.contains(P_INVENTORY) ->
@@ -80,5 +83,11 @@ object LogParser {
         val map = LinkedHashMap<String, String>()
         o.keys().forEach { k -> map[k] = o.getString(k) }
         return map
+    }
+
+    private fun parseSelectedSpell(payload: String): String? {
+        if (payload == "null") return null
+        // payload is a JSON string literal like "fireball"; wrap to reuse JSON unescaping
+        return JSONArray("[$payload]").getString(0)
     }
 }

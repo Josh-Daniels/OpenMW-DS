@@ -45,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 
 // Map
 import android.webkit.WebView
@@ -353,13 +354,18 @@ private fun InventoryPanel(state: GameState) {
             if (state.inventory.isEmpty()) {
                 EmptyPanel("No inventory recorded")
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(64.dp),
+                val ordered = remember(state.inventory, state.equipment) {
+                    val worn = state.equipment.values.toSet()
+                    val (equipped, rest) = state.inventory.partition { worn.contains(it.id) }
+                    equipped + rest
+                }
+                LazyHorizontalGrid(
+                    rows = GridCells.Adaptive(64.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    gridItems(state.inventory) { item ->
+                    gridItems(ordered) { item ->
                         val worn = state.equipment.values.contains(item.id)
                         ItemCell(
                             label = prettify(item.id),
@@ -479,14 +485,26 @@ private fun MagicPanel(state: GameState) {
         if (state.spells.isEmpty()) {
             EmptyPanel("No spells known")
         } else {
+            // Pin the selected spell to the top; keep the rest in their existing order.
+            val ordered = remember(state.spells, state.selectedSpell) {
+                val sel = state.selectedSpell
+                if (sel != null && state.spells.contains(sel))
+                    listOf(sel) + state.spells.filter { it != sel }
+                else state.spells
+            }
             Column(Modifier.fillMaxSize().mwPanel().padding(8.dp)) {
                 Text("Spells", color = BronzeLight, fontSize = 14.sp,
                     fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
                 Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
                 LazyColumn(Modifier.fillMaxSize()) {
-                    items(state.spells) { spell ->
-                        SpellRow(prettify(spell)) { CompanionActions.selectSpell(spell) }
+                    items(ordered) { spell ->
+                        SpellRow(
+                            title = prettify(spell),
+                            selected = spell == state.selectedSpell
+                        ) {
+                            CompanionActions.selectSpell(spell)
+                        }
                     }
                 }
             }
@@ -495,16 +513,19 @@ private fun MagicPanel(state: GameState) {
 }
 
 @Composable
-private fun SpellRow(title: String, onTap: () -> Unit) {
+private fun SpellRow(title: String, selected: Boolean = false, onTap: () -> Unit) {
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(if (selected) SlotWorn else Color.Transparent)
                 .clickable { onTap() }
                 .padding(horizontal = 8.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(title, color = Bone, fontSize = 15.sp, fontFamily = MwBody,
+            Text(title, color = if (selected) BronzeLight else Bone,
+                fontSize = 15.sp, fontFamily = MwBody,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
