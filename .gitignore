@@ -5,7 +5,10 @@ jniLibs
 local.properties
 *.iml
 obj
-assets
+/app/src/main/assets/*
+!/app/src/main/assets/companion/
+.cxx-docker/
+app/.cxx-docker/
 .gdb_history
 app/wrap
 fabric.properties

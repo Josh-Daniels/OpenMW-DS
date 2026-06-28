@@ -93,6 +93,11 @@ android {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
+            // Keep the macOS (Android Studio) and Linux (Docker) native caches
+            // apart so an IDE sync can never poison the container build.
+            if (System.getenv("ALPHA3_DOCKER") != null) {
+                buildStagingDirectory = file(".cxx-docker")
+            }
         }
     }
 

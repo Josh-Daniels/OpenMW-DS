@@ -1,5 +1,5 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <string name="app_name">Morrowind-DS</string>
+    <string name="app_name">OpenMW-DS</string>
     <string name="searching_for_morrowind_esm" tools:ignore="TypographyEllipsis">Searching for Morrowind.esm...</string>
     <string name="config_file_missing">Config File Missing</string>
     <string name="openmw_config_file_not_found_msg">OpenMW config file not found.\nPlease select your game files manually.</string>
@@ -21,7 +21,7 @@
     <string name="game_files">"Game Files: "</string>
     <string name="please_select_a_folder_with_morrowind_ini_and_data_files">Please select a folder with Morrowind.ini and Data Files.</string>
     <string name="selected_folder">"Selected Folder: "</string>
-    <string name="launcher_topbar_title">Morrowind-DS</string>
+    <string name="launcher_topbar_title">OpenMW-DS</string>
     <string name="home">Home</string>
     <string name="setting">Settings</string>
     <string name="start_game">Start Game</string>
@@ -95,7 +95,7 @@
     <string name="select_directories_to_export">Select Directories to Export</string>
     <string name="selected_directories_zipped_and_exported_tip">Selected directories zipped and exported to Download/OpenMW/Exports</string>
     <string name="export">Export</string>
-    <string name="welcome_to_alpha_3_launcher">Welcome to Morrowind-DS!</string>
+    <string name="welcome_to_alpha_3_launcher">Welcome to OpenMW-DS!</string>
     <string name="getting_started">Getting Started.</string>
     <string name="close_and_don_t_show_again">Close and don\'t show again</string>
     <string name="configure_controls_tutorial">Configure Controls Tutorial</string>
