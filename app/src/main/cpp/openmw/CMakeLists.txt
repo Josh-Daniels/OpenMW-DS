@@ -97,7 +97,11 @@ if(NOT DEFINED ANDROID_API)
 endif()
 
 if(NOT DEFINED LUAJIT_HOST_CC)
-    set(LUAJIT_HOST_CC "gcc")
+    if(APPLE)
+        set(LUAJIT_HOST_CC "cc")
+    else()
+        set(LUAJIT_HOST_CC "gcc")
+    endif()
 endif()
 
 # Find the host tag for NDK prebuilt tools
@@ -124,10 +128,14 @@ endif()
 
 set(GLOBAL_CFLAGS "-w -fPIC -O3 -flto=thin")
 set(GLOBAL_CXXFLAGS "-w -fPIC -O3 -frtti -fexceptions -flto=thin")
-set(GLOBAL_LDFLAGS "-w -fPIC -Wl,--undefined-version -flto=thin -fuse-ld=lld -L${CMAKE_BINARY_DIR}/prefix/lib")
+if(APPLE)
+    set(GLOBAL_LDFLAGS "-w -fPIC -flto=thin -fuse-ld=lld -L${CMAKE_BINARY_DIR}/prefix/lib")
+else()
+    set(GLOBAL_LDFLAGS "-w -fPIC -Wl,--undefined-version -flto=thin -fuse-ld=lld -L${CMAKE_BINARY_DIR}/prefix/lib")
+endif()
 
 set(ndk_triplet ${NDK_TRIPLET})
-set(download_dir ${CMAKE_BINARY_DIR}/downloads/)
+set(download_dir $ENV{HOME}/.cache/openmw-android-downloads/)
 set(prefix ${CMAKE_BINARY_DIR}/prefix/)
 set(host ${ndk_triplet})
 set(android_platform android-${ANDROID_API})
@@ -470,16 +478,18 @@ ExternalProject_Add(lz4
 )
 
 set(LUAJIT_MAKE_FLAGS
-	HOST_CC=${LUAJIT_HOST_CC}
-	CFLAGS=
-	TARGET_CFLAGS=${GLOBAL_CFLAGS}
-	CROSS=llvm-
-	STATIC_CC=${host}${ANDROID_API}-clang
-	DYNAMIC_CC=${host}${ANDROID_API}-clang\ -fPIC
-	TARGET_LD=${host}${ANDROID_API}-clang
-	PREFIX=${prefix}
-	BUILDMODE=static
-	XCFLAGS=-DLUAJIT_ENABLE_SANDBOX_BYPASS
+    	HOST_CC=${LUAJIT_HOST_CC}
+    	CFLAGS=
+    	TARGET_CFLAGS=${GLOBAL_CFLAGS}
+    	CROSS=llvm-
+    	STATIC_CC=${host}${ANDROID_API}-clang
+    	DYNAMIC_CC=${host}${ANDROID_API}-clang\ -fPIC
+    	TARGET_LD=${host}${ANDROID_API}-clang
+    	TARGET_SYS=Linux
+    	PREFIX=${prefix}
+    	BUILDMODE=static
+    	XCFLAGS=-DLUAJIT_ENABLE_SANDBOX_BYPASS
+    	LDFLAGS=
 )
 
 ExternalProject_Add(luajit
