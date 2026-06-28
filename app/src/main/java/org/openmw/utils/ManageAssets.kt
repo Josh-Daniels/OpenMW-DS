@@ -127,6 +127,13 @@ class UserManageAssets(val context: Context) {
                 assetCopier.copy("libopenmw/ui", uiDir)
             }
         }
+
+        // Bundled second-screen companion mod -> OpenMW/Mods/companion
+        assetCopier.copy(
+            "companion",
+            "${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion"
+        )
+
         copyIfNotExists("libopenmw/openmw/settings.fallback.cfg", Constants.SETTINGS_FILE)
         UserManageAssets(context).installUQMResourceFiles()
         org.openmw.fragments.onFirstLaunch(context)
