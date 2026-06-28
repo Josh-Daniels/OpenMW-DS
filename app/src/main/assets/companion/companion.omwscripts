@@ -1,0 +1,2 @@
+PLAYER: scripts/companion/companion.lua
+GLOBAL: scripts/companion/companion_global.lua
