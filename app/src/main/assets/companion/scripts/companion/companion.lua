@@ -70,11 +70,47 @@ local function exportSelectedSpell()
     end
 end
 
+local function itemCategory(item)
+    if types.Weapon.objectIsInstance(item) then
+        local wt = types.Weapon.record(item).type
+        local WT = types.Weapon.TYPE
+        if wt == WT.Arrow or wt == WT.Bolt then return "ammo" end
+        return "weapon"
+    elseif types.Armor.objectIsInstance(item) then
+        local t = types.Armor.record(item).type
+        local AT = types.Armor.TYPE
+        local map = {
+            [AT.Helmet]="helmet", [AT.Cuirass]="cuirass",
+            [AT.LPauldron]="left_pauldron", [AT.RPauldron]="right_pauldron",
+            [AT.Greaves]="greaves", [AT.Boots]="boots",
+            [AT.LGauntlet]="left_gauntlet", [AT.RGauntlet]="right_gauntlet",
+            [AT.Shield]="shield", [AT.LBracer]="left_gauntlet",
+            [AT.RBracer]="right_gauntlet",
+        }
+        return map[t] or "armor"
+    elseif types.Clothing.objectIsInstance(item) then
+        local t = types.Clothing.record(item).type
+        local CT = types.Clothing.TYPE
+        local map = {
+            [CT.Amulet]="amulet", [CT.Ring]="left_ring",
+            [CT.Shirt]="shirt", [CT.Pants]="pants", [CT.Skirt]="skirt",
+            [CT.Robe]="robe", [CT.Shoes]="boots",
+            [CT.LGlove]="left_gauntlet", [CT.RGlove]="right_gauntlet",
+        }
+        return map[t] or "clothing"
+    elseif types.Lockpick.objectIsInstance(item) then return "lockpick"
+        elseif types.Probe.objectIsInstance(item) then return "probe"
+            elseif types.Light.objectIsInstance(item) then return "carried_left"
+            elseif types.Book.objectIsInstance(item) then return "book"
+    else return "misc" end
+end
+
 local function exportInventory()
     local parts = {}
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
         table.insert(parts, string.format(
-            '{"id":"%s","count":%d}', jsonEscape(item.recordId), item.count))
+            '{"id":"%s","count":%d,"cat":"%s"}',
+            jsonEscape(item.recordId), item.count, itemCategory(item)))
     end
     print('COMPANION_INVENTORY:[' .. table.concat(parts, ',') .. ']')
 end
@@ -88,6 +124,8 @@ local function exportEquipment()
     end
     print('COMPANION_EQUIPMENT:{' .. table.concat(parts, ',') .. '}')
 end
+
+
 
 -- Play a generic equip/unequip sound (the data path skips the engine's
 -- normal equip sound, so we trigger one ourselves). Polish per-item later.
@@ -186,13 +224,19 @@ local function onConsoleCommand(mode, command)
 
     if action == "spell" then
         local spell = core.magic.spells.records[arg]
-        if spell then
-            types.Actor.setSelectedSpell(self, spell)
-            print("COMPANION_DEBUG: selected spell " .. arg)
-        else
-            print("COMPANION_DEBUG: spell not found: " .. arg)
-        end
-        exportSelectedSpell()
+            if spell then
+                types.Actor.setSelectedSpell(self, spell)
+                local ok, err = pcall(function()
+                    ambient.playSound("Menu Click")
+                end)
+                if not ok then
+                    print("COMPANION_DEBUG: spell sound error: " .. tostring(err))
+                end
+                print("COMPANION_DEBUG: selected spell " .. arg)
+            else
+                print("COMPANION_DEBUG: spell not found: " .. arg)
+            end
+            exportSelectedSpell()
     elseif action == "equip" then
         equipItem(arg)
 	exportEquipment()

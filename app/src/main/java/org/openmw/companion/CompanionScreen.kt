@@ -93,6 +93,19 @@ private enum class Tab(val label: String) {
     MAP("Map"), INVENTORY("Inventory"), MAGIC("Magic"), JOURNAL("Journal")
 }
 
+private val EQUIPMENT_SLOT_ORDER = listOf(
+    "weapon", "ammo", "shield",
+    "lockpick", "probe",
+    "helmet", "cuirass",
+    "left_pauldron", "right_pauldron",
+    "greaves", "boots",
+    "left_gauntlet", "right_gauntlet",
+    "amulet", "left_ring", "right_ring",
+    "shirt", "pants", "skirt", "robe",
+    "carried_left", "carried_right",
+    "book"
+)
+
 /** Stone panel with a bronze frame — the signature Morrowind window look. */
 private fun Modifier.mwPanel(): Modifier = this
     .clip(RoundedCornerShape(3.dp))
@@ -355,9 +368,28 @@ private fun InventoryPanel(state: GameState) {
                 EmptyPanel("No inventory recorded")
             } else {
                 val ordered = remember(state.inventory, state.equipment) {
-                    val worn = state.equipment.values.toSet()
-                    val (equipped, rest) = state.inventory.partition { worn.contains(it.id) }
-                    equipped + rest
+                    val wornIds = state.equipment.values.toSet()
+
+                    // Build equipped items sorted by slot order
+                    val slotToItemId = state.equipment  // Map<slotName, itemId>
+                    val equippedSorted = EQUIPMENT_SLOT_ORDER
+                        .mapNotNull { slot -> slotToItemId[slot] }
+                        .mapNotNull { itemId -> state.inventory.find { it.id == itemId } }
+                        .distinctBy { it.id }
+
+                    // Remaining unequipped items alphabetically
+                    val categoryOrder = EQUIPMENT_SLOT_ORDER + listOf("misc")
+
+                    val rest = state.inventory
+                        .filter { !wornIds.contains(it.id) }
+                        .sortedWith(
+                            compareBy(
+                                { categoryOrder.indexOf(it.category).let { i -> if (i < 0) Int.MAX_VALUE else i } },
+                                { prettify(it.id).lowercase() }
+                            )
+                        )
+
+                    equippedSorted + rest
                 }
                 LazyHorizontalGrid(
                     rows = GridCells.Adaptive(64.dp),
@@ -367,15 +399,19 @@ private fun InventoryPanel(state: GameState) {
                 ) {
                     gridItems(ordered) { item ->
                         val worn = state.equipment.values.contains(item.id)
+                        val equippable = item.category != "misc"
                         ItemCell(
                             label = prettify(item.id),
                             count = item.count,
                             worn = worn,
+                            equippable = equippable,
                             onTap = {
+                                if (!equippable) return@ItemCell
                                 if (worn) CompanionActions.unequipItem(item.id)
                                 else CompanionActions.equipItem(item.id)
                             },
                             onEquipToggle = {
+                                if (!equippable) return@ItemCell
                                 if (worn) CompanionActions.unequipItem(item.id)
                                 else CompanionActions.equipItem(item.id)
                             },
@@ -415,6 +451,7 @@ private fun ItemCell(
     label: String,
     count: Int,
     worn: Boolean,
+    equippable: Boolean,
     onTap: () -> Unit,
     onEquipToggle: () -> Unit,
     onDrop: () -> Unit
@@ -435,7 +472,6 @@ private fun ItemCell(
             .padding(4.dp),
         contentAlignment = Alignment.Center
     ) {
-        // Icon placeholder: the item name for now (replaced by real icons later)
         Text(
             label,
             color = if (worn) BronzeLight else Bone,
@@ -461,10 +497,12 @@ private fun ItemCell(
             onDismissRequest = { menuOpen = false },
             properties = PopupProperties(focusable = false)
         ) {
-            DropdownMenuItem(
-                text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody) },
-                onClick = { menuOpen = false; onEquipToggle() }
-            )
+            if (worn || equippable) {
+                DropdownMenuItem(
+                    text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody) },
+                    onClick = { menuOpen = false; onEquipToggle() }
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Drop", fontFamily = MwBody) },
                 onClick = { menuOpen = false; onDrop() }
@@ -474,34 +512,64 @@ private fun ItemCell(
 }
 
 /* ---- Magic (list of spells) ---- */
-
 @Composable
 private fun MagicPanel(state: GameState) {
-    Box(
-        Modifier
+    val sel = state.selectedSpell
+
+    Column(
+        modifier = Modifier
             .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        // ---- Active spell panel ----
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .mwPanel()
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            if (sel != null) {
+                Column {
+                    Text(
+                        "Active Spell",
+                        color = BronzeLight, fontSize = 10.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        prettify(sel),
+                        color = Bone, fontSize = 18.sp,
+                        fontFamily = MwBody, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else {
+                Text(
+                    "No spell selected",
+                    color = BoneDim, fontSize = 14.sp,
+                    fontFamily = MwBody
+                )
+            }
+        }
+
+        // ---- Spell list panel ----
         if (state.spells.isEmpty()) {
             EmptyPanel("No spells known")
         } else {
-            // Pin the selected spell to the top; keep the rest in their existing order.
-            val ordered = remember(state.spells, state.selectedSpell) {
-                val sel = state.selectedSpell
-                if (sel != null && state.spells.contains(sel))
-                    listOf(sel) + state.spells.filter { it != sel }
-                else state.spells
-            }
-            Column(Modifier.fillMaxSize().mwPanel().padding(8.dp)) {
-                Text("Spells", color = BronzeLight, fontSize = 14.sp,
+            Column(Modifier.weight(1f).mwPanel().padding(8.dp)) {
+                Text(
+                    "Spells",
+                    color = BronzeLight, fontSize = 14.sp,
                     fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 6.dp, bottom = 6.dp))
+                    modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
+                )
                 Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
                 LazyColumn(Modifier.fillMaxSize()) {
-                    items(ordered) { spell ->
+                    items(state.spells.sortedBy { it.lowercase() }) { spell ->
                         SpellRow(
                             title = prettify(spell),
-                            selected = spell == state.selectedSpell
+                            selected = spell == sel
                         ) {
                             CompanionActions.selectSpell(spell)
                         }

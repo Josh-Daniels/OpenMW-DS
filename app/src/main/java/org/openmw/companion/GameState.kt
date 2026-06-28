@@ -12,8 +12,7 @@ data class Dynamic(val current: Float, val max: Float) {
 
 data class Vec3(val x: Float, val y: Float, val z: Float)
 
-data class InventoryItem(val id: String, val count: Int)
-
+data class InventoryItem(val id: String, val count: Int, val category: String = "misc")
 data class GameState(
     val health: Dynamic = Dynamic(0f, 0f),
     val magicka: Dynamic = Dynamic(0f, 0f),

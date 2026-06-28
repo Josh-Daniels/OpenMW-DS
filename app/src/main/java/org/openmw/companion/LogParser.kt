@@ -74,7 +74,11 @@ object LogParser {
         val arr = JSONArray(json)
         return (0 until arr.length()).map {
             val o = arr.getJSONObject(it)
-            InventoryItem(o.getString("id"), o.getInt("count"))
+            InventoryItem(
+                o.getString("id"),
+                o.getInt("count"),
+                o.optString("cat", "misc")
+            )
         }
     }
 

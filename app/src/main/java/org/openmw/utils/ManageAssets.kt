@@ -129,9 +129,11 @@ class UserManageAssets(val context: Context) {
         }
 
         // Bundled second-screen companion mod -> OpenMW/Mods/companion
+        // Currently changed to replace the lua scripts on every launch. Small files.
         assetCopier.copy(
             "companion",
-            "${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion"
+            "${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion",
+            overwrite = true  // add this
         )
 
         copyIfNotExists("libopenmw/openmw/settings.fallback.cfg", Constants.SETTINGS_FILE)
