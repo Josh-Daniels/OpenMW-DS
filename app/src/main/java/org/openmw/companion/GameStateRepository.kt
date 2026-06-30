@@ -22,6 +22,9 @@ object GameStateRepository {
     // slot for the interior map (isInterior != 0).  The companion app shows
     // whichever bitmap matches the player's current cell.
     private val _exteriorMapBitmaps = MutableStateFlow<Map<Pair<Int,Int>, Bitmap>>(emptyMap())
+    // OpenMW proactively captures a 3×3 grid around the player; keep a
+    // slightly larger window here so boundary transitions are seamless.
+    private const val MAX_EXTERIOR_SEGMENTS = 25
     val exteriorMapBitmaps: StateFlow<Map<Pair<Int,Int>, Bitmap>> = _exteriorMapBitmaps.asStateFlow()
 
     private val _interiorMapBitmap = MutableStateFlow<Bitmap?>(null)
@@ -58,7 +61,11 @@ object GameStateRepository {
         if (isInterior != 0) {
             _interiorMapBitmap.value = bmp
         } else {
-            _exteriorMapBitmaps.update { it + (Pair(segX, segY) to bmp) }
+            _exteriorMapBitmaps.update { current ->
+                val updated = current + (Pair(segX, segY) to bmp)
+                if (updated.size <= MAX_EXTERIOR_SEGMENTS) updated
+                else updated.entries.drop(updated.size - MAX_EXTERIOR_SEGMENTS).associate { it.key to it.value }
+            }
         }
     }
 
