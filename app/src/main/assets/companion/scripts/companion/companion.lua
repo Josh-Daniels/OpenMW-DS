@@ -6,8 +6,10 @@ local ambient = require('openmw.ambient')
 
 local statsTimer = 0
 local slowTimer = 0
+local journalTimer = 0
 local STATS_INTERVAL = 0.1
 local SLOW_INTERVAL = 0.2
+local JOURNAL_INTERVAL = 5.0
 
 local SLOT_NAMES = {
     [1] = "cuirass", [2] = "greaves", [3] = "left_pauldron", [4] = "right_pauldron",
@@ -20,6 +22,11 @@ local SLOT_NAMES = {
 local function jsonEscape(s)
     s = string.gsub(s, '\\', '\\\\')
     s = string.gsub(s, '"', '\\"')
+    s = string.gsub(s, '\n', '\\n')
+    s = string.gsub(s, '\r', '\\r')
+    s = string.gsub(s, '\t', '\\t')
+    -- strip remaining ASCII control characters (0x00-0x1F except already handled)
+    s = string.gsub(s, '%c', '')
     return s
 end
 
@@ -153,6 +160,31 @@ local function exportEquipment()
     print('COMPANION_EQUIPMENT:{' .. table.concat(parts, ',') .. '}')
 end
 
+local journalExportedCount = -1
+local function exportJournal()
+    local ok, err = pcall(function()
+        local j = types.Player.journal(self)
+        local entries = j.journalTextEntries
+        local count = #entries
+        if count == journalExportedCount then return end
+        journalExportedCount = count
+        print('COMPANION_JOURNAL_START:' .. count)
+        for i = 1, count do
+            local e = entries[i]
+            if e then
+                print(string.format(
+                    'COMPANION_JOURNAL_ENTRY:{"q":"%s","t":"%s","d":%d,"m":%d,"dom":%d}',
+                    jsonEscape(e.questId), jsonEscape(e.text),
+                    e.day, e.month, e.dayOfMonth))
+            end
+        end
+        print('COMPANION_JOURNAL_END:' .. count)
+    end)
+    if not ok then
+        print("COMPANION_DEBUG: journal error: " .. tostring(err))
+    end
+end
+
 
 
 -- Play a generic equip/unequip sound (the data path skips the engine's
@@ -183,6 +215,8 @@ local function slotForItem(item, currentEquip)
         return 16  -- carried_right, used with attack button
     elseif types.Probe.objectIsInstance(item) then
         return 16  -- carried_right, used with attack button
+    elseif types.Light.objectIsInstance(item) then
+        return 19  -- carried_left (torches, lanterns)
     elseif types.Armor.objectIsInstance(item) then
         local t = types.Armor.record(item).type
         local AT = types.Armor.TYPE
@@ -246,6 +280,12 @@ end
 local function dispatchCommand(command)
     if string.sub(command, 1, 4) ~= "CMP:" then return end
     local payload = string.sub(command, 5)
+    -- no-arg commands first
+    if payload == "journal" then
+        journalExportedCount = -1
+        exportJournal()
+        return
+    end
     local action, arg = string.match(payload, "^(%S+)%s+(.+)$")
     if not action then return end
 
@@ -315,10 +355,16 @@ local function onUpdate(dt)
         exportInventory()
         exportEquipment()
     end
+    journalTimer = journalTimer + dt
+    if journalTimer >= JOURNAL_INTERVAL then
+        journalTimer = 0
+        exportJournal()
+    end
 end
 
 local function onActive()
     ui.setConsoleMode("Companion")
+    exportJournal()
 end
 
 return {

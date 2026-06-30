@@ -1,5 +1,6 @@
 package org.openmw.companion
 
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -12,11 +13,15 @@ import org.json.JSONObject
  */
 object LogParser {
 
+    private const val TAG = "CompanionParser"
     private const val P_STATS = "COMPANION_STATS:"
     private const val P_SPELLS = "COMPANION_SPELLS:"
     private const val P_SELECTED_SPELL = "COMPANION_SELECTED_SPELL:"
     private const val P_INVENTORY = "COMPANION_INVENTORY:"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
+    const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
+    const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
+    const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
 
     /** Returns an updated state, or null if this line isn't ours / was malformed. */
     fun parseLine(line: String, current: GameState): GameState? {
@@ -95,6 +100,20 @@ object LogParser {
         val map = LinkedHashMap<String, String>()
         o.keys().forEach { k -> map[k] = o.getString(k) }
         return map
+    }
+
+    fun parseJournalEntry(json: String): JournalEntry? = try {
+        val o = JSONObject(json)
+        JournalEntry(
+            questId = o.optString("q", ""),
+            text = o.optString("t", ""),
+            day = o.optInt("d", 0),
+            month = o.optInt("m", 0),
+            dayOfMonth = o.optInt("dom", 0)
+        )
+    } catch (e: Exception) {
+        Log.e(TAG, "Journal entry parse failed: $json", e)
+        null
     }
 
     private fun parseSelectedSpell(payload: String): String? {

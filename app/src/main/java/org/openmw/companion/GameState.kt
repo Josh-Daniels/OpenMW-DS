@@ -25,6 +25,14 @@ data class SpellEntry(
     val type: String = "spell"
 )
 
+data class JournalEntry(
+    val questId: String,
+    val text: String,
+    val day: Int,
+    val month: Int,
+    val dayOfMonth: Int
+)
+
 data class GameState(
     val health: Dynamic = Dynamic(0f, 0f),
     val magicka: Dynamic = Dynamic(0f, 0f),
@@ -35,6 +43,7 @@ data class GameState(
     val inventory: List<InventoryItem> = emptyList(),
     val equipment: Map<String, String> = emptyMap(),
     val selectedSpell: String? = null,
+    val journalEntries: List<JournalEntry> = emptyList(),
     /** Wall-clock time we last parsed a STATS line; 0 = no data yet. */
     val lastUpdateMs: Long = 0L
 ) {

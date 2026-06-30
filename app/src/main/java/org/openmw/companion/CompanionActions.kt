@@ -18,6 +18,8 @@ object CompanionActions {
 
     fun readItem(id: String) = runCommand("CMP:read $id")
 
+    fun refreshJournal() = runCommand("CMP:journal")
+
     private fun runCommand(command: String) {
         try {
             EngineActivity.sendCompanionCommand(command)

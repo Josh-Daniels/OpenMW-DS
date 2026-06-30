@@ -701,29 +701,73 @@ private fun SpellRow(title: String, selected: Boolean = false, onTap: () -> Unit
     }
 }
 
-/* ---- Journal (deferred: no readable-journal data via stable Lua yet) ---- */
+/* ---- Journal ---- */
 
 @Composable
 private fun JournalPanel() {
+    val state by GameStateRepository.state.collectAsState()
+
+    LaunchedEffect(Unit) { CompanionActions.refreshJournal() }
+
     Box(
         Modifier
             .fillMaxSize()
             .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
     ) {
-        Column(
-            Modifier.fillMaxSize().mwPanel().padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text("Journal", color = Bone, fontSize = 20.sp,
-                fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            Text("Awaiting a way to read quest entries",
-                color = BoneDim, fontSize = 13.sp, fontFamily = MwBody,
-                textAlign = TextAlign.Center)
+        if (state.journalEntries.isEmpty()) {
+            Column(
+                Modifier.fillMaxSize().mwPanel().padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text("Journal", color = Bone, fontSize = 20.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                Text("No journal entries yet",
+                    color = BoneDim, fontSize = 13.sp, fontFamily = MwBody,
+                    textAlign = TextAlign.Center)
+            }
+        } else {
+            // Group by questId; most-recently-active quest shown first.
+            val byQuest = state.journalEntries
+                .groupBy { it.questId }
+                .entries
+                .reversed()
+
+            LazyColumn(Modifier.fillMaxSize().mwPanel().padding(horizontal = 4.dp)) {
+                byQuest.forEach { (questId, entries) ->
+                    item(key = "header_$questId") {
+                        Text(
+                            prettifyQuestId(questId),
+                            color = BronzeLight,
+                            fontSize = 13.sp,
+                            fontFamily = MwDisplay,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(start = 10.dp, top = 14.dp, bottom = 3.dp, end = 10.dp)
+                        )
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+                    }
+                    items(entries, key = { it.questId + it.day + it.month + it.dayOfMonth + it.text.length }) { entry ->
+                        Text(
+                            entry.text,
+                            color = Bone,
+                            fontSize = 12.sp,
+                            fontFamily = MwBody,
+                            lineHeight = 17.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+                item { Spacer(Modifier.height(8.dp)) }
+            }
         }
     }
 }
+
+private fun prettifyQuestId(id: String): String =
+    id.split(Regex("[\\s_]+"))
+        .filter { it.isNotEmpty() }
+        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercaseChar() } }
 
 @Composable
 private fun EmptyPanel(message: String) {

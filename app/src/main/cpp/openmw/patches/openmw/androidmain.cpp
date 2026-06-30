@@ -89,8 +89,10 @@ Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*
         JNIEnv* e = nullptr;
         g_companionVm->AttachCurrentThread(&e, nullptr);
         jstring s = e->NewStringUTF(std::string(msg).c_str());
-        e->CallStaticVoidMethod(g_companionClass, g_companionMethod, s);
-        e->DeleteLocalRef(s);
+        if (s) {
+            e->CallStaticVoidMethod(g_companionClass, g_companionMethod, s);
+            e->DeleteLocalRef(s);
+        }
     });
 }
 
