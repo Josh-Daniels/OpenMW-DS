@@ -17,11 +17,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,14 +45,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 
-// Map
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.compose.runtime.DisposableEffect
+// Splash image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
+import org.openmw.R
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.ui.viewinterop.AndroidView
-import kotlin.math.abs
+import kotlin.time.Duration.Companion.milliseconds
+
 
 /**
  * SECOND-SCREEN UI — Morrowind-styled.
@@ -92,6 +91,12 @@ private const val BOTTOM_BAR_SPACE = 84
 private enum class Tab(val label: String) {
     MAP("Map"), INVENTORY("Inventory"), MAGIC("Magic"), JOURNAL("Journal")
 }
+
+private fun InventoryItem.displayName(): String =
+    if (name.isNotBlank()) name else prettify(id)
+
+private fun SpellEntry.displayName(): String =
+    if (name.isNotBlank()) name else prettify(id)
 
 private val EQUIPMENT_SLOT_ORDER = listOf(
     "weapon", "ammo", "shield",
@@ -145,7 +150,46 @@ fun CompanionScreen() {
                 .fillMaxWidth()
                 .padding(12.dp)
         )
+
+        var splashVisible by remember { mutableStateOf(true) }
+
+        var now by remember { mutableStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1000L.milliseconds)
+                now = System.currentTimeMillis()
+            }
+        }
+
+// "Live" = we've had a stats update recently. Don't require a non-empty cell here —
+// the cell legitimately blanks during exterior transitions, and that must not
+// count as "left the game". Use a generous window to ride out cell-load stalls.
+        val live = state.lastUpdateMs > 0L && (now - state.lastUpdateMs) < 8000L
+
+        LaunchedEffect(live) {
+            if (live) {
+                delay(1500L.milliseconds)
+                splashVisible = false
+            } else {
+                splashVisible = true
+            }
+        }
+
+        if (splashVisible) {
+            SplashPanel()
+        }
     }
+}
+
+/* ---- Splash panel for when not in game ---- */
+@Composable
+private fun SplashPanel() {
+    Image(
+        painter = painterResource(id = R.drawable.morrowind_splash),
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier.fillMaxSize()
+    )
 }
 
 /* ---- Top stat bar (floats over all tabs) ---- */
@@ -385,7 +429,7 @@ private fun InventoryPanel(state: GameState) {
                         .sortedWith(
                             compareBy(
                                 { categoryOrder.indexOf(it.category).let { i -> if (i < 0) Int.MAX_VALUE else i } },
-                                { prettify(it.id).lowercase() }
+                                { it.displayName().lowercase() }
                             )
                         )
 
@@ -399,22 +443,27 @@ private fun InventoryPanel(state: GameState) {
                 ) {
                     gridItems(ordered) { item ->
                         val worn = state.equipment.values.contains(item.id)
-                        val equippable = item.category != "misc"
+                        val readable = item.category == "book" || item.category == "scroll"
+                        val equippable = item.category != "misc" && !readable
                         ItemCell(
-                            label = prettify(item.id),
+                            label = item.displayName(),
                             count = item.count,
                             worn = worn,
                             equippable = equippable,
+                            readable = readable,
                             onTap = {
-                                if (!equippable) return@ItemCell
-                                if (worn) CompanionActions.unequipItem(item.id)
-                                else CompanionActions.equipItem(item.id)
+                                when {
+                                    readable -> CompanionActions.readItem(item.id)
+                                    equippable && worn -> CompanionActions.unequipItem(item.id)
+                                    equippable -> CompanionActions.equipItem(item.id)
+                                }
                             },
                             onEquipToggle = {
                                 if (!equippable) return@ItemCell
                                 if (worn) CompanionActions.unequipItem(item.id)
                                 else CompanionActions.equipItem(item.id)
                             },
+                            onRead = { CompanionActions.readItem(item.id) },
                             onDrop = { CompanionActions.dropItem(item.id, item.count) }
                         )
                     }
@@ -452,8 +501,10 @@ private fun ItemCell(
     count: Int,
     worn: Boolean,
     equippable: Boolean,
+    readable: Boolean,
     onTap: () -> Unit,
     onEquipToggle: () -> Unit,
+    onRead: () -> Unit,
     onDrop: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -503,6 +554,12 @@ private fun ItemCell(
                     onClick = { menuOpen = false; onEquipToggle() }
                 )
             }
+            if (readable) {
+                DropdownMenuItem(
+                    text = { Text("Read", fontFamily = MwBody) },
+                    onClick = { menuOpen = false; onRead() }
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Drop", fontFamily = MwBody) },
                 onClick = { menuOpen = false; onDrop() }
@@ -512,6 +569,20 @@ private fun ItemCell(
 }
 
 /* ---- Magic (list of spells) ---- */
+
+@Composable
+private fun SpellSectionHeader(title: String) {
+    Column {
+        Text(
+            title,
+            color = BronzeLight, fontSize = 13.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 6.dp, top = 8.dp, bottom = 4.dp)
+        )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+    }
+}
+
 @Composable
 private fun MagicPanel(state: GameState) {
     val sel = state.selectedSpell
@@ -530,6 +601,8 @@ private fun MagicPanel(state: GameState) {
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
             if (sel != null) {
+                val selName = state.spells.find { it.id == sel }?.displayName() ?: prettify(sel)
+
                 Column {
                     Text(
                         "Active Spell",
@@ -538,7 +611,7 @@ private fun MagicPanel(state: GameState) {
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        prettify(sel),
+                        selName,
                         color = Bone, fontSize = 18.sp,
                         fontFamily = MwBody, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis
@@ -557,21 +630,49 @@ private fun MagicPanel(state: GameState) {
         if (state.spells.isEmpty()) {
             EmptyPanel("No spells known")
         } else {
+            val powers = remember(state.spells) {
+                state.spells.filter { it.type == "power" }.sortedBy { it.id.lowercase() }
+            }
+            val spells = remember(state.spells) {
+                state.spells.filter { it.type == "spell" }.sortedBy { it.id.lowercase() }
+            }
+            val scrolls = remember(state.spells) {
+                state.spells.filter { it.type == "scroll" }.sortedBy { it.id.lowercase() }
+            }
+
             Column(Modifier.weight(1f).mwPanel().padding(8.dp)) {
-                Text(
-                    "Spells",
-                    color = BronzeLight, fontSize = 14.sp,
-                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
-                )
-                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
                 LazyColumn(Modifier.fillMaxSize()) {
-                    items(state.spells.sortedBy { it.lowercase() }) { spell ->
-                        SpellRow(
-                            title = prettify(spell),
-                            selected = spell == sel
-                        ) {
-                            CompanionActions.selectSpell(spell)
+                    if (powers.isNotEmpty()) {
+                        item {
+                            SpellSectionHeader("Powers")
+                        }
+                        items(powers) { spell ->
+                            SpellRow(
+                                title = spell.displayName(),
+                                selected = spell.id == sel
+                            ) { CompanionActions.selectSpell(spell.id) }
+                        }
+                    }
+                    if (spells.isNotEmpty()) {
+                        item {
+                            SpellSectionHeader("Spells")
+                        }
+                        items(spells) { spell ->
+                            SpellRow(
+                                title = spell.displayName(),
+                                selected = spell.id == sel
+                            ) { CompanionActions.selectSpell(spell.id) }
+                        }
+                    }
+                    if (scrolls.isNotEmpty()) {
+                        item {
+                            SpellSectionHeader("Scrolls")
+                        }
+                        items(scrolls) { spell ->
+                            SpellRow(
+                                title = spell.displayName(),
+                                selected = false
+                            ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
                 }
@@ -647,7 +748,7 @@ private fun BottomTabBar(
             .padding(6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Tab.values().forEach { t ->
+        Tab.entries.forEach { t ->
             val isSel = t == selected
             Box(
                 modifier = Modifier

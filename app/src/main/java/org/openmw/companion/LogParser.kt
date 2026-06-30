@@ -27,7 +27,7 @@ object LogParser {
                 line.contains(P_SELECTED_SPELL) ->
                     current.copy(selectedSpell = parseSelectedSpell(after(line, P_SELECTED_SPELL)))
                 line.contains(P_SPELLS) ->
-                    current.copy(spells = parseStringArray(after(line, P_SPELLS)))
+                    current.copy(spells = parseSpells(after(line, P_SPELLS)))
                 line.contains(P_INVENTORY) ->
                     current.copy(inventory = parseInventory(after(line, P_INVENTORY)))
                 line.contains(P_EQUIPMENT) ->
@@ -36,6 +36,18 @@ object LogParser {
             }
         } catch (e: Exception) {
             null
+        }
+    }
+
+    private fun parseSpells(json: String): List<SpellEntry> {
+        val arr = JSONArray(json)
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            SpellEntry(
+                id = o.getString("id"),
+                name = o.optString("name", ""),
+                type = o.optString("type", "spell")
+            )
         }
     }
 
@@ -65,19 +77,15 @@ object LogParser {
         )
     }
 
-    private fun parseStringArray(json: String): List<String> {
-        val arr = JSONArray(json)
-        return (0 until arr.length()).map { arr.getString(it) }
-    }
-
     private fun parseInventory(json: String): List<InventoryItem> {
         val arr = JSONArray(json)
         return (0 until arr.length()).map {
             val o = arr.getJSONObject(it)
             InventoryItem(
-                o.getString("id"),
-                o.getInt("count"),
-                o.optString("cat", "misc")
+                id = o.optString("id", ""),
+                name = o.optString("name", ""),
+                count = o.optInt("count", 1),
+                category = o.optString("cat", "misc")
             )
         }
     }

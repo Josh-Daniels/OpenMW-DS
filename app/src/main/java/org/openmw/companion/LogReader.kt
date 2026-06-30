@@ -8,6 +8,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.RandomAccessFile
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Tails openmw.log. Polls the file size; when it grows, reads only the new
@@ -25,12 +26,17 @@ class LogReader(private val path: String) {
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return
         job = scope.launch(Dispatchers.IO) {
-            var lastPos = 0L
+            var lastPos = -1L   // -1 = not yet initialised
             while (isActive) {
                 try {
                     val file = File(path)
                     if (file.exists()) {
                         val len = file.length()
+
+                        // First sighting: skip everything already in the log,
+                        // so we don't replay previous sessions.
+                        if (lastPos < 0L) lastPos = len
+
                         if (len < lastPos) lastPos = 0L           // truncated -> restart
                         if (len > lastPos) {
                             RandomAccessFile(file, "r").use { raf ->
@@ -49,7 +55,6 @@ class LogReader(private val path: String) {
                                             }
                                         }
                                     }
-                                    // advance by BYTE length actually consumed (UTF-8 safe)
                                     val consumed = text.substring(0, lastNl + 1)
                                         .toByteArray(Charsets.UTF_8).size
                                     lastPos += consumed
@@ -58,9 +63,9 @@ class LogReader(private val path: String) {
                         }
                     }
                 } catch (e: Exception) {
-                    // transient IO error (file mid-write etc.) — just retry next tick
+                    // transient IO error — retry next tick
                 }
-                delay(POLL_MS)
+                delay(POLL_MS.milliseconds)
             }
         }
     }

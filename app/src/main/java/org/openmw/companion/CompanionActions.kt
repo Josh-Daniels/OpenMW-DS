@@ -28,5 +28,9 @@ object CompanionActions {
         }
     }
 
+    fun readItem(id: String) {
+        automateCommands("CMP:read $id")
+    }
+
     private const val TAG = "CompanionActions"
 }

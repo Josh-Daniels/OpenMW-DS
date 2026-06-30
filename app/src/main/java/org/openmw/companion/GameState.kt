@@ -12,14 +12,26 @@ data class Dynamic(val current: Float, val max: Float) {
 
 data class Vec3(val x: Float, val y: Float, val z: Float)
 
-data class InventoryItem(val id: String, val count: Int, val category: String = "misc")
+data class InventoryItem(
+    val id: String,
+    val name: String = "",
+    val count: Int = 1,
+    val category: String = "misc"
+)
+
+data class SpellEntry(
+    val id: String,
+    val name: String = "",
+    val type: String = "spell"
+)
+
 data class GameState(
     val health: Dynamic = Dynamic(0f, 0f),
     val magicka: Dynamic = Dynamic(0f, 0f),
     val fatigue: Dynamic = Dynamic(0f, 0f),
     val cell: String = "—",
     val pos: Vec3 = Vec3(0f, 0f, 0f),
-    val spells: List<String> = emptyList(),
+    val spells: List<SpellEntry> = emptyList(),
     val inventory: List<InventoryItem> = emptyList(),
     val equipment: Map<String, String> = emptyMap(),
     val selectedSpell: String? = null,

@@ -30,44 +30,68 @@ local function isCastable(spellId)
     return rec.type == ST.Spell or rec.type == ST.Power
 end
 
-local function exportSpells()
-    local parts = {}
-    for _, spell in ipairs(types.Actor.spells(self)) do
-        if isCastable(spell.id) then
-            table.insert(parts, '"' .. jsonEscape(spell.id) .. '"')
-        end
-    end
-    print('COMPANION_SPELLS:[' .. table.concat(parts, ',') .. ']')
+local function itemName(item)
+    local ok, rec = pcall(function() return item.type.record(item) end)
+    local nm = (ok and rec and rec.name) or nil
+    if nm and nm ~= "" then return nm end
+    return item.recordId
 end
 
 -- ===== Exporters (outbound, unchanged) =====
-
 local function exportStats()
     local health = types.Actor.stats.dynamic.health(self)
     local magicka = types.Actor.stats.dynamic.magicka(self)
     local fatigue = types.Actor.stats.dynamic.fatigue(self)
+    local cell = self.cell and self.cell.name or ""
     local pos = self.position
-    local cell = self.cell.name
-    if cell == "" then cell = "Wilderness" end
     print(string.format(
-        'COMPANION_STATS:{"health":{"current":%.1f,"max":%.1f},'
-        .. '"magicka":{"current":%.1f,"max":%.1f},'
-        .. '"fatigue":{"current":%.1f,"max":%.1f},'
-        .. '"cell":"%s","pos":{"x":%.1f,"y":%.1f,"z":%.1f}}',
+        'COMPANION_STATS:{"health":{"current":%.1f,"max":%.1f},"magicka":{"current":%.1f,"max":%.1f},"fatigue":{"current":%.1f,"max":%.1f},"cell":"%s","pos":{"x":%.1f,"y":%.1f,"z":%.1f}}',
         health.current, health.base,
         magicka.current, magicka.base,
         fatigue.current, fatigue.base,
-        jsonEscape(cell), pos.x, pos.y, pos.z
+        jsonEscape(cell),
+        pos.x, pos.y, pos.z
     ))
+end
+
+local function exportSpells()
+    local parts = {}
+
+    for _, spell in ipairs(types.Actor.spells(self)) do
+        if isCastable(spell.id) then
+            local rec = core.magic.spells.records[spell.id]
+            local typeStr = (rec and rec.type == core.magic.SPELL_TYPE.Power) and "power" or "spell"
+            local nm = (rec and rec.name and rec.name ~= "") and rec.name or spell.id
+            table.insert(parts, string.format(
+                '{"id":"%s","name":"%s","type":"%s"}',
+                jsonEscape(spell.id), jsonEscape(nm), typeStr))
+        end
+    end
+
+    for _, item in ipairs(types.Actor.inventory(self):getAll(types.Book)) do
+        local rec = types.Book.record(item)
+        if rec.isScroll and rec.enchant and rec.enchant ~= "" then
+            table.insert(parts, string.format(
+                '{"id":"%s","name":"%s","type":"scroll"}',
+                jsonEscape(item.recordId), jsonEscape(itemName(item))))
+        end
+    end
+
+    print('COMPANION_SPELLS:[' .. table.concat(parts, ',') .. ']')
 end
 
 local function exportSelectedSpell()
     local spell = types.Actor.getSelectedSpell(self)
     if spell then
         print('COMPANION_SELECTED_SPELL:"' .. jsonEscape(spell.id) .. '"')
-    else
-        print('COMPANION_SELECTED_SPELL:null')
+        return
     end
+    local item = types.Actor.getSelectedEnchantedItem(self)
+    if item then
+        print('COMPANION_SELECTED_SPELL:"' .. jsonEscape(item.recordId) .. '"')
+        return
+    end
+    print('COMPANION_SELECTED_SPELL:null')
 end
 
 local function itemCategory(item)
@@ -101,7 +125,10 @@ local function itemCategory(item)
     elseif types.Lockpick.objectIsInstance(item) then return "lockpick"
         elseif types.Probe.objectIsInstance(item) then return "probe"
             elseif types.Light.objectIsInstance(item) then return "carried_left"
-            elseif types.Book.objectIsInstance(item) then return "book"
+            elseif types.Book.objectIsInstance(item) then
+                local rec = types.Book.record(item)
+                if rec.isScroll then return "scroll" end
+                return "book"
     else return "misc" end
 end
 
@@ -109,8 +136,9 @@ local function exportInventory()
     local parts = {}
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
         table.insert(parts, string.format(
-            '{"id":"%s","count":%d,"cat":"%s"}',
-            jsonEscape(item.recordId), item.count, itemCategory(item)))
+            '{"id":"%s","name":"%s","count":%d,"cat":"%s"}',
+            jsonEscape(item.recordId), jsonEscape(itemName(item)),
+            item.count, itemCategory(item)))
     end
     print('COMPANION_INVENTORY:[' .. table.concat(parts, ',') .. ']')
 end
@@ -223,18 +251,23 @@ local function onConsoleCommand(mode, command)
     if not action then return end
 
     if action == "spell" then
-        local spell = core.magic.spells.records[arg]
+            -- Try as a real spell record first
+            local spell = core.magic.spells.records[arg]
             if spell then
                 types.Actor.setSelectedSpell(self, spell)
-                local ok, err = pcall(function()
-                    ambient.playSound("Menu Click")
-                end)
-                if not ok then
-                    print("COMPANION_DEBUG: spell sound error: " .. tostring(err))
-                end
+                ambient.playSound("Menu Click")
                 print("COMPANION_DEBUG: selected spell " .. arg)
             else
-                print("COMPANION_DEBUG: spell not found: " .. arg)
+                -- Try as a scroll item in inventory
+                local item = types.Actor.inventory(self):find(arg)
+                if item and types.Book.objectIsInstance(item)
+                        and types.Book.record(item).isScroll then
+                    types.Actor.setSelectedEnchantedItem(self, item)
+                    ambient.playSound("Menu Click")
+                    print("COMPANION_DEBUG: selected scroll " .. arg)
+                else
+                    print("COMPANION_DEBUG: spell/scroll not found: " .. arg)
+                end
             end
             exportSelectedSpell()
     elseif action == "equip" then
@@ -253,6 +286,14 @@ local function onConsoleCommand(mode, command)
             print("COMPANION_DEBUG: drop " .. id .. " x" .. countStr)
 	exportInventory()
         end
+    elseif action == "read" then
+            local item = types.Actor.inventory(self):find(arg)
+            if item and types.Book.objectIsInstance(item) then
+                self:sendEvent('AddUiMode', { mode = 'Book', target = item })
+                print("COMPANION_DEBUG: reading " .. arg)
+            else
+                print("COMPANION_DEBUG: read - book not found: " .. arg)
+            end
     end
 end
 
