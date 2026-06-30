@@ -703,9 +703,22 @@ private fun SpellRow(title: String, selected: Boolean = false, onTap: () -> Unit
 
 /* ---- Journal ---- */
 
+private sealed class JournalNav {
+    object Journal : JournalNav()
+    object QuestList : JournalNav()
+    data class QuestDetail(val questId: String) : JournalNav()
+}
+
+private fun morrowindMonthName(month: Int): String = listOf(
+    "Morning Star", "Sun's Dawn", "First Seed", "Rain's Hand",
+    "Second Seed", "Midyear", "Sun's Height", "Last Seed",
+    "Hearthfire", "Frostfall", "Sun's Dusk", "Evening Star"
+).getOrElse(month - 1) { "Month $month" }
+
 @Composable
 private fun JournalPanel() {
     val state by GameStateRepository.state.collectAsState()
+    var nav by remember { mutableStateOf<JournalNav>(JournalNav.Journal) }
 
     LaunchedEffect(Unit) { CompanionActions.refreshJournal() }
 
@@ -728,38 +741,129 @@ private fun JournalPanel() {
                     textAlign = TextAlign.Center)
             }
         } else {
-            // Group by questId; most-recently-active quest shown first.
-            val byQuest = state.journalEntries
-                .groupBy { it.questId }
-                .entries
-                .reversed()
-
-            LazyColumn(Modifier.fillMaxSize().mwPanel().padding(horizontal = 4.dp)) {
-                byQuest.forEach { (questId, entries) ->
-                    item(key = "header_$questId") {
-                        Text(
-                            prettifyQuestId(questId),
-                            color = BronzeLight,
-                            fontSize = 13.sp,
-                            fontFamily = MwDisplay,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(start = 10.dp, top = 14.dp, bottom = 3.dp, end = 10.dp)
-                        )
-                        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
-                    }
-                    items(entries, key = { it.questId + it.day + it.month + it.dayOfMonth + it.text.length }) { entry ->
-                        Text(
-                            entry.text,
-                            color = Bone,
-                            fontSize = 12.sp,
-                            fontFamily = MwBody,
-                            lineHeight = 17.sp,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                        )
-                    }
-                }
-                item { Spacer(Modifier.height(8.dp)) }
+            when (val n = nav) {
+                is JournalNav.Journal ->
+                    JournalChronological(state.journalEntries) { nav = JournalNav.QuestList }
+                is JournalNav.QuestList ->
+                    JournalQuestList(
+                        entries = state.journalEntries,
+                        onBack = { nav = JournalNav.Journal },
+                        onQuest = { nav = JournalNav.QuestDetail(it) }
+                    )
+                is JournalNav.QuestDetail ->
+                    JournalQuestDetail(
+                        questId = n.questId,
+                        entries = state.journalEntries.filter { it.questId == n.questId },
+                        onBack = { nav = JournalNav.QuestList }
+                    )
             }
+        }
+    }
+}
+
+@Composable
+private fun JournalNavBar(left: String?, onLeft: (() -> Unit)?, center: String, right: String?, onRight: (() -> Unit)?) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (left != null && onLeft != null)
+            Text("◀ $left", color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
+                modifier = Modifier.clickable { onLeft() }.padding(4.dp))
+        else
+            Spacer(Modifier.size(1.dp))
+        Text(center, color = Bone, fontSize = 15.sp, fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
+        if (right != null && onRight != null)
+            Text("$right ▶", color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
+                modifier = Modifier.clickable { onRight() }.padding(4.dp))
+        else
+            Spacer(Modifier.size(1.dp))
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+}
+
+@Composable
+private fun JournalChronological(entries: List<JournalEntry>, onQuestsClick: () -> Unit) {
+    // Precompute list with date-break headers inserted whenever the date changes.
+    // Each item is either (dateString, null) for a header or (null, entry) for text.
+    val listItems = remember(entries) {
+        buildList<Pair<String?, JournalEntry?>> {
+            var lastDate = ""
+            entries.forEach { e ->
+                val date = "${e.dayOfMonth} ${morrowindMonthName(e.month)}"
+                if (date != lastDate) { add(date to null); lastDate = date }
+                add(null to e)
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().mwPanel()) {
+        JournalNavBar(left = null, onLeft = null, center = "Journal", right = "Quests", onRight = onQuestsClick)
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+            items(listItems, key = { (date, entry) ->
+                date?.let { "hdr:$it" } ?: entry!!.run { "e:$questId:$day:$dayOfMonth:${text.length}" }
+            }) { (date, entry) ->
+                if (date != null) {
+                    Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 2.dp))
+                } else if (entry != null) {
+                    Text(entry.text, color = Bone, fontSize = 12.sp, fontFamily = MwBody,
+                        lineHeight = 17.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                }
+            }
+            item { Spacer(Modifier.height(8.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun JournalQuestList(entries: List<JournalEntry>, onBack: () -> Unit, onQuest: (String) -> Unit) {
+    // Most-recently-active quest first: scan in reverse to find last occurrence of each questId.
+    val quests = remember(entries) {
+        entries.reversed().map { it.questId }.distinct()
+    }
+
+    Column(Modifier.fillMaxSize().mwPanel()) {
+        JournalNavBar(left = "Journal", onLeft = onBack, center = "Quests", right = null, onRight = null)
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+            items(quests, key = { it }) { questId ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onQuest(questId) }
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(prettifyQuestId(questId), color = Bone, fontSize = 13.sp,
+                        fontFamily = MwBody, modifier = Modifier.weight(1f))
+                    Text("▶", color = BronzeLight, fontSize = 11.sp, fontFamily = MwBody)
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+            }
+            item { Spacer(Modifier.height(8.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun JournalQuestDetail(questId: String, entries: List<JournalEntry>, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().mwPanel()) {
+        JournalNavBar(left = "Quests", onLeft = onBack, center = prettifyQuestId(questId), right = null, onRight = null)
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+            items(entries, key = { e -> "e:${e.day}:${e.dayOfMonth}:${e.text.length}" }) { entry ->
+                val date = "${entry.dayOfMonth} ${morrowindMonthName(entry.month)}"
+                Text(date, color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
+                Text(entry.text, color = Bone, fontSize = 12.sp, fontFamily = MwBody,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp))
+            }
+            item { Spacer(Modifier.height(8.dp)) }
         }
     }
 }
