@@ -44,7 +44,8 @@ local function itemName(item)
     return item.recordId
 end
 
--- ===== Exporters (outbound, unchanged) =====
+-- ===== Exporters (outbound) =====
+
 local function exportStats()
     local health = types.Actor.stats.dynamic.health(self)
     local magicka = types.Actor.stats.dynamic.magicka(self)
@@ -160,6 +161,31 @@ local function exportEquipment()
     print('COMPANION_EQUIPMENT:{' .. table.concat(parts, ',') .. '}')
 end
 
+-- Lazy per-questId lookup from core.dialogue.journal.records.
+-- The .name field returns the ESM's original CamelCase id string
+-- (e.g. "A1_1_FindSpymaster") which the app prettifies further.
+local questNameCache = {}
+local journalRecords = nil
+
+local function getQuestName(questId)
+    local cached = questNameCache[questId]
+    if cached ~= nil then return cached end
+    local name = ""
+    pcall(function()
+        if not journalRecords then
+            journalRecords = core.dialogue.journal.records
+        end
+        local r = journalRecords[questId]
+        if r and r.name then name = r.name end
+    end)
+    questNameCache[questId] = name
+    return name
+end
+
+-- NOTE: OpenMW 0.52 Lua does not expose quest completion status.
+-- Probed: j.questStages, j.quests, entry.stage/isFinished, types.Player.getQuestStage,
+-- core.getJournalIndex — all nil or ERR. Active/done split requires a C++ engine change.
+
 local journalExportedCount = -1
 local function exportJournal()
     local ok, err = pcall(function()
@@ -168,14 +194,32 @@ local function exportJournal()
         local count = #entries
         if count == journalExportedCount then return end
         journalExportedCount = count
+
+        -- Count unique questIds and probe quest stage API on first export.
+        local seen = {}; local uniqueQ = 0
+        for i = 1, count do
+            pcall(function()
+                local qid = tostring(entries[i].questId or "")
+                if not seen[qid] then seen[qid] = true; uniqueQ = uniqueQ + 1 end
+            end)
+        end
+        print("COMPANION_DEBUG: journal uniqueQ=" .. uniqueQ .. " entries=" .. count)
+
         print('COMPANION_JOURNAL_START:' .. count)
         for i = 1, count do
-            local e = entries[i]
-            if e then
+            -- Protect each entry individually so one bad entry can't abort the whole export.
+            local ok2, err2 = pcall(function()
+                local e = entries[i]
+                if not e then return end
+                local qid = tostring(e.questId or "")
+                local name = getQuestName(qid)
                 print(string.format(
-                    'COMPANION_JOURNAL_ENTRY:{"q":"%s","t":"%s","d":%d,"m":%d,"dom":%d}',
-                    jsonEscape(e.questId), jsonEscape(e.text),
-                    e.day, e.month, e.dayOfMonth))
+                    'COMPANION_JOURNAL_ENTRY:{"q":"%s","n":"%s","t":"%s","d":%d,"m":%d,"dom":%d}',
+                    jsonEscape(qid), jsonEscape(name), jsonEscape(e.text or ""),
+                    e.day or 0, e.month or 0, e.dayOfMonth or 0))
+            end)
+            if not ok2 then
+                print("COMPANION_DEBUG: entry " .. i .. " err=" .. tostring(err2))
             end
         end
         print('COMPANION_JOURNAL_END:' .. count)

@@ -19,12 +19,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -42,8 +48,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.PopupProperties
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.unit.Dp
 
 // Splash image
 import androidx.compose.ui.res.painterResource
@@ -85,8 +98,8 @@ private val MwDisplay = FontFamily.Serif
 private val MwBody    = FontFamily.Serif
 private val MwData    = FontFamily.Monospace
 
-private const val TOP_BAR_SPACE = 96
-private const val BOTTOM_BAR_SPACE = 84
+private const val TOP_BAR_SPACE = 76
+private const val BOTTOM_BAR_SPACE = 76
 
 private enum class Tab(val label: String) {
     MAP("Map"), INVENTORY("Inventory"), MAGIC("Magic"), JOURNAL("Journal")
@@ -164,7 +177,7 @@ fun CompanionScreen() {
 // "Live" = we've had a stats update recently. Don't require a non-empty cell here —
 // the cell legitimately blanks during exterior transitions, and that must not
 // count as "left the game". Use a generous window to ride out cell-load stalls.
-        val live = state.lastUpdateMs > 0L && (now - state.lastUpdateMs) < 8000L
+        val live = state.lastUpdateMs > 0L && (now - state.lastUpdateMs) < 30_000L
 
         LaunchedEffect(live) {
             if (live) {
@@ -407,23 +420,18 @@ private fun InventoryPanel(state: GameState) {
     ) {
         PaperDoll(Modifier.weight(0.38f).fillMaxHeight())
 
-        Box(Modifier.weight(0.62f).fillMaxHeight().mwPanel().padding(6.dp)) {
+        Column(Modifier.weight(0.62f).fillMaxHeight().mwPanel().padding(6.dp)) {
             if (state.inventory.isEmpty()) {
                 EmptyPanel("No inventory recorded")
             } else {
                 val ordered = remember(state.inventory, state.equipment) {
                     val wornIds = state.equipment.values.toSet()
-
-                    // Build equipped items sorted by slot order
-                    val slotToItemId = state.equipment  // Map<slotName, itemId>
+                    val slotToItemId = state.equipment
                     val equippedSorted = EQUIPMENT_SLOT_ORDER
                         .mapNotNull { slot -> slotToItemId[slot] }
                         .mapNotNull { itemId -> state.inventory.find { it.id == itemId } }
                         .distinctBy { it.id }
-
-                    // Remaining unequipped items alphabetically
                     val categoryOrder = EQUIPMENT_SLOT_ORDER + listOf("misc")
-
                     val rest = state.inventory
                         .filter { !wornIds.contains(it.id) }
                         .sortedWith(
@@ -432,14 +440,34 @@ private fun InventoryPanel(state: GameState) {
                                 { it.displayName().lowercase() }
                             )
                         )
-
                     equippedSorted + rest
                 }
+
+                val gridState = rememberLazyGridState()
+                val thumbFraction by remember {
+                    derivedStateOf {
+                        val info = gridState.layoutInfo
+                        val total = info.totalItemsCount
+                        val visible = info.visibleItemsInfo.size
+                        if (total == 0) 1f else (visible.toFloat() / total).coerceIn(0.05f, 1f)
+                    }
+                }
+                val scrollFraction by remember {
+                    derivedStateOf {
+                        val info = gridState.layoutInfo
+                        val total = info.totalItemsCount
+                        val visible = info.visibleItemsInfo.size
+                        if (total <= visible) 0f else
+                            gridState.firstVisibleItemIndex.toFloat() / (total - visible)
+                    }
+                }
+
                 LazyHorizontalGrid(
+                    state = gridState,
                     rows = GridCells.Adaptive(64.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.weight(1f).fillMaxWidth()
                 ) {
                     gridItems(ordered) { item ->
                         val worn = state.equipment.values.contains(item.id)
@@ -467,6 +495,22 @@ private fun InventoryPanel(state: GameState) {
                             onDrop = { CompanionActions.dropItem(item.id, item.count) }
                         )
                     }
+                }
+
+                Spacer(Modifier.height(4.dp))
+                Canvas(Modifier.fillMaxWidth().height(3.dp).padding(horizontal = 2.dp)) {
+                    val thumbW = size.width * thumbFraction
+                    val thumbX = (size.width - thumbW) * scrollFraction
+                    drawRoundRect(
+                        color = BronzeDark.copy(alpha = 0.5f),
+                        cornerRadius = CornerRadius(4f)
+                    )
+                    drawRoundRect(
+                        color = BronzeLight,
+                        topLeft = Offset(thumbX, 0f),
+                        size = Size(thumbW, size.height),
+                        cornerRadius = CornerRadius(4f)
+                    )
                 }
             }
         }
@@ -546,23 +590,41 @@ private fun ItemCell(
         DropdownMenu(
             expanded = menuOpen,
             onDismissRequest = { menuOpen = false },
-            properties = PopupProperties(focusable = false)
+            containerColor = StonePanel,
+            shadowElevation = 0.dp,
+            border = BorderStroke(1.dp, Bronze),
+            shape = RoundedCornerShape(3.dp)
         ) {
+            // Item name header
+            Text(
+                label,
+                color = BronzeLight,
+                fontSize = 12.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+
+            val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
             if (worn || equippable) {
                 DropdownMenuItem(
-                    text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody) },
-                    onClick = { menuOpen = false; onEquipToggle() }
+                    text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
+                    onClick = { menuOpen = false; onEquipToggle() },
+                    colors = menuItemColors
                 )
             }
             if (readable) {
                 DropdownMenuItem(
-                    text = { Text("Read", fontFamily = MwBody) },
-                    onClick = { menuOpen = false; onRead() }
+                    text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
+                    onClick = { menuOpen = false; onRead() },
+                    colors = menuItemColors
                 )
             }
             DropdownMenuItem(
-                text = { Text("Drop", fontFamily = MwBody) },
-                onClick = { menuOpen = false; onDrop() }
+                text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; onDrop() },
+                colors = menuItemColors
             )
         }
     }
@@ -764,18 +826,18 @@ private fun JournalPanel() {
 @Composable
 private fun JournalNavBar(left: String?, onLeft: (() -> Unit)?, center: String, right: String?, onRight: (() -> Unit)?) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (left != null && onLeft != null)
-            Text("◀ $left", color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
+            Text("◀ $left", color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody,
                 modifier = Modifier.clickable { onLeft() }.padding(4.dp))
         else
             Spacer(Modifier.size(1.dp))
-        Text(center, color = Bone, fontSize = 15.sp, fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
+        Text(center, color = Bone, fontSize = 16.sp, fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
         if (right != null && onRight != null)
-            Text("$right ▶", color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
+            Text("$right ▶", color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody,
                 modifier = Modifier.clickable { onRight() }.padding(4.dp))
         else
             Spacer(Modifier.size(1.dp))
@@ -785,62 +847,101 @@ private fun JournalNavBar(left: String?, onLeft: (() -> Unit)?, center: String, 
 
 @Composable
 private fun JournalChronological(entries: List<JournalEntry>, onQuestsClick: () -> Unit) {
-    // Precompute list with date-break headers inserted whenever the date changes.
-    // Each item is either (dateString, null) for a header or (null, entry) for text.
-    val listItems = remember(entries) {
-        buildList<Pair<String?, JournalEntry?>> {
-            var lastDate = ""
-            entries.forEach { e ->
-                val date = "${e.dayOfMonth} ${morrowindMonthName(e.month)}"
-                if (date != lastDate) { add(date to null); lastDate = date }
-                add(null to e)
+    // Each day fills one column. Two days per page (left = older, right = newer),
+    // like an open book where each physical page holds one day.
+    val pages = remember(entries) {
+        val byDay = LinkedHashMap<String, MutableList<JournalEntry>>()
+        entries.forEach { e ->
+            val date = "${e.dayOfMonth} ${morrowindMonthName(e.month)}"
+            byDay.getOrPut(date) { mutableListOf() }.add(e)
+        }
+        val dayCols = byDay.entries.map { (date, dayEntries) ->
+            buildList<Pair<String?, JournalEntry?>> {
+                add(date to null)
+                dayEntries.forEach { add(null to it) }
             }
         }
+        dayCols.chunked(2)  // pair days: [leftDay, rightDay]
     }
+    val pagerState = rememberPagerState(
+        initialPage = (pages.size - 1).coerceAtLeast(0),
+        pageCount = { pages.size }
+    )
 
     Column(Modifier.fillMaxSize().mwPanel()) {
         JournalNavBar(left = null, onLeft = null, center = "Journal", right = "Quests", onRight = onQuestsClick)
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
-            items(listItems, key = { (date, entry) ->
-                date?.let { "hdr:$it" } ?: entry!!.run { "e:$questId:$day:$dayOfMonth:${text.length}" }
-            }) { (date, entry) ->
-                if (date != null) {
-                    Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 2.dp))
-                } else if (entry != null) {
-                    Text(entry.text, color = Bone, fontSize = 12.sp, fontFamily = MwBody,
-                        lineHeight = 17.sp,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+
+        HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { pageIdx ->
+            val pageDays = pages.getOrElse(pageIdx) { emptyList() }
+            Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp)) {
+                JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.weight(1f))
+                Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
+                JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.weight(1f))
+            }
+        }
+
+        if (pages.size > 1) {
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(pages.size) { idx ->
+                    Box(
+                        Modifier
+                            .padding(horizontal = 3.dp)
+                            .size(if (idx == pagerState.currentPage) 7.dp else 5.dp)
+                            .clip(CircleShape)
+                            .background(if (idx == pagerState.currentPage) BronzeLight else BronzeDark)
+                    )
                 }
             }
-            item { Spacer(Modifier.height(8.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun JournalColumn(items: List<Pair<String?, JournalEntry?>>, modifier: Modifier) {
+    // verticalScroll lets long entries overflow cleanly rather than clip.
+    Column(modifier.padding(horizontal = 6.dp).verticalScroll(rememberScrollState())) {
+        items.forEach { (date, entry) ->
+            if (date != null) {
+                Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 1.dp))
+            } else if (entry != null) {
+                Text(entry.text, color = Bone, fontSize = 13.sp, fontFamily = MwBody,
+                    lineHeight = 18.sp,
+                    modifier = Modifier.padding(bottom = 4.dp))
+            }
         }
     }
 }
 
 @Composable
 private fun JournalQuestList(entries: List<JournalEntry>, onBack: () -> Unit, onQuest: (String) -> Unit) {
-    // Most-recently-active quest first: scan in reverse to find last occurrence of each questId.
+    // Most-recently-active quest first. Keep one representative entry per quest to resolve the display name.
     val quests = remember(entries) {
-        entries.reversed().map { it.questId }.distinct()
+        val seen = LinkedHashMap<String, JournalEntry>()
+        entries.reversed().forEach { e -> seen.putIfAbsent(e.questId, e) }
+        seen.values.toList()
     }
 
     Column(Modifier.fillMaxSize().mwPanel()) {
         JournalNavBar(left = "Journal", onLeft = onBack, center = "Quests", right = null, onRight = null)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
-            items(quests, key = { it }) { questId ->
+            items(quests, key = { it.questId }) { rep ->
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { onQuest(questId) }
-                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                        .clickable { onQuest(rep.questId) }
+                        .padding(horizontal = 10.dp, vertical = 11.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(prettifyQuestId(questId), color = Bone, fontSize = 13.sp,
+                    Text(questDisplayName(rep), color = Bone, fontSize = 14.sp,
                         fontFamily = MwBody, modifier = Modifier.weight(1f))
-                    Text("▶", color = BronzeLight, fontSize = 11.sp, fontFamily = MwBody)
+                    Text("▶", color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody)
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
             }
@@ -851,16 +952,17 @@ private fun JournalQuestList(entries: List<JournalEntry>, onBack: () -> Unit, on
 
 @Composable
 private fun JournalQuestDetail(questId: String, entries: List<JournalEntry>, onBack: () -> Unit) {
+    val title = entries.firstOrNull()?.let { questDisplayName(it) } ?: prettifyQuestId(questId)
     Column(Modifier.fillMaxSize().mwPanel()) {
-        JournalNavBar(left = "Quests", onLeft = onBack, center = prettifyQuestId(questId), right = null, onRight = null)
+        JournalNavBar(left = "Quests", onLeft = onBack, center = title, right = null, onRight = null)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
             items(entries, key = { e -> "e:${e.day}:${e.dayOfMonth}:${e.text.length}" }) { entry ->
                 val date = "${entry.dayOfMonth} ${morrowindMonthName(entry.month)}"
-                Text(date, color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
+                Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
-                Text(entry.text, color = Bone, fontSize = 12.sp, fontFamily = MwBody,
-                    lineHeight = 17.sp,
+                Text(entry.text, color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                    lineHeight = 20.sp,
                     modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp))
             }
             item { Spacer(Modifier.height(8.dp)) }
@@ -868,10 +970,40 @@ private fun JournalQuestDetail(questId: String, entries: List<JournalEntry>, onB
     }
 }
 
-private fun prettifyQuestId(id: String): String =
-    id.split(Regex("[\\s_]+"))
-        .filter { it.isNotEmpty() }
-        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercaseChar() } }
+private fun questDisplayName(entry: JournalEntry): String {
+    val raw = entry.questName
+    return when {
+        raw.isEmpty() -> prettifyQuestId(entry.questId)
+        raw.contains(' ') -> raw.split(' ')
+            .joinToString(" ") { it.replaceFirstChar(Char::uppercaseChar) }
+        else -> prettifyRawQuestName(raw)
+    }
+}
+
+// Processes ESM CamelCase names like "A1_1_FindSpymaster" → "Find Spymaster".
+// Strips short code prefixes (BM, MS, A1, …) and pure-number segments, then
+// splits CamelCase boundaries.
+private fun prettifyRawQuestName(raw: String): String {
+    val parts = raw.split('_')
+    val meaningful = parts.filter { seg ->
+        seg.isNotEmpty() &&
+        !seg.all { it.isDigit() } &&
+        !(seg.length <= 3 && seg.all { it.isUpperCase() || it.isDigit() })
+    }
+    val toProcess = meaningful.ifEmpty { parts.takeLast(1) }
+    return toProcess.flatMap { seg ->
+        seg.replace(Regex("([a-z])([A-Z])"), "$1 $2")
+           .replace(Regex("([A-Z]{2,})([A-Z][a-z])"), "$1 $2")
+           .split(' ')
+    }.filter { it.isNotEmpty() }
+     .joinToString(" ") { it.replaceFirstChar(Char::uppercaseChar) }
+}
+
+private fun prettifyQuestId(id: String): String {
+    val parts = id.split(Regex("[\\s_]+")).filter { it.isNotEmpty() }
+    val body = parts.dropWhile { it.length <= 3 || it.all { c -> c.isDigit() } }.ifEmpty { parts }
+    return body.joinToString(" ") { it.replaceFirstChar { c -> c.uppercaseChar() } }
+}
 
 @Composable
 private fun EmptyPanel(message: String) {

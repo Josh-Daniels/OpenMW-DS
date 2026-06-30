@@ -27,6 +27,7 @@ data class SpellEntry(
 
 data class JournalEntry(
     val questId: String,
+    val questName: String = "",  // display name from core.dialogue; empty = fall back to prettified ID
     val text: String,
     val day: Int,
     val month: Int,

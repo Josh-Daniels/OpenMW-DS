@@ -106,6 +106,7 @@ object LogParser {
         val o = JSONObject(json)
         JournalEntry(
             questId = o.optString("q", ""),
+            questName = o.optString("n", ""),
             text = o.optString("t", ""),
             day = o.optInt("d", 0),
             month = o.optInt("m", 0),
