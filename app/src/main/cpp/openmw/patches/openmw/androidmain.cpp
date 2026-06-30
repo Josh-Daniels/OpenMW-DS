@@ -15,9 +15,12 @@ int stderr = 0; // Hack: fix linker error
 #include <SDL_mouse.h>
 #include <components/vfs/pathutil.hpp>
 #include <components/debug/debugging.hpp>
+#include <components/resource/resourcesystem.hpp>
+#include <components/resource/imagemanager.hpp>
 
 #include <osg/GraphicsContext>
 #include <osg/OperationThread>
+#include <osgDB/WriteFile>
 
 #include <atomic>
 #include <deque>
@@ -131,6 +134,31 @@ extern "C" void companionDeliverMapTexture(
                             (jint)width, (jint)height, (jint)segX, (jint)segY,
                             (jint)isInterior, arr);
     e->DeleteLocalRef(arr);
+}
+// Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
+// Called from Kotlin on any thread when a new icon path is encountered.
+// iconPath is the VFS-normalized path (e.g. "icons/m/misc_shirt_01.dds").
+// outputPath is an absolute filesystem path for the PNG output.
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_exportIconToPng(
+    JNIEnv* env, jclass /*cls*/, jstring jIconPath, jstring jOutputPath)
+{
+    Resource::ResourceSystem* rs = MWBase::Environment::get().getResourceSystem();
+    if (!rs) return;
+
+    const char* iconPath   = env->GetStringUTFChars(jIconPath,   nullptr);
+    const char* outputPath = env->GetStringUTFChars(jOutputPath, nullptr);
+
+    try {
+        osg::ref_ptr<osg::Image> image = rs->getImageManager()->getImage(
+            VFS::Path::Normalized(iconPath));
+        osgDB::writeImageFile(*image, outputPath);
+    } catch (const std::exception& e) {
+        Log(Debug::Error) << "exportIconToPng '" << iconPath << "': " << e.what();
+    }
+
+    env->ReleaseStringUTFChars(jIconPath,   iconPath);
+    env->ReleaseStringUTFChars(jOutputPath, outputPath);
 }
 // -----------------------------------------------------------------------------
 

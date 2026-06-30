@@ -554,6 +554,15 @@ class EngineActivity : SDLActivity() {
         /** Queues a CMP: command for delivery to Lua on the engine thread. */
         @JvmStatic
         external fun sendCompanionCommand(cmd: String)
+
+        /**
+         * Decodes an item icon from the VFS (BSA/loose files) and writes it as PNG.
+         * [iconPath] is the VFS-normalized path from rec.icon (e.g. "icons/m/misc_shirt_01.dds").
+         * [outputPath] is the absolute filesystem path for the output PNG.
+         * Safe to call from any thread; does not require a GL context.
+         */
+        @JvmStatic
+        external fun exportIconToPng(iconPath: String, outputPath: String)
     }
 
     fun findHapticForSound(name: String): HapticEffect? {

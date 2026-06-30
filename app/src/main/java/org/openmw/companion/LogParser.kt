@@ -94,7 +94,8 @@ object LogParser {
                 id = o.optString("id", ""),
                 name = o.optString("name", ""),
                 count = o.optInt("count", 1),
-                category = o.optString("cat", "misc")
+                category = o.optString("cat", "misc"),
+                icon = o.optString("icon", "")
             )
         }
     }

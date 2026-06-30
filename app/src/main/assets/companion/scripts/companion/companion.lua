@@ -157,10 +157,12 @@ end
 local function exportInventory()
     local parts = {}
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
+        local ok, rec = pcall(function() return item.type.record(item) end)
+        local icon = (ok and rec and rec.icon) or ""
         table.insert(parts, string.format(
-            '{"id":"%s","name":"%s","count":%d,"cat":"%s"}',
+            '{"id":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s"}',
             jsonEscape(item.recordId), jsonEscape(itemName(item)),
-            item.count, itemCategory(item)))
+            item.count, itemCategory(item), jsonEscape(icon)))
     end
     print('COMPANION_INVENTORY:[' .. table.concat(parts, ',') .. ']')
 end

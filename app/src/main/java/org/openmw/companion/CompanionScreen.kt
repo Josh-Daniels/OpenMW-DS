@@ -69,8 +69,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.time.Duration.Companion.milliseconds
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.ImageBitmap
 import org.openmw.Constants
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.unit.IntOffset
@@ -111,6 +116,10 @@ private val MwData    = FontFamily.Monospace
 
 private const val TOP_BAR_SPACE = 76
 private const val BOTTOM_BAR_SPACE = 76
+
+private val ICON_CACHE_DIR by lazy {
+    File("${Constants.USER_FILE_STORAGE}/companion_icons").also { it.mkdirs() }
+}
 
 // Fraction of a single cell segment visible across the short canvas axis.
 // 0.25 = tight zoom (25% of cell visible); increase toward 1.0 to zoom out.
@@ -557,6 +566,7 @@ private fun InventoryPanel(state: GameState) {
                         ItemCell(
                             label = item.displayName(),
                             count = item.count,
+                            iconPath = item.icon,
                             worn = worn,
                             equippable = equippable,
                             readable = readable,
@@ -624,6 +634,7 @@ private fun PaperDoll(modifier: Modifier = Modifier) {
 private fun ItemCell(
     label: String,
     count: Int,
+    iconPath: String,
     worn: Boolean,
     equippable: Boolean,
     readable: Boolean,
@@ -633,6 +644,23 @@ private fun ItemCell(
     onDrop: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    var iconBitmap by remember(iconPath) { mutableStateOf<ImageBitmap?>(null) }
+
+    if (iconPath.isNotEmpty()) {
+        LaunchedEffect(iconPath) {
+            withContext(Dispatchers.IO) {
+                val pngFile = File(ICON_CACHE_DIR, iconPath.replace('/', '_').substringBeforeLast('.') + ".png")
+                if (!pngFile.exists()) {
+                    CompanionActions.exportIconToPng(iconPath, pngFile.absolutePath)
+                }
+                if (pngFile.exists()) {
+                    BitmapFactory.decodeFile(pngFile.absolutePath)?.let {
+                        iconBitmap = it.asImageBitmap()
+                    }
+                }
+            }
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -648,16 +676,26 @@ private fun ItemCell(
             .padding(4.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            label,
-            color = if (worn) BronzeLight else Bone,
-            fontSize = 10.sp,
-            fontFamily = MwBody,
-            textAlign = TextAlign.Center,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-            lineHeight = 11.sp
-        )
+        val bmp = iconBitmap
+        if (bmp != null) {
+            Image(
+                bitmap = bmp,
+                contentDescription = label,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text(
+                label,
+                color = if (worn) BronzeLight else Bone,
+                fontSize = 10.sp,
+                fontFamily = MwBody,
+                textAlign = TextAlign.Center,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 11.sp
+            )
+        }
         if (count > 1) {
             Text(
                 "$count",

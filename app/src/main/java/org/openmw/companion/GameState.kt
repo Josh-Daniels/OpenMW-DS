@@ -16,7 +16,8 @@ data class InventoryItem(
     val id: String,
     val name: String = "",
     val count: Int = 1,
-    val category: String = "misc"
+    val category: String = "misc",
+    val icon: String = ""
 )
 
 data class SpellEntry(
