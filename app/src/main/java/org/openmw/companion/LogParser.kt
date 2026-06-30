@@ -19,6 +19,7 @@ object LogParser {
     private const val P_SELECTED_SPELL = "COMPANION_SELECTED_SPELL:"
     private const val P_INVENTORY = "COMPANION_INVENTORY:"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
+    private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
     const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
     const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
@@ -37,6 +38,8 @@ object LogParser {
                     current.copy(inventory = parseInventory(after(line, P_INVENTORY)))
                 line.contains(P_EQUIPMENT) ->
                     current.copy(equipment = parseEquipment(after(line, P_EQUIPMENT)))
+                line.contains(P_ACTIVE_EFFECTS) ->
+                    current.copy(activeEffects = parseActiveEffects(after(line, P_ACTIVE_EFFECTS)))
                 else -> null
             }
         } catch (e: Exception) {
@@ -92,6 +95,7 @@ object LogParser {
             val o = arr.getJSONObject(it)
             InventoryItem(
                 id = o.optString("id", ""),
+                stackId = o.optString("sid", ""),
                 name = o.optString("name", ""),
                 count = o.optInt("count", 1),
                 category = o.optString("cat", "misc"),
@@ -105,6 +109,17 @@ object LogParser {
         val map = LinkedHashMap<String, String>()
         o.keys().forEach { k -> map[k] = o.getString(k) }
         return map
+    }
+
+    private fun parseActiveEffects(json: String): List<ActiveEffect> {
+        val arr = JSONArray(json)
+        return (0 until arr.length()).map {
+            val o = arr.getJSONObject(it)
+            ActiveEffect(
+                name = o.optString("name", ""),
+                harmful = o.optBoolean("harmful", false)
+            )
+        }
     }
 
     fun parseJournalEntry(json: String): JournalEntry? = try {

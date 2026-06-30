@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -41,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -70,6 +72,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.time.Duration.Companion.milliseconds
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import org.openmw.Constants
 import androidx.compose.ui.graphics.asImageBitmap
@@ -78,6 +81,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.sin
@@ -103,10 +107,13 @@ private val BronzeDark  = Color(0xFF5A4528)   // inner border / dividers
 private val BronzeLight = Color(0xFFC9A063)   // highlights, selected
 private val Bone        = Color(0xFFD8CBB0)   // primary text
 private val BoneDim     = Color(0xFF9A8C70)   // secondary text
+private val BoneBright  = Color(0xFFF2EEE3)   // item name, high prominence
+private val BoneMuted   = Color(0xFFBCAF96)   // item name, low prominence
 private val FloatStone  = Color(0xF02A2318)   // near-opaque stone for floating bars
 
 private val HealthCol   = Color(0xFF8E2B20)   // blood red
-private val MagickaCol  = Color(0xFF35608F)   // arcane blue
+private val MagickaCol  = Color(0xFF35608F)   // arcane blue (stat bar)
+private val SpellFavCol = Color(0xFF83AEBE)   // spell fav slot border/text (muted steel blue)
 private val FatigueCol  = Color(0xFF4E7A3A)   // earthy green
 
 // ---- type roles (swap to bundled Morrowind fonts later in one place) ----
@@ -125,8 +132,11 @@ private val ICON_CACHE_DIR by lazy {
 // 0.25 = tight zoom (25% of cell visible); increase toward 1.0 to zoom out.
 private const val MINIMAP_CROP_FRACTION = 0.25f
 
+private val FAV_SLOT_WIDTH  = 132.dp
+private val FAV_SLOT_HEIGHT = 34.dp
+
 private enum class Tab(val label: String) {
-    MAP("Map"), INVENTORY("Inventory"), MAGIC("Magic"), JOURNAL("Journal")
+    INVENTORY("Inventory"), MAGIC("Spells"), MAP("Map"), STATS("Stats"), JOURNAL("Journal")
 }
 
 private fun InventoryItem.displayName(): String =
@@ -146,6 +156,21 @@ private val EQUIPMENT_SLOT_ORDER = listOf(
     "shirt", "pants", "skirt", "robe",
     "carried_left", "carried_right",
     "book"
+)
+
+private data class InvCategory(val label: String, val cats: Set<String>)
+
+private val INV_CATEGORIES = listOf(
+    InvCategory("Weapons", setOf("weapon", "ammo")),
+    InvCategory("Armor",   setOf("helmet", "cuirass", "left_pauldron", "right_pauldron",
+                                  "greaves", "boots", "left_gauntlet", "right_gauntlet",
+                                  "shield", "armor")),
+    InvCategory("Apparel", setOf("amulet", "left_ring", "shirt", "pants", "skirt",
+                                  "robe", "clothing")),
+    InvCategory("Tools",   setOf("lockpick", "probe")),
+    InvCategory("Books",       setOf("book", "scroll")),
+    InvCategory("Consumables", setOf("potion", "ingredient")),
+    InvCategory("Misc",        setOf("misc", "carried_left")),
 )
 
 /** Stone panel with a bronze frame — the signature Morrowind window look. */
@@ -170,15 +195,19 @@ fun CompanionScreen() {
         onDispose { logReader.stop() }
     }
 
+    val context = LocalContext.current
+    LaunchedEffect(Unit) { FavouritesRepository.init(context) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(StoneDark)
     ) {
         when (tab) {
-            Tab.MAP -> MapPanel(state)
             Tab.INVENTORY -> InventoryPanel(state)
             Tab.MAGIC -> MagicPanel(state)
+            Tab.MAP -> MapPanel(state)
+            Tab.STATS -> StatsPanel()
             Tab.JOURNAL -> JournalPanel()
         }
 
@@ -216,7 +245,7 @@ fun CompanionScreen() {
 @Composable
 private fun SplashPanel(onDismiss: () -> Unit = {}) {
     Image(
-        painter = painterResource(id = R.drawable.morrowind_splash),
+        painter = painterResource(id = R.drawable.openmw_ds_splash),
         contentDescription = null,
         contentScale = ContentScale.Crop,
         modifier = Modifier
@@ -229,17 +258,80 @@ private fun SplashPanel(onDismiss: () -> Unit = {}) {
 
 @Composable
 private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
+    var effectsExpanded by remember { mutableStateOf(false) }
+    val hasEffects = state.activeEffects.isNotEmpty()
+
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(3.dp))
             .background(FloatStone)
             .border(2.dp, Bronze, RoundedCornerShape(3.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp)
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         CompactStat("Health", state.health, HealthCol, Modifier.weight(1f))
         CompactStat("Magicka", state.magicka, MagickaCol, Modifier.weight(1f))
         CompactStat("Fatigue", state.fatigue, FatigueCol, Modifier.weight(1f))
+
+        if (hasEffects) {
+            Box(
+                Modifier
+                    .width(1.dp)
+                    .height(28.dp)
+                    .background(BronzeDark)
+            )
+            Box {
+                Column(
+                    modifier = Modifier.clickable { effectsExpanded = !effectsExpanded },
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "Effects",
+                        color = BronzeLight, fontSize = 12.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        state.activeEffects.forEach { effect ->
+                            EffectDot(effect.harmful, 10.dp)
+                        }
+                    }
+                }
+                DropdownMenu(
+                    expanded = effectsExpanded,
+                    onDismissRequest = { effectsExpanded = false },
+                    containerColor = StonePanel,
+                    shadowElevation = 0.dp,
+                    border = BorderStroke(1.dp, Bronze),
+                    shape = RoundedCornerShape(3.dp)
+                ) {
+                    state.activeEffects.forEach { effect ->
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            EffectDot(effect.harmful, 8.dp)
+                            Text(
+                                effect.name,
+                                color = Bone, fontSize = 12.sp,
+                                fontFamily = MwBody
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EffectDot(harmful: Boolean, sizeDp: Dp) {
+    val dotColor = if (harmful) Color(0xFFC75C5C) else Color(0xFF7FBF7F)
+    Canvas(Modifier.size(sizeDp)) {
+        drawCircle(dotColor.copy(alpha = 0.3f))
+        drawCircle(dotColor, radius = size.minDimension * 0.38f)
     }
 }
 
@@ -386,6 +478,8 @@ private fun MapPanel(state: GameState) {
     else
         interiorMap != null
 
+    val favs by FavouritesRepository.state.collectAsState()
+
     Box(
         Modifier
             .fillMaxSize()
@@ -459,6 +553,46 @@ private fun MapPanel(state: GameState) {
                 modifier = Modifier.align(Alignment.Center)
             )
         }
+
+        // Gear favourites — bottom-left, stacked vertically
+        Column(
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            repeat(2) { idx ->
+                val slot = favs.gear.getOrNull(idx)
+                FavSlotView(slot = slot, borderColor = BronzeLight) {
+                    val s = slot ?: return@FavSlotView
+                    val item = state.inventory.find { it.id == s.id }
+                    val readable = item?.category == "book" || item?.category == "scroll"
+                    val equippable = item != null && item.category != "misc" && !readable
+                    // Use per-stack instance id when available; fall back to recordId.
+                    val target = item?.stackId?.takeIf { it.isNotEmpty() } ?: s.id
+                    val worn = if (item?.stackId?.isNotEmpty() == true)
+                        state.equipment.values.contains(item.stackId)
+                    else
+                        state.equipment.values.contains(s.id)
+                    when {
+                        readable    -> CompanionActions.readItem(s.id)
+                        equippable && worn -> CompanionActions.unequipItem(target)
+                        equippable  -> CompanionActions.equipItem(target)
+                    }
+                }
+            }
+        }
+
+        // Magic favourites — bottom-right, stacked vertically
+        Column(
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            repeat(2) { idx ->
+                val slot = favs.magic.getOrNull(idx)
+                FavSlotView(slot = slot, borderColor = SpellFavCol) {
+                    slot?.let { CompanionActions.selectSpell(it.id) }
+                }
+            }
+        }
     }
 }
 
@@ -498,212 +632,307 @@ private fun MapButton(label: String, filled: Boolean, onClick: () -> Unit) {
     }
 }
 
-/* ---- Inventory: paper-doll + grid of framed slots ---- */
+/* ---- Favourite slots (floating over the map) ---- */
 
 @Composable
-private fun InventoryPanel(state: GameState) {
-    Row(
+private fun FavSlotView(slot: FavSlot?, borderColor: Color, onClick: () -> Unit) {
+    val isEmpty = slot == null
+    val alpha   = if (isEmpty) 0.4f else 1f
+    val bgColor = Color(0xC0151210)
+
+    Box(
         modifier = Modifier
-            .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+            .width(FAV_SLOT_WIDTH)
+            .height(FAV_SLOT_HEIGHT)
     ) {
-        PaperDoll(Modifier.weight(0.38f).fillMaxHeight())
-
-        Column(Modifier.weight(0.62f).fillMaxHeight().mwPanel().padding(6.dp)) {
-            if (state.inventory.isEmpty()) {
-                EmptyPanel("No inventory recorded")
-            } else {
-                val ordered = remember(state.inventory, state.equipment) {
-                    val wornIds = state.equipment.values.toSet()
-                    val slotToItemId = state.equipment
-                    val equippedSorted = EQUIPMENT_SLOT_ORDER
-                        .mapNotNull { slot -> slotToItemId[slot] }
-                        .mapNotNull { itemId -> state.inventory.find { it.id == itemId } }
-                        .distinctBy { it.id }
-                    val categoryOrder = EQUIPMENT_SLOT_ORDER + listOf("misc")
-                    val rest = state.inventory
-                        .filter { !wornIds.contains(it.id) }
-                        .sortedWith(
-                            compareBy(
-                                { categoryOrder.indexOf(it.category).let { i -> if (i < 0) Int.MAX_VALUE else i } },
-                                { it.displayName().lowercase() }
-                            )
-                        )
-                    equippedSorted + rest
-                }
-
-                val gridState = rememberLazyGridState()
-                val thumbFraction by remember {
-                    derivedStateOf {
-                        val info = gridState.layoutInfo
-                        val total = info.totalItemsCount
-                        val visible = info.visibleItemsInfo.size
-                        if (total == 0) 1f else (visible.toFloat() / total).coerceIn(0.05f, 1f)
-                    }
-                }
-                val scrollFraction by remember {
-                    derivedStateOf {
-                        val info = gridState.layoutInfo
-                        val total = info.totalItemsCount
-                        val visible = info.visibleItemsInfo.size
-                        if (total <= visible) 0f else
-                            gridState.firstVisibleItemIndex.toFloat() / (total - visible)
-                    }
-                }
-
-                LazyHorizontalGrid(
-                    state = gridState,
-                    rows = GridCells.Adaptive(64.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.weight(1f).fillMaxWidth()
-                ) {
-                    gridItems(ordered) { item ->
-                        val worn = state.equipment.values.contains(item.id)
-                        val readable = item.category == "book" || item.category == "scroll"
-                        val equippable = item.category != "misc" && !readable
-                        ItemCell(
-                            label = item.displayName(),
-                            count = item.count,
-                            iconPath = item.icon,
-                            worn = worn,
-                            equippable = equippable,
-                            readable = readable,
-                            onTap = {
-                                when {
-                                    readable -> CompanionActions.readItem(item.id)
-                                    equippable && worn -> CompanionActions.unequipItem(item.id)
-                                    equippable -> CompanionActions.equipItem(item.id)
-                                }
-                            },
-                            onEquipToggle = {
-                                if (!equippable) return@ItemCell
-                                if (worn) CompanionActions.unequipItem(item.id)
-                                else CompanionActions.equipItem(item.id)
-                            },
-                            onRead = { CompanionActions.readItem(item.id) },
-                            onDrop = { CompanionActions.dropItem(item.id, item.count) }
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(4.dp))
-                Canvas(Modifier.fillMaxWidth().height(3.dp).padding(horizontal = 2.dp)) {
-                    val thumbW = size.width * thumbFraction
-                    val thumbX = (size.width - thumbW) * scrollFraction
-                    drawRoundRect(
-                        color = BronzeDark.copy(alpha = 0.5f),
-                        cornerRadius = CornerRadius(4f)
-                    )
-                    drawRoundRect(
-                        color = BronzeLight,
-                        topLeft = Offset(thumbX, 0f),
-                        size = Size(thumbW, size.height),
-                        cornerRadius = CornerRadius(4f)
-                    )
-                }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(4.dp))
+                .background(bgColor)
+                .then(
+                    if (!isEmpty) Modifier.border(1.dp, borderColor, RoundedCornerShape(4.dp))
+                    else Modifier
+                )
+                .clickable(enabled = !isEmpty) { onClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = slot?.name ?: "Empty",
+                color = borderColor.copy(alpha = alpha),
+                fontSize = 11.sp,
+                fontFamily = MwBody,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 6.dp)
+            )
+        }
+        // Dashed border for empty slots drawn as Canvas overlay (avoids clip-halving issue)
+        if (isEmpty) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawRoundRect(
+                    color = borderColor.copy(alpha = alpha),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 1.dp.toPx(),
+                        pathEffect = androidx.compose.ui.graphics.PathEffect
+                            .dashPathEffect(floatArrayOf(6f, 4f))
+                    ),
+                    cornerRadius = CornerRadius(4.dp.toPx())
+                )
             }
         }
     }
 }
 
-/** Empty character frame — where the paper-doll image will go. */
+/* ---- Inventory ---- */
+
 @Composable
-private fun PaperDoll(modifier: Modifier = Modifier) {
-    Box(modifier = modifier.mwPanel().padding(8.dp), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            // simple silhouette placeholder
-            Box(Modifier.size(30.dp).clip(CircleShape).background(BronzeDark))
-            Spacer(Modifier.height(5.dp))
-            Box(
-                Modifier
-                    .size(width = 46.dp, height = 58.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(BronzeDark)
+private fun InventoryPanel(state: GameState) {
+    var selectedCategoryLabel by remember { mutableStateOf<String?>(null) }
+    val presentCategories = remember(state.inventory) {
+        INV_CATEGORIES.filter { grp -> state.inventory.any { it.category in grp.cats } }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        EquippedStrip(state)
+        Column(Modifier.weight(1f).mwPanel()) {
+            CategorySubTabs(
+                categories = presentCategories,
+                selected = selectedCategoryLabel,
+                onSelect = { selectedCategoryLabel = it }
             )
-            Spacer(Modifier.height(12.dp))
-            Text("Character", color = BoneDim, fontSize = 12.sp, fontFamily = MwDisplay)
-            Text("paper doll", color = BronzeDark, fontSize = 10.sp, fontFamily = MwBody)
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            Box(Modifier.weight(1f)) {
+                InventoryItemList(state, selectedCategoryLabel)
+            }
         }
+    }
+}
+
+@Composable
+private fun EquippedStrip(state: GameState) {
+    val wornItems = remember(state.inventory, state.equipment) {
+        EQUIPMENT_SLOT_ORDER
+            .mapNotNull { slot -> state.equipment[slot] }
+            .mapNotNull { sid ->
+                // equipment values are now per-stack instance ids (stackId); fall back
+                // to recordId matching for older Lua that emits recordId instead.
+                state.inventory.find { it.stackId == sid }
+                    ?: state.inventory.find { it.stackId.isEmpty() && it.id == sid }
+            }
+            .distinctBy { it.stackId.ifEmpty { it.id } }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(50.dp)
+            .mwPanel()
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "EQUIPPED",
+            color = BronzeLight,
+            fontSize = 10.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.5.sp
+        )
+        Box(
+            Modifier
+                .padding(horizontal = 10.dp)
+                .width(1.dp)
+                .height(28.dp)
+                .background(BronzeDark)
+        )
+        if (wornItems.isEmpty()) {
+            Text("Nothing equipped", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+        } else {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                wornItems.forEach { item -> EquippedChip(item.displayName()) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EquippedChip(label: String) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(SlotWorn)
+            .border(1.dp, BronzeLight, RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+    ) {
+        Text(
+            label,
+            color = BronzeLight,
+            fontSize = 11.sp,
+            fontFamily = MwBody,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun CategorySubTabs(
+    categories: List<InvCategory>,
+    selected: String?,
+    onSelect: (String?) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        CategoryTab(label = "All", active = selected == null) { onSelect(null) }
+        categories.forEach { cat ->
+            CategoryTab(label = cat.label, active = selected == cat.label) { onSelect(cat.label) }
+        }
+    }
+}
+
+@Composable
+private fun CategoryTab(label: String, active: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(2.dp))
+            .background(if (active) Bronze else Color.Transparent)
+            .border(1.dp, if (active) BronzeLight else BronzeDark, RoundedCornerShape(2.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 5.dp)
+    ) {
+        Text(
+            label,
+            color = if (active) StoneDark else Bone,
+            fontSize = 12.sp,
+            fontFamily = MwDisplay,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) {
+    val wornIds = remember(state.equipment) { state.equipment.values.toSet() }
+    val selectedGroup = INV_CATEGORIES.find { it.label == selectedCategoryLabel }
+
+    if (state.inventory.isEmpty()) {
+        EmptyPanel("No inventory recorded")
+        return
+    }
+
+    // Match by per-stack instance id (stackId) when available; fall back to
+    // recordId for items whose Lua side didn't emit a sid field.
+    fun isWorn(item: InventoryItem): Boolean =
+        if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId)
+        else wornIds.contains(item.id)
+
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+        if (selectedGroup == null) {
+            INV_CATEGORIES.forEach { grp ->
+                val groupItems = state.inventory
+                    .filter { it.category in grp.cats }
+                    .sortedBy { it.displayName().lowercase() }
+                if (groupItems.isNotEmpty()) {
+                    item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
+                    items(groupItems) { item ->
+                        val worn = isWorn(item)
+                        val readable = item.category == "book" || item.category == "scroll"
+                        ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable)
+                    }
+                }
+            }
+        } else {
+            val groupItems = state.inventory
+                .filter { it.category in selectedGroup.cats }
+                .sortedBy { it.displayName().lowercase() }
+            items(groupItems) { item ->
+                val worn = isWorn(item)
+                val readable = item.category == "book" || item.category == "scroll"
+                ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable)
+            }
+        }
+        item { Spacer(Modifier.height(4.dp)) }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ItemCell(
-    label: String,
-    count: Int,
-    iconPath: String,
+private fun ItemRow(
+    item: InventoryItem,
     worn: Boolean,
     equippable: Boolean,
-    readable: Boolean,
-    onTap: () -> Unit,
-    onEquipToggle: () -> Unit,
-    onRead: () -> Unit,
-    onDrop: () -> Unit
+    readable: Boolean
 ) {
+    val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
-    var iconBitmap by remember(iconPath) { mutableStateOf<ImageBitmap?>(null) }
+    val label = item.displayName()
 
-    if (iconPath.isNotEmpty()) {
-        LaunchedEffect(iconPath) {
-            withContext(Dispatchers.IO) {
-                val pngFile = File(ICON_CACHE_DIR, iconPath.replace('/', '_').substringBeforeLast('.') + ".png")
-                if (!pngFile.exists()) {
-                    CompanionActions.exportIconToPng(iconPath, pngFile.absolutePath)
-                }
-                if (pngFile.exists()) {
-                    BitmapFactory.decodeFile(pngFile.absolutePath)?.let {
-                        iconBitmap = it.asImageBitmap()
-                    }
+    Box {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = {
+                            val target = item.stackId.ifEmpty { item.id }
+                            when {
+                                readable -> CompanionActions.readItem(item.id)
+                                equippable && worn -> CompanionActions.unequipItem(target)
+                                equippable -> CompanionActions.equipItem(target)
+                            }
+                        },
+                        onLongClick = { menuOpen = true }
+                    )
+                    .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    label,
+                    color = if (worn) BoneMuted else BoneBright,
+                    fontSize = 14.sp,
+                    fontFamily = MwBody,
+                    fontWeight = FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(end = 8.dp)
+                )
+                when {
+                    worn -> Text(
+                        "WORN",
+                        color = BronzeLight,
+                        fontSize = 10.sp,
+                        fontFamily = MwDisplay,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp
+                    )
+                    item.count > 1 -> Text(
+                        "x${item.count}",
+                        color = BoneDim,
+                        fontSize = 11.sp,
+                        fontFamily = MwData
+                    )
                 }
             }
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .aspectRatio(1f)
-            .clip(RoundedCornerShape(2.dp))
-            .background(if (worn) SlotWorn else SlotBg)
-            .border(
-                if (worn) 2.dp else 1.dp,
-                if (worn) BronzeLight else BronzeDark,
-                RoundedCornerShape(2.dp)
-            )
-            .combinedClickable(onClick = onTap, onLongClick = { menuOpen = true })
-            .padding(4.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        val bmp = iconBitmap
-        if (bmp != null) {
-            Image(
-                bitmap = bmp,
-                contentDescription = label,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Text(
-                label,
-                color = if (worn) BronzeLight else Bone,
-                fontSize = 10.sp,
-                fontFamily = MwBody,
-                textAlign = TextAlign.Center,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-                lineHeight = 11.sp
-            )
-        }
-        if (count > 1) {
-            Text(
-                "$count",
-                color = BoneDim,
-                fontSize = 9.sp,
-                fontFamily = MwData,
-                modifier = Modifier.align(Alignment.BottomEnd)
-            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
         }
 
         DropdownMenu(
@@ -714,7 +943,6 @@ private fun ItemCell(
             border = BorderStroke(1.dp, Bronze),
             shape = RoundedCornerShape(3.dp)
         ) {
-            // Item name header
             Text(
                 label,
                 color = BronzeLight,
@@ -724,25 +952,37 @@ private fun ItemCell(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
-
             val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
             if (worn || equippable) {
                 DropdownMenuItem(
                     text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = { menuOpen = false; onEquipToggle() },
+                    onClick = {
+                        menuOpen = false
+                        val target = item.stackId.ifEmpty { item.id }
+                        if (worn) CompanionActions.unequipItem(target)
+                        else CompanionActions.equipItem(target)
+                    },
                     colors = menuItemColors
                 )
             }
             if (readable) {
                 DropdownMenuItem(
                     text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = { menuOpen = false; onRead() },
+                    onClick = { menuOpen = false; CompanionActions.readItem(item.id) },
                     colors = menuItemColors
                 )
             }
             DropdownMenuItem(
+                text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = {
+                    menuOpen = false
+                    FavouritesRepository.assignGear(context, FavSlot(item.id, label))
+                },
+                colors = menuItemColors
+            )
+            DropdownMenuItem(
                 text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; onDrop() },
+                onClick = { menuOpen = false; CompanionActions.dropItem(item.id, item.count) },
                 colors = menuItemColors
             )
         }
@@ -767,6 +1007,7 @@ private fun SpellSectionHeader(title: String) {
 @Composable
 private fun MagicPanel(state: GameState) {
     val sel = state.selectedSpell
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -830,7 +1071,12 @@ private fun MagicPanel(state: GameState) {
                         items(powers) { spell ->
                             SpellRow(
                                 title = spell.displayName(),
-                                selected = spell.id == sel
+                                selected = spell.id == sel,
+                                onAddToFavourites = {
+                                    FavouritesRepository.assignMagic(
+                                        context, FavSlot(spell.id, spell.displayName())
+                                    )
+                                }
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -841,7 +1087,12 @@ private fun MagicPanel(state: GameState) {
                         items(spells) { spell ->
                             SpellRow(
                                 title = spell.displayName(),
-                                selected = spell.id == sel
+                                selected = spell.id == sel,
+                                onAddToFavourites = {
+                                    FavouritesRepository.assignMagic(
+                                        context, FavSlot(spell.id, spell.displayName())
+                                    )
+                                }
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -852,7 +1103,12 @@ private fun MagicPanel(state: GameState) {
                         items(scrolls) { spell ->
                             SpellRow(
                                 title = spell.displayName(),
-                                selected = false
+                                selected = false,
+                                onAddToFavourites = {
+                                    FavouritesRepository.assignMagic(
+                                        context, FavSlot(spell.id, spell.displayName())
+                                    )
+                                }
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -862,23 +1118,60 @@ private fun MagicPanel(state: GameState) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SpellRow(title: String, selected: Boolean = false, onTap: () -> Unit) {
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(if (selected) SlotWorn else Color.Transparent)
-                .clickable { onTap() }
-                .padding(horizontal = 8.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(title, color = if (selected) BronzeLight else Bone,
-                fontSize = 15.sp, fontFamily = MwBody,
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+private fun SpellRow(
+    title: String,
+    selected: Boolean = false,
+    onAddToFavourites: (() -> Unit)? = null,
+    onTap: () -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Box {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(if (selected) SlotWorn else Color.Transparent)
+                    .combinedClickable(
+                        onClick = onTap,
+                        onLongClick = { if (onAddToFavourites != null) menuOpen = true }
+                    )
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    title, color = if (selected) BronzeLight else Bone,
+                    fontSize = 15.sp, fontFamily = MwBody,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+        if (onAddToFavourites != null) {
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+                containerColor = StonePanel,
+                shadowElevation = 0.dp,
+                border = BorderStroke(1.dp, Bronze),
+                shape = RoundedCornerShape(3.dp)
+            ) {
+                Text(
+                    title,
+                    color = BronzeLight, fontSize = 12.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+                DropdownMenuItem(
+                    text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
+                    onClick = { menuOpen = false; onAddToFavourites() },
+                    colors = MenuDefaults.itemColors(textColor = Bone)
+                )
+            }
+        }
     }
 }
 
@@ -1128,6 +1421,35 @@ private fun prettifyQuestId(id: String): String {
 private fun EmptyPanel(message: String) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(message, color = BoneDim, fontSize = 15.sp, fontFamily = MwBody)
+    }
+}
+
+/* ---- Stats (placeholder) ---- */
+
+@Composable
+private fun StatsPanel() {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+    ) {
+        Column(
+            Modifier.fillMaxSize().mwPanel().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                "Stats",
+                color = Bone, fontSize = 20.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Coming soon",
+                color = BoneDim, fontSize = 13.sp, fontFamily = MwBody,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }
 

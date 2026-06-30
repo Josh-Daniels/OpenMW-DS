@@ -137,22 +137,50 @@ extern "C" void companionDeliverMapTexture(
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.
-// iconPath is the VFS-normalized path (e.g. "icons/m/misc_shirt_01.dds").
+// iconPath is the raw ESM icon path (may use backslashes; VFS::Path::Normalized handles it).
 // outputPath is an absolute filesystem path for the PNG output.
 extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_exportIconToPng(
     JNIEnv* env, jclass /*cls*/, jstring jIconPath, jstring jOutputPath)
 {
     Resource::ResourceSystem* rs = MWBase::Environment::get().getResourceSystem();
-    if (!rs) return;
+    if (!rs) {
+        Log(Debug::Error) << "exportIconToPng: ResourceSystem not available";
+        return;
+    }
 
     const char* iconPath   = env->GetStringUTFChars(jIconPath,   nullptr);
     const char* outputPath = env->GetStringUTFChars(jOutputPath, nullptr);
 
+    Log(Debug::Info) << "exportIconToPng: '" << iconPath << "' -> '" << outputPath << "'";
+
     try {
-        osg::ref_ptr<osg::Image> image = rs->getImageManager()->getImage(
-            VFS::Path::Normalized(iconPath));
-        osgDB::writeImageFile(*image, outputPath);
+        VFS::Path::Normalized normalized(iconPath);
+        osg::ref_ptr<osg::Image> image = rs->getImageManager()->getImage(normalized);
+        if (!image) {
+            Log(Debug::Warning) << "exportIconToPng: image not found for '" << iconPath << "'";
+            env->ReleaseStringUTFChars(jIconPath,   iconPath);
+            env->ReleaseStringUTFChars(jOutputPath, outputPath);
+            return;
+        }
+
+        if (image->isCompressed()) {
+            // DXT/S3TC compressed — PNG writer cannot handle these.
+            // Log the pixel format so we know if this is a real issue.
+            Log(Debug::Warning) << "exportIconToPng: skipping compressed image '"
+                << iconPath << "' (pixelFormat=0x" << std::hex << image->getPixelFormat() << ")";
+            env->ReleaseStringUTFChars(jIconPath,   iconPath);
+            env->ReleaseStringUTFChars(jOutputPath, outputPath);
+            return;
+        }
+
+        bool ok = osgDB::writeImageFile(*image, outputPath);
+        if (!ok) {
+            Log(Debug::Warning) << "exportIconToPng: writeImageFile returned false for '"
+                << outputPath << "' (pixelFormat=0x" << std::hex << image->getPixelFormat() << ")";
+        } else {
+            Log(Debug::Info) << "exportIconToPng: wrote '" << outputPath << "'";
+        }
     } catch (const std::exception& e) {
         Log(Debug::Error) << "exportIconToPng '" << iconPath << "': " << e.what();
     }

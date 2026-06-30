@@ -14,6 +14,8 @@ data class Vec3(val x: Float, val y: Float, val z: Float)
 
 data class InventoryItem(
     val id: String,
+    /** Per-stack instance identifier (OpenMW item.id); empty if unavailable. */
+    val stackId: String = "",
     val name: String = "",
     val count: Int = 1,
     val category: String = "misc",
@@ -25,6 +27,8 @@ data class SpellEntry(
     val name: String = "",
     val type: String = "spell"
 )
+
+data class ActiveEffect(val name: String, val harmful: Boolean)
 
 data class JournalEntry(
     val questId: String,
@@ -53,6 +57,7 @@ data class GameState(
     val inventory: List<InventoryItem> = emptyList(),
     val equipment: Map<String, String> = emptyMap(),
     val selectedSpell: String? = null,
+    val activeEffects: List<ActiveEffect> = emptyList(),
     val journalEntries: List<JournalEntry> = emptyList(),
     /** Wall-clock time we last parsed a STATS line; 0 = no data yet. */
     val lastUpdateMs: Long = 0L

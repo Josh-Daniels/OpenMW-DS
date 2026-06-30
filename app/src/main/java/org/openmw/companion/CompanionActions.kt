@@ -21,10 +21,12 @@ object CompanionActions {
     fun refreshJournal() = runCommand("CMP:journal")
 
     fun exportIconToPng(iconPath: String, outputPath: String) {
+        Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {
             EngineActivity.exportIconToPng(iconPath, outputPath)
+            Log.d(TAG, "exportIconToPng returned for '$iconPath'")
         } catch (t: Throwable) {
-            Log.e(TAG, "exportIconToPng failed for $iconPath", t)
+            Log.e(TAG, "exportIconToPng threw for '$iconPath'", t)
         }
     }
 

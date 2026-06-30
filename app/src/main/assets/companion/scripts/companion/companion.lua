@@ -51,6 +51,15 @@ local function exportStats()
     local magicka = types.Actor.stats.dynamic.magicka(self)
     local fatigue = types.Actor.stats.dynamic.fatigue(self)
     local cell = self.cell and self.cell.name or ""
+    if cell == "" and self.cell then
+        pcall(function()
+            local regionId = self.cell.region
+            if regionId then
+                local reg = core.regions.records[regionId]
+                if reg and reg.name and reg.name ~= "" then cell = reg.name end
+            end
+        end)
+    end
     local pos = self.position
 
     local isExt = self.cell and self.cell.isExterior or false
@@ -151,17 +160,194 @@ local function itemCategory(item)
                 local rec = types.Book.record(item)
                 if rec.isScroll then return "scroll" end
                 return "book"
+    elseif types.Potion.objectIsInstance(item) then return "potion"
+    elseif types.Ingredient.objectIsInstance(item) then return "ingredient"
     else return "misc" end
 end
 
+-- Returns a stable per-stack instance identifier (distinct from recordId so
+-- two stacks of the same item type can be told apart). Uses item.id (OpenMW
+-- instance RefId). Falls back to "" if the API is unavailable.
+local function stackId(item)
+    local ok, v = pcall(function() return tostring(item.id) end)
+    if ok and v and v ~= "" then return v end
+    return ""
+end
+
+local lastActiveEffectsStr = nil
+local effectsDiagDone = false
+
+-- Attribute and skill IDs used as second param for parameterized effects.
+local ATTR_IDS = {"strength","intelligence","willpower","agility","speed","endurance","personality","luck"}
+local SKILL_IDS = {
+    "acrobatics","alchemy","alteration","armorer","athletics","axe","block","bluntweapon",
+    "conjuration","destruction","enchant","handtohand","heavyarmor","illusion","lightarmor",
+    "longblade","marksman","mediumarmor","mercantile","mysticism","restoration","security",
+    "shortblade","sneak","spear","speechcraft","unarmored"
+}
+-- Effects that require a second param and are handled explicitly below.
+local ATTR_EFFECT_IDS = {"absorbattribute","damageattribute","drainattribute","fortifyattribute","restoreattribute"}
+local SKILL_EFFECT_IDS = {"absorbskill","damageskill","drainskill","fortifyskill","restoreskill"}
+
+local function exportActiveEffects()
+    local parts = {}
+    local effectsObj = types.Actor.activeEffects(self)
+
+    -- One-shot diagnostic: understand what's actually iterable.
+    if not effectsDiagDone then
+        effectsDiagDone = true
+        -- Can we pairs() over EFFECT_TYPE?
+        local d1 = {}
+        local ok1 = pcall(function()
+            local n = 0
+            for k, v in pairs(core.magic.EFFECT_TYPE) do
+                n = n + 1
+                if n <= 5 then d1[#d1+1] = tostring(k)..':'..type(v)..':'..tostring(v) end
+            end
+            d1[#d1+1] = 'n='..n
+        end)
+        print('COMPANION_DEBUG_EFFECT: EFFECT_TYPE ok='..tostring(ok1)..' '..table.concat(d1,'|'))
+        -- Can we pairs() over effects.records?
+        local d2 = {}
+        local ok2 = pcall(function()
+            local n = 0
+            for k, _ in pairs(core.magic.effects.records) do
+                n = n + 1
+                if n <= 5 then d2[#d2+1] = type(k)..':'..tostring(k) end
+            end
+            d2[#d2+1] = 'n='..n
+        end)
+        print('COMPANION_DEBUG_EFFECT: records ok='..tostring(ok2)..' '..table.concat(d2,'|'))
+        -- Does getEffect return an object with magnitude, and what is it for a known ID?
+        pcall(function()
+            local p = effectsObj:getEffect('restorehealth')
+            print('COMPANION_DEBUG_EFFECT: getEffect restorehealth type='..type(p)
+                ..' nil='..(p==nil and 'y' or 'n')
+                ..' mag='..tostring(p and p.magnitude))
+        end)
+        -- getEffect with attribute param
+        pcall(function()
+            local p = effectsObj:getEffect('fortifyattribute','strength')
+            print('COMPANION_DEBUG_EFFECT: fortifyattr/strength type='..type(p)
+                ..' mag='..tostring(p and p.magnitude))
+        end)
+    end
+
+    -- Mark which effectIds are handled as parameterized (skip in non-param loop).
+    local paramSet = {}
+    for _, e in ipairs(ATTR_EFFECT_IDS) do paramSet[e] = true end
+    for _, e in ipairs(SKILL_EFFECT_IDS) do paramSet[e] = true end
+
+    -- Collect non-parameterized active effects.
+    -- Strategy: build a list of effectIds from EFFECT_TYPE (preferred) or records.
+    -- IMPORTANT: getEffect() always returns a non-nil ActiveEffect — check magnitude > 0
+    -- to distinguish genuinely active effects from inactive defaults.
+    local effectIds = {}
+
+    -- Try EFFECT_TYPE: if values are strings they ARE the effectIds; otherwise try keys.
+    local gotFromType = false
+    pcall(function()
+        for k, v in pairs(core.magic.EFFECT_TYPE) do
+            if type(v) == 'string' then
+                effectIds[#effectIds+1] = v
+            elseif type(k) == 'string' then
+                effectIds[#effectIds+1] = k:lower()
+            end
+        end
+        gotFromType = #effectIds > 0
+    end)
+
+    -- Fallback: keys of effects.records.
+    if not gotFromType then
+        pcall(function()
+            for k, _ in pairs(core.magic.effects.records) do
+                effectIds[#effectIds+1] = tostring(k)
+            end
+        end)
+    end
+
+    for _, eid in ipairs(effectIds) do
+        if not paramSet[eid] then
+            pcall(function()
+                local p = effectsObj:getEffect(eid)
+                if p and p.magnitude > 0 then
+                    local rec = core.magic.effects.records[eid]
+                    local name = (rec and rec.name and rec.name ~= '') and rec.name or eid
+                    local harmful = (rec and rec.harmful) or false
+                    parts[#parts+1] = string.format('{"name":"%s","harmful":%s}',
+                        jsonEscape(name), harmful and 'true' or 'false')
+                end
+            end)
+        end
+    end
+
+    local function cap(s) return s:sub(1,1):upper() .. s:sub(2) end
+
+    -- Attribute-parameterized effects (e.g. "Fortify Strength" = fortifyattribute + strength).
+    for _, eid in ipairs(ATTR_EFFECT_IDS) do
+        local rec = nil
+        pcall(function() rec = core.magic.effects.records[eid] end)
+        local baseName = (rec and rec.name and rec.name ~= '') and rec.name or eid
+        local harmful = (rec and rec.harmful) or false
+        for _, attr in ipairs(ATTR_IDS) do
+            pcall(function()
+                local p = effectsObj:getEffect(eid, attr)
+                if p and p.magnitude > 0 then
+                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s}',
+                        jsonEscape(baseName), cap(attr), harmful and 'true' or 'false')
+                end
+            end)
+        end
+    end
+
+    -- Skill-parameterized effects (e.g. "Fortify Acrobatics" = fortifyskill + acrobatics).
+    for _, eid in ipairs(SKILL_EFFECT_IDS) do
+        local rec = nil
+        pcall(function() rec = core.magic.effects.records[eid] end)
+        local baseName = (rec and rec.name and rec.name ~= '') and rec.name or eid
+        local harmful = (rec and rec.harmful) or false
+        for _, skill in ipairs(SKILL_IDS) do
+            pcall(function()
+                local p = effectsObj:getEffect(eid, skill)
+                if p and p.magnitude > 0 then
+                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s}',
+                        jsonEscape(baseName), cap(skill), harmful and 'true' or 'false')
+                end
+            end)
+        end
+    end
+
+    local str = table.concat(parts, ',')
+    if str == lastActiveEffectsStr then return end
+    lastActiveEffectsStr = str
+    print('COMPANION_ACTIVE_EFFECTS:['..str..']')
+end
+
+local iconDiagDone = false
+local stackDiagDone = false
 local function exportInventory()
     local parts = {}
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
         local ok, rec = pcall(function() return item.type.record(item) end)
         local icon = (ok and rec and rec.icon) or ""
+        local sid = stackId(item)
+        if not iconDiagDone and ok and rec then
+            iconDiagDone = true
+            local keys = {}
+            for k, _ in pairs(rec) do keys[#keys+1] = tostring(k) end
+            print('COMPANION_DEBUG_ICON: id=' .. tostring(item.recordId)
+                .. ' icon=' .. tostring(rec.icon)
+                .. ' keys=' .. table.concat(keys, ','))
+        end
+        if not stackDiagDone then
+            stackDiagDone = true
+            print('COMPANION_DEBUG_STACK: recordId=' .. tostring(item.recordId)
+                .. ' sid=' .. tostring(sid)
+                .. ' same=' .. tostring(sid == item.recordId))
+        end
         table.insert(parts, string.format(
-            '{"id":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s"}',
-            jsonEscape(item.recordId), jsonEscape(itemName(item)),
+            '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s"}',
+            jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
             item.count, itemCategory(item), jsonEscape(icon)))
     end
     print('COMPANION_INVENTORY:[' .. table.concat(parts, ',') .. ']')
@@ -171,8 +357,12 @@ local function exportEquipment()
     local parts = {}
     for slot, item in pairs(types.Actor.getEquipment(self)) do
         local slotName = SLOT_NAMES[slot] or ("slot" .. tostring(slot))
+        local sid = stackId(item)
+        -- Prefer instance id so Kotlin can match the exact equipped stack;
+        -- fall back to recordId so the slot is never empty.
+        local slotVal = (sid ~= "") and sid or item.recordId
         table.insert(parts, string.format(
-            '"%s":"%s"', slotName, jsonEscape(item.recordId)))
+            '"%s":"%s"', slotName, jsonEscape(slotVal)))
     end
     print('COMPANION_EQUIPMENT:{' .. table.concat(parts, ',') .. '}')
 end
@@ -301,29 +491,43 @@ local function slotForItem(item, currentEquip)
     return nil
 end
 
-local function equipItem(itemId)
-    local item = types.Actor.inventory(self):find(itemId)
-    if not item then
-        print("COMPANION_DEBUG: equip - not found: " .. itemId)
+local function equipItem(arg)
+    -- arg is preferably a per-stack instance id (from stackId()); fall back to
+    -- recordId so old clients still work.
+    local found = nil
+    for _, item in ipairs(types.Actor.inventory(self):getAll()) do
+        if stackId(item) == arg then
+            found = item
+            break
+        end
+    end
+    if not found then
+        -- Fallback: find by recordId (matches first stack when arg is a recordId).
+        found = types.Actor.inventory(self):find(arg)
+    end
+    if not found then
+        print("COMPANION_DEBUG: equip - not found: " .. arg)
         return
     end
     local equip = types.Actor.getEquipment(self)
-    local slot = slotForItem(item, equip)
+    local slot = slotForItem(found, equip)
     if slot == nil then
-        print("COMPANION_DEBUG: equip - no slot for: " .. itemId)
+        print("COMPANION_DEBUG: equip - no slot for: " .. arg)
         return
     end
-    equip[slot] = item
+    equip[slot] = found
     types.Actor.setEquipment(self, equip)
     playEquipSound(true)
-    print("COMPANION_DEBUG: equipped " .. itemId .. " -> slot " .. slot)
+    print("COMPANION_DEBUG: equipped " .. arg .. " -> slot " .. slot)
 end
 
-local function unequipItem(itemId)
+local function unequipItem(arg)
     local equip = types.Actor.getEquipment(self)
     local changed = false
     for slot, item in pairs(equip) do
-        if item.recordId == itemId then
+        local sid = stackId(item)
+        -- Match by instance id first; fall back to recordId for old clients.
+        if sid == arg or (sid == "" and item.recordId == arg) then
             equip[slot] = nil
             changed = true
         end
@@ -331,9 +535,9 @@ local function unequipItem(itemId)
     if changed then
         types.Actor.setEquipment(self, equip)
         playEquipSound(false)
-        print("COMPANION_DEBUG: unequipped " .. itemId)
+        print("COMPANION_DEBUG: unequipped " .. arg)
     else
-        print("COMPANION_DEBUG: unequip - not worn: " .. itemId)
+        print("COMPANION_DEBUG: unequip - not worn: " .. arg)
     end
 end
 
@@ -414,6 +618,7 @@ local function onUpdate(dt)
         exportSelectedSpell()
         exportInventory()
         exportEquipment()
+        exportActiveEffects()
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then
