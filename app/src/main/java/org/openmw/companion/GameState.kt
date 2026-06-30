@@ -40,6 +40,14 @@ data class GameState(
     val fatigue: Dynamic = Dynamic(0f, 0f),
     val cell: String = "—",
     val pos: Vec3 = Vec3(0f, 0f, 0f),
+    /** True when the player is in an exterior cell. */
+    val cellIsExterior: Boolean = false,
+    /** Exterior cell grid X coordinate (meaningful only when cellIsExterior). */
+    val cellGridX: Int = 0,
+    /** Exterior cell grid Y coordinate (meaningful only when cellIsExterior). */
+    val cellGridY: Int = 0,
+    /** Player yaw in radians (Z-axis Euler angle from self.rotation.z). */
+    val rotZ: Float = 0f,
     val spells: List<SpellEntry> = emptyList(),
     val inventory: List<InventoryItem> = emptyList(),
     val equipment: Map<String, String> = emptyMap(),

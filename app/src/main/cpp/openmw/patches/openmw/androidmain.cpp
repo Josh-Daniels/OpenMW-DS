@@ -37,6 +37,7 @@ int stderr = 0; // Hack: fix linker error
 static JavaVM*   g_companionVm     = nullptr;
 static jclass    g_companionClass  = nullptr;
 static jmethodID g_companionMethod = nullptr;
+static jmethodID g_mapTextureMethod = nullptr;
 
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
@@ -73,6 +74,8 @@ Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*
     g_companionClass  = static_cast<jclass>(env->NewGlobalRef(cls));
     g_companionMethod = env->GetStaticMethodID(g_companionClass, "onCompanionLine",
                                                "(Ljava/lang/String;)V");
+    g_mapTextureMethod = env->GetStaticMethodID(g_companionClass, "onCompanionMapTexture",
+                                                "(IIIII[B)V");
     env->DeleteLocalRef(cls);
 
     Debug::setLogListener([](Debug::Level, std::string_view /*prefix*/, std::string_view msg) {
@@ -105,6 +108,29 @@ Java_org_openmw_EngineActivity_sendCompanionCommand(JNIEnv* env, jclass /*cls*/,
         g_commandQueue.push_back(std::string(raw));
     }
     env->ReleaseStringUTFChars(jcmd, raw);
+}
+
+// Called from the OSG render thread (MapCaptureCallback in localmap.cpp) once per
+// cell entry with raw RGBA pixels from glReadPixels. Delivers to Kotlin via JNI.
+// segX/segY are the map segment grid coordinates; isInterior distinguishes interior
+// cells (where segments are 0,0 0,1 etc.) from exterior grid cells.
+extern "C" void companionDeliverMapTexture(
+    int width, int height, int segX, int segY, int isInterior, const unsigned char* rgba)
+{
+    if (!g_companionVm || !g_companionClass || !g_mapTextureMethod) return;
+
+    JNIEnv* e = nullptr;
+    g_companionVm->AttachCurrentThread(&e, nullptr);
+
+    const jsize size = static_cast<jsize>(width) * height * 4;
+    jbyteArray arr = e->NewByteArray(size);
+    if (!arr) return;
+
+    e->SetByteArrayRegion(arr, 0, size, reinterpret_cast<const jbyte*>(rgba));
+    e->CallStaticVoidMethod(g_companionClass, g_mapTextureMethod,
+                            (jint)width, (jint)height, (jint)segX, (jint)segY,
+                            (jint)isInterior, arr);
+    e->DeleteLocalRef(arr);
 }
 // -----------------------------------------------------------------------------
 

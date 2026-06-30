@@ -1,0 +1,92 @@
+--- a/apps/openmw/mwrender/localmap.cpp
++++ b/apps/openmw/mwrender/localmap.cpp
+@@ -3,3 +3,6 @@
+ #include <cstdint>
++#include <atomic>
++#include <cstring>
++#include <vector>
+ 
+ #include <osg/ComputeBoundsVisitor>
+@@ -33,6 +36,75 @@
+ #include "util.hpp"
+ #include "vismask.hpp"
+ 
++#ifdef __ANDROID__
++#include <GLES3/gl3.h>
++#endif
++
++extern "C" void companionDeliverMapTexture(int width, int height, int segX, int segY, int isInterior, const unsigned char* rgba);
++
++namespace
++{
++    struct MapCaptureCallback : public osg::Camera::DrawCallback
++    {
++        int mWidth;
++        int mHeight;
++        int mSegX;
++        int mSegY;
++        int mIsInterior;
++        mutable std::atomic<bool> mCaptured;
++        osg::ref_ptr<osg::Texture2D> mTexture;
++
++        MapCaptureCallback(int width, int height, int segX, int segY, bool isInterior, osg::Texture2D* texture)
++            : mWidth(width)
++            , mHeight(height)
++            , mSegX(segX)
++            , mSegY(segY)
++            , mIsInterior(isInterior ? 1 : 0)
++            , mCaptured(false)
++            , mTexture(texture)
++        {
++        }
++
++        void operator()(osg::RenderInfo& renderInfo) const override
++        {
++            bool expected = false;
++            if (!mCaptured.compare_exchange_strong(expected, true))
++                return;
++            if (!mTexture)
++            {
++                mCaptured.store(false);
++                return;
++            }
++
++            osg::State* state = renderInfo.getState();
++            osg::Texture::TextureObject* texObj = mTexture->getTextureObject(state->getContextID());
++            if (!texObj)
++            {
++                mCaptured.store(false);
++                return;
++            }
++
++            GLint prevFBO = 0;
++            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevFBO);
++
++            GLuint fbo = 0;
++            glGenFramebuffers(1, &fbo);
++            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
++            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texObj->id(), 0);
++
++            if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
++            {
++                std::vector<unsigned char> buf(static_cast<size_t>(mWidth) * mHeight * 4);
++                glReadPixels(0, 0, mWidth, mHeight, GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
++                companionDeliverMapTexture(mWidth, mHeight, mSegX, mSegY, mIsInterior, buf.data());
++            }
++
++            glBindFramebuffer(GL_READ_FRAMEBUFFER, prevFBO);
++            glDeleteFramebuffers(1, &fbo);
++        }
++    };
++}
++
+ namespace
+ {
+     float square(float val)
+@@ -179,2 +251,6 @@
+         segment.mMapTexture = static_cast<osg::Texture2D*>(mLocalMapRTTs.back()->getColorTexture(nullptr));
++        if (osg::Camera* cam = mLocalMapRTTs.back()->getCamera(nullptr))
++            cam->setPostDrawCallback(
++                new MapCaptureCallback(mMapResolution, mMapResolution, segmentX, segmentY, mInterior,
++                                       segment.mMapTexture));
+     }

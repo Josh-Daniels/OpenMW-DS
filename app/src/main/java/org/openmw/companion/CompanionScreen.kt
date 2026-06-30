@@ -64,8 +64,16 @@ import androidx.compose.foundation.Image
 import org.openmw.R
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.delay
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.time.Duration.Companion.milliseconds
+import android.graphics.Bitmap
+import org.openmw.Constants
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.rotate
+import kotlin.math.sin
+import kotlin.math.cos
 
 
 /**
@@ -135,6 +143,17 @@ fun CompanionScreen() {
     val state by GameStateRepository.state.collectAsState()
     var tab by remember { mutableStateOf(Tab.MAP) }
 
+    // Log-tail fallback: feeds GameStateRepository the same way the JNI sink does,
+    // so the UI works even if installCompanionSink() has a hiccup.
+    val scope = rememberCoroutineScope()
+    val logReader = remember {
+        LogReader("${Constants.USER_FILE_STORAGE}/config/openmw.log")
+    }
+    DisposableEffect(Unit) {
+        logReader.start(scope)
+        onDispose { logReader.stop() }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -164,44 +183,30 @@ fun CompanionScreen() {
                 .padding(12.dp)
         )
 
-        var splashVisible by remember { mutableStateOf(true) }
-
-        var now by remember { mutableStateOf(System.currentTimeMillis()) }
-        LaunchedEffect(Unit) {
-            while (true) {
-                delay(1000L.milliseconds)
-                now = System.currentTimeMillis()
-            }
-        }
-
-// "Live" = we've had a stats update recently. Don't require a non-empty cell here —
-// the cell legitimately blanks during exterior transitions, and that must not
-// count as "left the game". Use a generous window to ride out cell-load stalls.
-        val live = state.lastUpdateMs > 0L && (now - state.lastUpdateMs) < 30_000L
-
-        LaunchedEffect(live) {
-            if (live) {
-                delay(1500L.milliseconds)
-                splashVisible = false
-            } else {
-                splashVisible = true
-            }
-        }
-
-        if (splashVisible) {
-            SplashPanel()
-        }
+        // SPLASH DISABLED FOR TESTING — re-enable once map is verified working
+        // var splashVisible by remember { mutableStateOf(true) }
+        // LaunchedEffect(state.lastUpdateMs) {
+        //     if (state.lastUpdateMs > 0L && splashVisible) {
+        //         delay(500L.milliseconds)
+        //         splashVisible = false
+        //     }
+        // }
+        // if (splashVisible) {
+        //     SplashPanel(onDismiss = { splashVisible = false })
+        // }
     }
 }
 
 /* ---- Splash panel for when not in game ---- */
 @Composable
-private fun SplashPanel() {
+private fun SplashPanel(onDismiss: () -> Unit = {}) {
     Image(
         painter = painterResource(id = R.drawable.morrowind_splash),
         contentDescription = null,
         contentScale = ContentScale.Crop,
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(onClick = onDismiss)
     )
 }
 
@@ -354,34 +359,117 @@ private fun MapPanel(state: GameState) {
 }
 
 */
-/* ---- Map: coordinate readout (web/bundled map deferred) ---- */
+/* ---- Map: local-map texture from the engine + player direction arrow ---- */
 
 @Composable
 private fun MapPanel(state: GameState) {
+    val exteriorMaps by GameStateRepository.exteriorMapBitmaps.collectAsState()
+    val interiorMap  by GameStateRepository.interiorMapBitmap.collectAsState()
+
+    // Pick the bitmap matching the player's current cell.
+    val mapBitmap: Bitmap? = if (state.cellIsExterior) {
+        exteriorMaps[Pair(state.cellGridX, state.cellGridY)]
+    } else {
+        interiorMap
+    }
+
     Box(
         Modifier
             .fillMaxSize()
             .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
     ) {
         Column(
-            Modifier.fillMaxSize().mwPanel().padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            Modifier.fillMaxSize().mwPanel().padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Cell name header
             Text(
-                if (state.hasData) state.cell else "—",
-                color = Bone, fontSize = 24.sp, fontFamily = MwDisplay,
-                fontWeight = FontWeight.SemiBold
+                if (state.hasData) state.cell.ifEmpty { "Exterior" } else "—",
+                color = Bone, fontSize = 18.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(bottom = 6.dp)
             )
-            Spacer(Modifier.height(12.dp))
+
+            if (mapBitmap != null) {
+                // Compute player UV within the current cell.
+                // For exterior cells: each cell is Constants.CellSizeInUnits = 8192 world units wide.
+                // The map texture covers exactly one cell's worth of terrain.
+                val cellSize = 8192f
+                val (playerU, playerV) = if (state.cellIsExterior) {
+                    val u = (state.pos.x - state.cellGridX * cellSize) / cellSize
+                    // v=0 is top (North) in our flipped bitmap; South (low Y) → v near 1
+                    val v = 1f - (state.pos.y - state.cellGridY * cellSize) / cellSize
+                    Pair(u.coerceIn(0f, 1f), v.coerceIn(0f, 1f))
+                } else {
+                    // Interior: place the arrow at the center of the map.
+                    Pair(0.5f, 0.5f)
+                }
+
+                // rotZ=0 → North, East=+π/2. Canvas.rotate() is clockwise, so +rotZ → right = East.
+                val arrowDeg = (state.rotZ * (180f / Math.PI.toFloat()))
+
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    Image(
+                        bitmap = mapBitmap.asImageBitmap(),
+                        contentDescription = "Local map",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Canvas(Modifier.fillMaxSize()) {
+                        val bitmapAspect = mapBitmap.width.toFloat() / mapBitmap.height
+                        val canvasAspect = size.width / size.height
+                        // Compute the actual rendered region of the image (ContentScale.Fit).
+                        val (imgW, imgH) = if (bitmapAspect > canvasAspect) {
+                            Pair(size.width, size.width / bitmapAspect)
+                        } else {
+                            Pair(size.height * bitmapAspect, size.height)
+                        }
+                        val imgLeft = (size.width - imgW) / 2f
+                        val imgTop  = (size.height - imgH) / 2f
+
+                        val arrowX = imgLeft + playerU * imgW
+                        val arrowY = imgTop  + playerV * imgH
+                        val r = imgW.coerceAtMost(imgH) * 0.04f  // arrow radius ~4% of image
+
+                        rotate(degrees = arrowDeg, pivot = Offset(arrowX, arrowY)) {
+                            // Filled arrow pointing UP (toward decreasing Y = North on map)
+                            val path = androidx.compose.ui.graphics.Path().apply {
+                                moveTo(arrowX, arrowY - r * 1.8f)         // tip
+                                lineTo(arrowX - r * 0.7f, arrowY + r * 0.6f) // bottom-left
+                                lineTo(arrowX,             arrowY + r * 0.1f) // center indent
+                                lineTo(arrowX + r * 0.7f, arrowY + r * 0.6f) // bottom-right
+                                close()
+                            }
+                            drawPath(path, color = androidx.compose.ui.graphics.Color(0xFFFFD700))
+                            drawPath(path, color = androidx.compose.ui.graphics.Color(0xFF000000),
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = r * 0.25f))
+                        }
+                    }
+                }
+            } else {
+                // No map texture received yet — show a placeholder.
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        if (state.hasData) "Loading map…" else "—",
+                        color = BronzeDark, fontSize = 13.sp, fontFamily = MwBody
+                    )
+                }
+            }
+
+            // Coordinates footer
             Text(
-                "x ${state.pos.x.toInt()}    y ${state.pos.y.toInt()}    z ${state.pos.z.toInt()}",
-                color = BoneDim, fontSize = 14.sp, fontFamily = MwData
-            )
-            Spacer(Modifier.height(20.dp))
-            Text(
-                "Local map to be inscribed here",
-                color = BronzeDark, fontSize = 12.sp, fontFamily = MwBody
+                "x ${state.pos.x.toInt()}  y ${state.pos.y.toInt()}  z ${state.pos.z.toInt()}",
+                color = BoneDim, fontSize = 12.sp, fontFamily = MwData,
+                modifier = Modifier.padding(top = 6.dp)
             )
         }
     }

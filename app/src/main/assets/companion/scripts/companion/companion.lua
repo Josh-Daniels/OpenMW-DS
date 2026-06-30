@@ -52,13 +52,27 @@ local function exportStats()
     local fatigue = types.Actor.stats.dynamic.fatigue(self)
     local cell = self.cell and self.cell.name or ""
     local pos = self.position
+
+    local isExt = self.cell and self.cell.isExterior or false
+    local gx, gy = 0, 0
+    if isExt then
+        pcall(function() gx = self.cell.gridX end)
+        pcall(function() gy = self.cell.gridY end)
+    end
+
+    local rotZ = 0
+    pcall(function() rotZ = self.rotation:getYaw() end)
+
     print(string.format(
-        'COMPANION_STATS:{"health":{"current":%.1f,"max":%.1f},"magicka":{"current":%.1f,"max":%.1f},"fatigue":{"current":%.1f,"max":%.1f},"cell":"%s","pos":{"x":%.1f,"y":%.1f,"z":%.1f}}',
+        'COMPANION_STATS:{"health":{"current":%.1f,"max":%.1f},"magicka":{"current":%.1f,"max":%.1f},"fatigue":{"current":%.1f,"max":%.1f},"cell":"%s","pos":{"x":%.1f,"y":%.1f,"z":%.1f},"cellExt":%s,"cellGX":%d,"cellGY":%d,"rotZ":%.5f}',
         health.current, health.base,
         magicka.current, magicka.base,
         fatigue.current, fatigue.base,
         jsonEscape(cell),
-        pos.x, pos.y, pos.z
+        pos.x, pos.y, pos.z,
+        isExt and "true" or "false",
+        gx, gy,
+        rotZ
     ))
 end
 

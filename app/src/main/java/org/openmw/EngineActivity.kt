@@ -541,6 +541,16 @@ class EngineActivity : SDLActivity() {
             GameStateRepository.onRawLine(line)
         }
 
+        /**
+         * Called from the OSG render thread once per cell entry with raw RGBA pixels
+         * from glReadPixels. width/height are in pixels; segX/segY are the map segment
+         * grid coordinates; isInterior is 1 for interior cells, 0 for exterior.
+         */
+        @JvmStatic
+        fun onCompanionMapTexture(width: Int, height: Int, segX: Int, segY: Int, isInterior: Int, rgba: ByteArray) {
+            GameStateRepository.onMapTexture(width, height, segX, segY, isInterior, rgba)
+        }
+
         /** Queues a CMP: command for delivery to Lua on the engine thread. */
         @JvmStatic
         external fun sendCompanionCommand(cmd: String)

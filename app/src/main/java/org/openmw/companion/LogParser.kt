@@ -78,6 +78,10 @@ object LogParser {
                 p.getDouble("y").toFloat(),
                 p.getDouble("z").toFloat()
             ),
+            cellIsExterior = o.optBoolean("cellExt", false),
+            cellGridX = o.optInt("cellGX", 0),
+            cellGridY = o.optInt("cellGY", 0),
+            rotZ = o.optDouble("rotZ", 0.0).toFloat(),
             lastUpdateMs = System.currentTimeMillis()
         )
     }
