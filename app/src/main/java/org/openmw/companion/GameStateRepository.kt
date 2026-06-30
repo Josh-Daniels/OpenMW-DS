@@ -18,4 +18,10 @@ object GameStateRepository {
     fun update(transform: (GameState) -> GameState) {
         _state.update(transform)
     }
+
+    /** Called from JNI on the engine thread for every COMPANION_* log line. */
+    fun onRawLine(line: String) {
+        val trimmed = line.trimEnd()
+        _state.update { cur -> LogParser.parseLine(trimmed, cur) ?: cur }
+    }
 }

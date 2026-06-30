@@ -167,7 +167,7 @@ local function playEquipSound(equipping)
     end
 end
 
--- ===== Inbound actions (CMP: channel) =====
+-- ===== Inbound actions =====
 
 -- Best-effort slot lookup for equipping. This is the part most likely to
 -- need tweaking if some item types don't equip — watch the COMPANION_DEBUG log.
@@ -243,40 +243,37 @@ local function unequipItem(itemId)
     end
 end
 
-local function onConsoleCommand(mode, command)
-    if mode ~= "Companion" then return end
+local function dispatchCommand(command)
     if string.sub(command, 1, 4) ~= "CMP:" then return end
     local payload = string.sub(command, 5)
     local action, arg = string.match(payload, "^(%S+)%s+(.+)$")
     if not action then return end
 
     if action == "spell" then
-            -- Try as a real spell record first
-            local spell = core.magic.spells.records[arg]
-            if spell then
-                types.Actor.setSelectedSpell(self, spell)
+        local spell = core.magic.spells.records[arg]
+        if spell then
+            types.Actor.setSelectedSpell(self, spell)
+            ambient.playSound("Menu Click")
+            print("COMPANION_DEBUG: selected spell " .. arg)
+        else
+            local item = types.Actor.inventory(self):find(arg)
+            if item and types.Book.objectIsInstance(item)
+                    and types.Book.record(item).isScroll then
+                types.Actor.setSelectedEnchantedItem(self, item)
                 ambient.playSound("Menu Click")
-                print("COMPANION_DEBUG: selected spell " .. arg)
+                print("COMPANION_DEBUG: selected scroll " .. arg)
             else
-                -- Try as a scroll item in inventory
-                local item = types.Actor.inventory(self):find(arg)
-                if item and types.Book.objectIsInstance(item)
-                        and types.Book.record(item).isScroll then
-                    types.Actor.setSelectedEnchantedItem(self, item)
-                    ambient.playSound("Menu Click")
-                    print("COMPANION_DEBUG: selected scroll " .. arg)
-                else
-                    print("COMPANION_DEBUG: spell/scroll not found: " .. arg)
-                end
+                print("COMPANION_DEBUG: spell/scroll not found: " .. arg)
             end
-            exportSelectedSpell()
+        end
+        exportSelectedSpell()
     elseif action == "equip" then
         equipItem(arg)
-	exportEquipment()
+        exportEquipment()
         exportInventory()
     elseif action == "unequip" then
         unequipItem(arg)
-	exportEquipment()
+        exportEquipment()
         exportInventory()
     elseif action == "drop" then
         local id, countStr = string.match(arg, "^(.+)|(%d+)$")
@@ -284,17 +281,22 @@ local function onConsoleCommand(mode, command)
             core.sendGlobalEvent('CompanionDropItem',
                 { actor = self.object, itemId = id, count = tonumber(countStr) })
             print("COMPANION_DEBUG: drop " .. id .. " x" .. countStr)
-	exportInventory()
+            exportInventory()
         end
     elseif action == "read" then
-            local item = types.Actor.inventory(self):find(arg)
-            if item and types.Book.objectIsInstance(item) then
-                self:sendEvent('AddUiMode', { mode = 'Book', target = item })
-                print("COMPANION_DEBUG: reading " .. arg)
-            else
-                print("COMPANION_DEBUG: read - book not found: " .. arg)
-            end
+        local item = types.Actor.inventory(self):find(arg)
+        if item and types.Book.objectIsInstance(item) then
+            self:sendEvent('AddUiMode', { mode = 'Book', target = item })
+            print("COMPANION_DEBUG: reading " .. arg)
+        else
+            print("COMPANION_DEBUG: read - book not found: " .. arg)
+        end
     end
+end
+
+local function onConsoleCommand(mode, command)
+    if mode ~= "Companion" then return end
+    dispatchCommand(command)
 end
 
 -- ===== Handlers =====
@@ -309,7 +311,7 @@ local function onUpdate(dt)
     if slowTimer >= SLOW_INTERVAL then
         slowTimer = 0
         exportSpells()
-	exportSelectedSpell()
+        exportSelectedSpell()
         exportInventory()
         exportEquipment()
     end
@@ -317,13 +319,12 @@ end
 
 local function onActive()
     ui.setConsoleMode("Companion")
-    print("COMPANION_DEBUG: companion console mode active")
 end
 
 return {
     engineHandlers = {
         onUpdate = onUpdate,
         onActive = onActive,
-        onConsoleCommand = onConsoleCommand
+        onConsoleCommand = onConsoleCommand,
     }
 }

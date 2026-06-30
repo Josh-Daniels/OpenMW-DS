@@ -10,7 +10,6 @@ import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import org.openmw.companion.CompanionScreen
 import org.openmw.companion.GameStateRepository
-import org.openmw.companion.LogReader
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -115,11 +114,11 @@ class EngineActivity : SDLActivity() {
     private external fun getPathToJni(path_global: String, path_user: String)
 
     // For MorrowindDS
-    private val companionLogReader = LogReader("/storage/emulated/0/Alpha3/config/openmw.log")
     private var companionPresentation: Presentation? = null
 
     external fun getLastResourceName(): String
     external fun initAlpha3()
+    private external fun installCompanionSink()
 
     init {
         System.loadLibrary("Alpha3")
@@ -162,8 +161,7 @@ class EngineActivity : SDLActivity() {
 
         // MorrowindDS
         companionPresentation?.dismiss()
-        companionLogReader.stop()
-        
+
         finishAffinity() // kill all activity
         Process.killProcess(Process.myPid())
 //        exitProcess(0)
@@ -536,6 +534,16 @@ class EngineActivity : SDLActivity() {
 
         var resolutionX = 0
         var resolutionY = 0
+
+        /** Called from native (engine thread) for every COMPANION_* log line. */
+        @JvmStatic
+        fun onCompanionLine(line: String) {
+            GameStateRepository.onRawLine(line)
+        }
+
+        /** Queues a CMP: command for delivery to Lua on the engine thread. */
+        @JvmStatic
+        external fun sendCompanionCommand(cmd: String)
     }
 
     fun findHapticForSound(name: String): HapticEffect? {
@@ -601,8 +609,9 @@ class EngineActivity : SDLActivity() {
             return
         }
 
-        // Start reading the engine's log so GameStateRepository gets populated
-        companionLogReader.start(lifecycleScope)
+        // Install in-process log sink so COMPANION_* lines go directly to Kotlin.
+        runCatching { installCompanionSink() }
+            .onFailure { Log.e(TAG, "installCompanionSink failed", it) }
 
         val presentation = Presentation(this, displays[0])
         val composeView = ComposeView(presentation.context).apply {

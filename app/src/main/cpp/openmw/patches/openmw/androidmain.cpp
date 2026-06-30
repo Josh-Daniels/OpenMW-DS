@@ -4,22 +4,107 @@ int stderr = 0; // Hack: fix linker error
 
 #include "SDL_main.h"
 #include "engine.hpp"
+#include "mwbase/environment.hpp"
+#include "mwbase/luamanager.hpp"
 #include "mwbase/windowmanager.hpp"
 #include "mwsound/soundbridge.hpp"
+#include "mwworld/ptr.hpp"
 #include <SDL_events.h>
 #include <SDL_gamecontroller.h>
 #include <SDL_hints.h>
 #include <SDL_mouse.h>
 #include <components/vfs/pathutil.hpp>
+#include <components/debug/debugging.hpp>
 
 #include <osg/GraphicsContext>
 #include <osg/OperationThread>
+
+#include <atomic>
+#include <deque>
+#include <mutex>
+#include <string>
 
 /*******************************************************************************
  * Functions called by JNI
  *******************************************************************************/
 
 #include <jni.h>
+
+// --- In-process companion log sink -------------------------------------------
+// Intercepts COMPANION_* lines written by the Lua mod and delivers them to
+// Kotlin without touching openmw.log at all.
+
+static JavaVM*   g_companionVm     = nullptr;
+static jclass    g_companionClass  = nullptr;
+static jmethodID g_companionMethod = nullptr;
+
+// --- Companion command queue -------------------------------------------------
+// JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
+// g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
+// guaranteeing Lua is fully initialized before we ever call handleConsoleCommand.
+
+static std::deque<std::string>         g_commandQueue;
+static std::mutex                      g_commandMutex;
+static std::atomic<MWBase::LuaManager*> g_luaManagerPtr{nullptr};
+
+// Called from InputWrapper::capture() every frame on the engine thread.
+void drainCompanionCommands()
+{
+    MWBase::LuaManager* lua = g_luaManagerPtr.load(std::memory_order_acquire);
+    if (!lua) return;
+
+    std::deque<std::string> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_commandMutex);
+        if (g_commandQueue.empty()) return;
+        pending.swap(g_commandQueue);
+    }
+
+    for (auto& cmd : pending)
+        lua->handleConsoleCommand("Companion", cmd, MWWorld::Ptr());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*/)
+{
+    env->GetJavaVM(&g_companionVm);
+
+    jclass cls = env->FindClass("org/openmw/EngineActivity");
+    g_companionClass  = static_cast<jclass>(env->NewGlobalRef(cls));
+    g_companionMethod = env->GetStaticMethodID(g_companionClass, "onCompanionLine",
+                                               "(Ljava/lang/String;)V");
+    env->DeleteLocalRef(cls);
+
+    Debug::setLogListener([](Debug::Level, std::string_view /*prefix*/, std::string_view msg) {
+        // Cache LuaManager once Lua is provably running (first stats export).
+        if (!g_luaManagerPtr.load(std::memory_order_relaxed)
+                && msg.find("COMPANION_STATS") != std::string_view::npos) {
+            MWBase::LuaManager* lm = MWBase::Environment::get().getLuaManager();
+            g_luaManagerPtr.store(lm, std::memory_order_release);
+        }
+
+        if (g_companionMethod == nullptr) return;
+        if (msg.find("COMPANION_") == std::string_view::npos) return;
+
+        JNIEnv* e = nullptr;
+        g_companionVm->AttachCurrentThread(&e, nullptr);
+        jstring s = e->NewStringUTF(std::string(msg).c_str());
+        e->CallStaticVoidMethod(g_companionClass, g_companionMethod, s);
+        e->DeleteLocalRef(s);
+    });
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_sendCompanionCommand(JNIEnv* env, jclass /*cls*/, jstring jcmd)
+{
+    const char* raw = env->GetStringUTFChars(jcmd, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(g_commandMutex);
+        g_commandQueue.push_back(std::string(raw));
+    }
+    env->ReleaseStringUTFChars(jcmd, raw);
+}
+// -----------------------------------------------------------------------------
 
 /* Called before  to initialize JNI bindings  */
 

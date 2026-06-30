@@ -1,13 +1,10 @@
+@file:OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
+
 package org.openmw.companion
 
 import android.util.Log
-import org.openmw.utils.automateCommands
+import org.openmw.EngineActivity
 
-/**
- * All companion actions now route through the CMP: Lua channel.
- * Companion console mode is always on (set in companion.lua), so vanilla
- * console commands no longer apply here — everything is handled in Lua.
- */
 object CompanionActions {
 
     fun equipItem(itemId: String) = runCommand("CMP:equip $itemId")
@@ -19,17 +16,15 @@ object CompanionActions {
 
     fun selectSpell(spellId: String) = runCommand("CMP:spell $spellId")
 
+    fun readItem(id: String) = runCommand("CMP:read $id")
+
     private fun runCommand(command: String) {
         try {
-            automateCommands(command)
-            Log.d(TAG, "Sent: $command")
+            EngineActivity.sendCompanionCommand(command)
+            Log.d(TAG, "Queued: $command")
         } catch (e: Exception) {
-            Log.e(TAG, "Command failed (overlay not ready?): $command", e)
+            Log.e(TAG, "Command failed: $command", e)
         }
-    }
-
-    fun readItem(id: String) {
-        automateCommands("CMP:read $id")
     }
 
     private const val TAG = "CompanionActions"

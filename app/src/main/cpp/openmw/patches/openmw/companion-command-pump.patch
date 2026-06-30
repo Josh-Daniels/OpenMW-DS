@@ -1,0 +1,22 @@
+--- a/components/sdlutil/sdlinputwrapper.cpp
++++ b/components/sdlutil/sdlinputwrapper.cpp
+@@ -3,4 +3,8 @@
+ #include <components/debug/debuglog.hpp>
+ #include <components/settings/values.hpp>
+
++#ifdef __ANDROID__
++extern void drainCompanionCommands();
++#endif
++
+ #include <osgViewer/Viewer>
+@@ -55,6 +59,10 @@
+     {
+         mViewer->getEventQueue()->frame(0.f);
+
+         SDL_PumpEvents();
+
++#ifdef __ANDROID__
++        drainCompanionCommands();
++#endif
++
+         SDL_Event evt;
