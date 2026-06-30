@@ -82,15 +82,13 @@ diff --git a/apps/openmw/mwrender/renderingmanager.hpp b/apps/openmw/mwrender/re
 index b8ad535eb3..a6e04698b6 100644
 --- a/apps/openmw/mwrender/renderingmanager.hpp
 +++ b/apps/openmw/mwrender/renderingmanager.hpp
-@@ -279,6 +279,8 @@ namespace MWRender
- 
-         void setNavMeshMode(Settings::NavMeshRenderMode value);
+@@ -287,4 +287,6 @@ namespace MWRender
+         osg::Vec2f getProjectionOffset() const { return mProjectionOffset; }
  
 +        void setWriteNormals(bool enabled);
-+
++ 
      private:
          void updateTextureFiltering();
-         void updateAmbient();
 diff --git a/components/shader/shadervisitor.cpp b/components/shader/shadervisitor.cpp
 index a9ad457a67..2c70536861 100644
 --- a/components/shader/shadervisitor.cpp

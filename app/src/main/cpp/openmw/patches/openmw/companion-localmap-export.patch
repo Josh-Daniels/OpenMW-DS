@@ -90,3 +90,38 @@
 +                new MapCaptureCallback(mMapResolution, mMapResolution, segmentX, segmentY, mInterior,
 +                                       segment.mMapTexture));
      }
+@@ -191,3 +267,34 @@
+         int cellY = cell->getCell()->getGridY();
+ 
++#ifdef __ANDROID__
++        // Companion: proactively capture neighboring exterior segments that are
++        // loaded but not yet rendered, bypassing the HUD widgetCropped filter
++        // which limits the stock engine to only the player's current cell.
++        for (int dy = -1; dy <= 1; ++dy)
++        {
++            for (int dx = -1; dx <= 1; ++dx)
++            {
++                if (dx == 0 && dy == 0)
++                    continue;
++                auto nit = mExteriorSegments.find(std::make_pair(cellX + dx, cellY + dy));
++                if (nit == mExteriorSegments.end() || nit->second.mMapTexture)
++                    continue;
++                const int nx = cellX + dx, ny = cellY + dy;
++                const osg::BoundingSphere bound = mSceneRoot->getBound();
++                setupRenderToTexture(nx, ny,
++                    nx * mMapWorldSize + mMapWorldSize / 2.f,
++                    ny * mMapWorldSize + mMapWorldSize / 2.f,
++                    osg::Vec3d(0, 1, 0),
++                    bound.center().z() - bound.radius(),
++                    bound.center().z() + bound.radius());
++                nit->second.mMapTexture = static_cast<osg::Texture2D*>(
++                    mLocalMapRTTs.back()->getColorTexture(nullptr));
++                if (osg::Camera* ncam = mLocalMapRTTs.back()->getCamera(nullptr))
++                    ncam->setPostDrawCallback(
++                        new MapCaptureCallback(mMapResolution, mMapResolution,
++                                               nx, ny, false, nit->second.mMapTexture));
++            }
++        }
++#endif
++ 
+         MapSegment& segment = mExteriorSegments[std::make_pair(cellX, cellY)];
