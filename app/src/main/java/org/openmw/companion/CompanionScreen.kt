@@ -52,6 +52,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -214,7 +215,10 @@ fun CompanionScreen() {
     }
 
     val context = LocalContext.current
-    LaunchedEffect(Unit) { FavouritesRepository.init(context) }
+    // Load synchronously during composition (not LaunchedEffect) so favourite
+    // pills show their persisted content on the very first frame, with no
+    // post-composition flash of empty slots.
+    remember(context) { FavouritesRepository.init(context) }
 
     Box(
         modifier = Modifier
@@ -226,7 +230,7 @@ fun CompanionScreen() {
             Tab.INVENTORY -> InventoryPanel(state)
             Tab.MAGIC -> MagicPanel(state)
             Tab.MAP -> MapPanel(state)
-            Tab.STATS -> StatsPanel()
+            Tab.STATS -> StatsPanel(state)
             Tab.JOURNAL -> JournalPanel()
         }
 
@@ -1507,32 +1511,208 @@ private fun EmptyPanel(message: String) {
     }
 }
 
-/* ---- Stats (placeholder) ---- */
+/* ---- Stats ---- */
+
+private val STATS_LEFT_WIDTH = 165.dp
 
 @Composable
-private fun StatsPanel() {
-    Box(
+private fun StatsPanel(state: GameState) {
+    val character = state.character
+
+    Column(
         Modifier
             .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Column(
-            Modifier.fillMaxSize().mwPanel().padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+        CharacterHeaderPanel(character)
+
+        Row(
+            Modifier.fillMaxWidth().weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                "Stats",
-                color = Bone, fontSize = 20.sp,
-                fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold
+            AttributesAndEffectsPanel(
+                character = character,
+                activeEffects = state.activeEffects,
+                modifier = Modifier.width(STATS_LEFT_WIDTH).fillMaxHeight()
             )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Coming soon",
-                color = BoneDim, fontSize = 13.sp, fontFamily = MwBody,
-                textAlign = TextAlign.Center
+            SkillsPanel(
+                skills = character.skills,
+                modifier = Modifier.weight(1f).fillMaxHeight()
             )
         }
+    }
+}
+
+@Composable
+private fun CharacterHeaderPanel(character: CharacterInfo) {
+    val subtitle = listOf(character.race, character.className, character.birthSign)
+        .filter { it.isNotBlank() }
+        .joinToString(" · ")
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .mwPanel()
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(
+                character.name.ifBlank { "—" },
+                color = Bone, fontSize = 18.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold
+            )
+            if (subtitle.isNotBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    subtitle,
+                    color = BoneDim, fontSize = 12.sp, fontFamily = MwBody
+                )
+            }
+        }
+        Column(
+            modifier = Modifier
+                .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "${character.level}",
+                color = BronzeLight, fontSize = 20.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+            )
+            Text(
+                "LEVEL",
+                color = BoneDim, fontSize = 9.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttributesAndEffectsPanel(
+    character: CharacterInfo,
+    activeEffects: List<ActiveEffect>,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier.mwPanel().padding(10.dp).verticalScroll(rememberScrollState())
+    ) {
+        SpellSectionHeader("Attributes")
+        Column(Modifier.padding(top = 4.dp)) {
+            character.attributes.forEach { attr -> AttributeRow(attr) }
+        }
+
+        Spacer(Modifier.height(4.dp))
+        SpellSectionHeader("Active Effects")
+        if (activeEffects.isEmpty()) {
+            Text(
+                "No active effects",
+                color = BoneDim, fontSize = 12.sp, fontFamily = MwBody,
+                fontStyle = FontStyle.Italic,
+                modifier = Modifier.padding(top = 6.dp, start = 2.dp)
+            )
+        } else {
+            Column(Modifier.padding(top = 4.dp)) {
+                activeEffects.forEach { effect -> ActiveEffectRow(effect) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttributeRow(attr: AttributeStat) {
+    val diff = attr.current - attr.base
+    val currentColor = when {
+        diff > 0.01f -> Color(0xFF7FBF7F)
+        diff < -0.01f -> Color(0xFFC75C5C)
+        else -> BronzeLight
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            attr.name.ifBlank { attr.id },
+            color = Bone, fontSize = 13.sp, fontFamily = MwBody
+        )
+        Row {
+            Text(
+                "${attr.current.toInt()}",
+                color = currentColor, fontSize = 13.sp,
+                fontFamily = MwData, fontWeight = FontWeight.Bold
+            )
+            Text(
+                " / ${attr.base.toInt()}",
+                color = BoneDim, fontSize = 13.sp, fontFamily = MwData
+            )
+        }
+    }
+}
+
+@Composable
+private fun ActiveEffectRow(effect: ActiveEffect) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        EffectDot(effect.harmful, 8.dp)
+        Text(
+            effect.name,
+            color = Bone, fontSize = 12.sp, fontFamily = MwBody,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun SkillsPanel(skills: List<SkillStat>, modifier: Modifier = Modifier) {
+    val major = remember(skills) { skills.filter { it.category == "major" } }
+    val minor = remember(skills) { skills.filter { it.category == "minor" } }
+    val misc = remember(skills) { skills.filter { it.category == "misc" } }
+
+    Row(modifier.mwPanel().padding(10.dp)) {
+        SkillColumn("Major", major, Modifier.weight(1f).fillMaxHeight())
+        Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
+        SkillColumn("Minor", minor, Modifier.weight(1f).fillMaxHeight())
+        Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
+        SkillColumn("Misc", misc, Modifier.weight(1f).fillMaxHeight())
+    }
+}
+
+@Composable
+private fun SkillColumn(label: String, skills: List<SkillStat>, modifier: Modifier = Modifier) {
+    Column(modifier.padding(horizontal = 8.dp)) {
+        SpellSectionHeader(label)
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(skills) { skill -> SkillRow(skill) }
+        }
+    }
+}
+
+@Composable
+private fun SkillRow(skill: SkillStat) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            skill.name.ifBlank { skill.id },
+            color = Bone, fontSize = 12.sp, fontFamily = MwBody,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            "${skill.value.toInt()}",
+            color = BronzeLight, fontSize = 12.sp,
+            fontFamily = MwData, fontWeight = FontWeight.Bold
+        )
     }
 }
 

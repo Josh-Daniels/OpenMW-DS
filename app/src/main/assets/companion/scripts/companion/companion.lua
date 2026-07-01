@@ -175,6 +175,7 @@ local function stackId(item)
 end
 
 local lastActiveEffectsStr = nil
+local lastCharacterStr = nil
 local effectsDiagDone = false
 
 -- Attribute and skill IDs used as second param for parameterized effects.
@@ -321,6 +322,89 @@ local function exportActiveEffects()
     if str == lastActiveEffectsStr then return end
     lastActiveEffectsStr = str
     print('COMPANION_ACTIVE_EFFECTS:['..str..']')
+end
+
+-- Character header, attributes and skills for the Stats screen.
+-- Verified against real OpenMW 0.52 Lua API (files/lua_api/openmw/types.lua,
+-- files/lua_api/openmw/core.lua):
+--   types.NPC.record(self)              -> NpcRecord {name, race, class, ...}
+--   types.NPC.races.records[raceId]     -> RaceRecord {name, ...}
+--   types.NPC.classes.records[classId]  -> ClassRecord {name, majorSkills, minorSkills, ...}
+--   types.Player.getBirthSign(self)     -> birth sign id string
+--   types.Player.birthSigns.records[id] -> BirthSignRecord {name, ...}
+--   types.Actor.stats.level(self)       -> LevelStat {current, progress}
+--   types.Actor.stats.attributes[id](self) -> AttributeStat {base, modified, modifier, damage}
+--   types.NPC.stats.skills[id](self)       -> SkillStat {base, modified, modifier, damage, progress}
+--   core.stats.Attribute.records[id]    -> AttributeRecord {name, ...}
+--   core.stats.Skill.records[id]        -> SkillRecord {name, ...}
+local function exportCharacter()
+    local npcRec = types.NPC.record(self)
+    local name = (npcRec and npcRec.name) or ""
+
+    local raceName = ""
+    pcall(function()
+        local r = types.NPC.races.records[npcRec.race]
+        if r and r.name and r.name ~= "" then raceName = r.name end
+    end)
+
+    local className = ""
+    local majorSet, minorSet = {}, {}
+    pcall(function()
+        local c = types.NPC.classes.records[npcRec.class]
+        if c then
+            if c.name and c.name ~= "" then className = c.name end
+            for _, s in ipairs(c.majorSkills or {}) do majorSet[s] = true end
+            for _, s in ipairs(c.minorSkills or {}) do minorSet[s] = true end
+        end
+    end)
+
+    local birthSignName = ""
+    pcall(function()
+        local signId = types.Player.getBirthSign(self)
+        if signId and signId ~= "" then
+            local b = types.Player.birthSigns.records[signId]
+            if b and b.name and b.name ~= "" then birthSignName = b.name end
+        end
+    end)
+
+    local level = 0
+    pcall(function() level = math.floor(types.Actor.stats.level(self).current) end)
+
+    local attrParts = {}
+    for _, attrId in ipairs(ATTR_IDS) do
+        local ok, stat = pcall(function() return types.Actor.stats.attributes[attrId](self) end)
+        if ok and stat then
+            local rec = core.stats.Attribute.records[attrId]
+            local nm = (rec and rec.name and rec.name ~= "") and rec.name or attrId
+            table.insert(attrParts, string.format(
+                '{"id":"%s","name":"%s","current":%.1f,"base":%.1f}',
+                jsonEscape(attrId), jsonEscape(nm), stat.modified, stat.base))
+        end
+    end
+
+    local skillParts = {}
+    for _, skillId in ipairs(SKILL_IDS) do
+        local ok, stat = pcall(function() return types.NPC.stats.skills[skillId](self) end)
+        if ok and stat then
+            local rec = core.stats.Skill.records[skillId]
+            local nm = (rec and rec.name and rec.name ~= "") and rec.name or skillId
+            local cat = "misc"
+            if majorSet[skillId] then cat = "major"
+            elseif minorSet[skillId] then cat = "minor" end
+            table.insert(skillParts, string.format(
+                '{"id":"%s","name":"%s","value":%.1f,"cat":"%s"}',
+                jsonEscape(skillId), jsonEscape(nm), stat.modified, cat))
+        end
+    end
+
+    local str = string.format(
+        '{"name":"%s","race":"%s","class":"%s","birthSign":"%s","level":%d,"attributes":[%s],"skills":[%s]}',
+        jsonEscape(name), jsonEscape(raceName), jsonEscape(className), jsonEscape(birthSignName),
+        level, table.concat(attrParts, ','), table.concat(skillParts, ','))
+
+    if str == lastCharacterStr then return end
+    lastCharacterStr = str
+    print('COMPANION_CHARACTER:' .. str)
 end
 
 local iconDiagDone = false
@@ -619,6 +703,7 @@ local function onUpdate(dt)
         exportInventory()
         exportEquipment()
         exportActiveEffects()
+        exportCharacter()
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then

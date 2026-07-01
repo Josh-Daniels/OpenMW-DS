@@ -30,6 +30,21 @@ data class SpellEntry(
 
 data class ActiveEffect(val name: String, val harmful: Boolean)
 
+data class AttributeStat(val id: String, val name: String, val current: Float, val base: Float)
+
+/** category: "major", "minor", or "misc" per the player's class. */
+data class SkillStat(val id: String, val name: String, val value: Float, val category: String)
+
+data class CharacterInfo(
+    val name: String = "",
+    val race: String = "",
+    val className: String = "",
+    val birthSign: String = "",
+    val level: Int = 0,
+    val attributes: List<AttributeStat> = emptyList(),
+    val skills: List<SkillStat> = emptyList()
+)
+
 data class JournalEntry(
     val questId: String,
     val questName: String = "",  // display name from core.dialogue; empty = fall back to prettified ID
@@ -59,6 +74,7 @@ data class GameState(
     val selectedSpell: String? = null,
     val activeEffects: List<ActiveEffect> = emptyList(),
     val journalEntries: List<JournalEntry> = emptyList(),
+    val character: CharacterInfo = CharacterInfo(),
     /** Wall-clock time we last parsed a STATS line; 0 = no data yet. */
     val lastUpdateMs: Long = 0L
 ) {

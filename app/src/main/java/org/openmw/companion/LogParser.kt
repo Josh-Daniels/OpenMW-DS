@@ -20,6 +20,7 @@ object LogParser {
     private const val P_INVENTORY = "COMPANION_INVENTORY:"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
+    private const val P_CHARACTER = "COMPANION_CHARACTER:"
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
     const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
     const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
@@ -40,6 +41,8 @@ object LogParser {
                     current.copy(equipment = parseEquipment(after(line, P_EQUIPMENT)))
                 line.contains(P_ACTIVE_EFFECTS) ->
                     current.copy(activeEffects = parseActiveEffects(after(line, P_ACTIVE_EFFECTS)))
+                line.contains(P_CHARACTER) ->
+                    current.copy(character = parseCharacter(after(line, P_CHARACTER)))
                 else -> null
             }
         } catch (e: Exception) {
@@ -120,6 +123,39 @@ object LogParser {
                 harmful = o.optBoolean("harmful", false)
             )
         }
+    }
+
+    private fun parseCharacter(json: String): CharacterInfo {
+        val o = JSONObject(json)
+        val attrs = o.getJSONArray("attributes")
+        val attributes = (0 until attrs.length()).map { i ->
+            val a = attrs.getJSONObject(i)
+            AttributeStat(
+                id = a.getString("id"),
+                name = a.optString("name", ""),
+                current = a.getDouble("current").toFloat(),
+                base = a.getDouble("base").toFloat()
+            )
+        }
+        val skillsArr = o.getJSONArray("skills")
+        val skills = (0 until skillsArr.length()).map { i ->
+            val s = skillsArr.getJSONObject(i)
+            SkillStat(
+                id = s.getString("id"),
+                name = s.optString("name", ""),
+                value = s.getDouble("value").toFloat(),
+                category = s.optString("cat", "misc")
+            )
+        }
+        return CharacterInfo(
+            name = o.optString("name", ""),
+            race = o.optString("race", ""),
+            className = o.optString("class", ""),
+            birthSign = o.optString("birthSign", ""),
+            level = o.optInt("level", 0),
+            attributes = attributes,
+            skills = skills
+        )
     }
 
     fun parseJournalEntry(json: String): JournalEntry? = try {
