@@ -808,6 +808,38 @@ local function fmtNum(n)
     return string.format("%.1f", n)
 end
 
+-- Morrowind armor class (Light/Medium/Heavy) is not stored on the record; it's
+-- derived by comparing the piece's weight to a per-slot base GMST scaled by the
+-- fLightMaxMod / fMedMaxMod multipliers. Mirrors OpenMW's Armor::getEquipmentSkill.
+local ARMOR_WEIGHT_GMST = nil
+local function armorWeightClass(rec)
+    if ARMOR_WEIGHT_GMST == nil then
+        local AT = types.Armor.TYPE
+        ARMOR_WEIGHT_GMST = {
+            [AT.Helmet] = "iHelmWeight", [AT.Cuirass] = "iCuirassWeight",
+            [AT.LPauldron] = "iPauldronWeight", [AT.RPauldron] = "iPauldronWeight",
+            [AT.Greaves] = "iGreavesWeight", [AT.Boots] = "iBootsWeight",
+            [AT.LGauntlet] = "iGauntletWeight", [AT.RGauntlet] = "iGauntletWeight",
+            [AT.LBracer] = "iGauntletWeight", [AT.RBracer] = "iGauntletWeight",
+            [AT.Shield] = "iShieldWeight",
+        }
+    end
+    local cls
+    pcall(function()
+        local gmst = ARMOR_WEIGHT_GMST[rec.type]
+        if not gmst then return end
+        local iWeight = math.floor(core.getGMST(gmst))
+        local lightMax = core.getGMST("fLightMaxMod")
+        local medMax = core.getGMST("fMedMaxMod")
+        local w = rec.weight or 0
+        local epsilon = 0.0005
+        if w <= iWeight * lightMax + epsilon then cls = "Light"
+        elseif w <= iWeight * medMax + epsilon then cls = "Medium"
+        else cls = "Heavy" end
+    end)
+    return cls
+end
+
 local function addRow(rows, k, v)
     if v ~= nil and v ~= "" then
         table.insert(rows, string.format('{"k":"%s","v":"%s"}', jsonEscape(k), jsonEscape(tostring(v))))
@@ -866,7 +898,13 @@ local function exportInfo(arg)
             end
         end
 
-        addRow(rows, "Weight", fmtNum(rec.weight))
+        -- Weight, with an armor class suffix for armor pieces, e.g. "16 (Heavy)".
+        local weightStr = fmtNum(rec.weight)
+        if weightStr and types.Armor.objectIsInstance(item) then
+            local cls = armorWeightClass(rec)
+            if cls then weightStr = weightStr .. " (" .. cls .. ")" end
+        end
+        addRow(rows, "Weight", weightStr)
         addRow(rows, "Value", fmtNum(rec.value))
 
         if types.Weapon.objectIsInstance(item) then
