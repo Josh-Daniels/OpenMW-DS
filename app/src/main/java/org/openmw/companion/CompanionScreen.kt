@@ -230,13 +230,19 @@ fun CompanionScreen() {
             .imePadding()
             .background(StoneDark)
     ) {
-        val showStatBar = tab == Tab.HUD || tab == Tab.STATS
+        // STATS no longer shows the TopStatBar — its Vitals section covers
+        // Health/Magicka/Fatigue, so the bar would be redundant and just eats space.
+        val showStatBar = tab == Tab.HUD
+
+        // Tapped stat row on the Stats screen. Rendered as a root-level overlay
+        // (below) so its scrim covers the tab bars, exactly like ItemInfoOverlay.
+        var selectedStat by remember { mutableStateOf<StatInfo?>(null) }
 
         when (tab) {
             Tab.INVENTORY -> InventoryPanel(state)
             Tab.MAGIC -> MagicPanel(state)
             Tab.HUD -> MapPanel(state)
-            Tab.STATS -> StatsPanel(state)
+            Tab.STATS -> StatsPanel(state, onSelectStat = { selectedStat = it })
             Tab.JOURNAL -> JournalPanel()
         }
 
@@ -311,6 +317,10 @@ fun CompanionScreen() {
         // Presentation's window context, which throws "Window type mismatch".
         val info by GameStateRepository.itemInfo.collectAsState()
         info?.let { ItemInfoOverlay(it, onDismiss = { GameStateRepository.dismissItemInfo() }) }
+
+        // Stat detail popup (Stats screen). Same in-window overlay pattern as
+        // ItemInfoOverlay — tap outside to dismiss.
+        selectedStat?.let { StatInfoPopup(it, onDismiss = { selectedStat = null }) }
     }
 }
 
@@ -2003,43 +2013,222 @@ private fun EmptyPanel(message: String) {
 
 /* ---- Stats ---- */
 
+/**
+ * What a tapped stat row opens a popup for. Each variant carries the data it
+ * needs; [toContent] renders it into the shared [StatInfoPopup] layout.
+ */
+private sealed interface StatInfo {
+    data class AttributeInfo(val attr: AttributeStat) : StatInfo
+    data class SkillInfo(val skill: SkillStat) : StatInfo
+    data class DynamicInfo(val label: String, val value: Dynamic, val desc: String) : StatInfo
+    data class LevelInfo(val level: Int, val progress: Int, val total: Int) : StatInfo
+    data class RaceInfo(val character: CharacterInfo) : StatInfo
+    data class ClassInfo(val character: CharacterInfo) : StatInfo
+}
+
+/** Uniform, render-ready popup contents produced from any [StatInfo]. */
+private data class StatPopupContent(
+    val title: String,
+    val rows: List<Pair<String, String>>,
+    val sections: List<Pair<String, List<String>>>,
+    val description: String
+)
+
+private fun capWord(s: String): String =
+    if (s.isBlank()) s else s.replaceFirstChar { it.uppercase() }
+
+private fun StatInfo.toContent(): StatPopupContent = when (this) {
+    is StatInfo.AttributeInfo -> StatPopupContent(
+        title = attr.name.ifBlank { attr.id },
+        rows = listOf(
+            "Current" to attr.current.toInt().toString(),
+            "Base" to attr.base.toInt().toString()
+        ),
+        sections = if (attr.governedSkills.isNotEmpty())
+            listOf("Governed Skills" to attr.governedSkills) else emptyList(),
+        description = attr.desc
+    )
+    is StatInfo.SkillInfo -> StatPopupContent(
+        title = skill.name.ifBlank { skill.id },
+        rows = listOf(
+            "Value" to skill.value.toInt().toString(),
+            "Category" to capWord(skill.category),
+            "Governing Attribute" to skill.governingAttribute,
+            "Specialization" to skill.specialization
+        ).filter { it.second.isNotBlank() },
+        sections = emptyList(),
+        description = skill.desc
+    )
+    is StatInfo.DynamicInfo -> StatPopupContent(
+        title = label,
+        rows = listOf(
+            "Current" to value.current.toInt().toString(),
+            "Maximum" to value.max.toInt().toString()
+        ),
+        sections = emptyList(),
+        description = desc
+    )
+    is StatInfo.LevelInfo -> StatPopupContent(
+        title = "Level $level",
+        rows = buildList {
+            add("Level" to level.toString())
+            if (total > 0) add("Progress to Next" to "$progress / $total")
+        },
+        sections = emptyList(),
+        description = ""
+    )
+    is StatInfo.RaceInfo -> StatPopupContent(
+        title = character.race.ifBlank { "Race" },
+        rows = emptyList(),
+        sections = buildList {
+            if (character.raceSkillBonuses.isNotEmpty())
+                add("Skill Bonuses" to character.raceSkillBonuses)
+            if (character.raceAbilities.isNotEmpty())
+                add("Abilities" to character.raceAbilities)
+        },
+        description = character.raceDesc
+    )
+    is StatInfo.ClassInfo -> StatPopupContent(
+        title = character.className.ifBlank { "Class" },
+        rows = if (character.classSpecialization.isNotBlank())
+            listOf("Specialization" to character.classSpecialization) else emptyList(),
+        sections = buildList {
+            if (character.classFavoredAttributes.isNotEmpty())
+                add("Favored Attributes" to character.classFavoredAttributes)
+            if (character.classMajorSkills.isNotEmpty())
+                add("Major Skills" to character.classMajorSkills)
+            if (character.classMinorSkills.isNotEmpty())
+                add("Minor Skills" to character.classMinorSkills)
+        },
+        description = character.classDesc
+    )
+}
+
+/**
+ * Shared stat detail popup. In-window overlay (NOT a Dialog — the companion UI
+ * lives in a Presentation on a secondary display where Dialog throws a window
+ * type mismatch), mirroring ItemInfoOverlay: full-screen scrim dismisses on tap,
+ * the panel swallows its own taps.
+ */
+@Composable
+private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
+    val content = info.toContent()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(20f)
+            .background(Color(0xB3000000))
+            .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(420.dp)
+                .heightIn(max = 560.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures(onTap = {}) }
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                content.title,
+                color = BronzeLight,
+                fontSize = 16.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(10.dp))
+
+            content.rows.forEachIndexed { i, (label, value) ->
+                if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(label, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                    Text(
+                        value,
+                        color = Bone,
+                        fontSize = 12.sp,
+                        fontFamily = MwData,
+                        modifier = Modifier.padding(start = 12.dp)
+                    )
+                }
+            }
+
+            content.sections.forEach { (heading, items) ->
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    heading.uppercase(),
+                    color = BronzeLight,
+                    fontSize = 11.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+                Spacer(Modifier.height(4.dp))
+                items.forEach { item ->
+                    Text(
+                        item,
+                        color = Bone,
+                        fontSize = 12.sp,
+                        fontFamily = MwBody,
+                        modifier = Modifier.padding(vertical = 3.dp)
+                    )
+                }
+            }
+
+            if (content.description.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    content.description,
+                    color = Bone,
+                    fontSize = 13.sp,
+                    fontFamily = MwBody,
+                    lineHeight = 18.sp
+                )
+            }
+        }
+    }
+}
+
 private val STATS_LEFT_WIDTH = 165.dp
 
 @Composable
-private fun StatsPanel(state: GameState) {
+private fun StatsPanel(state: GameState, onSelectStat: (StatInfo) -> Unit) {
     val character = state.character
 
     Column(
         Modifier
             .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+            .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        CharacterHeaderPanel(character)
+        CharacterHeaderPanel(character, onSelectStat)
 
         Row(
             Modifier.fillMaxWidth().weight(1f),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             AttributesAndEffectsPanel(
-                character = character,
-                activeEffects = state.activeEffects,
-                modifier = Modifier.width(STATS_LEFT_WIDTH).fillMaxHeight()
+                state = state,
+                modifier = Modifier.width(STATS_LEFT_WIDTH).fillMaxHeight(),
+                onSelectStat = onSelectStat
             )
             SkillsPanel(
                 skills = character.skills,
-                modifier = Modifier.weight(1f).fillMaxHeight()
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                onSelectStat = onSelectStat
             )
         }
     }
 }
 
 @Composable
-private fun CharacterHeaderPanel(character: CharacterInfo) {
-    val subtitle = listOf(character.race, character.className, character.birthSign)
-        .filter { it.isNotBlank() }
-        .joinToString(" · ")
-
+private fun CharacterHeaderPanel(character: CharacterInfo, onSelectStat: (StatInfo) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -2054,17 +2243,42 @@ private fun CharacterHeaderPanel(character: CharacterInfo) {
                 color = Bone, fontSize = 18.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold
             )
-            if (subtitle.isNotBlank()) {
+            // Race · Class · Birthsign — race and class are tappable for their popups.
+            val hasSubtitle = listOf(character.race, character.className, character.birthSign)
+                .any { it.isNotBlank() }
+            if (hasSubtitle) {
                 Spacer(Modifier.height(2.dp))
-                Text(
-                    subtitle,
-                    color = BoneDim, fontSize = 12.sp, fontFamily = MwBody
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (character.race.isNotBlank()) {
+                        Text(
+                            character.race, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody,
+                            modifier = Modifier.clickable { onSelectStat(StatInfo.RaceInfo(character)) }
+                        )
+                    }
+                    if (character.className.isNotBlank()) {
+                        if (character.race.isNotBlank())
+                            Text(" · ", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                        Text(
+                            character.className, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody,
+                            modifier = Modifier.clickable { onSelectStat(StatInfo.ClassInfo(character)) }
+                        )
+                    }
+                    if (character.birthSign.isNotBlank()) {
+                        if (character.race.isNotBlank() || character.className.isNotBlank())
+                            Text(" · ", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                        Text(character.birthSign, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                    }
+                }
             }
         }
         Column(
             modifier = Modifier
                 .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                .clickable {
+                    onSelectStat(
+                        StatInfo.LevelInfo(character.level, character.levelProgress, character.levelTotal)
+                    )
+                }
                 .padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -2084,21 +2298,38 @@ private fun CharacterHeaderPanel(character: CharacterInfo) {
 
 @Composable
 private fun AttributesAndEffectsPanel(
-    character: CharacterInfo,
-    activeEffects: List<ActiveEffect>,
-    modifier: Modifier = Modifier
+    state: GameState,
+    modifier: Modifier = Modifier,
+    onSelectStat: (StatInfo) -> Unit
 ) {
+    val character = state.character
     Column(
         modifier.mwPanel().padding(10.dp).verticalScroll(rememberScrollState())
     ) {
+        SpellSectionHeader("Vitals")
+        Column(Modifier.padding(top = 4.dp)) {
+            VitalRow("Health", state.health, HealthCol) {
+                onSelectStat(StatInfo.DynamicInfo("Health", state.health, character.healthDesc))
+            }
+            VitalRow("Magicka", state.magicka, MagickaCol) {
+                onSelectStat(StatInfo.DynamicInfo("Magicka", state.magicka, character.magickaDesc))
+            }
+            VitalRow("Fatigue", state.fatigue, FatigueCol) {
+                onSelectStat(StatInfo.DynamicInfo("Fatigue", state.fatigue, character.fatigueDesc))
+            }
+        }
+
+        Spacer(Modifier.height(4.dp))
         SpellSectionHeader("Attributes")
         Column(Modifier.padding(top = 4.dp)) {
-            character.attributes.forEach { attr -> AttributeRow(attr) }
+            character.attributes.forEach { attr ->
+                AttributeRow(attr) { onSelectStat(StatInfo.AttributeInfo(attr)) }
+            }
         }
 
         Spacer(Modifier.height(4.dp))
         SpellSectionHeader("Active Effects")
-        if (activeEffects.isEmpty()) {
+        if (state.activeEffects.isEmpty()) {
             Text(
                 "No active effects",
                 color = BoneDim, fontSize = 12.sp, fontFamily = MwBody,
@@ -2107,14 +2338,43 @@ private fun AttributesAndEffectsPanel(
             )
         } else {
             Column(Modifier.padding(top = 4.dp)) {
-                activeEffects.forEach { effect -> ActiveEffectRow(effect) }
+                state.activeEffects.forEach { effect -> ActiveEffectRow(effect) }
             }
         }
     }
 }
 
 @Composable
-private fun AttributeRow(attr: AttributeStat) {
+private fun VitalRow(label: String, value: Dynamic, barColor: Color, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = Bone, fontSize = 13.sp, fontFamily = MwBody)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .padding(end = 6.dp)
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(barColor)
+            )
+            Text(
+                "${value.current.toInt()}",
+                color = BronzeLight, fontSize = 13.sp,
+                fontFamily = MwData, fontWeight = FontWeight.Bold
+            )
+            Text(
+                " / ${value.max.toInt()}",
+                color = BoneDim, fontSize = 13.sp, fontFamily = MwData
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttributeRow(attr: AttributeStat, onClick: () -> Unit) {
     val diff = attr.current - attr.base
     val currentColor = when {
         diff > 0.01f -> Color(0xFF7FBF7F)
@@ -2122,7 +2382,7 @@ private fun AttributeRow(attr: AttributeStat) {
         else -> BronzeLight
     }
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -2161,34 +2421,45 @@ private fun ActiveEffectRow(effect: ActiveEffect) {
 }
 
 @Composable
-private fun SkillsPanel(skills: List<SkillStat>, modifier: Modifier = Modifier) {
+private fun SkillsPanel(
+    skills: List<SkillStat>,
+    modifier: Modifier = Modifier,
+    onSelectStat: (StatInfo) -> Unit
+) {
     val major = remember(skills) { skills.filter { it.category == "major" } }
     val minor = remember(skills) { skills.filter { it.category == "minor" } }
     val misc = remember(skills) { skills.filter { it.category == "misc" } }
 
     Row(modifier.mwPanel().padding(10.dp)) {
-        SkillColumn("Major", major, Modifier.weight(1f).fillMaxHeight())
+        SkillColumn("Major", major, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
         Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-        SkillColumn("Minor", minor, Modifier.weight(1f).fillMaxHeight())
+        SkillColumn("Minor", minor, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
         Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-        SkillColumn("Misc", misc, Modifier.weight(1f).fillMaxHeight())
+        SkillColumn("Misc", misc, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
     }
 }
 
 @Composable
-private fun SkillColumn(label: String, skills: List<SkillStat>, modifier: Modifier = Modifier) {
+private fun SkillColumn(
+    label: String,
+    skills: List<SkillStat>,
+    modifier: Modifier = Modifier,
+    onSelectStat: (StatInfo) -> Unit
+) {
     Column(modifier.padding(horizontal = 8.dp)) {
         SpellSectionHeader(label)
         LazyColumn(Modifier.fillMaxSize()) {
-            items(skills) { skill -> SkillRow(skill) }
+            items(skills) { skill ->
+                SkillRow(skill) { onSelectStat(StatInfo.SkillInfo(skill)) }
+            }
         }
     }
 }
 
 @Composable
-private fun SkillRow(skill: SkillStat) {
+private fun SkillRow(skill: SkillStat, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {

@@ -23,12 +23,22 @@ object LogParser {
     const val P_INVENTORY_END = "COMPANION_INVENTORY_END"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
-    private const val P_CHARACTER = "COMPANION_CHARACTER:"
+    const val P_CHARACTER = "COMPANION_CHARACTER:"
     private const val P_TARGET = "COMPANION_TARGET:"
     const val P_INFO = "COMPANION_INFO:"
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
     const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
     const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
+    // Streamed character-description batch (one record per line — the full set of
+    // descriptions is far larger than the engine's 4096-byte stdout flush limit).
+    const val P_CHARDETAIL_START = "COMPANION_CHARDETAIL_START"
+    const val P_CHARDETAIL_ATTR = "COMPANION_CHARDETAIL_ATTR:"
+    const val P_CHARDETAIL_SKILL = "COMPANION_CHARDETAIL_SKILL:"
+    const val P_CHARDETAIL_DYN = "COMPANION_CHARDETAIL_DYN:"
+    const val P_CHARDETAIL_RACE = "COMPANION_CHARDETAIL_RACE:"
+    const val P_CHARDETAIL_CLASS = "COMPANION_CHARDETAIL_CLASS:"
+    const val P_CHARDETAIL_LEVEL = "COMPANION_CHARDETAIL_LEVEL:"
+    const val P_CHARDETAIL_END = "COMPANION_CHARDETAIL_END"
 
     /** Returns an updated state, or null if this line isn't ours / was malformed. */
     fun parseLine(line: String, current: GameState): GameState? {
@@ -232,4 +242,53 @@ object LogParser {
         // payload is a JSON string literal like "fireball"; wrap to reuse JSON unescaping
         return JSONArray("[$payload]").getString(0)
     }
+
+    // ---- Streamed character-description batch parsing ----
+
+    private fun strArray(o: JSONObject, key: String): List<String> {
+        val arr = o.optJSONArray(key) ?: return emptyList()
+        return (0 until arr.length()).map { arr.optString(it, "") }
+    }
+
+    /** id, desc, and the list of governed-skill display names. Null if malformed. */
+    fun parseDetailAttr(json: String): Triple<String, String, List<String>>? = try {
+        val o = JSONObject(json)
+        Triple(o.optString("id", ""), o.optString("desc", ""), strArray(o, "skills"))
+    } catch (e: Exception) { null }
+
+    /** id, desc, governing-attribute name, specialization. Null if malformed. */
+    fun parseDetailSkill(json: String): DetailSkill? = try {
+        val o = JSONObject(json)
+        DetailSkill(o.optString("id", ""), o.optString("desc", ""),
+            o.optString("attr", ""), o.optString("spec", ""))
+    } catch (e: Exception) { null }
+
+    /** id ("health"/"magicka"/"fatigue") and its description. Null if malformed. */
+    fun parseDetailDyn(json: String): Pair<String, String>? = try {
+        val o = JSONObject(json)
+        o.optString("id", "") to o.optString("desc", "")
+    } catch (e: Exception) { null }
+
+    fun parseDetailRace(json: String): DetailRace? = try {
+        val o = JSONObject(json)
+        DetailRace(o.optString("desc", ""), strArray(o, "skills"), strArray(o, "abilities"))
+    } catch (e: Exception) { null }
+
+    fun parseDetailClass(json: String): DetailClass? = try {
+        val o = JSONObject(json)
+        DetailClass(o.optString("desc", ""), o.optString("spec", ""),
+            strArray(o, "attrs"), strArray(o, "major"), strArray(o, "minor"))
+    } catch (e: Exception) { null }
+
+    fun parseDetailLevel(json: String): Pair<Int, Int>? = try {
+        val o = JSONObject(json)
+        o.optInt("progress", 0) to o.optInt("total", 0)
+    } catch (e: Exception) { null }
+
+    data class DetailSkill(val id: String, val desc: String, val attr: String, val spec: String)
+    data class DetailRace(val desc: String, val skills: List<String>, val abilities: List<String>)
+    data class DetailClass(
+        val desc: String, val spec: String,
+        val attrs: List<String>, val major: List<String>, val minor: List<String>
+    )
 }

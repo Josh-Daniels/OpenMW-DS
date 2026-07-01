@@ -67,6 +67,67 @@ object GameStateRepository {
     // the engine's 4096-byte stdout flush and arrive truncated (see companion.lua).
     private var inventoryBuffer: MutableList<InventoryItem>? = null
 
+    // --- Streamed character-description batch (COMPANION_CHARDETAIL_*) ---
+    // Descriptions arrive on their own stream, separate from COMPANION_CHARACTER
+    // (which rebuilds the attribute/skill lists without descriptions). We buffer
+    // an in-flight batch, then keep the last completed one so it can be re-merged
+    // whenever a fresh COMPANION_CHARACTER replaces those lists.
+    private class DetailBuilder {
+        val attrDesc = HashMap<String, String>()
+        val attrSkills = HashMap<String, List<String>>()
+        val skillDesc = HashMap<String, String>()
+        val skillAttr = HashMap<String, String>()
+        val skillSpec = HashMap<String, String>()
+        var healthDesc = ""
+        var magickaDesc = ""
+        var fatigueDesc = ""
+        var raceDesc = ""
+        var raceSkills: List<String> = emptyList()
+        var raceAbilities: List<String> = emptyList()
+        var classDesc = ""
+        var classSpec = ""
+        var classAttrs: List<String> = emptyList()
+        var classMajor: List<String> = emptyList()
+        var classMinor: List<String> = emptyList()
+        var levelProgress = 0
+        var levelTotal = 0
+    }
+    private var detailBuffer: DetailBuilder? = null
+    private var lastDetail: DetailBuilder? = null
+
+    /** Folds the last-seen description batch onto a (possibly freshly rebuilt) character. */
+    private fun mergeDetail(ch: CharacterInfo, d: DetailBuilder?): CharacterInfo {
+        if (d == null) return ch
+        return ch.copy(
+            attributes = ch.attributes.map { a ->
+                a.copy(
+                    desc = d.attrDesc[a.id] ?: a.desc,
+                    governedSkills = d.attrSkills[a.id] ?: a.governedSkills
+                )
+            },
+            skills = ch.skills.map { s ->
+                s.copy(
+                    desc = d.skillDesc[s.id] ?: s.desc,
+                    governingAttribute = d.skillAttr[s.id] ?: s.governingAttribute,
+                    specialization = d.skillSpec[s.id] ?: s.specialization
+                )
+            },
+            healthDesc = d.healthDesc,
+            magickaDesc = d.magickaDesc,
+            fatigueDesc = d.fatigueDesc,
+            raceDesc = d.raceDesc,
+            raceSkillBonuses = d.raceSkills,
+            raceAbilities = d.raceAbilities,
+            classDesc = d.classDesc,
+            classSpecialization = d.classSpec,
+            classFavoredAttributes = d.classAttrs,
+            classMajorSkills = d.classMajor,
+            classMinorSkills = d.classMinor,
+            levelProgress = d.levelProgress,
+            levelTotal = d.levelTotal
+        )
+    }
+
     fun update(transform: (GameState) -> GameState) {
         _state.update(transform)
     }
@@ -125,6 +186,10 @@ object GameStateRepository {
         }
     }
 
+    /** Substring after a COMPANION_CHARDETAIL_* prefix, trimmed. */
+    private fun detailPayload(line: String, prefix: String): String =
+        line.substring(line.indexOf(prefix) + prefix.length).trim()
+
     /** Called from JNI on the engine thread for every COMPANION_* log line. */
     fun onRawLine(line: String) {
         val trimmed = line.trimEnd()
@@ -163,6 +228,70 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_INFO) -> {
                 val idx = trimmed.indexOf(LogParser.P_INFO) + LogParser.P_INFO.length
                 LogParser.parseItemInfo(trimmed.substring(idx).trim())?.let { _itemInfo.value = it }
+            }
+            // Character-description batch. Buffered, then merged into the character
+            // on END (and re-merged onto any later COMPANION_CHARACTER, see below).
+            trimmed.contains(LogParser.P_CHARDETAIL_START) -> {
+                detailBuffer = DetailBuilder()
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_ATTR) -> detailBuffer?.let { b ->
+                LogParser.parseDetailAttr(detailPayload(trimmed, LogParser.P_CHARDETAIL_ATTR))?.let {
+                    b.attrDesc[it.first] = it.second
+                    b.attrSkills[it.first] = it.third
+                }
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_SKILL) -> detailBuffer?.let { b ->
+                LogParser.parseDetailSkill(detailPayload(trimmed, LogParser.P_CHARDETAIL_SKILL))?.let {
+                    b.skillDesc[it.id] = it.desc
+                    b.skillAttr[it.id] = it.attr
+                    b.skillSpec[it.id] = it.spec
+                }
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_DYN) -> detailBuffer?.let { b ->
+                LogParser.parseDetailDyn(detailPayload(trimmed, LogParser.P_CHARDETAIL_DYN))?.let {
+                    when (it.first) {
+                        "health" -> b.healthDesc = it.second
+                        "magicka" -> b.magickaDesc = it.second
+                        "fatigue" -> b.fatigueDesc = it.second
+                    }
+                }
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_RACE) -> detailBuffer?.let { b ->
+                LogParser.parseDetailRace(detailPayload(trimmed, LogParser.P_CHARDETAIL_RACE))?.let {
+                    b.raceDesc = it.desc
+                    b.raceSkills = it.skills
+                    b.raceAbilities = it.abilities
+                }
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_CLASS) -> detailBuffer?.let { b ->
+                LogParser.parseDetailClass(detailPayload(trimmed, LogParser.P_CHARDETAIL_CLASS))?.let {
+                    b.classDesc = it.desc
+                    b.classSpec = it.spec
+                    b.classAttrs = it.attrs
+                    b.classMajor = it.major
+                    b.classMinor = it.minor
+                }
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_LEVEL) -> detailBuffer?.let { b ->
+                LogParser.parseDetailLevel(detailPayload(trimmed, LogParser.P_CHARDETAIL_LEVEL))?.let {
+                    b.levelProgress = it.first
+                    b.levelTotal = it.second
+                }
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_END) -> {
+                detailBuffer?.let { b ->
+                    lastDetail = b
+                    _state.update { it.copy(character = mergeDetail(it.character, b)) }
+                }
+                detailBuffer = null
+            }
+            // A fresh COMPANION_CHARACTER rebuilds attributes/skills from scratch
+            // (no descriptions), so re-apply the last description batch on top.
+            trimmed.contains(LogParser.P_CHARACTER) -> {
+                _state.update { cur ->
+                    val next = LogParser.parseLine(trimmed, cur) ?: cur
+                    next.copy(character = mergeDetail(next.character, lastDetail))
+                }
             }
             // Note: interior segment cleanup happens in onMapTexture (keyed off segment
             // (0,0) arrival), not here — the STATS line and the native map-capture

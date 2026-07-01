@@ -384,6 +384,169 @@ local function exportCharacter()
     print('COMPANION_CHARACTER:' .. str)
 end
 
+-- Description / metadata for the tappable Stats popups. Verified against the
+-- OpenMW 0.52 Lua API (files/lua_api/openmw/{core,types}.lua):
+--   core.stats.Attribute.records[id] -> {name, description, icon}
+--   core.stats.Skill.records[id]     -> {name, description, icon,
+--                                        specialization (combat/magic/stealth),
+--                                        attribute (governing attribute id)}
+--   types.NPC.races.records[id]      -> {description, skills (map id->bonus),
+--                                        spells (inherent ability ids)}
+--   types.NPC.classes.records[id]    -> {description, specialization,
+--                                        attributes (favored), majorSkills, minorSkills}
+--   types.Actor.stats.level(self)    -> {current, progress}; total per level from
+--                                        the iLevelUpTotal GMST.
+--   Health/Magicka/Fatigue tooltips  -> the sHealthDesc / sMagDesc / sFatDesc GMSTs
+--                                        (the localized ESM strings, not hardcoded).
+--
+-- This payload is large (many long paragraphs) so it CANNOT be one line — the
+-- engine's stdout sink flushes at 4096 bytes and only the first chunk keeps its
+-- COMPANION_ prefix. It is streamed START / <one record per line> / END, exactly
+-- like the inventory and journal exports, and change-detected as a whole so it
+-- only re-emits when something actually changes (e.g. a level-up).
+local lastCharacterDetailStr = nil
+local function exportCharacterDetail()
+    local function capFirst(s)
+        if not s or s == "" then return "" end
+        return s:sub(1, 1):upper() .. s:sub(2)
+    end
+
+    local npcRec = types.NPC.record(self)
+
+    -- Governed skills per attribute + one line per skill (desc/attr/spec).
+    local governed = {}
+    for _, aid in ipairs(ATTR_IDS) do governed[aid] = {} end
+    local skillLines = {}
+    for _, sid in ipairs(SKILL_IDS) do
+        local ok, rec = pcall(function() return core.stats.Skill.records[sid] end)
+        if ok and rec then
+            local gov = rec.attribute or ""
+            local govName = gov
+            pcall(function()
+                local arec = core.stats.Attribute.records[gov]
+                if arec and arec.name and arec.name ~= "" then govName = arec.name end
+            end)
+            local nm = (rec.name and rec.name ~= "" and rec.name) or sid
+            if governed[gov] then table.insert(governed[gov], nm) end
+            skillLines[#skillLines + 1] = string.format(
+                'COMPANION_CHARDETAIL_SKILL:{"id":"%s","desc":"%s","attr":"%s","spec":"%s"}',
+                jsonEscape(sid), jsonEscape(rec.description or ""),
+                jsonEscape(govName), jsonEscape(capFirst(tostring(rec.specialization or ""))))
+        end
+    end
+
+    -- One line per attribute (desc + the list of skills it governs).
+    local attrLines = {}
+    for _, aid in ipairs(ATTR_IDS) do
+        local ok, rec = pcall(function() return core.stats.Attribute.records[aid] end)
+        if ok and rec then
+            local skJson = {}
+            for _, snm in ipairs(governed[aid] or {}) do
+                skJson[#skJson + 1] = '"' .. jsonEscape(snm) .. '"'
+            end
+            attrLines[#attrLines + 1] = string.format(
+                'COMPANION_CHARDETAIL_ATTR:{"id":"%s","desc":"%s","skills":[%s]}',
+                jsonEscape(aid), jsonEscape(rec.description or ""),
+                table.concat(skJson, ','))
+        end
+    end
+
+    -- Health / Magicka / Fatigue descriptions from the ESM string GMSTs.
+    local dynLines = {}
+    local dynMap = { health = "sHealthDesc", magicka = "sMagDesc", fatigue = "sFatDesc" }
+    for _, id in ipairs({ "health", "magicka", "fatigue" }) do
+        local desc = ""
+        pcall(function() desc = tostring(core.getGMST(dynMap[id]) or "") end)
+        dynLines[#dynLines + 1] = string.format(
+            'COMPANION_CHARDETAIL_DYN:{"id":"%s","desc":"%s"}', id, jsonEscape(desc))
+    end
+
+    -- Race: description, skill bonuses, and inherent abilities (by display name).
+    local raceLine = ""
+    pcall(function()
+        local r = types.NPC.races.records[npcRec.race]
+        if r then
+            local skJson = {}
+            if r.skills then
+                for skid, bonus in pairs(r.skills) do
+                    local srec = core.stats.Skill.records[skid]
+                    local snm = (srec and srec.name and srec.name ~= "") and srec.name or skid
+                    skJson[#skJson + 1] = '"' ..
+                        jsonEscape(string.format("%s +%d", snm, math.floor((bonus or 0) + 0.5))) .. '"'
+                end
+            end
+            local abJson = {}
+            if r.spells then
+                for _, spid in ipairs(r.spells) do
+                    local sprec = core.magic.spells.records[spid]
+                    local spnm = (sprec and sprec.name and sprec.name ~= "") and sprec.name or spid
+                    abJson[#abJson + 1] = '"' .. jsonEscape(spnm) .. '"'
+                end
+            end
+            raceLine = string.format(
+                'COMPANION_CHARDETAIL_RACE:{"desc":"%s","skills":[%s],"abilities":[%s]}',
+                jsonEscape(r.description or ""), table.concat(skJson, ','), table.concat(abJson, ','))
+        end
+    end)
+
+    -- Class: description, specialization, favored attributes, major/minor skills.
+    local classLine = ""
+    pcall(function()
+        local c = types.NPC.classes.records[npcRec.class]
+        if c then
+            local function skillNames(list)
+                local out = {}
+                for _, sid in ipairs(list or {}) do
+                    local srec = core.stats.Skill.records[sid]
+                    local snm = (srec and srec.name and srec.name ~= "") and srec.name or sid
+                    out[#out + 1] = '"' .. jsonEscape(snm) .. '"'
+                end
+                return table.concat(out, ',')
+            end
+            local function attrNames(list)
+                local out = {}
+                for _, aid in ipairs(list or {}) do
+                    local arec = core.stats.Attribute.records[aid]
+                    local anm = (arec and arec.name and arec.name ~= "") and arec.name or aid
+                    out[#out + 1] = '"' .. jsonEscape(anm) .. '"'
+                end
+                return table.concat(out, ',')
+            end
+            classLine = string.format(
+                'COMPANION_CHARDETAIL_CLASS:{"desc":"%s","spec":"%s","attrs":[%s],"major":[%s],"minor":[%s]}',
+                jsonEscape(c.description or ""), jsonEscape(capFirst(tostring(c.specialization or ""))),
+                attrNames(c.attributes), skillNames(c.majorSkills), skillNames(c.minorSkills))
+        end
+    end)
+
+    -- Level progress toward the next level.
+    local levelLine = ""
+    pcall(function()
+        local lvl = types.Actor.stats.level(self)
+        local prog = math.floor((lvl.progress or 0) + 0.5)
+        local total = 10
+        pcall(function() total = math.floor(core.getGMST("iLevelUpTotal")) end)
+        levelLine = string.format('COMPANION_CHARDETAIL_LEVEL:{"progress":%d,"total":%d}', prog, total)
+    end)
+
+    local all = {}
+    for _, l in ipairs(attrLines) do all[#all + 1] = l end
+    for _, l in ipairs(skillLines) do all[#all + 1] = l end
+    for _, l in ipairs(dynLines) do all[#all + 1] = l end
+    if raceLine ~= "" then all[#all + 1] = raceLine end
+    if classLine ~= "" then all[#all + 1] = classLine end
+    if levelLine ~= "" then all[#all + 1] = levelLine end
+
+    -- Change-detect the whole batch so it only streams when something changed.
+    local blob = table.concat(all, '\n')
+    if blob == lastCharacterDetailStr then return end
+    lastCharacterDetailStr = blob
+
+    print('COMPANION_CHARDETAIL_START:' .. #all)
+    for _, l in ipairs(all) do print(l) end
+    print('COMPANION_CHARDETAIL_END:' .. #all)
+end
+
 -- Display name of the first parameter of a MagicEffectWithParams entry.
 -- Tries the referenced MagicEffect object first, then the effects registry.
 local function magicEffectName(eff)
@@ -1047,6 +1210,7 @@ local function onUpdate(dt)
         exportEquipment()
         exportActiveEffects()
         exportCharacter()
+        exportCharacterDetail()
         exportTarget()
     end
     journalTimer = journalTimer + dt
