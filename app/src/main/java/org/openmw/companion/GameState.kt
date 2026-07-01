@@ -36,6 +36,20 @@ data class SpellEntry(
 
 data class ActiveEffect(val name: String, val harmful: Boolean)
 
+/** One effect row in an item/spell info popup. */
+data class InfoEffect(val text: String, val harmful: Boolean)
+
+/**
+ * Transient detail popup contents, produced on demand by a CMP:info request.
+ * Not part of the live GameState — held in its own StateFlow. `rows` is an
+ * ordered list of (label, value) pairs; `effects` are formatted effect lines.
+ */
+data class ItemInfo(
+    val name: String,
+    val rows: List<Pair<String, String>>,
+    val effects: List<InfoEffect>
+)
+
 /** Current combat/crosshair target, shown as a name + health bar on the HUD. */
 data class TargetInfo(val name: String, val health: Dynamic)
 

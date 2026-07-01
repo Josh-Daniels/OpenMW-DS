@@ -35,6 +35,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -300,6 +302,101 @@ fun CompanionScreen() {
         }
         if (splashVisible) {
             SplashPanel(onDismiss = { splashVisible = false })
+        }
+
+        // Detail popup — appears when a COMPANION_INFO reply lands (in response to
+        // an "Info" menu tap). Rendered as an in-window overlay (NOT a Dialog):
+        // the companion UI lives inside a Presentation on a secondary display, and
+        // a Compose Dialog tries to add a TYPE_APPLICATION window into that
+        // Presentation's window context, which throws "Window type mismatch".
+        val info by GameStateRepository.itemInfo.collectAsState()
+        info?.let { ItemInfoOverlay(it, onDismiss = { GameStateRepository.dismissItemInfo() }) }
+    }
+}
+
+/* ---- Item / spell detail popup ---- */
+
+@Composable
+private fun ItemInfoOverlay(info: ItemInfo, onDismiss: () -> Unit) {
+    // Full-screen scrim; tapping it (outside the panel) dismisses. The scrim also
+    // blocks tap-through to the tabs/list underneath while the popup is open.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(20f)
+            .background(Color(0xB3000000))
+            .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(400.dp)
+                .heightIn(max = 560.dp)
+                .mwPanel()
+                // Swallow taps inside the panel so they don't reach the scrim.
+                .pointerInput(Unit) { detectTapGestures(onTap = {}) }
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                info.name,
+                color = BronzeLight,
+                fontSize = 16.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(10.dp))
+
+            info.rows.forEachIndexed { i, (label, value) ->
+                if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(label, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                    Text(
+                        value,
+                        color = Bone,
+                        fontSize = 12.sp,
+                        fontFamily = MwData,
+                        modifier = Modifier.padding(start = 12.dp)
+                    )
+                }
+            }
+
+            if (info.effects.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "EFFECTS",
+                    color = BronzeLight,
+                    fontSize = 11.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp
+                )
+                Spacer(Modifier.height(4.dp))
+                info.effects.forEach { eff ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (eff.harmful) Color(0xFFC75C5C) else Color(0xFF7FBF7F))
+                        )
+                        Text(
+                            eff.text,
+                            color = Bone,
+                            fontSize = 12.sp,
+                            fontFamily = MwBody,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1311,6 +1408,11 @@ private fun ItemRow(
                 )
             }
             DropdownMenuItem(
+                text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                colors = menuItemColors
+            )
+            DropdownMenuItem(
                 text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
                 onClick = {
                     menuOpen = false; DropdownState.closeAll()
@@ -1415,6 +1517,7 @@ private fun MagicPanel(state: GameState) {
                                         context, FavSlot(spell.id, spell.displayName())
                                     )
                                 },
+                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
                                 iconBitmap = null
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -1432,6 +1535,7 @@ private fun MagicPanel(state: GameState) {
                                         context, FavSlot(spell.id, spell.displayName())
                                     )
                                 },
+                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
                                 iconBitmap = null
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -1449,6 +1553,7 @@ private fun MagicPanel(state: GameState) {
                                         context, FavSlot(spell.id, spell.displayName())
                                     )
                                 },
+                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
                                 iconBitmap = null
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -1465,6 +1570,7 @@ private fun SpellRow(
     title: String,
     selected: Boolean = false,
     onAddToFavourites: (() -> Unit)? = null,
+    onInfo: (() -> Unit)? = null,
     iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
 ) {
@@ -1479,7 +1585,7 @@ private fun SpellRow(
                     .fillMaxWidth()
                     .combinedClickable(
                         onClick = onTap,
-                        onLongClick = { if (onAddToFavourites != null) { menuOpen = true; DropdownState.open() } }
+                        onLongClick = { if (onAddToFavourites != null || onInfo != null) { menuOpen = true; DropdownState.open() } }
                     )
                     .padding(horizontal = 8.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -1527,7 +1633,7 @@ private fun SpellRow(
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
         }
-        if (onAddToFavourites != null) {
+        if (onAddToFavourites != null || onInfo != null) {
             DropdownMenu(
                 expanded = menuOpen,
                 onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
@@ -1544,11 +1650,20 @@ private fun SpellRow(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                 )
                 Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
-                DropdownMenuItem(
-                    text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = { menuOpen = false; DropdownState.closeAll(); onAddToFavourites() },
-                    colors = MenuDefaults.itemColors(textColor = Bone)
-                )
+                if (onInfo != null) {
+                    DropdownMenuItem(
+                        text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+                        onClick = { menuOpen = false; DropdownState.closeAll(); onInfo() },
+                        colors = MenuDefaults.itemColors(textColor = Bone)
+                    )
+                }
+                if (onAddToFavourites != null) {
+                    DropdownMenuItem(
+                        text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
+                        onClick = { menuOpen = false; DropdownState.closeAll(); onAddToFavourites() },
+                        colors = MenuDefaults.itemColors(textColor = Bone)
+                    )
+                }
             }
         }
     }

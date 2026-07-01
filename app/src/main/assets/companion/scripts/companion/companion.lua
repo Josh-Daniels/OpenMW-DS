@@ -740,6 +740,179 @@ local function unequipItem(arg)
     end
 end
 
+-- ===== On-demand item / spell info (CMP:info) =====
+
+local function capitalize(s)
+    if not s or s == "" then return s end
+    return s:sub(1, 1):upper() .. s:sub(2)
+end
+
+local function rangeName(r)
+    local R = core.magic.RANGE
+    if R then
+        if r == R.Self then return "Self"
+        elseif r == R.Touch then return "Touch"
+        elseif r == R.Target then return "Target" end
+    end
+    return nil
+end
+
+-- Formats a MagicEffectWithParams as "<name> <mag> pts for <dur>s on <range>".
+-- Returns (text, harmful). range suffix only when includeRange is true.
+local function formatEffect(eff, includeRange)
+    local name = magicEffectName(eff) or (eff.id and tostring(eff.id)) or "?"
+    pcall(function()
+        if eff.affectedAttribute then name = name .. " " .. capitalize(tostring(eff.affectedAttribute)) end
+        if eff.affectedSkill then name = name .. " " .. capitalize(tostring(eff.affectedSkill)) end
+    end)
+    local mn = math.floor((eff.magnitudeMin or 0) + 0.5)
+    local mx = math.floor((eff.magnitudeMax or 0) + 0.5)
+    local text
+    if mn == mx then text = string.format("%s %d pts", name, mn)
+    else text = string.format("%s %d-%d pts", name, mn, mx) end
+    local dur = eff.duration or 0
+    if dur and dur > 0 then text = text .. string.format(" for %ds", math.floor(dur + 0.5)) end
+    if includeRange then
+        local rn = rangeName(eff.range)
+        if rn then text = text .. " on " .. rn end
+    end
+    local harmful = false
+    pcall(function()
+        local mrec = core.magic.effects.records[eff.id]
+        if mrec and mrec.harmful then harmful = true end
+    end)
+    return text, harmful
+end
+
+local function appendEffectList(effList, out, includeRange)
+    pcall(function()
+        for _, eff in ipairs(effList or {}) do
+            local text, harmful = formatEffect(eff, includeRange)
+            table.insert(out, string.format('{"t":"%s","h":%s}',
+                jsonEscape(text), harmful and "true" or "false"))
+        end
+    end)
+end
+
+local function appendEnchantEffects(enchantId, out)
+    if not enchantId or enchantId == "" then return end
+    pcall(function()
+        local ench = core.magic.enchantments.records[enchantId]
+        if ench and ench.effects then appendEffectList(ench.effects, out, true) end
+    end)
+end
+
+local function fmtNum(n)
+    if n == nil then return nil end
+    if math.floor(n) == n then return string.format("%d", n) end
+    return string.format("%.1f", n)
+end
+
+local function addRow(rows, k, v)
+    if v ~= nil and v ~= "" then
+        table.insert(rows, string.format('{"k":"%s","v":"%s"}', jsonEscape(k), jsonEscape(tostring(v))))
+    end
+end
+
+local function exportInfo(arg)
+    local kind, id = string.match(arg, "^(%a+):(.+)$")
+    if not kind or not id then
+        print("COMPANION_DEBUG: info - bad arg: " .. tostring(arg))
+        return
+    end
+
+    local name, rows, effects = "", {}, {}
+
+    if kind == "spell" then
+        local rec = core.magic.spells.records[id]
+        if not rec then print("COMPANION_DEBUG: info - spell not found: " .. id); return end
+        name = (rec.name and rec.name ~= "" and rec.name) or id
+        addRow(rows, "Magicka Cost", fmtNum(rec.cost))
+        pcall(function()
+            local e1 = rec.effects and rec.effects[1]
+            if e1 then
+                local mrec = core.magic.effects.records[e1.id]
+                if mrec and mrec.school and mrec.school ~= "" then
+                    addRow(rows, "School", capitalize(tostring(mrec.school)))
+                end
+            end
+        end)
+        appendEffectList(rec.effects, effects, true)
+
+    elseif kind == "item" then
+        local item = nil
+        for _, it in ipairs(types.Actor.inventory(self):getAll()) do
+            if it.recordId == id then item = it; break end
+        end
+        if not item then item = types.Actor.inventory(self):find(id) end
+        if not item then print("COMPANION_DEBUG: info - item not found: " .. id); return end
+        local okr, rec = pcall(function() return item.type.record(item) end)
+        if not okr or not rec then print("COMPANION_DEBUG: info - no record: " .. id); return end
+        name = (rec.name and rec.name ~= "" and rec.name) or id
+
+        -- Instance condition (current / max), not the record's max health.
+        local function condStr(maxHealth)
+            if not maxHealth or maxHealth <= 0 then return nil end
+            local cur = maxHealth
+            pcall(function()
+                local data = types.Item.itemData(item)
+                if data and data.condition ~= nil then cur = data.condition end
+            end)
+            return string.format("%d / %d", math.floor(cur + 0.5), math.floor(maxHealth + 0.5))
+        end
+        local function enchantPts()
+            if rec.enchantCapacity and rec.enchantCapacity > 0 then
+                addRow(rows, "Enchant Pts", fmtNum(rec.enchantCapacity))
+            end
+        end
+
+        addRow(rows, "Weight", fmtNum(rec.weight))
+        addRow(rows, "Value", fmtNum(rec.value))
+
+        if types.Weapon.objectIsInstance(item) then
+            addRow(rows, "Chop", string.format("%d-%d",
+                math.floor((rec.chopMinDamage or 0) + 0.5), math.floor((rec.chopMaxDamage or 0) + 0.5)))
+            addRow(rows, "Slash", string.format("%d-%d",
+                math.floor((rec.slashMinDamage or 0) + 0.5), math.floor((rec.slashMaxDamage or 0) + 0.5)))
+            addRow(rows, "Thrust", string.format("%d-%d",
+                math.floor((rec.thrustMinDamage or 0) + 0.5), math.floor((rec.thrustMaxDamage or 0) + 0.5)))
+            addRow(rows, "Reach", fmtNum(rec.reach))
+            addRow(rows, "Speed", fmtNum(rec.speed))
+            enchantPts()
+            addRow(rows, "Condition", condStr(rec.health))
+            appendEnchantEffects(rec.enchant, effects)
+        elseif types.Armor.objectIsInstance(item) then
+            addRow(rows, "Armor Rating", fmtNum(rec.baseArmor))
+            enchantPts()
+            addRow(rows, "Condition", condStr(rec.health))
+            appendEnchantEffects(rec.enchant, effects)
+        elseif types.Clothing.objectIsInstance(item) then
+            enchantPts()
+            appendEnchantEffects(rec.enchant, effects)
+        elseif types.Potion.objectIsInstance(item) then
+            appendEffectList(rec.effects, effects, false)
+        elseif types.Ingredient.objectIsInstance(item) then
+            appendEffectList(rec.effects, effects, false)
+        elseif types.Lockpick.objectIsInstance(item) or types.Probe.objectIsInstance(item) then
+            addRow(rows, "Quality", fmtNum(rec.quality))
+            addRow(rows, "Uses Left", condStr(rec.maxCondition))
+        elseif types.Book.objectIsInstance(item) then
+            if rec.isScroll then
+                appendEnchantEffects(rec.enchant, effects)
+            elseif rec.skill and rec.skill ~= "" then
+                addRow(rows, "Teaches", capitalize(tostring(rec.skill)))
+            end
+        end
+        -- Misc and anything else: weight/value only (already added).
+    else
+        print("COMPANION_DEBUG: info - unknown kind: " .. tostring(kind))
+        return
+    end
+
+    print(string.format('COMPANION_INFO:{"name":"%s","rows":[%s],"effects":[%s]}',
+        jsonEscape(name), table.concat(rows, ','), table.concat(effects, ',')))
+end
+
 local function dispatchCommand(command)
     if string.sub(command, 1, 4) ~= "CMP:" then return end
     local payload = string.sub(command, 5)
@@ -794,6 +967,8 @@ local function dispatchCommand(command)
         else
             print("COMPANION_DEBUG: read - book not found: " .. arg)
         end
+    elseif action == "info" then
+        exportInfo(arg)
     end
 end
 

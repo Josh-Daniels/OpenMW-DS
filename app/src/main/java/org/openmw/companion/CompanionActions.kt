@@ -20,6 +20,11 @@ object CompanionActions {
 
     fun refreshJournal() = runCommand("CMP:journal")
 
+    // Request an on-demand detail export; reply arrives as a COMPANION_INFO line.
+    fun requestItemInfo(itemId: String) = runCommand("CMP:info item:$itemId")
+
+    fun requestSpellInfo(spellId: String) = runCommand("CMP:info spell:$spellId")
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

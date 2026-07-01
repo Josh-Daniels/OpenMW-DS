@@ -25,6 +25,7 @@ object LogParser {
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     private const val P_CHARACTER = "COMPANION_CHARACTER:"
     private const val P_TARGET = "COMPANION_TARGET:"
+    const val P_INFO = "COMPANION_INFO:"
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
     const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
     const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
@@ -103,6 +104,26 @@ object LogParser {
         return (0 until arr.length()).mapNotNull {
             parseInventoryItem(arr.getJSONObject(it).toString())
         }
+    }
+
+    /** Parses a COMPANION_INFO payload into the detail-popup model. Null if malformed. */
+    fun parseItemInfo(json: String): ItemInfo? = try {
+        val o = JSONObject(json)
+        val rows = o.optJSONArray("rows")?.let { arr ->
+            (0 until arr.length()).map {
+                val r = arr.getJSONObject(it)
+                r.optString("k", "") to r.optString("v", "")
+            }
+        } ?: emptyList()
+        val effects = o.optJSONArray("effects")?.let { arr ->
+            (0 until arr.length()).map {
+                val e = arr.getJSONObject(it)
+                InfoEffect(e.optString("t", ""), e.optBoolean("h", false))
+            }
+        } ?: emptyList()
+        ItemInfo(o.optString("name", ""), rows, effects)
+    } catch (e: Exception) {
+        null
     }
 
     /** Parses a single COMPANION_INVENTORY_ITEM payload. Null if malformed. */

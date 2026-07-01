@@ -49,6 +49,16 @@ object GameStateRepository {
         _hudVisible.value = visible
     }
 
+    // Transient detail-popup contents, populated on demand by a CMP:info request
+    // and its COMPANION_INFO reply. null = no popup showing. Kept separate from
+    // the live GameState so opening the popup never interferes with stat updates.
+    private val _itemInfo = MutableStateFlow<ItemInfo?>(null)
+    val itemInfo: StateFlow<ItemInfo?> = _itemInfo.asStateFlow()
+
+    fun dismissItemInfo() {
+        _itemInfo.value = null
+    }
+
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
@@ -149,6 +159,10 @@ object GameStateRepository {
                     _state.update { it.copy(inventory = buf.toList()) }
                 }
                 inventoryBuffer = null
+            }
+            trimmed.contains(LogParser.P_INFO) -> {
+                val idx = trimmed.indexOf(LogParser.P_INFO) + LogParser.P_INFO.length
+                LogParser.parseItemInfo(trimmed.substring(idx).trim())?.let { _itemInfo.value = it }
             }
             // Note: interior segment cleanup happens in onMapTexture (keyed off segment
             // (0,0) arrival), not here — the STATS line and the native map-capture
