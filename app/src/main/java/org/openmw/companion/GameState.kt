@@ -58,10 +58,23 @@ data class ItemInfo(
 /** Current combat/crosshair target, shown as a name + health bar on the HUD. */
 data class TargetInfo(val name: String, val health: Dynamic)
 
-data class AttributeStat(val id: String, val name: String, val current: Float, val base: Float)
+data class AttributeStat(
+    val id: String, val name: String, val current: Float, val base: Float,
+    /** In-game description (from the streamed CHARDETAIL batch); "" until it lands. */
+    val desc: String = "",
+    /** Display names of the skills this attribute governs. */
+    val governedSkills: List<String> = emptyList()
+)
 
 /** category: "major", "minor", or "misc" per the player's class. */
-data class SkillStat(val id: String, val name: String, val value: Float, val category: String)
+data class SkillStat(
+    val id: String, val name: String, val value: Float, val category: String,
+    val desc: String = "",
+    /** Display name of the governing attribute (e.g. "Agility"). */
+    val governingAttribute: String = "",
+    /** "Combat", "Magic", or "Stealth". */
+    val specialization: String = ""
+)
 
 data class CharacterInfo(
     val name: String = "",
@@ -70,7 +83,25 @@ data class CharacterInfo(
     val birthSign: String = "",
     val level: Int = 0,
     val attributes: List<AttributeStat> = emptyList(),
-    val skills: List<SkillStat> = emptyList()
+    val skills: List<SkillStat> = emptyList(),
+    // --- Description / metadata for the tappable Stats popups (streamed
+    // separately via COMPANION_CHARDETAIL_*, merged in by GameStateRepository). ---
+    val healthDesc: String = "",
+    val magickaDesc: String = "",
+    val fatigueDesc: String = "",
+    val raceDesc: String = "",
+    /** e.g. "Alchemy +5". */
+    val raceSkillBonuses: List<String> = emptyList(),
+    /** Inherent racial ability/spell display names. */
+    val raceAbilities: List<String> = emptyList(),
+    val classDesc: String = "",
+    val classSpecialization: String = "",
+    val classFavoredAttributes: List<String> = emptyList(),
+    val classMajorSkills: List<String> = emptyList(),
+    val classMinorSkills: List<String> = emptyList(),
+    /** Skill-increase count toward the next level, and the total needed. */
+    val levelProgress: Int = 0,
+    val levelTotal: Int = 0
 )
 
 data class JournalEntry(
