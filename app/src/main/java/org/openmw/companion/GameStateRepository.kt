@@ -71,6 +71,12 @@ object GameStateRepository {
                 // COMPANION_STATS cell-name transition (see below), which runs on its own
                 // 0.1s Lua timer and isn't ordered relative to when segments actually render.
                 _interiorMapBitmaps.value = mapOf(Pair(0, 0) to bmp)
+                // Also drop stale exterior segments here: state.cellIsExterior only flips
+                // once the next COMPANION_STATS line arrives (its own async 0.1s timer), so
+                // there's a window right after entering an interior where MapPanel would
+                // still see cellIsExterior=true and render a leftover exterior segment
+                // instead of the interior capture that just started.
+                _exteriorMapBitmaps.value = emptyMap()
             } else {
                 _interiorMapBitmaps.update { current ->
                     val updated = current + (Pair(segX, segY) to bmp)

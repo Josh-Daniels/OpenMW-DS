@@ -601,21 +601,36 @@ private fun MapPanel(state: GameState) {
                 val maxY = interiorMaps.keys.maxOf { it.second }
                 val segCountX = maxX - minX + 1
                 val segCountY = maxY - minY + 1
-                val tilePx = size.minDimension / maxOf(segCountX, segCountY)
-                val gridW = segCountX * tilePx
-                val gridH = segCountY * tilePx
-                val originX = cx - gridW / 2f
-                val originY = cy - gridH / 2f
 
-                for ((seg, bmp) in interiorMaps) {
-                    val (sx, sy) = seg
-                    val left = originX + (sx - minX) * tilePx
-                    val top  = originY + (maxY - sy) * tilePx
+                if (segCountX == 1 && segCountY == 1) {
+                    // Single segment (the common case — most interiors are one
+                    // segment): fill the whole panel. Sizing off size.minDimension
+                    // (as the multi-segment path below does) left the panel's
+                    // landscape width empty, since the panel is wider than tall
+                    // after top/bottom bar padding — a square tile only ever
+                    // covers the shorter dimension.
                     drawImage(
-                        image = bmp.asImageBitmap(),
-                        dstOffset = IntOffset(left.toInt(), top.toInt()),
-                        dstSize   = IntSize(tilePx.toInt(), tilePx.toInt()),
+                        image = interiorMaps.values.first().asImageBitmap(),
+                        dstOffset = IntOffset(0, 0),
+                        dstSize = IntSize(size.width.toInt(), size.height.toInt()),
                     )
+                } else {
+                    val tilePx = size.minDimension / maxOf(segCountX, segCountY)
+                    val gridW = segCountX * tilePx
+                    val gridH = segCountY * tilePx
+                    val originX = cx - gridW / 2f
+                    val originY = cy - gridH / 2f
+
+                    for ((seg, bmp) in interiorMaps) {
+                        val (sx, sy) = seg
+                        val left = originX + sx * tilePx
+                        val top  = originY + sy * tilePx
+                        drawImage(
+                            image = bmp.asImageBitmap(),
+                            dstOffset = IntOffset(left.toInt(), top.toInt()),
+                            dstSize   = IntSize(tilePx.toInt(), tilePx.toInt()),
+                        )
+                    }
                 }
             }
 
