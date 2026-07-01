@@ -1,0 +1,47 @@
+Keep the crosshair/reticle visible when the HUD is hidden via "Hide UI".
+
+Unlike the floating actor-name tooltips (a sibling widget, handled in
+companion-keep-actor-names-on-hideui.patch), the crosshair is a CHILD of the
+HUD's main widget (openmw_hud.layout: "Crosshair" inside "_Main"). The Hide UI
+toggle hides the whole HUD via mHud->setVisible(mHudEnabled && !loading), and
+MyGUI's inherited-visibility propagation hides every child with it — including
+the crosshair. There is no separate mHudEnabled gate on the crosshair to relax.
+
+The crosshair's real visibility is already driven every frame by
+setCrosshairVisible(), called from WindowManager::showCrosshair():
+  - camera.cpp: showCrosshair(!isGuiMode() && mShowCrosshair) every frame
+    (hidden in menus/loading and in third person),
+  - inputmanagerimp.cpp: showCrosshair(false) on entering GUI mode,
+  - gated additionally by Settings::hud().mCrosshair.
+
+So we detach the crosshair from the HUD main widget in the HUD constructor,
+making it an independent root widget on the same "HUD" layer. Hiding mHud no
+longer affects it, while all of its own hide conditions remain intact.
+detachFromWidget() resets the widget's absolute position to its local coord
+(0,0 in the layout), so we recenter it on the viewport and make it
+click-through (a reticle must never steal the centre tap from the world).
+
+--- a/apps/openmw/mwgui/hud.cpp
++++ b/apps/openmw/mwgui/hud.cpp
+@@ -92,5 +92,21 @@
+         getWidget(mWeaponSpellBox, "WeaponSpellName");
+
+         getWidget(mCrosshair, "Crosshair");
++
++        // COMPANION: detach the crosshair from the HUD's main widget so it is not
++        // hidden when the HUD is toggled off via "Hide UI" — mHud->setVisible(false)
++        // would otherwise hide it through MyGUI's inherited visibility. Its own
++        // visibility is still fully managed every frame by setCrosshairVisible()
++        // (driven from the camera: hidden in GUI mode / third person / when the
++        // crosshair setting is off). detachFromWidget() resets the widget to its
++        // local coord (0,0), so recenter it on the viewport and make it click-through.
++        mCrosshair->detachFromWidget("HUD");
++        mCrosshair->setNeedMouseFocus(false);
++        {
++            const MyGUI::IntSize& crossView = MyGUI::RenderManager::getInstance().getViewSize();
++            const MyGUI::IntSize crossSize = mCrosshair->getSize();
++            mCrosshair->setCoord((crossView.width - crossSize.width) / 2,
++                (crossView.height - crossSize.height) / 2, crossSize.width, crossSize.height);
++        }
+
+         LocalMapBase::init(mMinimap, mCompass);
