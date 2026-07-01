@@ -37,8 +37,10 @@ import androidx.compose.animation.expandIn
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
@@ -51,15 +53,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -313,6 +319,25 @@ class EngineActivity : SDLActivity() {
                                 virtualKeyboard = virtualKeyboard,
                                 onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
                             )
+                        }
+
+                        // Independent of both OpenMW's native Hide UI and the app's own
+                        // isUIHidden overlay-hide switch, but only while actually in-game
+                        // (game data is fresh) — hidden during main menu/intro/game menus.
+                        // Polled on a timer (not just keyed off lastUpdateMs) so it also
+                        // expires while the companion tick is paused, e.g. inventory/menus.
+                        var inGame by remember { mutableStateOf(false) }
+                        LaunchedEffect(Unit) {
+                            while (true) {
+                                val last = GameStateRepository.state.value.lastUpdateMs
+                                inGame = last > 0L && (System.currentTimeMillis() - last) < 8000L
+                                delay(1000L)
+                            }
+                        }
+                        if (inGame) {
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                CrosshairOverlay(modifier = Modifier.align(Alignment.Center))
+                            }
                         }
 
                         Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
@@ -737,4 +762,46 @@ fun enableScreenStayOn(activity: Activity) {
 
 fun disableScreenStayOn(activity: Activity) {
     activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+}
+
+@Composable
+private fun CrosshairOverlay(modifier: Modifier = Modifier) {
+    val armLength = 10.dp
+    val gap = 4.dp
+    val strokeWidth = 1.5.dp
+    val color = Color.White.copy(alpha = 0.7f)
+
+    Canvas(modifier = modifier.size(armLength * 2)) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val stroke = strokeWidth.toPx()
+        val gapPx = gap.toPx()
+
+        // Vertical: top segment, then bottom segment, leaving a gap at center.
+        drawLine(
+            color = color,
+            start = Offset(center.x, 0f),
+            end = Offset(center.x, center.y - gapPx),
+            strokeWidth = stroke
+        )
+        drawLine(
+            color = color,
+            start = Offset(center.x, center.y + gapPx),
+            end = Offset(center.x, size.height),
+            strokeWidth = stroke
+        )
+
+        // Horizontal: left segment, then right segment, leaving a gap at center.
+        drawLine(
+            color = color,
+            start = Offset(0f, center.y),
+            end = Offset(center.x - gapPx, center.y),
+            strokeWidth = stroke
+        )
+        drawLine(
+            color = color,
+            start = Offset(center.x + gapPx, center.y),
+            end = Offset(size.width, center.y),
+            strokeWidth = stroke
+        )
+    }
 }
