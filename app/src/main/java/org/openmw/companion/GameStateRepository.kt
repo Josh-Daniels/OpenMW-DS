@@ -70,7 +70,6 @@ object GameStateRepository {
         raw.recycle()
 
         if (isInterior != 0) {
-            Log.d("CompanionMap", "interior segment received segX=$segX segY=$segY")
             if (segX == 0 && segY == 0) {
                 // requestInteriorMap() always requests (0,0) first for any interior-entry
                 // cycle (fresh bounds/segments computed from scratch each time), so its

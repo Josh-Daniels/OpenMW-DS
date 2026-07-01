@@ -578,8 +578,6 @@ class EngineActivity : SDLActivity() {
             width: Int, height: Int, segX: Int, segY: Int, isInterior: Int,
             boundsMinX: Float, boundsMinY: Float, rgba: ByteArray
         ) {
-            Log.d("CompanionJNI", "onCompanionMapTexture called interior=$isInterior seg=$segX,$segY " +
-                "boundsMinX=$boundsMinX boundsMinY=$boundsMinY")
             GameStateRepository.onMapTexture(width, height, segX, segY, isInterior, boundsMinX, boundsMinY, rgba)
         }
 
