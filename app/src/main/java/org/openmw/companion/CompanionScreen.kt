@@ -156,7 +156,7 @@ private val FAV_SLOT_WIDTH  = 132.dp
 private val FAV_SLOT_HEIGHT = 34.dp
 
 private enum class Tab(val label: String) {
-    INVENTORY("Inventory"), MAGIC("Spells"), MAP("Map"), STATS("Stats"), JOURNAL("Journal")
+    INVENTORY("Inventory"), MAGIC("Spells"), HUD("HUD"), STATS("Stats"), JOURNAL("Journal")
 }
 
 private fun InventoryItem.displayName(): String =
@@ -202,7 +202,7 @@ private fun Modifier.mwPanel(): Modifier = this
 @Composable
 fun CompanionScreen() {
     val state by GameStateRepository.state.collectAsState()
-    var tab by remember { mutableStateOf(Tab.MAP) }
+    var tab by remember { mutableStateOf(Tab.HUD) }
 
     // Log-tail fallback: feeds GameStateRepository the same way the JNI sink does,
     // so the UI works even if installCompanionSink() has a hiccup.
@@ -227,21 +227,25 @@ fun CompanionScreen() {
             .imePadding()
             .background(StoneDark)
     ) {
+        val showStatBar = tab == Tab.HUD || tab == Tab.STATS
+
         when (tab) {
             Tab.INVENTORY -> InventoryPanel(state)
             Tab.MAGIC -> MagicPanel(state)
-            Tab.MAP -> MapPanel(state)
+            Tab.HUD -> MapPanel(state)
             Tab.STATS -> StatsPanel(state)
             Tab.JOURNAL -> JournalPanel()
         }
 
-        TopStatBar(
-            state = state,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(12.dp)
-        )
+        if (showStatBar) {
+            TopStatBar(
+                state = state,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(12.dp)
+            )
+        }
 
         BottomTabBar(
             selected = tab,
@@ -545,6 +549,18 @@ private fun MapPanel(state: GameState) {
 
     val favs by FavouritesRepository.state.collectAsState()
 
+    val weaponId = state.equipment["weapon"]
+    val weaponName = if (weaponId == null) {
+        "Hand-to-Hand"
+    } else {
+        val item = state.inventory.find { it.stackId == weaponId }
+            ?: state.inventory.find { it.stackId.isEmpty() && it.id == weaponId }
+        item?.displayName() ?: "None"
+    }
+    val selectedSpellName = state.selectedSpell
+        ?.let { sid -> state.spells.find { it.id == sid } }
+        ?.displayName() ?: "None"
+
     Box(
         Modifier
             .fillMaxSize()
@@ -621,20 +637,51 @@ private fun MapPanel(state: GameState) {
             if (hasMap) drawArrow(cx, cy, size.minDimension * 0.04f, arrowDeg)
         }
 
-        // Cell name — top-centre overlay
+        // Cell name — top-centre overlay. Horizontal padding keeps it clear of the
+        // weapon/spell pills in the top corners; truncates rather than overlapping.
         Text(
             if (state.hasData) state.cell.ifEmpty { "Exterior" } else "—",
             color = Bone, fontSize = 18.sp, fontFamily = MwDisplay,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 8.dp, start = 144.dp, end = 144.dp)
         )
 
-        // Coordinates — bottom-centre overlay
-        Text(
-            "x ${state.pos.x.toInt()}  y ${state.pos.y.toInt()}  z ${state.pos.z.toInt()}",
-            color = BoneDim, fontSize = 12.sp, fontFamily = MwData,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
-        )
+        // Weapon — top-left, mirrors the GEAR favourite group's edge gap.
+        // Display-only (no tap handler).
+        Column(
+            modifier = Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                "WEAPON",
+                color = BoneDim,
+                fontSize = 7.sp,
+                fontFamily = MwDisplay,
+                letterSpacing = 1.sp
+            )
+            EquippedDisplayPill(weaponName)
+        }
+
+        // Spell — top-right, mirror of the weapon group.
+        // Display-only (no tap handler).
+        Column(
+            modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp, top = 6.dp),
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                "SPELL",
+                color = BoneDim,
+                fontSize = 7.sp,
+                fontFamily = MwDisplay,
+                letterSpacing = 1.sp
+            )
+            EquippedDisplayPill(selectedSpellName)
+        }
 
         // Loading placeholder
         if (!hasMap && state.hasData) {
@@ -651,7 +698,7 @@ private fun MapPanel(state: GameState) {
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
-                "GEAR",
+                "FAV. GEAR",
                 color = BoneDim,
                 fontSize = 10.sp,
                 fontFamily = MwDisplay,
@@ -686,7 +733,7 @@ private fun MapPanel(state: GameState) {
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
-                "SPELLS",
+                "FAV. SPELLS",
                 color = BoneDim,
                 fontSize = 10.sp,
                 fontFamily = MwDisplay,
@@ -699,6 +746,41 @@ private fun MapPanel(state: GameState) {
                 }
             }
         }
+    }
+}
+
+private val EQUIPPED_PILL_MAX_FONT = 12.sp
+private val EQUIPPED_PILL_MIN_FONT = 8.sp
+
+@Composable
+private fun EquippedDisplayPill(value: String) {
+    val isEmpty = value == "None"
+    var fontSize by remember(value) { mutableStateOf(EQUIPPED_PILL_MAX_FONT) }
+    Box(
+        modifier = Modifier
+            .width(FAV_SLOT_WIDTH)
+            .height(FAV_SLOT_HEIGHT)
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(0xC0151210))
+            .border(1.dp, BronzeDark, RoundedCornerShape(4.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            value,
+            color = if (isEmpty) BoneDim else Bone,
+            fontSize = fontSize,
+            fontFamily = MwBody,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            softWrap = false,
+            onTextLayout = { result ->
+                if (result.didOverflowWidth && fontSize > EQUIPPED_PILL_MIN_FONT) {
+                    fontSize = (fontSize.value - 1).sp
+                }
+            },
+            modifier = Modifier.padding(horizontal = 6.dp)
+        )
     }
 }
 
@@ -803,7 +885,7 @@ private fun InventoryPanel(state: GameState) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+            .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         EquippedStrip(state)
@@ -1122,7 +1204,7 @@ private fun MagicPanel(state: GameState) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+            .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         // ---- Active spell panel ----
@@ -1313,7 +1395,7 @@ private fun JournalPanel() {
     Box(
         Modifier
             .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+            .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
     ) {
         if (state.journalEntries.isEmpty()) {
             Column(
