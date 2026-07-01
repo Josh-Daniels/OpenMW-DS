@@ -561,98 +561,6 @@ private fun CompactStat(
     }
 }
 
-/* ---- Map: UESP web map in a WebView, follows the player ---- */
-
-/*
-// The map URL builder. If centering doesn't work, this is the ONE place to change
-// the parameter scheme (e.g. oblocx/oblocy instead of x/y, or a different zoom range).
-private fun uespMapUrl(x: Int, y: Int, zoom: Int): String =
-    "https://kezyma.github.io/map/morrowind/map.html"
-
-// Only recenter when the player has moved at least this far (world units),
-// to avoid constant reloads. One cell is 8192 units.
-private const val RECENTER_THRESHOLD = 1500f
-
-@Composable
-private fun MapPanel(state: GameState) {
-    var follow by remember { mutableStateOf(true) }
-    var zoom by remember { mutableIntStateOf(5) }
-
-    // Hold the WebView so we can reload it on demand.
-    val webViewRef = remember { mutableStateOf<WebView?>(null) }
-    // Last position we centered on, to throttle reloads.
-    var lastX by remember { mutableStateOf(Int.MIN_VALUE) }
-    var lastY by remember { mutableStateOf(Int.MIN_VALUE) }
-
-    Box(
-        Modifier
-            .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
-    ) {
-        Column(Modifier.fillMaxSize().mwPanel().padding(4.dp)) {
-
-            // The web map itself
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(2.dp)),
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            webViewClient = WebViewClient()
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.builtInZoomControls = true
-                            settings.displayZoomControls = false
-                            settings.loadWithOverviewMode = true
-                            settings.useWideViewPort = true
-                            settings.userAgentString =
-                                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-                            webViewRef.value = this
-                            val px = state.pos.x.toInt()
-                            val py = state.pos.y.toInt()
-                            loadUrl(uespMapUrl(px, py, zoom))
-                            lastX = px; lastY = py
-                        }
-                    }
-                )
-            }
-
-            // Control strip
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MapButton(if (follow) "Following" else "Free", filled = follow) {
-                    follow = !follow
-                    if (follow) {
-                        // snap back to player immediately
-                        val px = state.pos.x.toInt(); val py = state.pos.y.toInt()
-                        webViewRef.value?.loadUrl(uespMapUrl(px, py, zoom))
-                        lastX = px; lastY = py
-                    }
-                }
-                MapButton("Recenter", filled = false) {
-                    val px = state.pos.x.toInt(); val py = state.pos.y.toInt()
-                    webViewRef.value?.loadUrl(uespMapUrl(px, py, zoom))
-                    lastX = px; lastY = py
-                }
-            }
-        }
-    }
-
-    // When following, recenter on meaningful movement.
-    LaunchedEffect(state.pos.x, state.pos.y, follow) {
-        if (!follow) return@LaunchedEffect
-        val px = state.pos.x.toInt()
-        val py = state.pos.y.toInt()
-        if (abs(px - lastX) > RECENTER_THRESHOLD || abs(py - lastY) > RECENTER_THRESHOLD) {
-            webViewRef.value?.loadUrl(uespMapUrl(px, py, zoom))
-            lastX = px; lastY = py
-        }
-    }
-}
-
-*/
 /* ---- Map: local-map texture from the engine + player direction arrow ---- */
 
 @Composable
@@ -668,16 +576,21 @@ private fun MapPanel(state: GameState) {
     val favs by FavouritesRepository.state.collectAsState()
 
     val weaponId = state.equipment["weapon"]
-    val weaponName = if (weaponId == null) {
-        "Hand-to-Hand"
-    } else {
-        val item = state.inventory.find { it.stackId == weaponId }
+    val weaponItem = weaponId?.let {
+        state.inventory.find { it.stackId == weaponId }
             ?: state.inventory.find { it.stackId.isEmpty() && it.id == weaponId }
-        item?.displayName() ?: "None"
     }
-    val selectedSpellName = state.selectedSpell
+    val weaponName = if (weaponId == null) "Hand-to-Hand"
+                     else weaponItem?.displayName() ?: "None"
+    val weaponIcon = weaponItem?.icon ?: ""
+
+    val selectedSpellEntry = state.selectedSpell
         ?.let { sid -> state.spells.find { it.id == sid } }
-        ?.displayName() ?: "None"
+    val selectedSpellName = selectedSpellEntry?.displayName() ?: "None"
+    val spellIcon = selectedSpellEntry?.icon ?: ""
+
+    var showWeaponName by remember { mutableStateOf(false) }
+    var showSpellName by remember { mutableStateOf(false) }
 
     Box(
         Modifier
@@ -769,37 +682,45 @@ private fun MapPanel(state: GameState) {
                 .padding(bottom = 8.dp, start = 144.dp, end = 144.dp)
         )
 
-        // Weapon — top-left, mirrors the GEAR favourite group's edge gap.
-        // Display-only (no tap handler).
-        Column(
+        // Weapon — top-left icon box. Tapping toggles a persistent name label.
+        EquippedCornerIcon(
             modifier = Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text(
-                "WEAPON",
-                color = BoneDim,
-                fontSize = 7.sp,
-                fontFamily = MwDisplay,
-                letterSpacing = 1.sp
-            )
-            EquippedDisplayPill(weaponName)
-        }
+            label = "WEAPON",
+            iconPath = weaponIcon,
+            showName = showWeaponName,
+            onToggle = { showWeaponName = !showWeaponName }
+        )
 
-        // Spell — top-right, mirror of the weapon group.
-        // Display-only (no tap handler).
-        Column(
+        // Spell — top-right icon box, mirror of the weapon group.
+        EquippedCornerIcon(
             modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp, top = 6.dp),
-            horizontalAlignment = Alignment.End,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text(
-                "SPELL",
-                color = BoneDim,
-                fontSize = 7.sp,
-                fontFamily = MwDisplay,
-                letterSpacing = 1.sp
+            label = "SPELL",
+            iconPath = spellIcon,
+            showName = showSpellName,
+            onToggle = { showSpellName = !showSpellName }
+        )
+
+        // Name labels — absolutely-positioned siblings of the icon columns above,
+        // so showing/hiding them never shifts the icons. Each sits beside its icon
+        // (weapon: to the right; spell: to the left), vertically centred on the box.
+        // Horizontal offset = corner gap (8dp) + icon width (40dp) + 6dp gap.
+        if (showWeaponName) {
+            CornerNameLabel(
+                name = weaponName,
+                alignEnd = false,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 8.dp + 40.dp + 6.dp, top = 6.dp)
             )
-            EquippedDisplayPill(selectedSpellName)
+        }
+        if (showSpellName) {
+            CornerNameLabel(
+                name = selectedSpellName,
+                alignEnd = true,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 8.dp + 40.dp + 6.dp, top = 6.dp)
+            )
         }
 
         // Loading placeholder
@@ -825,7 +746,14 @@ private fun MapPanel(state: GameState) {
             )
             repeat(2) { idx ->
                 val slot = favs.gear.getOrNull(idx)
-                FavSlotView(slot = slot, borderColor = BronzeLight) {
+                val slotItem = slot?.let { s -> state.inventory.find { it.id == s.id } }
+                val slotWorn = slot != null && (
+                    if (slotItem?.stackId?.isNotEmpty() == true)
+                        state.equipment.values.contains(slotItem.stackId)
+                    else
+                        state.equipment.values.contains(slot.id)
+                )
+                FavSlotView(slot = slot, borderColor = BronzeLight, equipped = slotWorn) {
                     val s = slot ?: return@FavSlotView
                     val item = state.inventory.find { it.id == s.id }
                     val readable = item?.category == "book" || item?.category == "scroll"
@@ -860,7 +788,8 @@ private fun MapPanel(state: GameState) {
             )
             repeat(2) { idx ->
                 val slot = favs.magic.getOrNull(idx)
-                FavSlotView(slot = slot, borderColor = BronzeLight) {
+                val slotSelected = slot != null && state.selectedSpell == slot.id
+                FavSlotView(slot = slot, borderColor = BronzeLight, equipped = slotSelected) {
                     slot?.let { CompanionActions.selectSpell(it.id) }
                 }
             }
@@ -922,6 +851,97 @@ private fun TargetHealthOverlay(target: TargetInfo, modifier: Modifier = Modifie
                     .clip(RoundedCornerShape(2.dp))
                     .background(HealthCol)
             )
+        }
+    }
+}
+
+// Top-corner equipped weapon / selected spell: a 40dp icon box with a centered
+// caption above it. Tapping the box toggles a persistent name label (rendered as
+// a separate sibling overlay — see CornerNameLabel — so it never shifts the icon).
+// Border brightens to BronzeLight while the name label is showing.
+@Composable
+private fun EquippedCornerIcon(
+    modifier: Modifier,
+    label: String,
+    iconPath: String,
+    showName: Boolean,
+    onToggle: () -> Unit,
+) {
+    val icon = rememberItemIcon(iconPath)
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            label,
+            color = BoneDim,
+            fontSize = 7.sp,
+            fontFamily = MwDisplay,
+            letterSpacing = 1.sp
+        )
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(SlotBg)
+                .border(1.dp, if (showName) BronzeLight else BronzeDark, RoundedCornerShape(2.dp))
+                .clickable { onToggle() }
+        ) {
+            if (icon != null) {
+                Image(
+                    bitmap = icon,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.size(40.dp)
+                )
+            }
+        }
+    }
+}
+
+// The equipped weapon / spell name label, rendered as an absolutely-positioned
+// sibling of the icon Column (NOT a child) so toggling it can never move the icon.
+// It sits beside the 40dp icon box and is vertically centred on it: an invisible
+// caption placeholder + 4dp spacer reproduce the icon Column's vertical offset
+// (top padding → caption → gap → icon) so the label lines up with the icon exactly
+// regardless of font metrics. `alignEnd` mirrors the layout for the right corner.
+@Composable
+private fun CornerNameLabel(name: String, alignEnd: Boolean, modifier: Modifier) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start
+    ) {
+        // Transparent copy of the WEAPON/SPELL caption: reserves the exact same
+        // height as the real caption above the icon so the label below aligns.
+        Text(
+            "W",
+            color = Color.Transparent,
+            fontSize = 7.sp,
+            fontFamily = MwDisplay,
+            letterSpacing = 1.sp
+        )
+        Spacer(Modifier.height(4.dp))
+        // 40dp-tall band matching the icon box; centre the label within it.
+        Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 120.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(StonePanel)
+                    .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    name,
+                    color = Bone,
+                    fontSize = 9.sp,
+                    fontFamily = MwBody,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }
@@ -1000,10 +1020,19 @@ private fun MapButton(label: String, filled: Boolean, onClick: () -> Unit) {
 /* ---- Favourite slots (floating over the map) ---- */
 
 @Composable
-private fun FavSlotView(slot: FavSlot?, borderColor: Color, onClick: () -> Unit) {
+private fun FavSlotView(
+    slot: FavSlot?,
+    borderColor: Color,
+    equipped: Boolean = false,
+    onClick: () -> Unit
+) {
     val isEmpty = slot == null
     val alpha   = if (isEmpty) 0.4f else 1f
-    val bgColor = Color(0xC0151210)
+    // Mirror the inventory worn/unworn styling: equipped favourites get the
+    // bronze-tinted fill + bright border/name, non-equipped ones stay dim.
+    val bgColor    = if (equipped) SlotWorn else Color(0xC0151210)
+    val slotBorder = if (equipped) borderColor else BronzeDark
+    val textColor  = if (equipped) BoneBright else BoneMuted
 
     Box(
         modifier = Modifier
@@ -1016,7 +1045,7 @@ private fun FavSlotView(slot: FavSlot?, borderColor: Color, onClick: () -> Unit)
                 .clip(RoundedCornerShape(4.dp))
                 .background(bgColor)
                 .then(
-                    if (!isEmpty) Modifier.border(1.dp, borderColor, RoundedCornerShape(4.dp))
+                    if (!isEmpty) Modifier.border(1.dp, slotBorder, RoundedCornerShape(4.dp))
                     else Modifier
                 )
                 .clickable(enabled = !isEmpty) { onClick() },
@@ -1024,7 +1053,7 @@ private fun FavSlotView(slot: FavSlot?, borderColor: Color, onClick: () -> Unit)
         ) {
             Text(
                 text = slot?.name ?: "Empty",
-                color = borderColor.copy(alpha = alpha),
+                color = textColor.copy(alpha = alpha),
                 fontSize = 11.sp,
                 fontFamily = MwBody,
                 maxLines = 1,
@@ -1310,7 +1339,7 @@ private fun ItemRow(
                 // passing iconBitmap non-null at the call site.
                 Box(
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(40.dp)
                         .clip(RoundedCornerShape(2.dp))
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
@@ -1649,7 +1678,7 @@ private fun SpellRow(
                 // passing iconBitmap non-null at the call site.
                 Box(
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(40.dp)
                         .clip(RoundedCornerShape(2.dp))
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
