@@ -1,0 +1,30 @@
+Keep floating actor-name tooltips visible when the HUD is hidden.
+
+OpenMW's "Hide UI" toggle sets mHudEnabled=false and, in
+WindowManager::updateVisible(), hides both the HUD (mHud) and the entire
+tooltip layer (mToolTips). The tooltip layer is what renders the floating
+name shown above an NPC/creature when the player looks at it (the game-mode
+branch of ToolTips::update() driven by mFocusObject). Hiding it means the
+companion's second-screen crosshair has no on-world name to pair with while
+Hide UI is active.
+
+ToolTips::update() already hides all of its children each frame and only
+re-shows the focus-object tooltip in game mode (or the hover tooltip in GUI
+mode), so keeping the tooltip layer itself visible does not leak any other
+HUD element. We therefore drop the mHudEnabled dependency for the tooltip
+layer only; mHud stays gated by Hide UI exactly as before.
+
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -645,7 +645,9 @@
+         if (!mMap)
+             return; // UI not created yet
+
+         mHud->setVisible(mHudEnabled && !loading);
+-        mToolTips->setVisible(mHudEnabled && !loading);
++        // COMPANION: keep floating actor-name tooltips visible even when the HUD is
++        // hidden via the Hide UI toggle. update() only shows the focus-object name.
++        mToolTips->setVisible(!loading);
+
+         bool gameMode = !isGuiMode();
+
