@@ -18,6 +18,9 @@ object LogParser {
     private const val P_SPELLS = "COMPANION_SPELLS:"
     private const val P_SELECTED_SPELL = "COMPANION_SELECTED_SPELL:"
     private const val P_INVENTORY = "COMPANION_INVENTORY:"
+    const val P_INVENTORY_START = "COMPANION_INVENTORY_START"
+    const val P_INVENTORY_ITEM = "COMPANION_INVENTORY_ITEM:"
+    const val P_INVENTORY_END = "COMPANION_INVENTORY_END"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     private const val P_CHARACTER = "COMPANION_CHARACTER:"
@@ -97,17 +100,27 @@ object LogParser {
 
     private fun parseInventory(json: String): List<InventoryItem> {
         val arr = JSONArray(json)
-        return (0 until arr.length()).map {
-            val o = arr.getJSONObject(it)
-            InventoryItem(
-                id = o.optString("id", ""),
-                stackId = o.optString("sid", ""),
-                name = o.optString("name", ""),
-                count = o.optInt("count", 1),
-                category = o.optString("cat", "misc"),
-                icon = o.optString("icon", "")
-            )
+        return (0 until arr.length()).mapNotNull {
+            parseInventoryItem(arr.getJSONObject(it).toString())
         }
+    }
+
+    /** Parses a single COMPANION_INVENTORY_ITEM payload. Null if malformed. */
+    fun parseInventoryItem(json: String): InventoryItem? = try {
+        val o = JSONObject(json)
+        InventoryItem(
+            id = o.optString("id", ""),
+            stackId = o.optString("sid", ""),
+            name = o.optString("name", ""),
+            count = o.optInt("count", 1),
+            category = o.optString("cat", "misc"),
+            icon = o.optString("icon", ""),
+            statVal = o.optString("statVal", ""),
+            statKey = o.optString("statKey", ""),
+            cond = if (o.has("cond")) o.optDouble("cond", 1.0).toFloat() else null
+        )
+    } catch (e: Exception) {
+        null
     }
 
     private fun parseEquipment(json: String): Map<String, String> {

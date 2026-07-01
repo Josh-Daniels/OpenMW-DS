@@ -19,7 +19,13 @@ data class InventoryItem(
     val name: String = "",
     val count: Int = 1,
     val category: String = "misc",
-    val icon: String = ""
+    val icon: String = "",
+    /** Pre-formatted stat value for display (e.g. "2-15", "30"); "" = no stat. */
+    val statVal: String = "",
+    /** Pre-formatted stat label (e.g. "SLASH", "ARMOR"); "" = no stat. */
+    val statKey: String = "",
+    /** Condition ratio 0..1; null = item has no durability (no cond bar). */
+    val cond: Float? = null
 )
 
 data class SpellEntry(

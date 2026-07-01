@@ -369,18 +369,112 @@ local function exportCharacter()
     print('COMPANION_CHARACTER:' .. str)
 end
 
+-- Display name of the first parameter of a MagicEffectWithParams entry.
+-- Tries the referenced MagicEffect object first, then the effects registry.
+local function magicEffectName(eff)
+    local nm
+    pcall(function()
+        if eff.effect and eff.effect.name and eff.effect.name ~= "" then nm = eff.effect.name end
+    end)
+    if not nm or nm == "" then
+        pcall(function()
+            local mrec = core.magic.effects.records[eff.id]
+            if mrec and mrec.name and mrec.name ~= "" then nm = mrec.name end
+        end)
+    end
+    if nm and nm ~= "" then return nm end
+    return nil
+end
+
+-- Returns (statVal, statKey, cond) for an inventory item.
+--   statVal / statKey  short pre-formatted display strings ("" = no stat)
+--   cond               0..1 condition ratio, or nil when no durability
+-- Field names verified against openmw_types.html / mwlua source:
+--   WeaponRecord.{chop,slash,thrust}{Min,Max}Damage, .type, .health
+--   ArmorRecord.baseArmor, .health   Lockpick/ProbeRecord.quality, .maxCondition
+--   per-instance condition: types.Item.itemData(item).condition
+local function itemStats(item, cat)
+    local okr, rec = pcall(function() return item.type.record(item) end)
+    if not okr or not rec then return "", "", nil end
+
+    -- Per-instance condition against a record max. A nil instance condition
+    -- means the item is pristine (never modified) => treat as full.
+    local function condRatio(maxHealth)
+        if not maxHealth or maxHealth <= 0 then return nil end
+        local cur = maxHealth
+        pcall(function()
+            local data = types.Item.itemData(item)
+            if data and data.condition ~= nil then cur = data.condition end
+        end)
+        local r = cur / maxHealth
+        if r < 0 then r = 0 elseif r > 1 then r = 1 end
+        return r
+    end
+
+    if cat == "weapon" or cat == "ammo" then
+        local WT = types.Weapon.TYPE
+        local t = rec.type
+        local key, mn, mx
+        if t == WT.BluntOneHand or t == WT.BluntTwoClose or t == WT.BluntTwoWide
+            or t == WT.AxeOneHand or t == WT.AxeTwoHand then
+            key, mn, mx = "CHOP", rec.chopMinDamage, rec.chopMaxDamage
+        elseif t == WT.SpearTwoWide or t == WT.MarksmanBow or t == WT.MarksmanCrossbow
+            or t == WT.MarksmanThrown or t == WT.Arrow or t == WT.Bolt then
+            key, mn, mx = "THRUST", rec.thrustMinDamage, rec.thrustMaxDamage
+        else
+            key, mn, mx = "SLASH", rec.slashMinDamage, rec.slashMaxDamage
+        end
+        mn = math.floor((mn or 0) + 0.5)
+        mx = math.floor((mx or 0) + 0.5)
+        return string.format("%d-%d", mn, mx), key, condRatio(rec.health)
+    elseif types.Armor.objectIsInstance(item) then
+        return string.format("%d", math.floor((rec.baseArmor or 0) + 0.5)), "ARMOR", condRatio(rec.health)
+    elseif cat == "lockpick" then
+        return string.format("Q%.1f", rec.quality or 0), "PICK", condRatio(rec.maxCondition)
+    elseif cat == "probe" then
+        return string.format("Q%.1f", rec.quality or 0), "PROBE", condRatio(rec.maxCondition)
+    elseif cat == "potion" then
+        local eff = rec.effects and rec.effects[1]
+        if eff then
+            local nm = magicEffectName(eff)
+            if nm then
+                local mag = 0
+                pcall(function() mag = math.floor((eff.magnitudeMax or eff.magnitudeMin or 0) + 0.5) end)
+                return string.format("%d", mag), string.upper(nm), nil
+            end
+        end
+    elseif cat == "ingredient" then
+        local n = 0
+        pcall(function()
+            if rec.effects then for _ in ipairs(rec.effects) do n = n + 1 end end
+        end)
+        if n > 0 then return tostring(n), "EFFECTS", nil end
+    end
+    return "", "", nil
+end
+
+-- Streamed as START / ITEM* / END (one item per line) rather than one giant
+-- JSON array line. The engine's stdout sink flushes in 4096-byte chunks and
+-- only the first chunk keeps its COMPANION_ prefix, so a single long inventory
+-- line arrives truncated on the app side. Per-item lines stay well under that.
 local function exportInventory()
-    local parts = {}
-    for _, item in ipairs(types.Actor.inventory(self):getAll()) do
+    local all = types.Actor.inventory(self):getAll()
+    print('COMPANION_INVENTORY_START:' .. #all)
+    for _, item in ipairs(all) do
         local ok, rec = pcall(function() return item.type.record(item) end)
         local icon = (ok and rec and rec.icon) or ""
         local sid = stackId(item)
-        table.insert(parts, string.format(
-            '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s"}',
+        local cat = itemCategory(item)
+        local statVal, statKey, cond = itemStats(item, cat)
+        local condField = ""
+        if cond ~= nil then condField = string.format(',"cond":%.3f', cond) end
+        print(string.format(
+            'COMPANION_INVENTORY_ITEM:{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","statVal":"%s","statKey":"%s"%s}',
             jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
-            item.count, itemCategory(item), jsonEscape(icon)))
+            item.count, cat, jsonEscape(icon),
+            jsonEscape(statVal), jsonEscape(statKey), condField))
     end
-    print('COMPANION_INVENTORY:[' .. table.concat(parts, ',') .. ']')
+    print('COMPANION_INVENTORY_END:' .. #all)
 end
 
 local function exportEquipment()

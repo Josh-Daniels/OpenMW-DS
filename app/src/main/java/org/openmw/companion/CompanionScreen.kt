@@ -1103,7 +1103,7 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                     items(groupItems) { item ->
                         val worn = isWorn(item)
                         val readable = item.category == "book" || item.category == "scroll"
-                        ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable)
+                        ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable, iconBitmap = null)
                     }
                 }
             }
@@ -1127,7 +1127,8 @@ private fun ItemRow(
     item: InventoryItem,
     worn: Boolean,
     equippable: Boolean,
-    readable: Boolean
+    readable: Boolean,
+    iconBitmap: ImageBitmap? = null
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
@@ -1156,6 +1157,26 @@ private fun ItemRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Icon box (leftmost). Placeholder empty slot until the icon
+                // pipeline loads real DDS textures; drop in a real bitmap by
+                // passing iconBitmap non-null at the call site.
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                ) {
+                    if (iconBitmap != null) {
+                        Image(
+                            bitmap = iconBitmap,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
                 Text(
                     label,
                     color = if (worn) BoneMuted else BoneBright,
@@ -1164,23 +1185,88 @@ private fun ItemRow(
                     fontWeight = FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(end = 8.dp)
+                    modifier = Modifier.weight(1f).padding(end = 12.dp)
                 )
-                when {
-                    worn -> Text(
-                        "WORN",
-                        color = BronzeLight,
-                        fontSize = 10.sp,
-                        fontFamily = MwDisplay,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.8.sp
-                    )
-                    item.count > 1 -> Text(
-                        "x${item.count}",
-                        color = BoneDim,
-                        fontSize = 11.sp,
-                        fontFamily = MwData
-                    )
+                // Trailing columns are fixed-width slots (empty when N/A) so the
+                // stat value, condition bar and worn/count tag always sit in the
+                // same horizontal position across every row.
+                //
+                // Stat column: weapon damage / armor rating / etc.
+                Box(Modifier.width(66.dp), contentAlignment = Alignment.CenterEnd) {
+                    if (item.statVal.isNotEmpty()) {
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                item.statVal,
+                                color = BronzeLight,
+                                fontSize = 11.sp,
+                                fontFamily = MwData,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (item.statKey.isNotEmpty()) {
+                                Text(
+                                    item.statKey,
+                                    color = BoneDim,
+                                    fontSize = 8.sp,
+                                    fontFamily = MwBody,
+                                    letterSpacing = 0.5.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.width(16.dp))
+                // Condition column.
+                Box(Modifier.width(50.dp), contentAlignment = Alignment.Center) {
+                    if (item.cond != null) {
+                        val fillColor = if (item.cond >= 0.5f) BronzeLight else Color(0xFFC75C5C)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "COND",
+                                color = BoneDim,
+                                fontSize = 7.sp,
+                                fontFamily = MwBody,
+                                letterSpacing = 0.5.sp
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(1.dp))
+                                    .background(Color(0xFF0E0B07))
+                                    .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                            ) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth(item.cond.coerceIn(0f, 1f))
+                                        .fillMaxHeight()
+                                        .background(fillColor)
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.width(16.dp))
+                // Worn / count column — fixed slot, empty when neither applies.
+                Box(Modifier.width(46.dp), contentAlignment = Alignment.CenterEnd) {
+                    when {
+                        worn -> Text(
+                            "WORN",
+                            color = BronzeLight,
+                            fontSize = 10.sp,
+                            fontFamily = MwDisplay,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.8.sp
+                        )
+                        item.count > 1 -> Text(
+                            "x${item.count}",
+                            color = BoneDim,
+                            fontSize = 11.sp,
+                            fontFamily = MwData
+                        )
+                    }
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
@@ -1328,7 +1414,8 @@ private fun MagicPanel(state: GameState) {
                                     FavouritesRepository.assignMagic(
                                         context, FavSlot(spell.id, spell.displayName())
                                     )
-                                }
+                                },
+                                iconBitmap = null
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -1344,7 +1431,8 @@ private fun MagicPanel(state: GameState) {
                                     FavouritesRepository.assignMagic(
                                         context, FavSlot(spell.id, spell.displayName())
                                     )
-                                }
+                                },
+                                iconBitmap = null
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -1360,7 +1448,8 @@ private fun MagicPanel(state: GameState) {
                                     FavouritesRepository.assignMagic(
                                         context, FavSlot(spell.id, spell.displayName())
                                     )
-                                }
+                                },
+                                iconBitmap = null
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -1376,6 +1465,7 @@ private fun SpellRow(
     title: String,
     selected: Boolean = false,
     onAddToFavourites: (() -> Unit)? = null,
+    iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -1387,7 +1477,6 @@ private fun SpellRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(if (selected) SlotWorn else Color.Transparent)
                     .combinedClickable(
                         onClick = onTap,
                         onLongClick = { if (onAddToFavourites != null) { menuOpen = true; DropdownState.open() } }
@@ -1395,12 +1484,46 @@ private fun SpellRow(
                     .padding(horizontal = 8.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Icon box (leftmost). Placeholder empty slot until the icon
+                // pipeline loads real textures; drop in a real bitmap by
+                // passing iconBitmap non-null at the call site.
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                ) {
+                    if (iconBitmap != null) {
+                        Image(
+                            bitmap = iconBitmap,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                // Text colours mirror the inventory worn/unworn styling: the
+                // equipped spell dims to BoneMuted (like a worn item) with an
+                // "EQUIPPED" tag, rather than a bronze/bold highlight.
                 Text(
-                    title, color = if (selected) BronzeLight else Bone,
+                    title, color = if (selected) BoneMuted else BoneBright,
                     fontSize = 15.sp, fontFamily = MwBody,
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                    fontWeight = FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(end = 8.dp)
                 )
+                if (selected) {
+                    Text(
+                        "EQUIPPED",
+                        color = BronzeLight,
+                        fontSize = 10.sp,
+                        fontFamily = MwDisplay,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp
+                    )
+                }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
         }

@@ -52,6 +52,11 @@ object GameStateRepository {
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
+    // Accumulates inventory across INVENTORY_START / INVENTORY_ITEM / INVENTORY_END
+    // lines. Inventory is streamed per-item because one combined line can exceed
+    // the engine's 4096-byte stdout flush and arrive truncated (see companion.lua).
+    private var inventoryBuffer: MutableList<InventoryItem>? = null
+
     fun update(transform: (GameState) -> GameState) {
         _state.update(transform)
     }
@@ -129,6 +134,21 @@ object GameStateRepository {
                     _state.update { it.copy(journalEntries = buf.toList()) }
                 }
                 journalBuffer = null
+            }
+            trimmed.contains(LogParser.P_INVENTORY_ITEM) -> {
+                inventoryBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_INVENTORY_ITEM) + LogParser.P_INVENTORY_ITEM.length
+                    LogParser.parseInventoryItem(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_INVENTORY_START) -> {
+                inventoryBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_INVENTORY_END) -> {
+                inventoryBuffer?.let { buf ->
+                    _state.update { it.copy(inventory = buf.toList()) }
+                }
+                inventoryBuffer = null
             }
             // Note: interior segment cleanup happens in onMapTexture (keyed off segment
             // (0,0) arrival), not here — the STATS line and the native map-capture
