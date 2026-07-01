@@ -7,7 +7,7 @@
 +#include <vector>
  
  #include <osg/ComputeBoundsVisitor>
-@@ -33,6 +36,75 @@
+@@ -33,6 +36,80 @@
  #include "util.hpp"
  #include "vismask.hpp"
  
@@ -15,7 +15,7 @@
 +#include <GLES3/gl3.h>
 +#endif
 +
-+extern "C" void companionDeliverMapTexture(int width, int height, int segX, int segY, int isInterior, const unsigned char* rgba);
++extern "C" void companionDeliverMapTexture(int width, int height, int segX, int segY, int isInterior, float boundsMinX, float boundsMinY, const unsigned char* rgba);
 +
 +namespace
 +{
@@ -26,15 +26,20 @@
 +        int mSegX;
 +        int mSegY;
 +        int mIsInterior;
++        float mBoundsMinX;
++        float mBoundsMinY;
 +        mutable std::atomic<bool> mCaptured;
 +        osg::ref_ptr<osg::Texture2D> mTexture;
 +
-+        MapCaptureCallback(int width, int height, int segX, int segY, bool isInterior, osg::Texture2D* texture)
++        MapCaptureCallback(int width, int height, int segX, int segY, bool isInterior, float boundsMinX,
++            float boundsMinY, osg::Texture2D* texture)
 +            : mWidth(width)
 +            , mHeight(height)
 +            , mSegX(segX)
 +            , mSegY(segY)
 +            , mIsInterior(isInterior ? 1 : 0)
++            , mBoundsMinX(boundsMinX)
++            , mBoundsMinY(boundsMinY)
 +            , mCaptured(false)
 +            , mTexture(texture)
 +        {
@@ -71,7 +76,7 @@
 +            {
 +                std::vector<unsigned char> buf(static_cast<size_t>(mWidth) * mHeight * 4);
 +                glReadPixels(0, 0, mWidth, mHeight, GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
-+                companionDeliverMapTexture(mWidth, mHeight, mSegX, mSegY, mIsInterior, buf.data());
++                companionDeliverMapTexture(mWidth, mHeight, mSegX, mSegY, mIsInterior, mBoundsMinX, mBoundsMinY, buf.data());
 +            }
 +
 +            glBindFramebuffer(GL_READ_FRAMEBUFFER, prevFBO);
@@ -83,11 +88,12 @@
  namespace
  {
      float square(float val)
-@@ -179,2 +251,6 @@
+@@ -179,2 +251,7 @@
          segment.mMapTexture = static_cast<osg::Texture2D*>(mLocalMapRTTs.back()->getColorTexture(nullptr));
 +        if (osg::Camera* cam = mLocalMapRTTs.back()->getCamera(nullptr))
 +            cam->setPostDrawCallback(
 +                new MapCaptureCallback(mMapResolution, mMapResolution, segmentX, segmentY, mInterior,
++                                       mInterior ? mBounds.xMin() : 0.0f, mInterior ? mBounds.yMin() : 0.0f,
 +                                       segment.mMapTexture));
      }
 @@ -191,3 +267,34 @@
@@ -119,7 +125,7 @@
 +                if (osg::Camera* ncam = mLocalMapRTTs.back()->getCamera(nullptr))
 +                    ncam->setPostDrawCallback(
 +                        new MapCaptureCallback(mMapResolution, mMapResolution,
-+                                               nx, ny, false, nit->second.mMapTexture));
++                                               nx, ny, false, 0.0f, 0.0f, nit->second.mMapTexture));
 +            }
 +        }
 +#endif

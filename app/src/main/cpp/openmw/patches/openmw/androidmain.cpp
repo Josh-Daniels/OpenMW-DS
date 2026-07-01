@@ -78,7 +78,7 @@ Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*
     g_companionMethod = env->GetStaticMethodID(g_companionClass, "onCompanionLine",
                                                "(Ljava/lang/String;)V");
     g_mapTextureMethod = env->GetStaticMethodID(g_companionClass, "onCompanionMapTexture",
-                                                "(IIIII[B)V");
+                                                "(IIIIIFF[B)V");
     env->DeleteLocalRef(cls);
 
     Debug::setLogListener([](Debug::Level, std::string_view /*prefix*/, std::string_view msg) {
@@ -116,12 +116,15 @@ Java_org_openmw_EngineActivity_sendCompanionCommand(JNIEnv* env, jclass /*cls*/,
 // Called from the OSG render thread (MapCaptureCallback in localmap.cpp) once per
 // cell entry with raw RGBA pixels from glReadPixels. Delivers to Kotlin via JNI.
 // segX/segY are the map segment grid coordinates; isInterior distinguishes interior
-// cells (where segments are 0,0 0,1 etc.) from exterior grid cells.
+// cells (where segments are 0,0 0,1 etc.) from exterior grid cells. boundsMinX/Y are
+// the interior's mBounds min corner in world units (0.0f for exterior, unused there).
 extern "C" void companionDeliverMapTexture(
-    int width, int height, int segX, int segY, int isInterior, const unsigned char* rgba)
+    int width, int height, int segX, int segY, int isInterior, float boundsMinX, float boundsMinY,
+    const unsigned char* rgba)
 {
     Log(Debug::Info) << "companion map: w=" << width << " h=" << height
-                      << " segX=" << segX << " segY=" << segY << " interior=" << isInterior;
+                      << " segX=" << segX << " segY=" << segY << " interior=" << isInterior
+                      << " boundsMinX=" << boundsMinX << " boundsMinY=" << boundsMinY;
 
     if (!g_companionVm || !g_companionClass || !g_mapTextureMethod) return;
 
@@ -135,7 +138,7 @@ extern "C" void companionDeliverMapTexture(
     e->SetByteArrayRegion(arr, 0, size, reinterpret_cast<const jbyte*>(rgba));
     e->CallStaticVoidMethod(g_companionClass, g_mapTextureMethod,
                             (jint)width, (jint)height, (jint)segX, (jint)segY,
-                            (jint)isInterior, arr);
+                            (jint)isInterior, (jfloat)boundsMinX, (jfloat)boundsMinY, arr);
     if (e->ExceptionCheck()) {
         e->ExceptionDescribe();
         e->ExceptionClear();

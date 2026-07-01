@@ -8,6 +8,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+/** One captured interior map segment plus the interior's mBounds min corner (world units),
+ *  needed to compute the player's position within the segment for centering/zoom. */
+data class InteriorSegment(val bitmap: Bitmap, val boundsMinX: Float, val boundsMinY: Float)
+
 /**
  * The single source of truth for live game state. The LogReader writes to it;
  * any Compose UI (on either screen) reads from it. Being a plain object means
@@ -30,9 +34,9 @@ object GameStateRepository {
     // Interior cells are divided into segments the same way exterior cells are
     // (any interior whose bounds exceed one map-world-size tile gets more than
     // one); key by (segX, segY) so multiple segments don't overwrite each other.
-    private val _interiorMapBitmaps = MutableStateFlow<Map<Pair<Int, Int>, Bitmap>>(emptyMap())
+    private val _interiorMapBitmaps = MutableStateFlow<Map<Pair<Int, Int>, InteriorSegment>>(emptyMap())
     private const val MAX_INTERIOR_SEGMENTS = 25
-    val interiorMapBitmaps: StateFlow<Map<Pair<Int, Int>, Bitmap>> = _interiorMapBitmaps.asStateFlow()
+    val interiorMapBitmaps: StateFlow<Map<Pair<Int, Int>, InteriorSegment>> = _interiorMapBitmaps.asStateFlow()
 
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
@@ -46,7 +50,10 @@ object GameStateRepository {
      * Flips the image vertically (OpenGL origin is bottom-left) and stores
      * the resulting bitmap for the MapPanel to display.
      */
-    fun onMapTexture(width: Int, height: Int, segX: Int, segY: Int, isInterior: Int, rgba: ByteArray) {
+    fun onMapTexture(
+        width: Int, height: Int, segX: Int, segY: Int, isInterior: Int,
+        boundsMinX: Float, boundsMinY: Float, rgba: ByteArray
+    ) {
         // Convert RGBA bytes to Android ARGB_8888 pixel array.
         val pixels = IntArray(width * height)
         for (i in pixels.indices) {
@@ -70,7 +77,7 @@ object GameStateRepository {
                 // arrival is a reliable "start of a new capture batch" signal — unlike the
                 // COMPANION_STATS cell-name transition (see below), which runs on its own
                 // 0.1s Lua timer and isn't ordered relative to when segments actually render.
-                _interiorMapBitmaps.value = mapOf(Pair(0, 0) to bmp)
+                _interiorMapBitmaps.value = mapOf(Pair(0, 0) to InteriorSegment(bmp, boundsMinX, boundsMinY))
                 // Also drop stale exterior segments here: state.cellIsExterior only flips
                 // once the next COMPANION_STATS line arrives (its own async 0.1s timer), so
                 // there's a window right after entering an interior where MapPanel would
@@ -79,7 +86,7 @@ object GameStateRepository {
                 _exteriorMapBitmaps.value = emptyMap()
             } else {
                 _interiorMapBitmaps.update { current ->
-                    val updated = current + (Pair(segX, segY) to bmp)
+                    val updated = current + (Pair(segX, segY) to InteriorSegment(bmp, boundsMinX, boundsMinY))
                     if (updated.size <= MAX_INTERIOR_SEGMENTS) updated
                     else updated.entries.drop(updated.size - MAX_INTERIOR_SEGMENTS).associate { it.key to it.value }
                 }

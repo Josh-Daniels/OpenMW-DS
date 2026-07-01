@@ -570,11 +570,17 @@ class EngineActivity : SDLActivity() {
          * Called from the OSG render thread once per cell entry with raw RGBA pixels
          * from glReadPixels. width/height are in pixels; segX/segY are the map segment
          * grid coordinates; isInterior is 1 for interior cells, 0 for exterior.
+         * boundsMinX/boundsMinY are the interior's mBounds min corner in world units
+         * (0.0f for exterior segments, where they're unused).
          */
         @JvmStatic
-        fun onCompanionMapTexture(width: Int, height: Int, segX: Int, segY: Int, isInterior: Int, rgba: ByteArray) {
-            Log.d("CompanionJNI", "onCompanionMapTexture called interior=$isInterior seg=$segX,$segY")
-            GameStateRepository.onMapTexture(width, height, segX, segY, isInterior, rgba)
+        fun onCompanionMapTexture(
+            width: Int, height: Int, segX: Int, segY: Int, isInterior: Int,
+            boundsMinX: Float, boundsMinY: Float, rgba: ByteArray
+        ) {
+            Log.d("CompanionJNI", "onCompanionMapTexture called interior=$isInterior seg=$segX,$segY " +
+                "boundsMinX=$boundsMinX boundsMinY=$boundsMinY")
+            GameStateRepository.onMapTexture(width, height, segX, segY, isInterior, boundsMinX, boundsMinY, rgba)
         }
 
         /** Queues a CMP: command for delivery to Lua on the engine thread. */

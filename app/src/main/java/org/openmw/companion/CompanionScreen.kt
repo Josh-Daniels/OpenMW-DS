@@ -93,6 +93,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.sin
 import kotlin.math.cos
+import kotlin.math.floor
 
 
 /**
@@ -581,54 +582,37 @@ private fun MapPanel(state: GameState) {
                     }
                 }
             } else if (interiorMaps.isNotEmpty()) {
-                // Interior cells are divided into segments the same way exterior cells
-                // are; composite all captured segments into one grid, centered in the
-                // panel (we don't have the player's own in-interior segment coordinate,
-                // so unlike exterior this isn't player-centered — just fully visible).
-                //
-                // Deliberately NOT using `cellPx` here: that constant is 4x the panel's
-                // own size (size.minDimension / MINIMAP_CROP_FRACTION), sized that way
-                // so the exterior branch above can crop into a small, player-centered
-                // zoom of one cell using playerU/playerV. There's no equivalent player
-                // offset for interior segments, so reusing `cellPx` as the tile size
-                // just centered a 4x-oversized image on the panel — only the texture's
-                // center ~25% ever intersected the visible canvas, showing whatever
-                // (usually blank) content happened to be exactly at that texture's
-                // center. Instead, size tiles so the whole segment grid fits the panel.
-                val minX = interiorMaps.keys.minOf { it.first }
-                val maxX = interiorMaps.keys.maxOf { it.first }
-                val minY = interiorMaps.keys.minOf { it.second }
-                val maxY = interiorMaps.keys.maxOf { it.second }
-                val segCountX = maxX - minX + 1
-                val segCountY = maxY - minY + 1
+                // Interior cells are divided into mMapWorldSize-sized segments the same
+                // way exterior cells are, anchored at the interior's mBounds min corner
+                // (boundsMinX/boundsMinY — constant across all segments of one interior).
+                // Compute which segment the player is standing in and their fractional
+                // position within it, then crop/zoom exactly like the exterior branch.
+                val interiorMapWorldSize = 8192f
+                val boundsMinX = interiorMaps.values.first().boundsMinX
+                val boundsMinY = interiorMaps.values.first().boundsMinY
 
-                if (segCountX == 1 && segCountY == 1) {
-                    // Single segment (the common case — most interiors are one
-                    // segment): fill the whole panel. Sizing off size.minDimension
-                    // (as the multi-segment path below does) left the panel's
-                    // landscape width empty, since the panel is wider than tall
-                    // after top/bottom bar padding — a square tile only ever
-                    // covers the shorter dimension.
-                    drawImage(
-                        image = interiorMaps.values.first().asImageBitmap(),
-                        dstOffset = IntOffset(0, 0),
-                        dstSize = IntSize(size.width.toInt(), size.height.toInt()),
-                    )
-                } else {
-                    val tilePx = size.minDimension / maxOf(segCountX, segCountY)
-                    val gridW = segCountX * tilePx
-                    val gridH = segCountY * tilePx
-                    val originX = cx - gridW / 2f
-                    val originY = cy - gridH / 2f
+                val rawX = (state.pos.x - boundsMinX) / interiorMapWorldSize
+                val rawY = (state.pos.y - boundsMinY) / interiorMapWorldSize
+                val playerSegX = floor(rawX).toInt()
+                val playerSegY = floor(rawY).toInt()
+                val playerU = (rawX - playerSegX).coerceIn(0f, 1f)
+                val playerV = (1f - (rawY - playerSegY)).coerceIn(0f, 1f)
 
-                    for ((seg, bmp) in interiorMaps) {
-                        val (sx, sy) = seg
-                        val left = originX + sx * tilePx
-                        val top  = originY + sy * tilePx
+                val originX = cx - playerU * cellPx
+                val originY = cy - playerV * cellPx
+
+                val reach = (maxOf(size.width, size.height) / cellPx).toInt() + 1
+                for (dy in -reach..reach) {
+                    for (dx in -reach..reach) {
+                        val seg = interiorMaps[Pair(playerSegX + dx, playerSegY + dy)] ?: continue
+                        val left = originX + dx * cellPx
+                        val top  = originY - dy * cellPx
+                        if (left + cellPx < 0f || left > size.width)  continue
+                        if (top  + cellPx < 0f || top  > size.height) continue
                         drawImage(
-                            image = bmp.asImageBitmap(),
+                            image = seg.bitmap.asImageBitmap(),
                             dstOffset = IntOffset(left.toInt(), top.toInt()),
-                            dstSize   = IntSize(tilePx.toInt(), tilePx.toInt()),
+                            dstSize   = IntSize(cellPx.toInt(), cellPx.toInt()),
                         )
                     }
                 }
