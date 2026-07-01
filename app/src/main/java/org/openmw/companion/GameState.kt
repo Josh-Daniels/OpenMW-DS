@@ -30,6 +30,9 @@ data class SpellEntry(
 
 data class ActiveEffect(val name: String, val harmful: Boolean)
 
+/** Current combat/crosshair target, shown as a name + health bar on the HUD. */
+data class TargetInfo(val name: String, val health: Dynamic)
+
 data class AttributeStat(val id: String, val name: String, val current: Float, val base: Float)
 
 /** category: "major", "minor", or "misc" per the player's class. */
@@ -75,6 +78,8 @@ data class GameState(
     val activeEffects: List<ActiveEffect> = emptyList(),
     val journalEntries: List<JournalEntry> = emptyList(),
     val character: CharacterInfo = CharacterInfo(),
+    /** Current combat target under the crosshair; null = no target. */
+    val target: TargetInfo? = null,
     /** Wall-clock time we last parsed a STATS line; 0 = no data yet. */
     val lastUpdateMs: Long = 0L
 ) {

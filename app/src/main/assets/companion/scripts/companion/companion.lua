@@ -3,6 +3,9 @@ local self = require('openmw.self')
 local ui = require('openmw.ui')
 local core = require('openmw.core')
 local ambient = require('openmw.ambient')
+local camera = require('openmw.camera')
+local nearby = require('openmw.nearby')
+local util = require('openmw.util')
 
 local statsTimer = 0
 local slowTimer = 0
@@ -176,7 +179,6 @@ end
 
 local lastActiveEffectsStr = nil
 local lastCharacterStr = nil
-local effectsDiagDone = false
 
 -- Attribute and skill IDs used as second param for parameterized effects.
 local ATTR_IDS = {"strength","intelligence","willpower","agility","speed","endurance","personality","luck"}
@@ -193,46 +195,6 @@ local SKILL_EFFECT_IDS = {"absorbskill","damageskill","drainskill","fortifyskill
 local function exportActiveEffects()
     local parts = {}
     local effectsObj = types.Actor.activeEffects(self)
-
-    -- One-shot diagnostic: understand what's actually iterable.
-    if not effectsDiagDone then
-        effectsDiagDone = true
-        -- Can we pairs() over EFFECT_TYPE?
-        local d1 = {}
-        local ok1 = pcall(function()
-            local n = 0
-            for k, v in pairs(core.magic.EFFECT_TYPE) do
-                n = n + 1
-                if n <= 5 then d1[#d1+1] = tostring(k)..':'..type(v)..':'..tostring(v) end
-            end
-            d1[#d1+1] = 'n='..n
-        end)
-        print('COMPANION_DEBUG_EFFECT: EFFECT_TYPE ok='..tostring(ok1)..' '..table.concat(d1,'|'))
-        -- Can we pairs() over effects.records?
-        local d2 = {}
-        local ok2 = pcall(function()
-            local n = 0
-            for k, _ in pairs(core.magic.effects.records) do
-                n = n + 1
-                if n <= 5 then d2[#d2+1] = type(k)..':'..tostring(k) end
-            end
-            d2[#d2+1] = 'n='..n
-        end)
-        print('COMPANION_DEBUG_EFFECT: records ok='..tostring(ok2)..' '..table.concat(d2,'|'))
-        -- Does getEffect return an object with magnitude, and what is it for a known ID?
-        pcall(function()
-            local p = effectsObj:getEffect('restorehealth')
-            print('COMPANION_DEBUG_EFFECT: getEffect restorehealth type='..type(p)
-                ..' nil='..(p==nil and 'y' or 'n')
-                ..' mag='..tostring(p and p.magnitude))
-        end)
-        -- getEffect with attribute param
-        pcall(function()
-            local p = effectsObj:getEffect('fortifyattribute','strength')
-            print('COMPANION_DEBUG_EFFECT: fortifyattr/strength type='..type(p)
-                ..' mag='..tostring(p and p.magnitude))
-        end)
-    end
 
     -- Mark which effectIds are handled as parameterized (skip in non-param loop).
     local paramSet = {}
@@ -407,28 +369,12 @@ local function exportCharacter()
     print('COMPANION_CHARACTER:' .. str)
 end
 
-local iconDiagDone = false
-local stackDiagDone = false
 local function exportInventory()
     local parts = {}
     for _, item in ipairs(types.Actor.inventory(self):getAll()) do
         local ok, rec = pcall(function() return item.type.record(item) end)
         local icon = (ok and rec and rec.icon) or ""
         local sid = stackId(item)
-        if not iconDiagDone and ok and rec then
-            iconDiagDone = true
-            local keys = {}
-            for k, _ in pairs(rec) do keys[#keys+1] = tostring(k) end
-            print('COMPANION_DEBUG_ICON: id=' .. tostring(item.recordId)
-                .. ' icon=' .. tostring(rec.icon)
-                .. ' keys=' .. table.concat(keys, ','))
-        end
-        if not stackDiagDone then
-            stackDiagDone = true
-            print('COMPANION_DEBUG_STACK: recordId=' .. tostring(item.recordId)
-                .. ' sid=' .. tostring(sid)
-                .. ' same=' .. tostring(sid == item.recordId))
-        end
         table.insert(parts, string.format(
             '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s"}',
             jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
@@ -520,6 +466,81 @@ local function exportJournal()
 end
 
 
+
+-- ===== Combat target export =====
+--
+-- CONCEPT USED: (a) crosshair target. OpenMW 0.52 Lua does NOT expose a
+-- combat/attack target or AI packages for querying (verified: neither the
+-- I.Combat interface nor types.Actor exposes getActiveAiPackage / a target
+-- field — see openmw.readthedocs.io/en/stable/reference/lua-scripting/
+-- interface_combat.html and openmw_types.html, and the master
+-- files/lua_api/openmw/types.lua). So concept (b) "most recently hit / actively
+-- fought" is unavailable to a player script. Instead we raycast from the camera
+-- through the viewport centre (the crosshair) to find the actor under it, and
+-- gate on combat stance (weapon or spell readied) so the bar only shows "during
+-- combat" rather than for every NPC the player glances at.
+--
+-- APIs (all verified against the stable docs):
+--   camera.getPosition() -> Vector3           (openmw_camera.html)
+--   camera.viewportToWorldVector(vector2)      -> Vector3 direction through a
+--       viewport point; (0.5,0.5) = crosshair  (openmw_camera.html)
+--   nearby.castRay(from, to, {ignore=...})     -> RayCastingResult
+--       {hit, hitPos, hitNormal, hitObject}    (openmw_nearby.html)
+--   types.Actor.getStance(actor) / STANCE      (openmw_types.html)
+--   types.Actor.stats.dynamic.health(actor)    -> {current, base}; works on any
+--       actor, not just the player             (files/lua_api/.../types.lua)
+local TARGET_RAY_RANGE = 8192  -- ~one cell; covers melee, marksman and spells.
+
+local function currentTargetActor()
+    local ok, obj = pcall(function()
+        -- Only while a weapon or spell is readied ("during combat").
+        if types.Actor.getStance(self) == types.Actor.STANCE.Nothing then
+            return nil
+        end
+        local origin = camera.getPosition()
+        local dir = camera.viewportToWorldVector(util.vector2(0.5, 0.5))
+        local dest = origin + dir * TARGET_RAY_RANGE
+        local r = nearby.castRay(origin, dest, { ignore = self.object })
+        if r and r.hit and r.hitObject then
+            local o = r.hitObject
+            if types.NPC.objectIsInstance(o) or types.Creature.objectIsInstance(o) then
+                -- Skip corpses: only report actors that are still alive.
+                if types.Actor.stats.dynamic.health(o).current > 0 then
+                    return o
+                end
+            end
+        end
+        return nil
+    end)
+    if ok then return obj end
+    return nil
+end
+
+local lastTargetStr = nil
+local function exportTarget()
+    local obj = currentTargetActor()
+    local str = '{}'
+    if obj then
+        local nm = ""
+        pcall(function()
+            local rec = obj.type.record(obj)
+            if rec and rec.name and rec.name ~= "" then nm = rec.name end
+        end)
+        if nm == "" then nm = obj.recordId or "?" end
+        local cur, mx = 0, 0
+        pcall(function()
+            local hp = types.Actor.stats.dynamic.health(obj)
+            cur, mx = hp.current, hp.base
+        end)
+        str = string.format(
+            '{"name":"%s","health":{"current":%.1f,"max":%.1f}}',
+            jsonEscape(nm), cur, mx)
+    end
+    -- Change-detection: only print when the target or its health changed.
+    if str == lastTargetStr then return end
+    lastTargetStr = str
+    print('COMPANION_TARGET:' .. str)
+end
 
 -- Play a generic equip/unequip sound (the data path skips the engine's
 -- normal equip sound, so we trigger one ourselves). Polish per-item later.
@@ -704,6 +725,7 @@ local function onUpdate(dt)
         exportEquipment()
         exportActiveEffects()
         exportCharacter()
+        exportTarget()
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then

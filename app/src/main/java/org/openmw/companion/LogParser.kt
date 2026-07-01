@@ -21,6 +21,7 @@ object LogParser {
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     private const val P_CHARACTER = "COMPANION_CHARACTER:"
+    private const val P_TARGET = "COMPANION_TARGET:"
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
     const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
     const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
@@ -43,6 +44,8 @@ object LogParser {
                     current.copy(activeEffects = parseActiveEffects(after(line, P_ACTIVE_EFFECTS)))
                 line.contains(P_CHARACTER) ->
                     current.copy(character = parseCharacter(after(line, P_CHARACTER)))
+                line.contains(P_TARGET) ->
+                    current.copy(target = parseTarget(after(line, P_TARGET)))
                 else -> null
             }
         } catch (e: Exception) {
@@ -171,6 +174,21 @@ object LogParser {
     } catch (e: Exception) {
         Log.e(TAG, "Journal entry parse failed: $json", e)
         null
+    }
+
+    /** Empty payload {} or a missing name/health → null (no current target). */
+    private fun parseTarget(json: String): TargetInfo? {
+        val o = JSONObject(json)
+        val name = o.optString("name", "")
+        val h = o.optJSONObject("health") ?: return null
+        if (name.isEmpty()) return null
+        return TargetInfo(
+            name = name,
+            health = Dynamic(
+                h.getDouble("current").toFloat(),
+                h.getDouble("max").toFloat()
+            )
+        )
     }
 
     private fun parseSelectedSpell(payload: String): String? {

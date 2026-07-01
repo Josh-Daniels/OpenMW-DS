@@ -1,0 +1,33 @@
+Mirror OpenMW's in-game Hide UI toggle onto the Alpha3 second-screen overlay.
+
+WindowManager::setHudVisibility(show) is the single entry point that flips
+mHudEnabled when the player toggles Hide UI (bound to the "Toggle HUD" control).
+It runs only on an actual toggle, not per frame, so it's the right place to
+notify the app. We call companionDeliverHudVisibility() (defined in
+androidmain.cpp, which is copied into the openmw build) which forwards the new
+state to EngineActivity.onHudVisibilityChanged over JNI. The Kotlin side
+combines it with the app's own isUIHidden preference to show/hide OverlayUI
+(touch controls, gear icon, arrow) in sync with the game HUD.
+
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -1806,10 +1806,18 @@
+         mQuickKeysMenu->activateQuickKey(index);
+     }
+
++#ifdef __ANDROID__
++extern "C" void companionDeliverHudVisibility(bool visible);
++#endif
++
+     bool WindowManager::setHudVisibility(bool show)
+     {
+         mHudEnabled = show;
+         updateVisible();
+         mMessageBoxManager->setVisible(mHudEnabled);
++#ifdef __ANDROID__
++        // COMPANION: sync the Alpha3 second-screen overlay with the in-game Hide UI.
++        companionDeliverHudVisibility(mHudEnabled);
++#endif
+         return mHudEnabled;
+     }
+

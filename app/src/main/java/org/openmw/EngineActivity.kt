@@ -239,6 +239,10 @@ class EngineActivity : SDLActivity() {
                     // Adds Overlay menu for buttons and edit mode
                     composeViewUI.setContent {
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
+                        // In-game Hide UI (OpenMW mHudEnabled), pushed from native via
+                        // onHudVisibilityChanged. The overlay shows only when the app's own
+                        // hide preference is off AND the game HUD is currently visible.
+                        val hudVisible by GameStateRepository.hudVisible.collectAsState()
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
                         val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
@@ -313,31 +317,12 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
-                        if (!isUIHidden) {
+                        if (!isUIHidden && hudVisible) {
                             OverlayUI(
                                 context = this@EngineActivity,
                                 virtualKeyboard = virtualKeyboard,
                                 onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
                             )
-                        }
-
-                        // Independent of both OpenMW's native Hide UI and the app's own
-                        // isUIHidden overlay-hide switch, but only while actually in-game
-                        // (game data is fresh) — hidden during main menu/intro/game menus.
-                        // Polled on a timer (not just keyed off lastUpdateMs) so it also
-                        // expires while the companion tick is paused, e.g. inventory/menus.
-                        var inGame by remember { mutableStateOf(false) }
-                        LaunchedEffect(Unit) {
-                            while (true) {
-                                val last = GameStateRepository.state.value.lastUpdateMs
-                                inGame = last > 0L && (System.currentTimeMillis() - last) < 8000L
-                                delay(1000L)
-                            }
-                        }
-                        if (inGame) {
-                            Box(modifier = Modifier.fillMaxSize()) {
-                                CrosshairOverlay(modifier = Modifier.align(Alignment.Center))
-                            }
                         }
 
                         Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
@@ -581,6 +566,16 @@ class EngineActivity : SDLActivity() {
             GameStateRepository.onMapTexture(width, height, segX, segY, isInterior, boundsMinX, boundsMinY, rgba)
         }
 
+        /**
+         * Called from native (engine thread) whenever OpenMW's in-game Hide UI
+         * toggle flips mHudEnabled. Mirrors the state onto the Alpha3 second-screen
+         * overlay so the touch controls / gear icon / arrow hide and show in sync.
+         */
+        @JvmStatic
+        fun onHudVisibilityChanged(visible: Boolean) {
+            GameStateRepository.setHudVisible(visible)
+        }
+
         /** Queues a CMP: command for delivery to Lua on the engine thread. */
         @JvmStatic
         external fun sendCompanionCommand(cmd: String)
@@ -767,46 +762,4 @@ fun enableScreenStayOn(activity: Activity) {
 
 fun disableScreenStayOn(activity: Activity) {
     activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-}
-
-@Composable
-private fun CrosshairOverlay(modifier: Modifier = Modifier) {
-    val armLength = 10.dp
-    val gap = 4.dp
-    val strokeWidth = 1.5.dp
-    val color = Color.White.copy(alpha = 0.7f)
-
-    Canvas(modifier = modifier.size(armLength * 2)) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val stroke = strokeWidth.toPx()
-        val gapPx = gap.toPx()
-
-        // Vertical: top segment, then bottom segment, leaving a gap at center.
-        drawLine(
-            color = color,
-            start = Offset(center.x, 0f),
-            end = Offset(center.x, center.y - gapPx),
-            strokeWidth = stroke
-        )
-        drawLine(
-            color = color,
-            start = Offset(center.x, center.y + gapPx),
-            end = Offset(center.x, size.height),
-            strokeWidth = stroke
-        )
-
-        // Horizontal: left segment, then right segment, leaving a gap at center.
-        drawLine(
-            color = color,
-            start = Offset(0f, center.y),
-            end = Offset(center.x - gapPx, center.y),
-            strokeWidth = stroke
-        )
-        drawLine(
-            color = color,
-            start = Offset(center.x + gapPx, center.y),
-            end = Offset(size.width, center.y),
-            strokeWidth = stroke
-        )
-    }
 }

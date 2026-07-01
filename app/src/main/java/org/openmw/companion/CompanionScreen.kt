@@ -61,6 +61,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -637,17 +638,18 @@ private fun MapPanel(state: GameState) {
             if (hasMap) drawArrow(cx, cy, size.minDimension * 0.04f, arrowDeg)
         }
 
-        // Cell name — top-centre overlay. Horizontal padding keeps it clear of the
-        // weapon/spell pills in the top corners; truncates rather than overlapping.
+        // Cell name — bottom-centre overlay. Horizontal padding keeps it clear of
+        // the GEAR/SPELLS favourite groups in the bottom corners; truncates rather
+        // than overlapping.
         Text(
             if (state.hasData) state.cell.ifEmpty { "Exterior" } else "—",
-            color = Bone, fontSize = 18.sp, fontFamily = MwDisplay,
+            color = Bone, fontSize = 16.sp, fontFamily = MwDisplay,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 8.dp, start = 144.dp, end = 144.dp)
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 8.dp, start = 144.dp, end = 144.dp)
         )
 
         // Weapon — top-left, mirrors the GEAR favourite group's edge gap.
@@ -745,6 +747,64 @@ private fun MapPanel(state: GameState) {
                     slot?.let { CompanionActions.selectSpell(it.id) }
                 }
             }
+        }
+
+        // Combat target — top-centre, in the gap between the WEAPON and SPELL
+        // pills. Only present while a target exists (during combat).
+        state.target?.let { target ->
+            TargetHealthOverlay(
+                target = target,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 6.dp)
+            )
+        }
+    }
+}
+
+/** Target name + health bar shown at the bottom-centre of the HUD map. */
+@Composable
+private fun TargetHealthOverlay(target: TargetInfo, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.width(200.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            "TARGET",
+            color = BoneDim,
+            fontSize = 9.sp,
+            fontFamily = MwDisplay,
+            letterSpacing = 1.5.sp
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            target.name,
+            color = BronzeLight,
+            fontSize = 16.sp,
+            fontFamily = MwBody,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.widthIn(max = 196.dp)
+        )
+        Spacer(Modifier.height(5.dp))
+        // Taller variant of the player health bar in TopStatBar's CompactStat.
+        Box(
+            modifier = Modifier
+                .width(200.dp)
+                .height(16.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Color(0xFF0E0B07))
+                .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(target.health.ratio)
+                    .height(16.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(HealthCol)
+            )
         }
     }
 }

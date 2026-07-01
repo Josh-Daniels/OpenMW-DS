@@ -38,6 +38,17 @@ object GameStateRepository {
     private const val MAX_INTERIOR_SEGMENTS = 25
     val interiorMapBitmaps: StateFlow<Map<Pair<Int, Int>, InteriorSegment>> = _interiorMapBitmaps.asStateFlow()
 
+    // In-game Hide UI state (OpenMW's mHudEnabled), pushed from native via
+    // EngineActivity.onHudVisibilityChanged whenever the player toggles Hide UI.
+    // Defaults to visible; used to sync the Alpha3 touch-control overlay with the
+    // game's own HUD toggle.
+    private val _hudVisible = MutableStateFlow(true)
+    val hudVisible: StateFlow<Boolean> = _hudVisible.asStateFlow()
+
+    fun setHudVisible(visible: Boolean) {
+        _hudVisible.value = visible
+    }
+
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 

@@ -41,6 +41,7 @@ static JavaVM*   g_companionVm     = nullptr;
 static jclass    g_companionClass  = nullptr;
 static jmethodID g_companionMethod = nullptr;
 static jmethodID g_mapTextureMethod = nullptr;
+static jmethodID g_hudVisibilityMethod = nullptr;
 
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
@@ -79,6 +80,8 @@ Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*
                                                "(Ljava/lang/String;)V");
     g_mapTextureMethod = env->GetStaticMethodID(g_companionClass, "onCompanionMapTexture",
                                                 "(IIIIIFF[B)V");
+    g_hudVisibilityMethod = env->GetStaticMethodID(g_companionClass, "onHudVisibilityChanged",
+                                                   "(Z)V");
     env->DeleteLocalRef(cls);
 
     Debug::setLogListener([](Debug::Level, std::string_view /*prefix*/, std::string_view msg) {
@@ -144,6 +147,22 @@ extern "C" void companionDeliverMapTexture(
         e->ExceptionClear();
     }
     e->DeleteLocalRef(arr);
+}
+
+// Called from WindowManager::setHudVisibility (windowmanagerimp.cpp) whenever the
+// player toggles OpenMW's in-game Hide UI. Mirrors mHudEnabled onto the Alpha3
+// second-screen overlay (touch controls / gear icon) via a static Kotlin method.
+extern "C" void companionDeliverHudVisibility(bool visible)
+{
+    if (!g_companionVm || !g_companionClass || !g_hudVisibilityMethod) return;
+
+    JNIEnv* e = nullptr;
+    g_companionVm->AttachCurrentThread(&e, nullptr);
+    e->CallStaticVoidMethod(g_companionClass, g_hudVisibilityMethod, (jboolean)visible);
+    if (e->ExceptionCheck()) {
+        e->ExceptionDescribe();
+        e->ExceptionClear();
+    }
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.
