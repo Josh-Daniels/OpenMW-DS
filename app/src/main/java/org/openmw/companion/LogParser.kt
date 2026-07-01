@@ -64,7 +64,8 @@ object LogParser {
             SpellEntry(
                 id = o.getString("id"),
                 name = o.optString("name", ""),
-                type = o.optString("type", "spell")
+                type = o.optString("type", "spell"),
+                icon = o.optString("icon", "")
             )
         }
     }
@@ -157,7 +158,8 @@ object LogParser {
             val o = arr.getJSONObject(it)
             ActiveEffect(
                 name = o.optString("name", ""),
-                harmful = o.optBoolean("harmful", false)
+                harmful = o.optBoolean("harmful", false),
+                icon = o.optString("icon", "")
             )
         }
     }

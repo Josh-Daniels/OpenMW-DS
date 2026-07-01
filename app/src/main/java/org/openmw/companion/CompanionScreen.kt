@@ -474,12 +474,32 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                     shape = RoundedCornerShape(3.dp)
                 ) {
                     state.activeEffects.forEach { effect ->
+                        val effectIcon = rememberItemIcon(effect.icon)
                         Row(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // Compact 20dp icon box (same placeholder styling as
+                            // inventory/spell rows, sized down for the dropdown).
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(SlotBg)
+                                    .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                            ) {
+                                if (effectIcon != null) {
+                                    Image(
+                                        bitmap = effectIcon,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(6.dp))
                             EffectDot(effect.harmful, 8.dp)
+                            Spacer(Modifier.width(8.dp))
                             Text(
                                 effect.name,
                                 color = Bone, fontSize = 12.sp,
@@ -1202,7 +1222,7 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                     items(groupItems) { item ->
                         val worn = isWorn(item)
                         val readable = item.category == "book" || item.category == "scroll"
-                        ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable, iconBitmap = null)
+                        ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable, iconBitmap = rememberItemIcon(item.icon))
                     }
                 }
             }
@@ -1215,11 +1235,38 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
             items(groupItems) { item ->
                 val worn = isWorn(item)
                 val readable = item.category == "book" || item.category == "scroll"
-                ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable)
+                ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable, iconBitmap = rememberItemIcon(item.icon))
             }
         }
         item { Spacer(Modifier.height(4.dp)) }
     }
+}
+
+// Lazily extracts + caches an item icon from the OpenMW VFS (BSA / loose files)
+// and returns it as an ImageBitmap, or null while loading / on failure (in which
+// case the caller shows the empty placeholder box). Cache key is the icon path,
+// which is shared by every instance of the same record — icons never change, so a
+// PNG is written to cacheDir/item_icons once and reloaded from disk thereafter.
+// Safe to call from inside a LazyColumn item: LaunchedEffect cancels/restarts as
+// rows recycle, and the actual extract/decode runs on Dispatchers.IO.
+@Composable
+private fun rememberItemIcon(iconPath: String): ImageBitmap? {
+    val context = LocalContext.current
+    var bitmap by remember(iconPath) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(iconPath) {
+        if (iconPath.isEmpty()) return@LaunchedEffect
+        bitmap = withContext(Dispatchers.IO) {
+            val cacheDir = File(context.cacheDir, "item_icons").apply { mkdirs() }
+            val cacheFile = File(cacheDir, iconPath.replace('\\', '_').replace('/', '_') + ".png")
+            if (!cacheFile.exists()) {
+                CompanionActions.exportIconToPng(iconPath, cacheFile.absolutePath)
+            }
+            if (cacheFile.exists()) {
+                BitmapFactory.decodeFile(cacheFile.absolutePath)?.asImageBitmap()
+            } else null
+        }
+    }
+    return bitmap
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -1280,7 +1327,7 @@ private fun ItemRow(
                 Spacer(Modifier.width(10.dp))
                 Text(
                     label,
-                    color = if (worn) BoneMuted else BoneBright,
+                    color = if (worn) BoneBright else BoneMuted,
                     fontSize = 14.sp,
                     fontFamily = MwBody,
                     fontWeight = FontWeight.Normal,
@@ -1525,7 +1572,7 @@ private fun MagicPanel(state: GameState) {
                                     )
                                 },
                                 onInfo = { CompanionActions.requestSpellInfo(spell.id) },
-                                iconBitmap = null
+                                iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -1543,7 +1590,7 @@ private fun MagicPanel(state: GameState) {
                                     )
                                 },
                                 onInfo = { CompanionActions.requestSpellInfo(spell.id) },
-                                iconBitmap = null
+                                iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -1561,7 +1608,7 @@ private fun MagicPanel(state: GameState) {
                                     )
                                 },
                                 onInfo = { CompanionActions.requestSpellInfo(spell.id) },
-                                iconBitmap = null
+                                iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
@@ -1618,10 +1665,10 @@ private fun SpellRow(
                 }
                 Spacer(Modifier.width(10.dp))
                 // Text colours mirror the inventory worn/unworn styling: the
-                // equipped spell dims to BoneMuted (like a worn item) with an
-                // "EQUIPPED" tag, rather than a bronze/bold highlight.
+                // equipped spell is the brighter BoneBright (like a worn item)
+                // with an "EQUIPPED" tag, rather than a bronze/bold highlight.
                 Text(
-                    title, color = if (selected) BoneMuted else BoneBright,
+                    title, color = if (selected) BoneBright else BoneMuted,
                     fontSize = 15.sp, fontFamily = MwBody,
                     fontWeight = FontWeight.Normal,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,

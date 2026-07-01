@@ -31,10 +31,15 @@ data class InventoryItem(
 data class SpellEntry(
     val id: String,
     val name: String = "",
-    val type: String = "spell"
+    val type: String = "spell",
+    val icon: String = ""   // VFS icon path, empty = no icon
 )
 
-data class ActiveEffect(val name: String, val harmful: Boolean)
+data class ActiveEffect(
+    val name: String,
+    val harmful: Boolean,
+    val icon: String = ""   // VFS icon path, empty = no icon
+)
 
 /** One effect row in an item/spell info popup. */
 data class InfoEffect(val text: String, val harmful: Boolean)

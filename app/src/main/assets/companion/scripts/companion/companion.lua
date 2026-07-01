@@ -96,9 +96,18 @@ local function exportSpells()
             local rec = core.magic.spells.records[spell.id]
             local typeStr = (rec and rec.type == core.magic.SPELL_TYPE.Power) and "power" or "spell"
             local nm = (rec and rec.name and rec.name ~= "") and rec.name or spell.id
+            -- Spell records carry no icon of their own; use the first effect's
+            -- icon, matching what the in-game spell menu shows.
+            local icon = ""
+            pcall(function()
+                local effs = rec and rec.effects
+                if effs and effs[1] and effs[1].effect then
+                    icon = effs[1].effect.icon or ""
+                end
+            end)
             table.insert(parts, string.format(
-                '{"id":"%s","name":"%s","type":"%s"}',
-                jsonEscape(spell.id), jsonEscape(nm), typeStr))
+                '{"id":"%s","name":"%s","type":"%s","icon":"%s"}',
+                jsonEscape(spell.id), jsonEscape(nm), typeStr, jsonEscape(icon)))
         end
     end
 
@@ -106,8 +115,9 @@ local function exportSpells()
         local rec = types.Book.record(item)
         if rec.isScroll and rec.enchant and rec.enchant ~= "" then
             table.insert(parts, string.format(
-                '{"id":"%s","name":"%s","type":"scroll"}',
-                jsonEscape(item.recordId), jsonEscape(itemName(item))))
+                '{"id":"%s","name":"%s","type":"scroll","icon":"%s"}',
+                jsonEscape(item.recordId), jsonEscape(itemName(item)),
+                jsonEscape(rec.icon or "")))
         end
     end
 
@@ -237,8 +247,9 @@ local function exportActiveEffects()
                     local rec = core.magic.effects.records[eid]
                     local name = (rec and rec.name and rec.name ~= '') and rec.name or eid
                     local harmful = (rec and rec.harmful) or false
-                    parts[#parts+1] = string.format('{"name":"%s","harmful":%s}',
-                        jsonEscape(name), harmful and 'true' or 'false')
+                    local icon = (rec and rec.icon) or ''
+                    parts[#parts+1] = string.format('{"name":"%s","harmful":%s,"icon":"%s"}',
+                        jsonEscape(name), harmful and 'true' or 'false', jsonEscape(icon))
                 end
             end)
         end
@@ -252,12 +263,14 @@ local function exportActiveEffects()
         pcall(function() rec = core.magic.effects.records[eid] end)
         local baseName = (rec and rec.name and rec.name ~= '') and rec.name or eid
         local harmful = (rec and rec.harmful) or false
+        local icon = (rec and rec.icon) or ''
         for _, attr in ipairs(ATTR_IDS) do
             pcall(function()
                 local p = effectsObj:getEffect(eid, attr)
                 if p and p.magnitude > 0 then
-                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s}',
-                        jsonEscape(baseName), cap(attr), harmful and 'true' or 'false')
+                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s"}',
+                        jsonEscape(baseName), cap(attr), harmful and 'true' or 'false',
+                        jsonEscape(icon))
                 end
             end)
         end
@@ -269,12 +282,14 @@ local function exportActiveEffects()
         pcall(function() rec = core.magic.effects.records[eid] end)
         local baseName = (rec and rec.name and rec.name ~= '') and rec.name or eid
         local harmful = (rec and rec.harmful) or false
+        local icon = (rec and rec.icon) or ''
         for _, skill in ipairs(SKILL_IDS) do
             pcall(function()
                 local p = effectsObj:getEffect(eid, skill)
                 if p and p.magnitude > 0 then
-                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s}',
-                        jsonEscape(baseName), cap(skill), harmful and 'true' or 'false')
+                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s"}',
+                        jsonEscape(baseName), cap(skill), harmful and 'true' or 'false',
+                        jsonEscape(icon))
                 end
             end)
         end

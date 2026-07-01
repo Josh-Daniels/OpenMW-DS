@@ -19,6 +19,8 @@ int stderr = 0; // Hack: fix linker error
 #include <components/resource/imagemanager.hpp>
 
 #include <osg/GraphicsContext>
+#include <osg/GL>
+#include <osg/Image>
 #include <osg/OperationThread>
 #include <osgDB/WriteFile>
 
@@ -193,14 +195,29 @@ Java_org_openmw_EngineActivity_exportIconToPng(
             return;
         }
 
+        Log(Debug::Info) << "exportIconToPng: loaded '" << iconPath << "' "
+            << image->s() << "x" << image->t()
+            << " compressed=" << (image->isCompressed() ? 1 : 0)
+            << " pixelFormat=0x" << std::hex << image->getPixelFormat() << std::dec;
+
         if (image->isCompressed()) {
-            // DXT/S3TC compressed — PNG writer cannot handle these.
-            // Log the pixel format so we know if this is a real issue.
-            Log(Debug::Warning) << "exportIconToPng: skipping compressed image '"
-                << iconPath << "' (pixelFormat=0x" << std::hex << image->getPixelFormat() << ")";
-            env->ReleaseStringUTFChars(jIconPath,   iconPath);
-            env->ReleaseStringUTFChars(jOutputPath, outputPath);
-            return;
+            // DXT/S3TC compressed — the PNG writer can't handle these. Decompress
+            // to RGBA in software. osg::Image::getColor() decodes compressed
+            // blocks on the CPU (no GL context required) — the same fallback
+            // OpenMW itself uses under OPENMW_DECOMPRESS_TEXTURES; see
+            // components/resource/imagemanager.cpp.
+            osg::ref_ptr<osg::Image> rgba = new osg::Image;
+            rgba->setFileName(image->getFileName());
+            rgba->setOrigin(image->getOrigin());
+            rgba->allocateImage(image->s(), image->t(), image->r(),
+                GL_RGBA, GL_UNSIGNED_BYTE);
+            for (int s = 0; s < image->s(); ++s)
+                for (int t = 0; t < image->t(); ++t)
+                    for (int r = 0; r < image->r(); ++r)
+                        rgba->setColor(image->getColor(s, t, r), s, t, r);
+            image = rgba;
+            Log(Debug::Info) << "exportIconToPng: decompressed '" << iconPath
+                << "' to RGBA";
         }
 
         bool ok = osgDB::writeImageFile(*image, outputPath);
