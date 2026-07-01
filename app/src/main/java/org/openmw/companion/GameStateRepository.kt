@@ -75,9 +75,11 @@ object GameStateRepository {
     private class DetailBuilder {
         val attrDesc = HashMap<String, String>()
         val attrSkills = HashMap<String, List<String>>()
+        val attrIcon = HashMap<String, String>()
         val skillDesc = HashMap<String, String>()
         val skillAttr = HashMap<String, String>()
         val skillSpec = HashMap<String, String>()
+        val skillIcon = HashMap<String, String>()
         var healthDesc = ""
         var magickaDesc = ""
         var fatigueDesc = ""
@@ -102,14 +104,16 @@ object GameStateRepository {
             attributes = ch.attributes.map { a ->
                 a.copy(
                     desc = d.attrDesc[a.id] ?: a.desc,
-                    governedSkills = d.attrSkills[a.id] ?: a.governedSkills
+                    governedSkills = d.attrSkills[a.id] ?: a.governedSkills,
+                    icon = d.attrIcon[a.id] ?: a.icon
                 )
             },
             skills = ch.skills.map { s ->
                 s.copy(
                     desc = d.skillDesc[s.id] ?: s.desc,
                     governingAttribute = d.skillAttr[s.id] ?: s.governingAttribute,
-                    specialization = d.skillSpec[s.id] ?: s.specialization
+                    specialization = d.skillSpec[s.id] ?: s.specialization,
+                    icon = d.skillIcon[s.id] ?: s.icon
                 )
             },
             healthDesc = d.healthDesc,
@@ -236,8 +240,9 @@ object GameStateRepository {
             }
             trimmed.contains(LogParser.P_CHARDETAIL_ATTR) -> detailBuffer?.let { b ->
                 LogParser.parseDetailAttr(detailPayload(trimmed, LogParser.P_CHARDETAIL_ATTR))?.let {
-                    b.attrDesc[it.first] = it.second
-                    b.attrSkills[it.first] = it.third
+                    b.attrDesc[it.id] = it.desc
+                    b.attrSkills[it.id] = it.skills
+                    b.attrIcon[it.id] = it.icon
                 }
             }
             trimmed.contains(LogParser.P_CHARDETAIL_SKILL) -> detailBuffer?.let { b ->
@@ -245,6 +250,7 @@ object GameStateRepository {
                     b.skillDesc[it.id] = it.desc
                     b.skillAttr[it.id] = it.attr
                     b.skillSpec[it.id] = it.spec
+                    b.skillIcon[it.id] = it.icon
                 }
             }
             trimmed.contains(LogParser.P_CHARDETAIL_DYN) -> detailBuffer?.let { b ->

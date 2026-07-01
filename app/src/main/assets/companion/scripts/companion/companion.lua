@@ -353,6 +353,10 @@ local function exportCharacter()
         if ok and stat then
             local rec = core.stats.Attribute.records[attrId]
             local nm = (rec and rec.name and rec.name ~= "") and rec.name or attrId
+            -- NOTE: icon is emitted on the streamed CHARDETAIL_ATTR line, NOT here,
+            -- to keep this single COMPANION_CHARACTER line under the 4096-byte
+            -- stdout-flush limit (see CLAUDE.md). Only the dynamic `progress`
+            -- lives inline (small, and must update live).
             table.insert(attrParts, string.format(
                 '{"id":"%s","name":"%s","current":%.1f,"base":%.1f}',
                 jsonEscape(attrId), jsonEscape(nm), stat.modified, stat.base))
@@ -368,9 +372,11 @@ local function exportCharacter()
             local cat = "misc"
             if majorSet[skillId] then cat = "major"
             elseif minorSet[skillId] then cat = "minor" end
+            -- icon streamed on CHARDETAIL_SKILL (see attr note above); progress inline.
+            local prog = stat.progress or 0
             table.insert(skillParts, string.format(
-                '{"id":"%s","name":"%s","value":%.1f,"cat":"%s"}',
-                jsonEscape(skillId), jsonEscape(nm), stat.modified, cat))
+                '{"id":"%s","name":"%s","value":%.1f,"cat":"%s","progress":%.4f}',
+                jsonEscape(skillId), jsonEscape(nm), stat.modified, cat, prog))
         end
     end
 
@@ -429,9 +435,10 @@ local function exportCharacterDetail()
             local nm = (rec.name and rec.name ~= "" and rec.name) or sid
             if governed[gov] then table.insert(governed[gov], nm) end
             skillLines[#skillLines + 1] = string.format(
-                'COMPANION_CHARDETAIL_SKILL:{"id":"%s","desc":"%s","attr":"%s","spec":"%s"}',
+                'COMPANION_CHARDETAIL_SKILL:{"id":"%s","desc":"%s","attr":"%s","spec":"%s","icon":"%s"}',
                 jsonEscape(sid), jsonEscape(rec.description or ""),
-                jsonEscape(govName), jsonEscape(capFirst(tostring(rec.specialization or ""))))
+                jsonEscape(govName), jsonEscape(capFirst(tostring(rec.specialization or ""))),
+                jsonEscape(rec.icon or ""))
         end
     end
 
@@ -445,9 +452,9 @@ local function exportCharacterDetail()
                 skJson[#skJson + 1] = '"' .. jsonEscape(snm) .. '"'
             end
             attrLines[#attrLines + 1] = string.format(
-                'COMPANION_CHARDETAIL_ATTR:{"id":"%s","desc":"%s","skills":[%s]}',
+                'COMPANION_CHARDETAIL_ATTR:{"id":"%s","desc":"%s","skills":[%s],"icon":"%s"}',
                 jsonEscape(aid), jsonEscape(rec.description or ""),
-                table.concat(skJson, ','))
+                table.concat(skJson, ','), jsonEscape(rec.icon or ""))
         end
     end
 

@@ -2031,8 +2031,15 @@ private data class StatPopupContent(
     val title: String,
     val rows: List<Pair<String, String>>,
     val sections: List<Pair<String, List<String>>>,
-    val description: String
+    val description: String,
+    /** VFS icon path for the header, "" when the popup has no icon. */
+    val icon: String = "",
+    /** Optional progress bar (skill increase / level-up progress). */
+    val progress: StatProgress? = null
 )
+
+/** A labelled 0..1 progress bar with a caption line beneath it. */
+private data class StatProgress(val label: String, val ratio: Float, val caption: String)
 
 private fun capWord(s: String): String =
     if (s.isBlank()) s else s.replaceFirstChar { it.uppercase() }
@@ -2046,7 +2053,8 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
         ),
         sections = if (attr.governedSkills.isNotEmpty())
             listOf("Governed Skills" to attr.governedSkills) else emptyList(),
-        description = attr.desc
+        description = attr.desc,
+        icon = attr.icon
     )
     is StatInfo.SkillInfo -> StatPopupContent(
         title = skill.name.ifBlank { skill.id },
@@ -2057,7 +2065,13 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
             "Specialization" to skill.specialization
         ).filter { it.second.isNotBlank() },
         sections = emptyList(),
-        description = skill.desc
+        description = skill.desc,
+        icon = skill.icon,
+        // Per-skill progress toward the next skill increase ([0-1] from the
+        // engine's SkillStat.progress). Caption shows the rounded percentage.
+        progress = skill.progress.coerceIn(0f, 1f).let { r ->
+            StatProgress("Progress", r, "${(r * 100).toInt()}% to next increase")
+        }
     )
     is StatInfo.DynamicInfo -> StatPopupContent(
         title = label,
@@ -2075,7 +2089,13 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
             if (total > 0) add("Progress to Next" to "$progress / $total")
         },
         sections = emptyList(),
-        description = ""
+        description = "",
+        progress = if (total > 0)
+            StatProgress(
+                "Level Progress",
+                (progress.toFloat() / total).coerceIn(0f, 1f),
+                "$progress / $total increases"
+            ) else null
     )
     is StatInfo.RaceInfo -> StatPopupContent(
         title = character.race.ifBlank { "Race" },
@@ -2130,13 +2150,35 @@ private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            Text(
-                content.title,
-                color = BronzeLight,
-                fontSize = 16.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (content.icon.isNotBlank()) {
+                    val headerIcon = rememberItemIcon(content.icon)
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(SlotBg)
+                            .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                    ) {
+                        if (headerIcon != null) {
+                            Image(
+                                bitmap = headerIcon,
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(10.dp))
+                }
+                Text(
+                    content.title,
+                    color = BronzeLight,
+                    fontSize = 16.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             Spacer(Modifier.height(10.dp))
 
             content.rows.forEachIndexed { i, (label, value) ->
@@ -2177,6 +2219,36 @@ private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
                         modifier = Modifier.padding(vertical = 3.dp)
                     )
                 }
+            }
+
+            content.progress?.let { p ->
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    p.label.uppercase(),
+                    color = BoneDim,
+                    fontSize = 11.sp,
+                    fontFamily = MwBody,
+                    letterSpacing = 0.8.sp
+                )
+                Spacer(Modifier.height(5.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(Color(0xFF0E0B07))
+                        .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(p.ratio)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(1.dp))
+                            .background(BronzeLight)
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(p.caption, color = BoneDim, fontSize = 11.sp, fontFamily = MwBody)
             }
 
             if (content.description.isNotBlank()) {

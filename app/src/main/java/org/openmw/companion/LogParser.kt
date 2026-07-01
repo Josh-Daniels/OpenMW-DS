@@ -184,6 +184,7 @@ object LogParser {
                 name = a.optString("name", ""),
                 current = a.getDouble("current").toFloat(),
                 base = a.getDouble("base").toFloat()
+                // icon arrives via COMPANION_CHARDETAIL_ATTR (merged in the repo).
             )
         }
         val skillsArr = o.getJSONArray("skills")
@@ -193,7 +194,9 @@ object LogParser {
                 id = s.getString("id"),
                 name = s.optString("name", ""),
                 value = s.getDouble("value").toFloat(),
-                category = s.optString("cat", "misc")
+                category = s.optString("cat", "misc"),
+                // icon arrives via COMPANION_CHARDETAIL_SKILL (merged in the repo).
+                progress = s.optDouble("progress", 0.0).toFloat()
             )
         }
         return CharacterInfo(
@@ -250,17 +253,18 @@ object LogParser {
         return (0 until arr.length()).map { arr.optString(it, "") }
     }
 
-    /** id, desc, and the list of governed-skill display names. Null if malformed. */
-    fun parseDetailAttr(json: String): Triple<String, String, List<String>>? = try {
+    /** id, desc, governed-skill display names, and icon path. Null if malformed. */
+    fun parseDetailAttr(json: String): DetailAttr? = try {
         val o = JSONObject(json)
-        Triple(o.optString("id", ""), o.optString("desc", ""), strArray(o, "skills"))
+        DetailAttr(o.optString("id", ""), o.optString("desc", ""),
+            strArray(o, "skills"), o.optString("icon", ""))
     } catch (e: Exception) { null }
 
-    /** id, desc, governing-attribute name, specialization. Null if malformed. */
+    /** id, desc, governing-attribute name, specialization, icon. Null if malformed. */
     fun parseDetailSkill(json: String): DetailSkill? = try {
         val o = JSONObject(json)
         DetailSkill(o.optString("id", ""), o.optString("desc", ""),
-            o.optString("attr", ""), o.optString("spec", ""))
+            o.optString("attr", ""), o.optString("spec", ""), o.optString("icon", ""))
     } catch (e: Exception) { null }
 
     /** id ("health"/"magicka"/"fatigue") and its description. Null if malformed. */
@@ -285,7 +289,8 @@ object LogParser {
         o.optInt("progress", 0) to o.optInt("total", 0)
     } catch (e: Exception) { null }
 
-    data class DetailSkill(val id: String, val desc: String, val attr: String, val spec: String)
+    data class DetailAttr(val id: String, val desc: String, val skills: List<String>, val icon: String)
+    data class DetailSkill(val id: String, val desc: String, val attr: String, val spec: String, val icon: String)
     data class DetailRace(val desc: String, val skills: List<String>, val abilities: List<String>)
     data class DetailClass(
         val desc: String, val spec: String,

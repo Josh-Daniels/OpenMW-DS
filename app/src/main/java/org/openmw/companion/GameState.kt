@@ -63,7 +63,9 @@ data class AttributeStat(
     /** In-game description (from the streamed CHARDETAIL batch); "" until it lands. */
     val desc: String = "",
     /** Display names of the skills this attribute governs. */
-    val governedSkills: List<String> = emptyList()
+    val governedSkills: List<String> = emptyList(),
+    /** VFS icon path from core.stats.Attribute.records[id].icon; "" when none. */
+    val icon: String = ""
 )
 
 /** category: "major", "minor", or "misc" per the player's class. */
@@ -73,7 +75,11 @@ data class SkillStat(
     /** Display name of the governing attribute (e.g. "Agility"). */
     val governingAttribute: String = "",
     /** "Combat", "Magic", or "Stealth". */
-    val specialization: String = ""
+    val specialization: String = "",
+    /** VFS icon path from core.stats.Skill.records[id].icon; "" when none. */
+    val icon: String = "",
+    /** [0-1] progress toward the next skill increase (types.NPC SkillStat.progress). */
+    val progress: Float = 0f
 )
 
 data class CharacterInfo(
