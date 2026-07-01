@@ -1194,7 +1194,9 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
             INV_CATEGORIES.forEach { grp ->
                 val groupItems = state.inventory
                     .filter { it.category in grp.cats }
-                    .sortedBy { it.displayName().lowercase() }
+                    // Worn items first, then the rest alphabetically.
+                    .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }
+                        .thenBy { it.displayName().lowercase() })
                 if (groupItems.isNotEmpty()) {
                     item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
                     items(groupItems) { item ->
@@ -1207,7 +1209,9 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
         } else {
             val groupItems = state.inventory
                 .filter { it.category in selectedGroup.cats }
-                .sortedBy { it.displayName().lowercase() }
+                // Worn items first, then the rest alphabetically.
+                .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }
+                    .thenBy { it.displayName().lowercase() })
             items(groupItems) { item ->
                 val worn = isWorn(item)
                 val readable = item.category == "book" || item.category == "scroll"
@@ -1492,14 +1496,17 @@ private fun MagicPanel(state: GameState) {
         if (state.spells.isEmpty()) {
             EmptyPanel("No spells known")
         } else {
-            val powers = remember(state.spells) {
-                state.spells.filter { it.type == "power" }.sortedBy { it.id.lowercase() }
+            // Selected/equipped entry first, then the rest alphabetically.
+            val bySelectionThenName = compareByDescending<SpellEntry> { it.id == sel }
+                .thenBy { it.id.lowercase() }
+            val powers = remember(state.spells, sel) {
+                state.spells.filter { it.type == "power" }.sortedWith(bySelectionThenName)
             }
-            val spells = remember(state.spells) {
-                state.spells.filter { it.type == "spell" }.sortedBy { it.id.lowercase() }
+            val spells = remember(state.spells, sel) {
+                state.spells.filter { it.type == "spell" }.sortedWith(bySelectionThenName)
             }
-            val scrolls = remember(state.spells) {
-                state.spells.filter { it.type == "scroll" }.sortedBy { it.id.lowercase() }
+            val scrolls = remember(state.spells, sel) {
+                state.spells.filter { it.type == "scroll" }.sortedWith(bySelectionThenName)
             }
 
             Column(Modifier.weight(1f).mwPanel().padding(8.dp)) {
