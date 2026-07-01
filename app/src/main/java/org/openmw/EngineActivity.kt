@@ -573,6 +573,7 @@ class EngineActivity : SDLActivity() {
          */
         @JvmStatic
         fun onCompanionMapTexture(width: Int, height: Int, segX: Int, segY: Int, isInterior: Int, rgba: ByteArray) {
+            Log.d("CompanionJNI", "onCompanionMapTexture called interior=$isInterior seg=$segX,$segY")
             GameStateRepository.onMapTexture(width, height, segX, segY, isInterior, rgba)
         }
 

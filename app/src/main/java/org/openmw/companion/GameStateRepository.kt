@@ -27,8 +27,12 @@ object GameStateRepository {
     private const val MAX_EXTERIOR_SEGMENTS = 25
     val exteriorMapBitmaps: StateFlow<Map<Pair<Int,Int>, Bitmap>> = _exteriorMapBitmaps.asStateFlow()
 
-    private val _interiorMapBitmap = MutableStateFlow<Bitmap?>(null)
-    val interiorMapBitmap: StateFlow<Bitmap?> = _interiorMapBitmap.asStateFlow()
+    // Interior cells are divided into segments the same way exterior cells are
+    // (any interior whose bounds exceed one map-world-size tile gets more than
+    // one); key by (segX, segY) so multiple segments don't overwrite each other.
+    private val _interiorMapBitmaps = MutableStateFlow<Map<Pair<Int, Int>, Bitmap>>(emptyMap())
+    private const val MAX_INTERIOR_SEGMENTS = 25
+    val interiorMapBitmaps: StateFlow<Map<Pair<Int, Int>, Bitmap>> = _interiorMapBitmaps.asStateFlow()
 
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
@@ -59,7 +63,21 @@ object GameStateRepository {
         raw.recycle()
 
         if (isInterior != 0) {
-            _interiorMapBitmap.value = bmp
+            Log.d("CompanionMap", "interior segment received segX=$segX segY=$segY")
+            if (segX == 0 && segY == 0) {
+                // requestInteriorMap() always requests (0,0) first for any interior-entry
+                // cycle (fresh bounds/segments computed from scratch each time), so its
+                // arrival is a reliable "start of a new capture batch" signal — unlike the
+                // COMPANION_STATS cell-name transition (see below), which runs on its own
+                // 0.1s Lua timer and isn't ordered relative to when segments actually render.
+                _interiorMapBitmaps.value = mapOf(Pair(0, 0) to bmp)
+            } else {
+                _interiorMapBitmaps.update { current ->
+                    val updated = current + (Pair(segX, segY) to bmp)
+                    if (updated.size <= MAX_INTERIOR_SEGMENTS) updated
+                    else updated.entries.drop(updated.size - MAX_INTERIOR_SEGMENTS).associate { it.key to it.value }
+                }
+            }
         } else {
             _exteriorMapBitmaps.update { current ->
                 val updated = current + (Pair(segX, segY) to bmp)
@@ -89,6 +107,11 @@ object GameStateRepository {
                 }
                 journalBuffer = null
             }
+            // Note: interior segment cleanup happens in onMapTexture (keyed off segment
+            // (0,0) arrival), not here — the STATS line and the native map-capture
+            // pipeline are two independent async streams with no ordering guarantee
+            // between them, so clearing based on this cell-name transition raced with
+            // (and could wipe) a freshly-captured interior bitmap.
             else -> _state.update { cur -> LogParser.parseLine(trimmed, cur) ?: cur }
         }
     }

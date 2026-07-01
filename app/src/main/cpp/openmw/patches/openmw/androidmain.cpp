@@ -120,6 +120,9 @@ Java_org_openmw_EngineActivity_sendCompanionCommand(JNIEnv* env, jclass /*cls*/,
 extern "C" void companionDeliverMapTexture(
     int width, int height, int segX, int segY, int isInterior, const unsigned char* rgba)
 {
+    Log(Debug::Info) << "companion map: w=" << width << " h=" << height
+                      << " segX=" << segX << " segY=" << segY << " interior=" << isInterior;
+
     if (!g_companionVm || !g_companionClass || !g_mapTextureMethod) return;
 
     JNIEnv* e = nullptr;
@@ -133,6 +136,10 @@ extern "C" void companionDeliverMapTexture(
     e->CallStaticVoidMethod(g_companionClass, g_mapTextureMethod,
                             (jint)width, (jint)height, (jint)segX, (jint)segY,
                             (jint)isInterior, arr);
+    if (e->ExceptionCheck()) {
+        e->ExceptionDescribe();
+        e->ExceptionClear();
+    }
     e->DeleteLocalRef(arr);
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.

@@ -535,12 +535,12 @@ private fun MapPanel(state: GameState) {
 @Composable
 private fun MapPanel(state: GameState) {
     val exteriorMaps by GameStateRepository.exteriorMapBitmaps.collectAsState()
-    val interiorMap  by GameStateRepository.interiorMapBitmap.collectAsState()
+    val interiorMaps by GameStateRepository.interiorMapBitmaps.collectAsState()
 
     val hasMap = if (state.cellIsExterior)
         exteriorMaps.containsKey(Pair(state.cellGridX, state.cellGridY))
     else
-        interiorMap != null
+        interiorMaps.isNotEmpty()
 
     val favs by FavouritesRepository.state.collectAsState()
 
@@ -580,13 +580,41 @@ private fun MapPanel(state: GameState) {
                         )
                     }
                 }
-            } else {
-                interiorMap?.let { bmp ->
-                    val s = cellPx * 3f
+            } else if (interiorMaps.isNotEmpty()) {
+                // Interior cells are divided into segments the same way exterior cells
+                // are; composite all captured segments into one grid, centered in the
+                // panel (we don't have the player's own in-interior segment coordinate,
+                // so unlike exterior this isn't player-centered — just fully visible).
+                //
+                // Deliberately NOT using `cellPx` here: that constant is 4x the panel's
+                // own size (size.minDimension / MINIMAP_CROP_FRACTION), sized that way
+                // so the exterior branch above can crop into a small, player-centered
+                // zoom of one cell using playerU/playerV. There's no equivalent player
+                // offset for interior segments, so reusing `cellPx` as the tile size
+                // just centered a 4x-oversized image on the panel — only the texture's
+                // center ~25% ever intersected the visible canvas, showing whatever
+                // (usually blank) content happened to be exactly at that texture's
+                // center. Instead, size tiles so the whole segment grid fits the panel.
+                val minX = interiorMaps.keys.minOf { it.first }
+                val maxX = interiorMaps.keys.maxOf { it.first }
+                val minY = interiorMaps.keys.minOf { it.second }
+                val maxY = interiorMaps.keys.maxOf { it.second }
+                val segCountX = maxX - minX + 1
+                val segCountY = maxY - minY + 1
+                val tilePx = size.minDimension / maxOf(segCountX, segCountY)
+                val gridW = segCountX * tilePx
+                val gridH = segCountY * tilePx
+                val originX = cx - gridW / 2f
+                val originY = cy - gridH / 2f
+
+                for ((seg, bmp) in interiorMaps) {
+                    val (sx, sy) = seg
+                    val left = originX + (sx - minX) * tilePx
+                    val top  = originY + (maxY - sy) * tilePx
                     drawImage(
                         image = bmp.asImageBitmap(),
-                        dstOffset = IntOffset((cx - s / 2f).toInt(), (cy - s / 2f).toInt()),
-                        dstSize   = IntSize(s.toInt(), s.toInt()),
+                        dstOffset = IntOffset(left.toInt(), top.toInt()),
+                        dstSize   = IntSize(tilePx.toInt(), tilePx.toInt()),
                     )
                 }
             }
