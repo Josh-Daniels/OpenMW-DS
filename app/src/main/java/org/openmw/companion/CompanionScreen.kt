@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,6 +34,11 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -115,6 +121,18 @@ private val HealthCol   = Color(0xFF8E2B20)   // blood red
 private val MagickaCol  = Color(0xFF35608F)   // arcane blue (stat bar)
 private val SpellFavCol = Color(0xFF83AEBE)   // spell fav slot border/text (muted steel blue)
 private val FatigueCol  = Color(0xFF4E7A3A)   // earthy green
+
+// ---- dropdown focus guard ----
+// Compose DropdownMenu creates a new popup window in WindowManager when opened.
+// On the dual-screen Presentation, that popup doesn't inherit FLAG_NOT_FOCUSABLE
+// from the presentation window. This singleton tracks open state so a transparent
+// scrim can intercept outside taps before they reach underlying list items.
+private object DropdownState {
+    var anyOpen by mutableStateOf(false)
+    var closeRequest by mutableStateOf(0)
+    fun open() { anyOpen = true }
+    fun closeAll() { anyOpen = false; closeRequest++ }
+}
 
 // ---- type roles (swap to bundled Morrowind fonts later in one place) ----
 private val MwDisplay = FontFamily.Serif
@@ -201,6 +219,7 @@ fun CompanionScreen() {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .imePadding()
             .background(StoneDark)
     ) {
         when (tab) {
@@ -227,6 +246,40 @@ fun CompanionScreen() {
                 .fillMaxWidth()
                 .padding(12.dp)
         )
+
+        // Transparent scrim: intercepts outside taps while a dropdown is open so they
+        // dismiss the menu without also firing the click handler of the row beneath.
+        // Uses PointerEventPass.Initial so the DOWN event is seen but not consumed,
+        // letting scroll gestures reach the LazyColumn; only a confirmed tap-UP is consumed.
+        if (DropdownState.anyOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(10f)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitPointerEvent(PointerEventPass.Initial)
+                            val startPos = down.changes.firstOrNull()?.position
+                                ?: return@awaitEachGesture
+                            var dragged = false
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = event.changes.firstOrNull() ?: break
+                                if ((change.position - startPos).getDistance() > viewConfiguration.touchSlop) {
+                                    dragged = true
+                                }
+                                if (!change.pressed) {
+                                    if (!dragged) {
+                                        change.consume()
+                                        DropdownState.closeAll()
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    }
+            )
+        }
 
         var splashVisible by remember { mutableStateOf(true) }
         LaunchedEffect(state.lastUpdateMs) {
@@ -259,6 +312,9 @@ private fun SplashPanel(onDismiss: () -> Unit = {}) {
 @Composable
 private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
     var effectsExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) effectsExpanded = false
+    }
     val hasEffects = state.activeEffects.isNotEmpty()
 
     Row(
@@ -283,7 +339,10 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
             )
             Box {
                 Column(
-                    modifier = Modifier.clickable { effectsExpanded = !effectsExpanded },
+                    modifier = Modifier.clickable {
+                        effectsExpanded = !effectsExpanded
+                        if (effectsExpanded) DropdownState.open() else DropdownState.closeAll()
+                    },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
@@ -300,7 +359,8 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                 }
                 DropdownMenu(
                     expanded = effectsExpanded,
-                    onDismissRequest = { effectsExpanded = false },
+                    onDismissRequest = { effectsExpanded = false; DropdownState.closeAll() },
+                    properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
                     containerColor = StonePanel,
                     shadowElevation = 0.dp,
                     border = BorderStroke(1.dp, Bronze),
@@ -559,6 +619,13 @@ private fun MapPanel(state: GameState) {
             modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            Text(
+                "GEAR",
+                color = BoneDim,
+                fontSize = 10.sp,
+                fontFamily = MwDisplay,
+                letterSpacing = 1.sp
+            )
             repeat(2) { idx ->
                 val slot = favs.gear.getOrNull(idx)
                 FavSlotView(slot = slot, borderColor = BronzeLight) {
@@ -584,11 +651,19 @@ private fun MapPanel(state: GameState) {
         // Magic favourites — bottom-right, stacked vertically
         Column(
             modifier = Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp),
+            horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            Text(
+                "SPELLS",
+                color = BoneDim,
+                fontSize = 10.sp,
+                fontFamily = MwDisplay,
+                letterSpacing = 1.sp
+            )
             repeat(2) { idx ->
                 val slot = favs.magic.getOrNull(idx)
-                FavSlotView(slot = slot, borderColor = SpellFavCol) {
+                FavSlotView(slot = slot, borderColor = BronzeLight) {
                     slot?.let { CompanionActions.selectSpell(it.id) }
                 }
             }
@@ -883,6 +958,9 @@ private fun ItemRow(
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
     val label = item.displayName()
 
     Box {
@@ -899,7 +977,7 @@ private fun ItemRow(
                                 equippable -> CompanionActions.equipItem(target)
                             }
                         },
-                        onLongClick = { menuOpen = true }
+                        onLongClick = { menuOpen = true; DropdownState.open() }
                     )
                     .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -937,7 +1015,8 @@ private fun ItemRow(
 
         DropdownMenu(
             expanded = menuOpen,
-            onDismissRequest = { menuOpen = false },
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
             containerColor = StonePanel,
             shadowElevation = 0.dp,
             border = BorderStroke(1.dp, Bronze),
@@ -957,7 +1036,7 @@ private fun ItemRow(
                 DropdownMenuItem(
                     text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
                     onClick = {
-                        menuOpen = false
+                        menuOpen = false; DropdownState.closeAll()
                         val target = item.stackId.ifEmpty { item.id }
                         if (worn) CompanionActions.unequipItem(target)
                         else CompanionActions.equipItem(target)
@@ -968,21 +1047,21 @@ private fun ItemRow(
             if (readable) {
                 DropdownMenuItem(
                     text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = { menuOpen = false; CompanionActions.readItem(item.id) },
+                    onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.readItem(item.id) },
                     colors = menuItemColors
                 )
             }
             DropdownMenuItem(
                 text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
                 onClick = {
-                    menuOpen = false
+                    menuOpen = false; DropdownState.closeAll()
                     FavouritesRepository.assignGear(context, FavSlot(item.id, label))
                 },
                 colors = menuItemColors
             )
             DropdownMenuItem(
                 text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; CompanionActions.dropItem(item.id, item.count) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.dropItem(item.id, item.count) },
                 colors = menuItemColors
             )
         }
@@ -1127,6 +1206,9 @@ private fun SpellRow(
     onTap: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
     Box {
         Column {
             Row(
@@ -1135,7 +1217,7 @@ private fun SpellRow(
                     .background(if (selected) SlotWorn else Color.Transparent)
                     .combinedClickable(
                         onClick = onTap,
-                        onLongClick = { if (onAddToFavourites != null) menuOpen = true }
+                        onLongClick = { if (onAddToFavourites != null) { menuOpen = true; DropdownState.open() } }
                     )
                     .padding(horizontal = 8.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -1152,7 +1234,8 @@ private fun SpellRow(
         if (onAddToFavourites != null) {
             DropdownMenu(
                 expanded = menuOpen,
-                onDismissRequest = { menuOpen = false },
+                onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+                properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
                 containerColor = StonePanel,
                 shadowElevation = 0.dp,
                 border = BorderStroke(1.dp, Bronze),
@@ -1167,7 +1250,7 @@ private fun SpellRow(
                 Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
                 DropdownMenuItem(
                     text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = { menuOpen = false; onAddToFavourites() },
+                    onClick = { menuOpen = false; DropdownState.closeAll(); onAddToFavourites() },
                     colors = MenuDefaults.itemColors(textColor = Bone)
                 )
             }

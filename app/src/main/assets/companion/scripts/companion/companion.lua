@@ -44,7 +44,7 @@ local function itemName(item)
     return item.recordId
 end
 
--- ===== Exporters (outbound) =====
+-- ===== Exporters (outbounD) =====
 
 local function exportStats()
     local health = types.Actor.stats.dynamic.health(self)

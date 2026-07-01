@@ -40,19 +40,11 @@ class ManageAssets(private val context: Context) {
                 )
                 return
             }
-
-            // Smart check: Compare sizes
-            try {
-                context.assets.open(src).use { input ->
-                    val assetSize = input.available().toLong()
-                    if (destinationFile.length() == assetSize) {
-                        Log.d("ManageAssets", "File $dst is identical (size match), skipping.")
-                        return
-                    }
-                }
-            } catch (_: IOException) {
-                // Fallback to copy if size check fails
-            }
+            // overwrite=true: always copy — size-only comparison is unreliable
+            // (files that change but keep the same byte count would be wrongly skipped).
+            // Callers that pass overwrite=true (resourcePrepare) are already gated by the
+            // version stamp, so unconditional copy here is correct and still fast on
+            // subsequent launches when the stamp matches and this code is never reached.
         }
         try {
             context.assets.open(src).use { input ->
@@ -128,14 +120,6 @@ class UserManageAssets(val context: Context) {
             }
         }
 
-        // Bundled second-screen companion mod -> OpenMW/Mods/companion
-        // Currently changed to replace the lua scripts on every launch. Small files.
-        assetCopier.copy(
-            "companion",
-            "${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion",
-            overwrite = true  // add this
-        )
-
         copyIfNotExists("libopenmw/openmw/settings.fallback.cfg", Constants.SETTINGS_FILE)
         UserManageAssets(context).installUQMResourceFiles()
         org.openmw.fragments.onFirstLaunch(context)
@@ -157,6 +141,7 @@ class UserManageAssets(val context: Context) {
         Log.d("ManageAssets", "Smart copying resources from libopenmw/resources to ${Constants.USER_RESOURCES}")
         assetCopier.copy("libopenmw/openmw/defaults.bin", Constants.DEFAULTS_BIN, overwrite = true)
         assetCopier.copy("libopenmw/resources", Constants.USER_RESOURCES, overwrite = true)
+        assetCopier.copy("companion", "${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion", overwrite = true)
 
         // Write the new stamp after successful copy
         try {
