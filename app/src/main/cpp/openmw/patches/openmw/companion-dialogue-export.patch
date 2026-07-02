@@ -74,7 +74,24 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
  
          getWidget(mDispositionBar, "Disposition");
          getWidget(mDispositionText, "DispositionText");
-@@ -406,8 +418,34 @@
+@@ -373,7 +385,16 @@
+         {
+             resetReference();
+             MWBase::Environment::get().getDialogueManager()->goodbyeSelected();
+             mTopicsList->scrollToTop();
++            // Companion: when this window is hidden (Hide UI active), the mode-pop that
++            // follows exit() calls setVisible(false) as a no-op, so onClose() never fires
++            // and COMPANION_DIALOGUE_CLOSED is never emitted. Emit it here so every exit()
++            // path on a hidden window (B/Escape via exitCurrentGuiMode, etc.) still tells
++            // the companion overlay to dismiss. The visible path is unchanged — onClose()
++            // fires normally on the visible->hidden transition. companionGoodbye()'s hidden
++            // path returns before calling exit(), so there is no double-emit.
++            if (!isVisible())
++                Log(Debug::Info) << "COMPANION_DIALOGUE_CLOSED";
+             return true;
+         }
+     }
+@@ -406,8 +418,55 @@
          {
              MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
          }
@@ -93,6 +110,27 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +    {
 +        // Goodbye is NOT a topic — mirror onByeClicked(): exit() runs goodbyeSelected()
 +        // (unless mid-choice, in which case it's refused), then pop the dialogue mode.
++        // But when the companion (bottom) screen drives Goodbye while Hide UI has hidden
++        // this window, exit()'s mTopicsList->scrollToTop() runs on a hidden MyGUI widget;
++        // do exit()'s non-UI work directly instead (mirroring its else-branch minus the
++        // scroll) so the conversation still ends cleanly. The isInChoice guard mirrors
++        // exit() refusing (returning false) mid-choice.
++        if (!isVisible())
++        {
++            MWBase::DialogueManager* dialogueManager = MWBase::Environment::get().getDialogueManager();
++            if (!dialogueManager->isInChoice())
++            {
++                resetReference();
++                dialogueManager->goodbyeSelected();
++                MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
++                // onClose() won't fire here: the window is already hidden, so the mode-pop's
++                // setVisible(false) is a no-op and skips the visible->hidden transition that
++                // normally emits COMPANION_DIALOGUE_CLOSED. Emit it explicitly, or the
++                // companion overlay never clears its topic/service/history state.
++                Log(Debug::Info) << "COMPANION_DIALOGUE_CLOSED";
++            }
++            return;
++        }
 +        if (exit())
 +            MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
 +    }

@@ -1,0 +1,52 @@
+Hide the in-game dialogue window when the HUD is hidden via "Hide UI", so the
+companion (bottom-screen) dialogue UI is the sole conversation surface while
+Hide UI is active; restore it when Hide UI is toggled back on.
+
+Unlike the HUD (mHud) and the tooltip layer (mToolTips), the dialogue window's
+visibility is NOT driven by updateVisible() at all in vanilla — it is toggled by
+GuiModeState::update(visible) on GM_Dialogue push/pop, so Hide UI currently has
+no effect on it. We add the gate here, in updateVisible() (which setHudVisibility
+calls right after flipping mHudEnabled), because this is the single place the
+Hide UI state is applied to windows.
+
+Gate choice — getMode() == GM_Dialogue, NOT containsMode() and NOT isVisible():
+  * isVisible() cannot restore the window: once we hide it, isVisible() is stuck
+    false, so (mHudEnabled && isVisible()) can never become true again when Hide
+    UI is toggled back on — the window would stay gone for the rest of the
+    conversation.
+  * containsMode(GM_Dialogue) is too broad: GM_Dialogue stays on the mode stack
+    while a service window (Barter/Spells/Travel/...) is pushed on top. Vanilla
+    hides the dialogue window during barter (the pushed mode calls the previous
+    mode's GuiModeState::update(false)); a containsMode gate would force it back
+    visible behind/over the service window every updateVisible().
+  * getMode() == GM_Dialogue is exactly the condition under which vanilla shows
+    the dialogue window (dialogue is the topmost/active mode). When a service
+    window is pushed, getMode() is no longer GM_Dialogue, so we leave the window
+    alone and vanilla's own hide stands — no barter/service regression.
+
+Hiding mid-conversation is safe: WindowBase::setVisible(false) calls onClose(),
+but DialogueWindow::onClose() early-returns while containsMode(GM_Dialogue) is
+true (see companion-dialogue-export.patch), so it neither clears mHistoryContents
+nor emits COMPANION_DIALOGUE_CLOSED. setVisible(true) re-shows it (onOpen is a
+base no-op for DialogueWindow), so toggling Hide UI off restores the exact same
+open conversation.
+
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -648,6 +648,16 @@
+         mHud->setVisible(mHudEnabled && !loading);
+         // COMPANION: keep floating actor-name tooltips visible even when the HUD is
+         // hidden via the Hide UI toggle. update() only shows the focus-object name.
+         mToolTips->setVisible(!loading);
+
++        // COMPANION: hide the dialogue window with Hide UI so the companion (bottom)
++        // screen handles all dialogue interaction; restore it when Hide UI is toggled
++        // off (mHudEnabled true). Gated on getMode()==GM_Dialogue — the exact condition
++        // under which vanilla shows the window (a pushed service window makes it no
++        // longer the top mode, so this leaves it alone during barter/spells/travel).
++        // onClose() is a no-op while GM_Dialogue is still on the stack, so hiding it
++        // mid-conversation does not end the dialogue or clear its history.
++        if (mDialogueWindow && getMode() == GM_Dialogue)
++            mDialogueWindow->setVisible(mHudEnabled && !loading);
++
+         bool gameMode = !isGuiMode();
