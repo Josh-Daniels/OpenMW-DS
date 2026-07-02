@@ -143,6 +143,9 @@ object GameStateRepository {
         var raceDesc = ""
         var raceSkills: List<String> = emptyList()
         var raceAbilities: List<String> = emptyList()
+        var birthSignDesc = ""
+        var birthSignSpells: List<String> = emptyList()
+        var birthSignTexture = ""
         var classDesc = ""
         var classSpec = ""
         var classAttrs: List<String> = emptyList()
@@ -190,6 +193,9 @@ object GameStateRepository {
             raceDesc = d.raceDesc,
             raceSkillBonuses = d.raceSkills,
             raceAbilities = d.raceAbilities,
+            birthSignDesc = d.birthSignDesc,
+            birthSignSpells = d.birthSignSpells,
+            birthSignTexture = d.birthSignTexture,
             classDesc = d.classDesc,
             classSpecialization = d.classSpec,
             classFavoredAttributes = d.classAttrs,
@@ -527,6 +533,13 @@ object GameStateRepository {
                     b.raceDesc = it.desc
                     b.raceSkills = it.skills
                     b.raceAbilities = it.abilities
+                }
+            }
+            trimmed.contains(LogParser.P_CHARDETAIL_BIRTHSIGN) -> detailBuffer?.let { b ->
+                LogParser.parseDetailBirthSign(detailPayload(trimmed, LogParser.P_CHARDETAIL_BIRTHSIGN))?.let {
+                    b.birthSignDesc = it.desc
+                    b.birthSignSpells = it.spells
+                    b.birthSignTexture = it.texture
                 }
             }
             trimmed.contains(LogParser.P_CHARDETAIL_CLASS) -> detailBuffer?.let { b ->

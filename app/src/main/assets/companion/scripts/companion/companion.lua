@@ -451,6 +451,42 @@ local function exportCharacterDetail()
         end
     end)
 
+    -- Birthsign: description + inherent power/ability display names. The
+    -- `spells` table is built by the SAME engine helper as race abilities
+    -- (createReadOnlyRefIdTable over rec.mPowers.mList — verified
+    -- birthsignbindings.cpp:41 / racebindings.cpp:58), so it is a 1-based numeric
+    -- array of serialized spell-id strings, iterated with ipairs exactly like the
+    -- race block above. Static text → lives on this CHARDETAIL stream, NOT inline
+    -- on COMPANION_CHARACTER (4096-byte stdout-flush limit).
+    local birthSignLine = ""
+    pcall(function()
+        local signId = types.Player.getBirthSign(self)
+        if signId and signId ~= "" then
+            local b = types.Player.birthSigns.records[signId]
+            if b then
+                local spJson = {}
+                pcall(function()
+                    if b.spells then
+                        for _, spid in ipairs(b.spells) do
+                            local sprec = core.magic.spells.records[spid]
+                            local spnm = (sprec and sprec.name and sprec.name ~= "") and sprec.name or spid
+                            spJson[#spJson + 1] = '"' .. jsonEscape(spnm) .. '"'
+                        end
+                    end
+                end)
+                -- The sign's portrait art. `b.texture` is already run through
+                -- correctTexturePath (birthsignbindings.cpp:38) so it comes back as a
+                -- uniform VFS path (e.g. textures/tx_bm_apprentice.dds) — feed straight
+                -- to exportIconToPng/rememberItemIcon like every other icon.
+                local tex = ""
+                pcall(function() tex = b.texture or "" end)
+                birthSignLine = string.format(
+                    'COMPANION_CHARDETAIL_BIRTHSIGN:{"desc":"%s","texture":"%s","spells":[%s]}',
+                    jsonEscape(b.description or ""), jsonEscape(tex), table.concat(spJson, ','))
+            end
+        end
+    end)
+
     -- Class: description, specialization, favored attributes, major/minor skills.
     local classLine = ""
     pcall(function()
@@ -496,6 +532,7 @@ local function exportCharacterDetail()
     for _, l in ipairs(skillLines) do all[#all + 1] = l end
     for _, l in ipairs(dynLines) do all[#all + 1] = l end
     if raceLine ~= "" then all[#all + 1] = raceLine end
+    if birthSignLine ~= "" then all[#all + 1] = birthSignLine end
     if classLine ~= "" then all[#all + 1] = classLine end
     if levelLine ~= "" then all[#all + 1] = levelLine end
 

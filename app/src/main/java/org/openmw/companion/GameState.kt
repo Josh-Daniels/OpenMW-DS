@@ -139,6 +139,11 @@ data class CharacterInfo(
     val raceSkillBonuses: List<String> = emptyList(),
     /** Inherent racial ability/spell display names. */
     val raceAbilities: List<String> = emptyList(),
+    val birthSignDesc: String = "",
+    /** Birthsign inherent power/ability display names. */
+    val birthSignSpells: List<String> = emptyList(),
+    /** VFS path to the birthsign portrait art (e.g. textures/tx_bm_apprentice.dds). */
+    val birthSignTexture: String = "",
     val classDesc: String = "",
     val classSpecialization: String = "",
     val classFavoredAttributes: List<String> = emptyList(),

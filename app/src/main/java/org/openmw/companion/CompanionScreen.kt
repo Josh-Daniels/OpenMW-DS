@@ -2555,6 +2555,9 @@ private sealed interface StatInfo {
     data class DynamicInfo(val label: String, val value: Dynamic, val desc: String) : StatInfo
     data class LevelInfo(val level: Int, val progress: Int, val total: Int) : StatInfo
     data class RaceInfo(val character: CharacterInfo) : StatInfo
+    data class BirthSignInfo(
+        val name: String, val desc: String, val spells: List<String>, val texture: String
+    ) : StatInfo
     data class ClassInfo(val character: CharacterInfo) : StatInfo
     data class FactionInfo(val faction: FactionMembership) : StatInfo
     data class ReputationInfo(val value: Int) : StatInfo
@@ -2570,6 +2573,8 @@ private data class StatPopupContent(
     val description: String,
     /** VFS icon path for the header, "" when the popup has no icon. */
     val icon: String = "",
+    /** Optional large body image (VFS path) shown below the title; "" = none. */
+    val bodyImage: String = "",
     /** Optional progress bar (skill increase / level-up progress). */
     val progress: StatProgress? = null,
     /** Header title color; defaults to the usual BronzeLight. */
@@ -2647,6 +2652,13 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
                 add("Abilities" to character.raceAbilities)
         },
         description = character.raceDesc
+    )
+    is StatInfo.BirthSignInfo -> StatPopupContent(
+        title = name.ifBlank { "Birthsign" },
+        rows = emptyList(),
+        sections = if (spells.isNotEmpty()) listOf("Abilities" to spells) else emptyList(),
+        description = desc,
+        bodyImage = texture
     )
     is StatInfo.ClassInfo -> StatPopupContent(
         title = character.className.ifBlank { "Class" },
@@ -2772,6 +2784,34 @@ private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.height(10.dp))
+
+            // Optional large portrait art below the title (e.g. the birthsign
+            // sign image), framed like the app's other art slots. Loaded through
+            // the same rememberItemIcon pipeline as icons — the path is a uniform
+            // VFS texture path. Only rendered once the bitmap resolves.
+            if (content.bodyImage.isNotBlank()) {
+                val bodyBitmap = rememberItemIcon(content.bodyImage)
+                if (bodyBitmap != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(160.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(SlotBg)
+                            .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                            .padding(6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Image(
+                            bitmap = bodyBitmap,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+            }
 
             content.rows.forEachIndexed { i, (label, value) ->
                 if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
@@ -2907,7 +2947,7 @@ private fun CharacterHeaderPanel(character: CharacterInfo, onSelectStat: (StatIn
                 color = Bone, fontSize = 18.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold
             )
-            // Race · Class · Birthsign — race and class are tappable for their popups.
+            // Race · Class · Birthsign — all three are tappable for their popups.
             val hasSubtitle = listOf(character.race, character.className, character.birthSign)
                 .any { it.isNotBlank() }
             if (hasSubtitle) {
@@ -2930,7 +2970,19 @@ private fun CharacterHeaderPanel(character: CharacterInfo, onSelectStat: (StatIn
                     if (character.birthSign.isNotBlank()) {
                         if (character.race.isNotBlank() || character.className.isNotBlank())
                             Text(" · ", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
-                        Text(character.birthSign, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                        Text(
+                            character.birthSign, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody,
+                            modifier = Modifier.clickable {
+                                onSelectStat(
+                                    StatInfo.BirthSignInfo(
+                                        character.birthSign,
+                                        character.birthSignDesc,
+                                        character.birthSignSpells,
+                                        character.birthSignTexture
+                                    )
+                                )
+                            }
+                        )
                     }
                 }
             }

@@ -84,6 +84,7 @@ object LogParser {
     const val P_CHARDETAIL_SKILL = "COMPANION_CHARDETAIL_SKILL:"
     const val P_CHARDETAIL_DYN = "COMPANION_CHARDETAIL_DYN:"
     const val P_CHARDETAIL_RACE = "COMPANION_CHARDETAIL_RACE:"
+    const val P_CHARDETAIL_BIRTHSIGN = "COMPANION_CHARDETAIL_BIRTHSIGN:"
     const val P_CHARDETAIL_CLASS = "COMPANION_CHARDETAIL_CLASS:"
     const val P_CHARDETAIL_LEVEL = "COMPANION_CHARDETAIL_LEVEL:"
     const val P_CHARDETAIL_END = "COMPANION_CHARDETAIL_END"
@@ -362,6 +363,11 @@ object LogParser {
         DetailRace(o.optString("desc", ""), strArray(o, "skills"), strArray(o, "abilities"))
     } catch (e: Exception) { null }
 
+    fun parseDetailBirthSign(json: String): DetailBirthSign? = try {
+        val o = JSONObject(json)
+        DetailBirthSign(o.optString("desc", ""), strArray(o, "spells"), o.optString("texture", ""))
+    } catch (e: Exception) { null }
+
     fun parseDetailClass(json: String): DetailClass? = try {
         val o = JSONObject(json)
         DetailClass(o.optString("desc", ""), o.optString("spec", ""),
@@ -376,6 +382,7 @@ object LogParser {
     data class DetailAttr(val id: String, val desc: String, val skills: List<String>, val icon: String)
     data class DetailSkill(val id: String, val desc: String, val attr: String, val spec: String, val icon: String)
     data class DetailRace(val desc: String, val skills: List<String>, val abilities: List<String>)
+    data class DetailBirthSign(val desc: String, val spells: List<String>, val texture: String)
     data class DetailClass(
         val desc: String, val spec: String,
         val attrs: List<String>, val major: List<String>, val minor: List<String>
