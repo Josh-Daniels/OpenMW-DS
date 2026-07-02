@@ -20,6 +20,10 @@ object CompanionActions {
 
     fun refreshJournal() = runCommand("CMP:journal")
 
+    // Quest completion status is C++-only (androidmain.cpp handles this natively,
+    // NOT Lua); reply arrives as a streamed COMPANION_JOURNAL_FINISHED_* block.
+    fun refreshQuestStatus() = runCommand("CMP:questStatus")
+
     // Request an on-demand detail export; reply arrives as a COMPANION_INFO line.
     fun requestItemInfo(itemId: String) = runCommand("CMP:info item:$itemId")
 

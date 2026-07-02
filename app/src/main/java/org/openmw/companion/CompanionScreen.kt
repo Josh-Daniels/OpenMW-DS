@@ -2034,11 +2034,9 @@ private fun SpellRow(
 
 /* ---- Journal ---- */
 
-private sealed class JournalNav {
-    object Journal : JournalNav()
-    object QuestList : JournalNav()
-    data class QuestDetail(val questId: String) : JournalNav()
-}
+// Persistent three-tab header for the Journal panel. Declared left→right so
+// JournalTab.entries renders TOPICS | JOURNAL | QUESTS in order.
+private enum class JournalTab { Topics, Journal, Quests }
 
 private fun morrowindMonthName(month: Int): String = listOf(
     "Morning Star", "Sun's Dawn", "First Seed", "Rain's Hand",
@@ -2049,46 +2047,101 @@ private fun morrowindMonthName(month: Int): String = listOf(
 @Composable
 private fun JournalPanel() {
     val state by GameStateRepository.state.collectAsState()
-    var nav by remember { mutableStateOf<JournalNav>(JournalNav.Journal) }
+    val finishedQuestIds by GameStateRepository.finishedQuestIds.collectAsState()
+    var selectedJournalTab by remember { mutableStateOf(JournalTab.Journal) }
+    // Sub-navigation within the QUESTS tab: null = quest list, non-null = detail.
+    var selectedQuestId by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) { CompanionActions.refreshJournal() }
+    LaunchedEffect(Unit) {
+        CompanionActions.refreshJournal()
+        CompanionActions.refreshQuestStatus()
+    }
 
     Box(
         Modifier
             .fillMaxSize()
             .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
     ) {
-        if (state.journalEntries.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize().mwPanel().padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text("Journal", color = Bone, fontSize = 20.sp,
-                    fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
-                Text("No journal entries yet",
-                    color = BoneDim, fontSize = 13.sp, fontFamily = MwBody,
-                    textAlign = TextAlign.Center)
-            }
-        } else {
-            when (val n = nav) {
-                is JournalNav.Journal ->
-                    JournalChronological(state.journalEntries) { nav = JournalNav.QuestList }
-                is JournalNav.QuestList ->
-                    JournalQuestList(
-                        entries = state.journalEntries,
-                        onBack = { nav = JournalNav.Journal },
-                        onQuest = { nav = JournalNav.QuestDetail(it) }
-                    )
-                is JournalNav.QuestDetail ->
-                    JournalQuestDetail(
-                        questId = n.questId,
-                        entries = state.journalEntries.filter { it.questId == n.questId },
-                        onBack = { nav = JournalNav.QuestList }
-                    )
+        Column(Modifier.fillMaxSize()) {
+            JournalTabBar(selected = selectedJournalTab, onSelect = { selectedJournalTab = it })
+            Spacer(Modifier.height(8.dp))
+            Box(Modifier.fillMaxSize()) {
+                when (selectedJournalTab) {
+                    JournalTab.Topics -> JournalTopicsPlaceholder()
+                    JournalTab.Journal ->
+                        if (state.journalEntries.isEmpty()) JournalEmptyState()
+                        else JournalChronological(state.journalEntries)
+                    JournalTab.Quests -> {
+                        val qid = selectedQuestId
+                        if (qid == null)
+                            JournalQuestList(
+                                entries = state.journalEntries,
+                                finishedQuestIds = finishedQuestIds,
+                                onQuest = { selectedQuestId = it }
+                            )
+                        else
+                            JournalQuestDetail(
+                                questId = qid,
+                                entries = state.journalEntries.filter { it.questId == qid },
+                                onBack = { selectedQuestId = null }
+                            )
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun JournalTabBar(selected: JournalTab, onSelect: (JournalTab) -> Unit) {
+    Column(Modifier.fillMaxWidth().background(StonePanel)) {
+        // Top edge, matching mwPanel()'s Bronze frame.
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Bronze))
+        Row(Modifier.fillMaxWidth().height(36.dp)) {
+            JournalTab.entries.forEach { tab ->
+                val active = tab == selected
+                Box(
+                    Modifier.weight(1f).fillMaxHeight().clickable { onSelect(tab) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        tab.name.uppercase(),
+                        color = if (active) BronzeLight else BoneDim,
+                        fontSize = 12.sp, fontFamily = MwBody, letterSpacing = 1.5.sp
+                    )
+                    if (active) {
+                        Box(
+                            Modifier.align(Alignment.BottomCenter)
+                                .fillMaxWidth().height(2.dp).background(BronzeDark)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun JournalEmptyState() {
+    Column(
+        Modifier.fillMaxSize().mwPanel().padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("Journal", color = Bone, fontSize = 20.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text("No journal entries yet",
+            color = BoneDim, fontSize = 13.sp, fontFamily = MwBody,
+            textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+private fun JournalTopicsPlaceholder() {
+    // Topics require a native C++ export (separate task); placeholder for now.
+    Box(Modifier.fillMaxSize().mwPanel(), contentAlignment = Alignment.Center) {
+        Text("Coming soon", color = BoneDim, fontSize = 15.sp, fontFamily = MwBody)
     }
 }
 
@@ -2115,7 +2168,7 @@ private fun JournalNavBar(left: String?, onLeft: (() -> Unit)?, center: String, 
 }
 
 @Composable
-private fun JournalChronological(entries: List<JournalEntry>, onQuestsClick: () -> Unit) {
+private fun JournalChronological(entries: List<JournalEntry>) {
     // Each day fills one column. Two days per page (left = older, right = newer),
     // like an open book where each physical page holds one day.
     val pages = remember(entries) {
@@ -2138,8 +2191,6 @@ private fun JournalChronological(entries: List<JournalEntry>, onQuestsClick: () 
     )
 
     Column(Modifier.fillMaxSize().mwPanel()) {
-        JournalNavBar(left = null, onLeft = null, center = "Journal", right = "Quests", onRight = onQuestsClick)
-
         HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { pageIdx ->
             val pageDays = pages.getOrElse(pageIdx) { emptyList() }
             Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp)) {
@@ -2188,18 +2239,41 @@ private fun JournalColumn(items: List<Pair<String?, JournalEntry?>>, modifier: M
 }
 
 @Composable
-private fun JournalQuestList(entries: List<JournalEntry>, onBack: () -> Unit, onQuest: (String) -> Unit) {
+private fun JournalQuestList(
+    entries: List<JournalEntry>,
+    finishedQuestIds: Set<String>,
+    onQuest: (String) -> Unit
+) {
+    // Off = active quests only (default); on = also show finished quests.
+    var showAll by remember { mutableStateOf(false) }
+
     // Most-recently-active quest first. Keep one representative entry per quest to resolve the display name.
     val quests = remember(entries) {
         val seen = LinkedHashMap<String, JournalEntry>()
         entries.reversed().forEach { e -> seen.putIfAbsent(e.questId, e) }
         seen.values.toList()
     }
+    val visible = remember(quests, finishedQuestIds, showAll) {
+        if (showAll) quests else quests.filter { it.questId !in finishedQuestIds }
+    }
 
     Column(Modifier.fillMaxSize().mwPanel()) {
-        JournalNavBar(left = "Journal", onLeft = onBack, center = "Quests", right = null, onRight = null)
+        // Toggle button: label reflects the mode it switches TO.
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (showAll) "Active Only" else "Show All",
+                color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
+                modifier = Modifier.clickable { showAll = !showAll }.padding(4.dp)
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
-            items(quests, key = { it.questId }) { rep ->
+            items(visible, key = { it.questId }) { rep ->
+                val finished = rep.questId in finishedQuestIds
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -2208,8 +2282,8 @@ private fun JournalQuestList(entries: List<JournalEntry>, onBack: () -> Unit, on
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(questDisplayName(rep), color = Bone, fontSize = 14.sp,
-                        fontFamily = MwBody, modifier = Modifier.weight(1f))
+                    Text(questDisplayName(rep), color = if (finished) BoneDim else Bone,
+                        fontSize = 14.sp, fontFamily = MwBody, modifier = Modifier.weight(1f))
                     Text("▶", color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody)
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))

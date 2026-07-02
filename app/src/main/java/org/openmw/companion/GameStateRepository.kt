@@ -87,6 +87,14 @@ object GameStateRepository {
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
+    // Set of finished (completed) quest ids, exported natively on CMP:questStatus
+    // (androidmain.cpp). Kept separate from GameState (transient, refreshed on demand
+    // when the Journal tab is viewed). Ids match JournalEntry.questId (RefId text form).
+    private val _finishedQuestIds = MutableStateFlow<Set<String>>(emptySet())
+    val finishedQuestIds: StateFlow<Set<String>> = _finishedQuestIds.asStateFlow()
+    // Accumulates FINISHED_START / FINISHED_QUEST / FINISHED_END lines.
+    private var finishedQuestBuffer: MutableSet<String>? = null
+
     // Accumulates inventory across INVENTORY_START / INVENTORY_ITEM / INVENTORY_END
     // lines. Inventory is streamed per-item because one combined line can exceed
     // the engine's 4096-byte stdout flush and arrive truncated (see companion.lua).
@@ -275,6 +283,23 @@ object GameStateRepository {
                     _state.update { it.copy(journalEntries = buf.toList()) }
                 }
                 journalBuffer = null
+            }
+            // Finished-quest set (native). Checked before nothing else can match these;
+            // "FINISHED" in the prefix keeps them from colliding with JOURNAL_START/END.
+            trimmed.contains(LogParser.P_JOURNAL_FINISHED_START) -> {
+                finishedQuestBuffer = mutableSetOf()
+            }
+            trimmed.contains(LogParser.P_JOURNAL_FINISHED_QUEST) -> {
+                finishedQuestBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_JOURNAL_FINISHED_QUEST) +
+                        LogParser.P_JOURNAL_FINISHED_QUEST.length
+                    val id = trimmed.substring(idx).trim()
+                    if (id.isNotEmpty()) buf.add(id)
+                }
+            }
+            trimmed.contains(LogParser.P_JOURNAL_FINISHED_END) -> {
+                finishedQuestBuffer?.let { _finishedQuestIds.value = it.toSet() }
+                finishedQuestBuffer = null
             }
             trimmed.contains(LogParser.P_INVENTORY_ITEM) -> {
                 inventoryBuffer?.let { buf ->

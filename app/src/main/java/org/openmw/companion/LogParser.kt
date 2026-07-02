@@ -29,6 +29,11 @@ object LogParser {
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
     const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
     const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
+    // Finished-quest set, emitted natively (androidmain.cpp) on CMP:questStatus.
+    // Streamed START/QUEST/END; ids are RefId.serializeText() → match JOURNAL_ENTRY's q.
+    const val P_JOURNAL_FINISHED_START = "COMPANION_JOURNAL_FINISHED_START:"
+    const val P_JOURNAL_FINISHED_QUEST = "COMPANION_JOURNAL_FINISHED_QUEST:"
+    const val P_JOURNAL_FINISHED_END = "COMPANION_JOURNAL_FINISHED_END:"
     // Streamed dialogue topic list (one topic per line so a long list never trips
     // the engine's 4096-byte stdout flush). Topic payloads are plain strings, not JSON.
     // CLOSED signals the conversation ended → clear the list.

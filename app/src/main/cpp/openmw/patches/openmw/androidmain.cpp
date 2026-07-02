@@ -5,10 +5,13 @@ int stderr = 0; // Hack: fix linker error
 #include "SDL_main.h"
 #include "engine.hpp"
 #include "mwbase/environment.hpp"
+#include "mwbase/journal.hpp"
 #include "mwbase/luamanager.hpp"
 #include "mwbase/windowmanager.hpp"
+#include "mwdialogue/quest.hpp"
 #include "mwsound/soundbridge.hpp"
 #include "mwworld/ptr.hpp"
+#include <components/esm/refid.hpp>
 #include <SDL_events.h>
 #include <SDL_gamecontroller.h>
 #include <SDL_hints.h>
@@ -61,6 +64,34 @@ extern "C" void companionDialogueSelectEntry(const char* entry);
 extern "C" void companionDialogueGoodbye();
 extern "C" void companionDialogueChoice(int id);
 
+// Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
+// Quest completion status is NOT exposed to Lua in this build (types.Player.journal
+// carries only text entries — see the note in companion.lua), so it must be read
+// from the C++ journal here. Triggered on demand by the CMP:questStatus command
+// (sent by the Kotlin JournalPanel alongside CMP:journal), NOT per frame.
+// Streamed one small line each (START/QUEST/END) to stay clear of the 4096-byte
+// stdout-flush truncation that bites single long COMPANION_ lines.
+// Quest ids use RefId::serializeText() so they match the questId the Lua journal
+// export emits (mTopic.serializeText(), see mwlua/types/player.cpp).
+static void exportFinishedQuests()
+{
+    MWBase::Journal* journal = MWBase::Environment::get().getJournal();
+    if (!journal) return;
+
+    const auto& quests = journal->getQuests();
+    int finished = 0;
+    for (const auto& it : quests)
+        if (it.second.isFinished()) ++finished;
+
+    Log(Debug::Info) << "COMPANION_JOURNAL_FINISHED_START:" << finished;
+    for (const auto& it : quests)
+    {
+        if (!it.second.isFinished()) continue;
+        Log(Debug::Info) << "COMPANION_JOURNAL_FINISHED_QUEST:" << it.second.getTopic().serializeText();
+    }
+    Log(Debug::Info) << "COMPANION_JOURNAL_FINISHED_END:" << finished;
+}
+
 // Called from InputWrapper::capture() every frame on the engine thread.
 void drainCompanionCommands()
 {
@@ -100,6 +131,12 @@ void drainCompanionCommands()
         {
             Log(Debug::Info) << "companion: goodbye";
             companionDialogueGoodbye();
+        }
+        else if (cmd.rfind("CMP:questStatus", 0) == 0)
+        {
+            // Quest completion is C++-only in this build; handle natively rather
+            // than forwarding to Lua (which has no way to answer it).
+            exportFinishedQuests();
         }
         else
         {
