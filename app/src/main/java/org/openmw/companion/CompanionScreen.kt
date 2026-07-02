@@ -461,7 +461,7 @@ private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: (
     ) {
         Text(
             label,
-            color = if (dimmed) BoneDim else Bone, fontSize = 13.sp, fontFamily = MwBody,
+            color = if (dimmed) BoneDim else Bone, fontSize = 14.sp, fontFamily = MwBody,
             modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 4.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
@@ -505,13 +505,13 @@ private fun DialogueHistoryColumn(
                 // topic header, no tappable hyperlinks — matches the game's highlight.
                 Text(
                     say.text,
-                    color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody, lineHeight = 20.8.sp,
+                    color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody, lineHeight = 22.4.sp,
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                 )
             } else {
                 Text(
                     dialogueAnnotated(say.text, say.hyperlinks),
-                    color = Bone, fontSize = 13.sp, fontFamily = MwBody, lineHeight = 20.8.sp,
+                    color = Bone, fontSize = 14.sp, fontFamily = MwBody, lineHeight = 22.4.sp,
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                 )
             }
@@ -539,7 +539,7 @@ private fun DialogueHistoryColumn(
                     ) {
                         Text(
                             choice.text,
-                            color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody
+                            color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody
                         )
                     }
                 }
@@ -1978,7 +1978,7 @@ private fun SpellRow(
                 // with an "EQUIPPED" tag, rather than a bronze/bold highlight.
                 Text(
                     title, color = if (selected) BoneBright else BoneMuted,
-                    fontSize = 15.sp, fontFamily = MwBody,
+                    fontSize = 14.sp, fontFamily = MwBody,
                     fontWeight = FontWeight.Normal,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).padding(end = 8.dp)
@@ -2230,7 +2230,7 @@ private fun JournalColumn(items: List<Pair<String?, JournalEntry?>>, modifier: M
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(top = 8.dp, bottom = 1.dp))
             } else if (entry != null) {
-                Text(entry.text, color = Bone, fontSize = 13.sp, fontFamily = MwBody,
+                Text(entry.text, color = Bone, fontSize = 14.sp, fontFamily = MwBody,
                     lineHeight = 18.sp,
                     modifier = Modifier.padding(bottom = 4.dp))
             }
