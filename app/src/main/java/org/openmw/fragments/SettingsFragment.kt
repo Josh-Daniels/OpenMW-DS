@@ -113,7 +113,8 @@ fun onFirstLaunch(context: Context) {
                     true
                 } else {
                     val content = cfgFile.readText()
-                    !content.contains("vfs-mw") || !content.contains("data-local=")
+                    !content.contains("vfs-mw") || !content.contains("data-local=") ||
+                        !content.contains("Mods/companion")
                 }
 
                 if (needsUpdate) {
@@ -198,7 +199,7 @@ private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedD
 
     val currentLines = if (cfgFile.exists()) cfgFile.readLines() else emptyList()
 
-    val modifiedLines = currentLines.map { line ->
+    val mappedLines = currentLines.map { line ->
         when {
             line.contains(regexData) -> line.replace(regexData, replacementStringData)
             line.contains("resources=./resources") -> line.replace(
@@ -206,6 +207,20 @@ private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedD
                 "resources=${Constants.USER_RESOURCES}"
             )
             else -> line
+        }
+    }
+
+    // Drop duplicate Morrowind data lines. A stale `data="./Mods/companion"` line
+    // clobbered by an earlier over-broad regex now reads identical to the real
+    // data path; keep only the first occurrence so an existing config self-heals.
+    var seenDataFiles = false
+    val modifiedLines = mappedLines.filterNot { line ->
+        if (line == replacementStringData) {
+            val duplicate = seenDataFiles
+            seenDataFiles = true
+            duplicate
+        } else {
+            false
         }
     }
 
