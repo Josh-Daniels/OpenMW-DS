@@ -50,7 +50,7 @@ class LogReader(private val path: String) {
                                     for (raw in complete.split('\n')) {
                                         val line = raw.trimEnd('\r')
                                         if (line.contains("COMPANION_")) {
-                                            GameStateRepository.onRawLine(line)
+                                            GameStateRepository.onTailLine(line)
                                         }
                                     }
                                     val consumed = text.substring(0, lastNl + 1)

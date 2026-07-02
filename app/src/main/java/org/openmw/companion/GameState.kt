@@ -58,6 +58,24 @@ data class ItemInfo(
 /** Current combat/crosshair target, shown as a name + health bar on the HUD. */
 data class TargetInfo(val name: String, val health: Dynamic)
 
+/**
+ * One NPC utterance in the bottom-screen dialogue history (greeting or a topic
+ * response). Transient — held in its own StateFlow, not part of GameState.
+ * `topic` is the bold sub-header (empty for the greeting); `text` keeps its
+ * newlines; `hyperlinks` are the display phrases the engine flagged as tappable
+ * topic links within `text`.
+ */
+data class DialogueSay(
+    val topic: String = "",
+    val text: String,
+    val hyperlinks: List<String> = emptyList(),
+    /** true = an in-dialogue system message box (e.g. gold removed), not NPC speech. */
+    val isMessage: Boolean = false
+)
+
+/** A question/answer choice offered mid-dialogue (shown instead of topics while active). */
+data class DialogueChoice(val text: String, val id: Int)
+
 data class AttributeStat(
     val id: String, val name: String, val current: Float, val base: Float,
     /** In-game description (from the streamed CHARDETAIL batch); "" until it lands. */

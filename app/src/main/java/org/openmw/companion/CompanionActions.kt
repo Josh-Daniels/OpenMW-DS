@@ -25,6 +25,19 @@ object CompanionActions {
 
     fun requestSpellInfo(spellId: String) = runCommand("CMP:info spell:$spellId")
 
+    // Dialogue (bottom-screen) — handled natively in drainCompanionCommands, NOT Lua.
+    // The arg is the topic/service DISPLAY string exactly as exported (may contain
+    // spaces); the native side matches it against the dialogue window's list.
+    fun selectDialogueTopic(topic: String) = runCommand("CMPDLG:topic:$topic")
+
+    fun activateDialogueService(service: String) = runCommand("CMPDLG:service:$service")
+
+    // Goodbye is not a topic — dedicated command mirroring the in-game Bye button.
+    fun dialogueGoodbye() = runCommand("CMPDLG:goodbye")
+
+    // Answer a mid-dialogue question/choice by its integer id.
+    fun activateDialogueChoice(id: Int) = runCommand("CMPDLG:choice:$id")
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

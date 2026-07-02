@@ -548,7 +548,7 @@ class EngineActivity : SDLActivity() {
         /** Called from native (engine thread) for every COMPANION_* log line. */
         @JvmStatic
         fun onCompanionLine(line: String) {
-            GameStateRepository.onRawLine(line)
+            GameStateRepository.onJniLine(line)
         }
 
         /**

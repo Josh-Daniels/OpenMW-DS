@@ -1,0 +1,290 @@
+Companion dialogue: export the topic/service lists, response text and NPC name to
+the bottom screen, and drive topic/service/goodbye selection from there.
+
+Export (all via the companion Debug::Log -> onCompanionLine bridge; streamed as
+one small line each to avoid the 4096-byte stdout-flush split):
+  * setKeywords()      -> COMPANION_DIALOGUE_START / _TOPIC:<name> / _END
+                          (the filtered per-NPC topic list; not exposed to Lua).
+  * updateTopicsPane() -> COMPANION_DIALOGUE_SERVICES_START / _SERVICE:<name> / _END
+                          (Barter/Spells/Travel/... from getServices(); empty = none;
+                          same display strings the buttons use so a tapped service
+                          routed back through companionSelectEntry() matches exactly).
+  * setPtr()           -> COMPANION_DIALOGUE_NPC:<name> (emitted before startDialogue,
+                          new-actor only, so it doubles as the Kotlin history-clear
+                          signal that precedes the greeting's first SAY line).
+  * addResponse()      -> COMPANION_DIALOGUE_SAY_START / _TOPIC:<title> /
+                          _LINE:<one physical line>* / _END, then
+                          _LINKS:<pipe-separated> tappable topic phrases from
+                          mKeywordSearch.parseHyperText() (the same search the in-game
+                          history renders with). Text is split on '\n' before logging
+                          because a newline inside one Log() fragments into untagged
+                          continuation lines.
+  * onClose()          -> COMPANION_DIALOGUE_CLOSED (guarded by containsMode so a
+                          pushed service window is not treated as "closed").
+
+Selection: a file-static pointer to the single DialogueWindow (set in its
+constructor) plus two extern "C" bridges let drainCompanionCommands()
+(androidmain.cpp, engine main thread) drive selection without widening the
+WindowManager interface:
+  * companionSelectEntry() -> onSelectListItem(), the exact click handler (services
+    open their windows, everything else is a topic; same mGoodbye/isInChoice guards).
+  * companionGoodbye() mirrors onByeClicked() (Goodbye is not a topic).
+Both bridges no-op unless a dialogue is open (stale-mPtr guard).
+
+--- a/apps/openmw/mwgui/dialogue.hpp
++++ b/apps/openmw/mwgui/dialogue.hpp
+@@ -160,6 +160,12 @@
+ 
+         void updateTopics();
+ 
++        // Companion (bottom-screen dialogue): programmatic equivalents of clicking a
++        // topic/service row and the Goodbye button, driven from drainCompanionCommands.
++        void companionSelectEntry(const std::string& entry);
++        void companionGoodbye();
++        void companionSelectChoice(int id);
++
+         void onClose() override;
+ 
+         std::string_view getWindowIdForLua() const override { return "Dialogue"; }
+--- a/apps/openmw/mwgui/dialogue.cpp
++++ b/apps/openmw/mwgui/dialogue.cpp
+@@ -33,6 +33,15 @@
+ 
+ #include "bookpage.hpp"
+ #include "textcolours.hpp"
++
++namespace
++{
++    // Companion (bottom-screen dialogue): the single live DialogueWindow, set in its
++    // constructor. Used by the extern "C" bridge below so drainCompanionCommands
++    // (androidmain.cpp, engine main thread) can drive topic/service/goodbye without
++    // reaching into WindowManager's private members.
++    MWGui::DialogueWindow* gCompanionDialogueWindow = nullptr;
++}
+ 
+ namespace MWGui
+ {
+@@ -337,6 +346,9 @@
+ 
+         getWidget(mGoodbyeButton, "ByeButton");
+         mGoodbyeButton->eventMouseButtonClick += MyGUI::newDelegate(this, &DialogueWindow::onByeClicked);
++
++        // Companion: register this (single) dialogue window for the bottom-screen bridge.
++        gCompanionDialogueWindow = this;
+ 
+         getWidget(mDispositionBar, "Disposition");
+         getWidget(mDispositionText, "DispositionText");
+@@ -406,8 +418,34 @@
+         {
+             MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
+         }
++    }
++
++    void DialogueWindow::companionSelectEntry(const std::string& entry)
++    {
++        // Programmatic equivalent of a mouse click on a topic OR service row. Route
++        // through the same handler the click uses: onSelectListItem() already dispatches
++        // service GMST strings to their windows and everything else to onTopicActivated(),
++        // and applies the mGoodbye / isInChoice guards internally.
++        onSelectListItem(entry, 0);
+     }
+ 
++    void DialogueWindow::companionGoodbye()
++    {
++        // Goodbye is NOT a topic — mirror onByeClicked(): exit() runs goodbyeSelected()
++        // (unless mid-choice, in which case it's refused), then pop the dialogue mode.
++        if (exit())
++            MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
++    }
++
++    void DialogueWindow::companionSelectChoice(int id)
++    {
++        // Programmatic equivalent of clicking a choice/question answer. onChoiceActivated
++        // is protected, so this public wrapper exists for the companion bridge; it does
++        // exactly what a choice-link click does (questionAnswered + updateTopics, or a
++        // Goodbye choice).
++        onChoiceActivated(id);
++    }
++
+     void DialogueWindow::onSelectListItem(const std::string& topic, int /*id*/)
+     {
+         MWBase::DialogueManager* dialogueManager = MWBase::Environment::get().getDialogueManager();
+@@ -492,6 +530,12 @@
+         mGoodbye = false;
+         mTopicsList->setEnabled(true);
+ 
++        if (!sameActor)
++            // Companion: new conversation — set the bottom-screen header name and clear
++            // the accumulated response history. Emitted BEFORE startDialogue (which fires
++            // the greeting's addResponse) so the clear precedes the first SAY, not after.
++            Log(Debug::Info) << "COMPANION_DIALOGUE_NPC:" << mPtr.getClass().getName(mPtr);
++
+         if (!MWBase::Environment::get().getDialogueManager()->startDialogue(actor, mGreetingCallback.get()))
+         {
+             // No greetings found. The dialogue window should not be shown.
+@@ -549,6 +593,9 @@
+     {
+         if (MWBase::Environment::get().getWindowManager()->containsMode(GM_Dialogue))
+             return;
++        // Companion: dialogue has fully ended (not just a service window pushed on top),
++        // tell the bottom screen to clear its topic + service lists.
++        Log(Debug::Info) << "COMPANION_DIALOGUE_CLOSED";
+         // Reset history
+         mHistoryContents.clear();
+     }
+@@ -559,6 +606,15 @@
+             return false;
+         mIsCompanion = isCompanion();
+         mKeywords = keyWords;
++        // Companion: export the current topic list to the bottom screen. Streamed one
++        // line per topic (START/TOPIC/END) so a long list never trips the 4096-byte
++        // stdout-flush split that would corrupt a single unbounded line. This is the
++        // single choke point for topic-list changes (fires on dialogue open, after every
++        // topic selection, and on service refresh); the early-return above skips no-ops.
++        Log(Debug::Info) << "COMPANION_DIALOGUE_START";
++        for (const std::string& companionTopic : mKeywords)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_TOPIC:" << companionTopic;
++        Log(Debug::Info) << "COMPANION_DIALOGUE_END";
+         updateTopicsPane();
+         return true;
+     }
+@@ -618,6 +674,32 @@
+ 
+         if (isCompanion())
+             mTopicsList->addItem(gmst.find("sCompanionShare")->mValue.getString());
++
++        // Companion: export the service entries (Barter/Spells/Travel/... — NOT part of
++        // getAvailableTopics(); added here from getServices()) so the bottom screen can
++        // show a tappable Services section. Same display strings the buttons use, so a
++        // tapped service routed back through companionSelectEntry -> onSelectListItem
++        // matches exactly. Empty START/END = NPC has no services (hide the section).
++        Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICES_START";
++        if (mPtr.getType() == ESM::NPC::sRecordId)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sPersuasion")->mValue.getString();
++        if (services & ESM::NPC::AllItems)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sBarter")->mValue.getString();
++        if (services & ESM::NPC::Spells)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sSpells")->mValue.getString();
++        if (travel)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sTravel")->mValue.getString();
++        if (services & ESM::NPC::Spellmaking)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sSpellmakingMenuTitle")->mValue.getString();
++        if (services & ESM::NPC::Enchanting)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sEnchanting")->mValue.getString();
++        if (services & ESM::NPC::Training)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sServiceTrainingTitle")->mValue.getString();
++        if (services & ESM::NPC::Repair)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sRepair")->mValue.getString();
++        if (isCompanion())
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sCompanionShare")->mValue.getString();
++        Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICES_END";
+ 
+         if (mTopicsList->getItemCount() > 0)
+             mTopicsList->addSeparator();
+@@ -671,6 +753,16 @@
+         // choices
+         const TextColours& textColours = MWBase::Environment::get().getWindowManager()->getTextColours();
+         mChoices = MWBase::Environment::get().getDialogueManager()->getChoices();
++        // Companion: export the current choice list (question answers) to the bottom
++        // screen. Emitted here — where mChoices is actually assigned and which runs on
++        // every response/answer — rather than updateTopicsPane(), which setKeywords()
++        // skips when the topic list is unchanged (exactly the case when a choice appears).
++        // Empty START/END = no active choice → the bottom screen shows normal topics.
++        // Display strings are short answer phrases with no '|', so pipe-joining the id is safe.
++        Log(Debug::Info) << "COMPANION_DIALOGUE_CHOICE_START";
++        for (const std::pair<std::string, int>& companionChoice : mChoices)
++            Log(Debug::Info) << "COMPANION_DIALOGUE_CHOICE:" << companionChoice.first << "|" << companionChoice.second;
++        Log(Debug::Info) << "COMPANION_DIALOGUE_CHOICE_END";
+         mChoiceStyles.clear();
+         mControllerChoice = -1; // -1 so you must make a choice (and can't accidentally pick the first answer)
+         for (std::pair<std::string, int>& choice : mChoices)
+@@ -778,10 +870,54 @@
+     {
+         mHistoryContents.push_back(std::make_unique<Response>(text, title, needMargin));
+         updateHistory();
++
++        // Companion: mirror this NPC line onto the bottom-screen dialogue history.
++        const std::string body(text);
++        Log(Debug::Info) << "COMPANION_DIALOGUE_SAY_START";
++        if (!title.empty())
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SAY_TOPIC:" << title;
++        // Stream one physical line per Log() call: a newline inside a single Log() would
++        // fragment into untagged continuation lines (and long text would trip the
++        // 4096-byte stdout-flush split), corrupting the Kotlin parse either way.
++        for (std::size_t start = 0;;)
++        {
++            const std::size_t nl = body.find('\n', start);
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SAY_LINE:"
++                             << std::string_view(body).substr(
++                                    start, nl == std::string::npos ? std::string::npos : nl - start);
++            if (nl == std::string::npos)
++                break;
++            start = nl + 1;
++        }
++        Log(Debug::Info) << "COMPANION_DIALOGUE_SAY_END";
++
++        // Tappable topic hyperlinks: parseHyperText with mKeywordSearch — the same
++        // keyword search the in-game history renders with (see updateHistory) — so the
++        // highlighted phrases match the top screen. getDisplayName() is the shown phrase.
++        // Pipe-separated; omitted entirely when the response has no topic links.
++        const Translation::Storage& translationStorage
++            = MWBase::Environment::get().getWindowManager()->getTranslationDataStorage();
++        std::string links;
++        for (const auto& match : mKeywordSearch.parseHyperText(body, translationStorage))
++        {
++            const std::string_view displayName = match.getDisplayName();
++            if (displayName.empty())
++                continue;
++            if (!links.empty())
++                links += '|';
++            links.append(displayName);
++        }
++        if (!links.empty())
++            Log(Debug::Info) << "COMPANION_DIALOGUE_SAY_LINKS:" << links;
+     }
+ 
+     void DialogueWindow::addMessageBox(std::string_view text)
+     {
+         mHistoryContents.push_back(std::make_unique<Message>(text));
+         updateHistory();
++
++        // Companion: mirror in-dialogue system message boxes (e.g. "10 Gold pieces
++        // were removed from your inventory") onto the bottom-screen history. Always a
++        // single short sentence with no newline, so one line is safe (no streaming).
++        Log(Debug::Info) << "COMPANION_DIALOGUE_MSG:" << text;
+     }
+@@ -1011,3 +1142,34 @@
+         return true;
+     }
+ }
++
++// Companion bottom-screen dialogue bridge. Called from drainCompanionCommands()
++// (androidmain.cpp) on the engine main thread, so touching MyGUI here is safe.
++// Both are no-ops unless a dialogue is actually open, guarding against a stale
++// mPtr (the DialogueWindow object outlives any single conversation).
++extern "C" void companionDialogueSelectEntry(const char* entry)
++{
++    if (!gCompanionDialogueWindow || !entry)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Dialogue))
++        return;
++    gCompanionDialogueWindow->companionSelectEntry(entry);
++}
++
++extern "C" void companionDialogueGoodbye()
++{
++    if (!gCompanionDialogueWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Dialogue))
++        return;
++    gCompanionDialogueWindow->companionGoodbye();
++}
++
++extern "C" void companionDialogueChoice(int id)
++{
++    if (!gCompanionDialogueWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Dialogue))
++        return;
++    gCompanionDialogueWindow->companionSelectChoice(id);
++}

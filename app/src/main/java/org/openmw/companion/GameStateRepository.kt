@@ -59,6 +59,31 @@ object GameStateRepository {
         _itemInfo.value = null
     }
 
+    // Active dialogue topic list for the bottom-screen overlay. Streamed from the
+    // engine (COMPANION_DIALOGUE_START/_TOPIC/_END) whenever the topic list changes,
+    // and emptied on COMPANION_DIALOGUE_CLOSED. Empty list = no active dialogue.
+    // Kept separate from GameState (transient, like itemInfo / the map bitmaps).
+    private val _dialogueTopics = MutableStateFlow<List<String>>(emptyList())
+    val dialogueTopics: StateFlow<List<String>> = _dialogueTopics.asStateFlow()
+
+    // Service entries (Barter/Spells/Travel/...) for the current NPC, streamed
+    // separately from topics (COMPANION_DIALOGUE_SERVICES_*). Empty = hide the
+    // Services section. Also cleared on COMPANION_DIALOGUE_CLOSED.
+    private val _dialogueServices = MutableStateFlow<List<String>>(emptyList())
+    val dialogueServices: StateFlow<List<String>> = _dialogueServices.asStateFlow()
+
+    // NPC name header ("" = no active dialogue) + accumulated response history for the
+    // left column. Cleared on COMPANION_DIALOGUE_NPC (new actor) and _CLOSED.
+    private val _dialogueNpcName = MutableStateFlow("")
+    val dialogueNpcName: StateFlow<String> = _dialogueNpcName.asStateFlow()
+    private val _dialogueHistory = MutableStateFlow<List<DialogueSay>>(emptyList())
+    val dialogueHistory: StateFlow<List<DialogueSay>> = _dialogueHistory.asStateFlow()
+
+    // Active question/answer choices. Non-empty = the UI shows choices instead of the
+    // normal topics/services list. Cleared on COMPANION_DIALOGUE_CLOSED.
+    private val _dialogueChoices = MutableStateFlow<List<DialogueChoice>>(emptyList())
+    val dialogueChoices: StateFlow<List<DialogueChoice>> = _dialogueChoices.asStateFlow()
+
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
@@ -66,6 +91,19 @@ object GameStateRepository {
     // lines. Inventory is streamed per-item because one combined line can exceed
     // the engine's 4096-byte stdout flush and arrive truncated (see companion.lua).
     private var inventoryBuffer: MutableList<InventoryItem>? = null
+
+    // Accumulates dialogue topics across DIALOGUE_START / DIALOGUE_TOPIC / DIALOGUE_END.
+    private var dialogueBuffer: MutableList<String>? = null
+
+    // Accumulates services across DIALOGUE_SERVICES_START / DIALOGUE_SERVICE / DIALOGUE_SERVICES_END.
+    private var dialogueServiceBuffer: MutableList<String>? = null
+
+    // In-flight NPC response: topic title + physical lines, committed to history on SAY_END.
+    private var sayTopicBuffer: String = ""
+    private var sayLineBuffer: MutableList<String>? = null
+
+    // Accumulates choices across DIALOGUE_CHOICE_START / DIALOGUE_CHOICE / DIALOGUE_CHOICE_END.
+    private var dialogueChoiceBuffer: MutableList<DialogueChoice>? = null
 
     // --- Streamed character-description batch (COMPANION_CHARDETAIL_*) ---
     // Descriptions arrive on their own stream, separate from COMPANION_CHARACTER
@@ -194,7 +232,31 @@ object GameStateRepository {
     private fun detailPayload(line: String, prefix: String): String =
         line.substring(line.indexOf(prefix) + prefix.length).trim()
 
-    /** Called from JNI on the engine thread for every COMPANION_* log line. */
+    // The same COMPANION_ lines arrive from BOTH the in-process JNI sink and the
+    // LogReader file-tail fallback (the engine still writes them to openmw.log). Most
+    // state is idempotent so double-processing was invisible — but dialogueHistory
+    // appends, so every topic response was added twice (greetings self-corrected via
+    // the NPC-clear that precedes them). Gate the tail: only let it through when the
+    // JNI sink has gone quiet, so each line is handled once while the sink is healthy,
+    // and the tail still takes over if the sink ever stalls.
+    // How long after the last JNI line the tail stays suppressed. STATS ticks every
+    // ~100ms so the sink keeps this fresh during play; 1.5s tolerates a brief stall.
+    private const val TAIL_FALLBACK_DELAY_MS = 1500L
+    @Volatile private var lastJniLineMs = 0L
+
+    /** In-process JNI sink (primary path, engine thread). Always processed. */
+    fun onJniLine(line: String) {
+        lastJniLineMs = System.currentTimeMillis()
+        onRawLine(line)
+    }
+
+    /** Log-tail fallback (LogReader). Suppressed while the JNI sink is delivering. */
+    fun onTailLine(line: String) {
+        if (System.currentTimeMillis() - lastJniLineMs < TAIL_FALLBACK_DELAY_MS) return
+        onRawLine(line)
+    }
+
+    /** Called for every COMPANION_* log line (via onJniLine / onTailLine). */
     fun onRawLine(line: String) {
         val trimmed = line.trimEnd()
         if (trimmed.contains("COMPANION_DEBUG")) Log.d("CompanionRepo", trimmed)
@@ -232,6 +294,124 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_INFO) -> {
                 val idx = trimmed.indexOf(LogParser.P_INFO) + LogParser.P_INFO.length
                 LogParser.parseItemInfo(trimmed.substring(idx).trim())?.let { _itemInfo.value = it }
+            }
+            // Dialogue topic list. Streamed START/TOPIC/END while a conversation is
+            // open (re-sent on every topic-list change); CLOSED clears it. TOPIC
+            // payloads are plain strings. Buffer until END so the UI swaps atomically.
+            trimmed.contains(LogParser.P_DIALOGUE_TOPIC) -> {
+                dialogueBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_DIALOGUE_TOPIC) + LogParser.P_DIALOGUE_TOPIC.length
+                    val topic = trimmed.substring(idx).trim()
+                    if (topic.isNotEmpty()) buf.add(topic)
+                }
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_START) -> {
+                dialogueBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_END) -> {
+                dialogueBuffer?.let { buf -> _dialogueTopics.value = buf.toList() }
+                dialogueBuffer = null
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_CLOSED) -> {
+                dialogueBuffer = null
+                dialogueServiceBuffer = null
+                sayLineBuffer = null
+                dialogueChoiceBuffer = null
+                _dialogueTopics.value = emptyList()
+                _dialogueServices.value = emptyList()
+                _dialogueNpcName.value = ""
+                _dialogueHistory.value = emptyList()
+                _dialogueChoices.value = emptyList()
+            }
+            // Question/answer choices, streamed CHOICE_START / CHOICE:<text>|<id> / CHOICE_END.
+            // The colon on CHOICE keeps it from matching CHOICE_START/_END under contains.
+            trimmed.contains(LogParser.P_DIALOGUE_CHOICE) -> {
+                dialogueChoiceBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_DIALOGUE_CHOICE) + LogParser.P_DIALOGUE_CHOICE.length
+                    val payload = trimmed.substring(idx).trim()
+                    val sep = payload.lastIndexOf('|')   // id is the last field; text may contain anything
+                    if (sep > 0) {
+                        val id = payload.substring(sep + 1).toIntOrNull()
+                        if (id != null) buf.add(DialogueChoice(payload.substring(0, sep), id))
+                    }
+                }
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_CHOICE_START) -> {
+                dialogueChoiceBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_CHOICE_END) -> {
+                dialogueChoiceBuffer?.let { _dialogueChoices.value = it.toList() }
+                dialogueChoiceBuffer = null
+            }
+            // NPC name — new conversation: set the header and clear the accumulated
+            // history (emitted before the greeting's SAY lines, so this never wipes them).
+            trimmed.contains(LogParser.P_DIALOGUE_NPC) -> {
+                val idx = trimmed.indexOf(LogParser.P_DIALOGUE_NPC) + LogParser.P_DIALOGUE_NPC.length
+                _dialogueNpcName.value = trimmed.substring(idx).trim()
+                _dialogueHistory.value = emptyList()
+                sayLineBuffer = null
+            }
+            // Response text, streamed SAY_START / SAY_TOPIC / SAY_LINE* / SAY_END, then an
+            // optional SAY_LINKS attached to the just-published entry. Buffer until END so
+            // the history grows atomically. (Prefix colons keep _LINE/_LINKS/_TOPIC from
+            // matching each other or _START/_END under contains — see LogParser.)
+            trimmed.contains(LogParser.P_DIALOGUE_SAY_TOPIC) -> {
+                if (sayLineBuffer != null) {
+                    val idx = trimmed.indexOf(LogParser.P_DIALOGUE_SAY_TOPIC) + LogParser.P_DIALOGUE_SAY_TOPIC.length
+                    sayTopicBuffer = trimmed.substring(idx).trim()
+                }
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_SAY_LINE) -> {
+                sayLineBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_DIALOGUE_SAY_LINE) + LogParser.P_DIALOGUE_SAY_LINE.length
+                    buf.add(trimmed.substring(idx).trimEnd())   // keep leading indentation
+                }
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_SAY_LINKS) -> {
+                val idx = trimmed.indexOf(LogParser.P_DIALOGUE_SAY_LINKS) + LogParser.P_DIALOGUE_SAY_LINKS.length
+                val links = trimmed.substring(idx).trim().split("|").filter { it.isNotEmpty() }.distinct()
+                if (links.isNotEmpty()) {
+                    _dialogueHistory.update { hist ->
+                        if (hist.isEmpty()) hist
+                        else hist.toMutableList().also { it[it.lastIndex] = it.last().copy(hyperlinks = links) }
+                    }
+                }
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_SAY_START) -> {
+                sayTopicBuffer = ""
+                sayLineBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_SAY_END) -> {
+                sayLineBuffer?.let { lines ->
+                    _dialogueHistory.update { it + DialogueSay(topic = sayTopicBuffer, text = lines.joinToString("\n")) }
+                }
+                sayLineBuffer = null
+                sayTopicBuffer = ""
+            }
+            // In-dialogue system message box (single short line, no streaming). Append
+            // immediately as an isMessage entry — no topic header, no hyperlinks.
+            trimmed.contains(LogParser.P_DIALOGUE_MSG) -> {
+                val idx = trimmed.indexOf(LogParser.P_DIALOGUE_MSG) + LogParser.P_DIALOGUE_MSG.length
+                val msg = trimmed.substring(idx).trim()
+                if (msg.isNotEmpty()) {
+                    _dialogueHistory.update { it + DialogueSay(text = msg, isMessage = true) }
+                }
+            }
+            // Service entries, streamed alongside topics. The SERVICE: colon keeps this
+            // from matching SERVICES_START/_END (see prefix comment in LogParser).
+            trimmed.contains(LogParser.P_DIALOGUE_SERVICE) -> {
+                dialogueServiceBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_DIALOGUE_SERVICE) + LogParser.P_DIALOGUE_SERVICE.length
+                    val service = trimmed.substring(idx).trim()
+                    if (service.isNotEmpty()) buf.add(service)
+                }
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_SERVICES_START) -> {
+                dialogueServiceBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_DIALOGUE_SERVICES_END) -> {
+                dialogueServiceBuffer?.let { buf -> _dialogueServices.value = buf.toList() }
+                dialogueServiceBuffer = null
             }
             // Character-description batch. Buffered, then merged into the character
             // on END (and re-merged onto any later COMPANION_CHARACTER, see below).

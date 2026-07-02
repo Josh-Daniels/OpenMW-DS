@@ -25,6 +25,7 @@ int stderr = 0; // Hack: fix linker error
 #include <osgDB/WriteFile>
 
 #include <atomic>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -54,6 +55,12 @@ static std::deque<std::string>         g_commandQueue;
 static std::mutex                      g_commandMutex;
 static std::atomic<MWBase::LuaManager*> g_luaManagerPtr{nullptr};
 
+// Companion dialogue selection bridges (defined in mwgui/dialogue.cpp). Safe to
+// call here because drainCompanionCommands() runs on the engine main thread.
+extern "C" void companionDialogueSelectEntry(const char* entry);
+extern "C" void companionDialogueGoodbye();
+extern "C" void companionDialogueChoice(int id);
+
 // Called from InputWrapper::capture() every frame on the engine thread.
 void drainCompanionCommands()
 {
@@ -68,7 +75,37 @@ void drainCompanionCommands()
     }
 
     for (auto& cmd : pending)
-        lua->handleConsoleCommand("Companion", cmd, MWWorld::Ptr());
+    {
+        // Dialogue commands (CMPDLG:) are handled natively — Lua has no way to read the
+        // filtered topic list or select a topic. Everything else goes to Lua as before.
+        if (cmd.rfind("CMPDLG:topic:", 0) == 0)
+        {
+            std::string arg = cmd.substr(sizeof("CMPDLG:topic:") - 1);
+            Log(Debug::Info) << "companion: selectTopic " << arg;
+            companionDialogueSelectEntry(arg.c_str());
+        }
+        else if (cmd.rfind("CMPDLG:service:", 0) == 0)
+        {
+            std::string arg = cmd.substr(sizeof("CMPDLG:service:") - 1);
+            Log(Debug::Info) << "companion: activateService " << arg;
+            companionDialogueSelectEntry(arg.c_str());
+        }
+        else if (cmd.rfind("CMPDLG:choice:", 0) == 0)
+        {
+            const int id = std::atoi(cmd.c_str() + (sizeof("CMPDLG:choice:") - 1));
+            Log(Debug::Info) << "companion: selectChoice " << id;
+            companionDialogueChoice(id);
+        }
+        else if (cmd.rfind("CMPDLG:goodbye", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: goodbye";
+            companionDialogueGoodbye();
+        }
+        else
+        {
+            lua->handleConsoleCommand("Companion", cmd, MWWorld::Ptr());
+        }
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

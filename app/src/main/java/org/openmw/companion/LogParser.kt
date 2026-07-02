@@ -29,6 +29,35 @@ object LogParser {
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
     const val P_JOURNAL_ENTRY = "COMPANION_JOURNAL_ENTRY:"
     const val P_JOURNAL_END = "COMPANION_JOURNAL_END:"
+    // Streamed dialogue topic list (one topic per line so a long list never trips
+    // the engine's 4096-byte stdout flush). Topic payloads are plain strings, not JSON.
+    // CLOSED signals the conversation ended → clear the list.
+    const val P_DIALOGUE_START = "COMPANION_DIALOGUE_START"
+    const val P_DIALOGUE_TOPIC = "COMPANION_DIALOGUE_TOPIC:"
+    const val P_DIALOGUE_END = "COMPANION_DIALOGUE_END"
+    const val P_DIALOGUE_CLOSED = "COMPANION_DIALOGUE_CLOSED"
+    // Service entries (Barter/Spells/Travel/...), streamed separately from topics.
+    // The colon on _SERVICE disambiguates it from _SERVICES_START/_END under contains().
+    const val P_DIALOGUE_SERVICES_START = "COMPANION_DIALOGUE_SERVICES_START"
+    const val P_DIALOGUE_SERVICE = "COMPANION_DIALOGUE_SERVICE:"
+    const val P_DIALOGUE_SERVICES_END = "COMPANION_DIALOGUE_SERVICES_END"
+    // NPC name (also the history-clear signal) + streamed response text. _SAY_LINE and
+    // _SAY_LINKS carry the colon; _SAY_START/_TOPIC/_END are matched as-is. Order in the
+    // repo's when() disambiguates _SAY_START from _SAY_START-prefixed lines via contains.
+    const val P_DIALOGUE_NPC = "COMPANION_DIALOGUE_NPC:"
+    const val P_DIALOGUE_SAY_START = "COMPANION_DIALOGUE_SAY_START"
+    const val P_DIALOGUE_SAY_TOPIC = "COMPANION_DIALOGUE_SAY_TOPIC:"
+    const val P_DIALOGUE_SAY_LINE = "COMPANION_DIALOGUE_SAY_LINE:"
+    const val P_DIALOGUE_SAY_LINKS = "COMPANION_DIALOGUE_SAY_LINKS:"
+    const val P_DIALOGUE_SAY_END = "COMPANION_DIALOGUE_SAY_END"
+    // In-dialogue system message box (e.g. "10 Gold pieces were removed..."). Single
+    // short line, published to the history immediately (no START/END streaming).
+    const val P_DIALOGUE_MSG = "COMPANION_DIALOGUE_MSG:"
+    // Question/answer choices (shown instead of topics while active). CHOICE payload is
+    // "<display>|<id>". Empty START/END = no active choice.
+    const val P_DIALOGUE_CHOICE_START = "COMPANION_DIALOGUE_CHOICE_START"
+    const val P_DIALOGUE_CHOICE = "COMPANION_DIALOGUE_CHOICE:"
+    const val P_DIALOGUE_CHOICE_END = "COMPANION_DIALOGUE_CHOICE_END"
     // Streamed character-description batch (one record per line — the full set of
     // descriptions is far larger than the engine's 4096-byte stdout flush limit).
     const val P_CHARDETAIL_START = "COMPANION_CHARDETAIL_START"

@@ -20,6 +20,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.horizontalScroll
@@ -321,6 +329,268 @@ fun CompanionScreen() {
         // Stat detail popup (Stats screen). Same in-window overlay pattern as
         // ItemInfoOverlay — tap outside to dismiss.
         selectedStat?.let { StatInfoPopup(it, onDismiss = { selectedStat = null }) }
+
+        // Active-dialogue overlay. Driven by COMPANION_DIALOGUE_* from the engine and
+        // shown over whatever tab is active. There is NO tap-away dismiss: it closes
+        // only when the conversation ends (engine sends COMPANION_DIALOGUE_CLOSED →
+        // both lists empty) or the player taps a topic/GOODBYE. Topics or services
+        // non-empty = a conversation is open.
+        val dialogueTopics by GameStateRepository.dialogueTopics.collectAsState()
+        val dialogueServices by GameStateRepository.dialogueServices.collectAsState()
+        val dialogueNpcName by GameStateRepository.dialogueNpcName.collectAsState()
+        val dialogueHistory by GameStateRepository.dialogueHistory.collectAsState()
+        val dialogueChoices by GameStateRepository.dialogueChoices.collectAsState()
+        if (dialogueNpcName.isNotEmpty() || dialogueTopics.isNotEmpty() ||
+            dialogueServices.isNotEmpty() || dialogueHistory.isNotEmpty() ||
+            dialogueChoices.isNotEmpty()
+        ) {
+            DialogueTopicsOverlay(dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices, dialogueChoices)
+        }
+    }
+}
+
+/* ---- Dialogue topic list overlay (bottom screen) ---- */
+
+@Composable
+private fun DialogueTopicsOverlay(
+    npcName: String,
+    history: List<DialogueSay>,
+    topics: List<String>,
+    services: List<String>,
+    choices: List<DialogueChoice>
+) {
+    // Non-interactive dark scrim (NOT a Dialog — that crashes on the Presentation
+    // display). It has NO tap-away dismiss; the empty detectTapGestures just swallows
+    // taps on the exposed margins so they don't fall through to the tab underneath.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(15f)
+            .background(Color(0xCC0F0C08))
+            .pointerInput(Unit) { detectTapGestures {} }
+    ) {
+        // Same footprint as the Spells-tab list box: full width minus 12dp side padding,
+        // top 12dp down to just above the nav bar.
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- NPC name title bar (full width, window-title style) ----
+            if (npcName.isNotEmpty()) {
+                Text(
+                    npcName,
+                    color = BronzeLight, fontSize = 14.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
+                )
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            }
+
+            // ---- Two columns: dialogue history (75%) | topics/services (25%) ----
+            Row(Modifier.fillMaxSize()) {
+                DialogueHistoryColumn(
+                    history,
+                    choices,
+                    modifier = Modifier.weight(0.75f).fillMaxHeight().padding(8.dp)
+                )
+                Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
+                Column(Modifier.weight(0.25f).fillMaxHeight().padding(8.dp)) {
+                    // Right column ALWAYS shows services/topics/goodbye. While a choice is
+                    // active (choices non-empty) they're DIMMED and inert — the choice buttons
+                    // render inline in the left column instead (see DialogueHistoryColumn).
+                    val dimmed = choices.isNotEmpty()
+
+                    // Services (fixed, no scroll; hidden when the NPC has none). Styled
+                    // identically to topic rows — only the section header distinguishes them.
+                    if (services.isNotEmpty()) {
+                        SpellSectionHeader("SERVICES")
+                        Spacer(Modifier.height(4.dp))
+                        services.forEach { service ->
+                            DialogueOptionRow(service, dimmed = dimmed) {
+                                if (!dimmed) CompanionActions.activateDialogueService(service)
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                    }
+
+                    // Topics (fills remaining space, scrollable)
+                    SpellSectionHeader("TOPICS")
+                    Spacer(Modifier.height(4.dp))
+                    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        items(topics) { topic ->
+                            DialogueOptionRow(topic, dimmed = dimmed) {
+                                if (!dimmed) CompanionActions.selectDialogueTopic(topic)
+                            }
+                        }
+                    }
+
+                    // Goodbye (fixed at the bottom of the right column)
+                    Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(BronzeDark.copy(alpha = 0.2f))
+                            .clickable { if (!dimmed) CompanionActions.dialogueGoodbye() }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "GOODBYE",
+                            color = if (dimmed) BoneDim else BronzeLight, fontSize = 14.sp,
+                            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                            letterSpacing = 2.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One tappable row in the right column — shared by topics, services and choices so
+ *  they look identical (only the section header distinguishes them). */
+@Composable
+private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Text(
+            label,
+            color = if (dimmed) BoneDim else Bone, fontSize = 13.sp, fontFamily = MwBody,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 4.dp)
+        )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+    }
+}
+
+/** Left column: the running NPC-response history, auto-scrolled to the newest line.
+ *  When [choices] is non-empty (a mid-dialogue question) the choice buttons render
+ *  inline as the LAST item of the list, directly below the most recent response. */
+@Composable
+private fun DialogueHistoryColumn(
+    history: List<DialogueSay>,
+    choices: List<DialogueChoice>,
+    modifier: Modifier = Modifier
+) {
+    val listState = rememberLazyListState()
+    // Auto-scroll to the newest item — a fresh response OR the choice block appearing.
+    // Keyed on both history.size and choices.size so choices scrolling into view is
+    // covered; the choice block is appended after all history so the last index shifts
+    // by one when it's present.
+    LaunchedEffect(history.size, choices.size) {
+        val itemCount = history.size + if (choices.isNotEmpty()) 1 else 0
+        if (itemCount > 0) listState.animateScrollToItem(itemCount - 1)
+    }
+    LazyColumn(state = listState, modifier = modifier) {
+        itemsIndexed(history) { i, say ->
+            if (i > 0) {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+                Spacer(Modifier.height(8.dp))
+            }
+            if (say.topic.isNotEmpty()) {
+                Text(
+                    say.topic.uppercase(),
+                    color = BronzeLight, fontSize = 11.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+                    modifier = Modifier.padding(bottom = 3.dp)
+                )
+            }
+            if (say.isMessage) {
+                // System message box (gold removed, etc.): highlighted BronzeLight, no
+                // topic header, no tappable hyperlinks — matches the game's highlight.
+                Text(
+                    say.text,
+                    color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody, lineHeight = 20.8.sp,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                )
+            } else {
+                Text(
+                    dialogueAnnotated(say.text, say.hyperlinks),
+                    color = Bone, fontSize = 13.sp, fontFamily = MwBody, lineHeight = 20.8.sp,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                )
+            }
+        }
+        // Inline choice buttons, below the last response, while a question is active.
+        if (choices.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "CHOOSE",
+                    color = BoneDim, fontSize = 10.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 2.sp,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                choices.forEachIndexed { i, choice ->
+                    if (i > 0) Spacer(Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(BronzeLight.copy(alpha = 0.12f))
+                            .border(1.dp, BronzeLight, RoundedCornerShape(2.dp))
+                            .clickable { CompanionActions.activateDialogueChoice(choice.id) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            choice.text,
+                            color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+            }
+        }
+    }
+}
+
+/**
+ * Builds the response text as an AnnotatedString with each topic-hyperlink phrase
+ * rendered BronzeLight and tappable (→ selectDialogueTopic). Case-insensitive,
+ * longest-match-wins at any position so "Imperial cult" beats "Imperial".
+ */
+@Composable
+private fun dialogueAnnotated(text: String, links: List<String>): AnnotatedString = remember(text, links) {
+    buildAnnotatedString {
+        if (links.isEmpty()) {
+            append(text)
+            return@buildAnnotatedString
+        }
+        val lower = text.lowercase()
+        val lowerLinks = links.map { it.lowercase() }
+        var i = 0
+        while (i < text.length) {
+            var bestStart = -1
+            var bestLen = 0
+            for (w in lowerLinks) {
+                if (w.isEmpty()) continue
+                val idx = lower.indexOf(w, i)
+                if (idx >= 0 && (bestStart == -1 || idx < bestStart || (idx == bestStart && w.length > bestLen))) {
+                    bestStart = idx
+                    bestLen = w.length
+                }
+            }
+            if (bestStart == -1) {
+                append(text.substring(i))
+                break
+            }
+            if (bestStart > i) append(text.substring(i, bestStart))
+            val phrase = text.substring(bestStart, bestStart + bestLen)  // preserve original case
+            withLink(
+                LinkAnnotation.Clickable(
+                    tag = "topic",
+                    styles = TextLinkStyles(style = SpanStyle(color = BronzeLight))
+                ) { CompanionActions.selectDialogueTopic(phrase) }
+            ) {
+                append(phrase)
+            }
+            i = bestStart + bestLen
+        }
     }
 }
 
