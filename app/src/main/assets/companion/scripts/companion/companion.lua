@@ -691,7 +691,17 @@ local function getQuestName(questId)
             journalRecords = core.dialogue.journal.records
         end
         local r = journalRecords[questId]
-        if r and r.name then name = r.name end
+        if r then
+            -- questName is the proper display name (QS_Name info record).
+            -- Fall back to r.name (raw ID) if questName is nil/empty.
+            local qn = nil
+            pcall(function() qn = r.questName end)
+            if qn and qn ~= "" then
+                name = qn
+            elseif r.name and r.name ~= "" then
+                name = r.name
+            end
+        end
     end)
     questNameCache[questId] = name
     return name
@@ -709,16 +719,6 @@ local function exportJournal()
         local count = #entries
         if count == journalExportedCount then return end
         journalExportedCount = count
-
-        -- Count unique questIds and probe quest stage API on first export.
-        local seen = {}; local uniqueQ = 0
-        for i = 1, count do
-            pcall(function()
-                local qid = tostring(entries[i].questId or "")
-                if not seen[qid] then seen[qid] = true; uniqueQ = uniqueQ + 1 end
-            end)
-        end
-        print("COMPANION_DEBUG: journal uniqueQ=" .. uniqueQ .. " entries=" .. count)
 
         print('COMPANION_JOURNAL_START:' .. count)
         for i = 1, count do
