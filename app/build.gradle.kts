@@ -42,6 +42,24 @@ val restorePinnedLibs = tasks.register("restorePinnedLibs") {
     }
 }
 
+// Force CMake install step to rerun if generated assets are missing.
+// Fixes fresh clone builds where the stamp exists but assets were never copied.
+val generatedLibopenmwDir = layout.buildDirectory.dir("generated_assets/libopenmw")
+tasks.matching { it.name.startsWith("buildCMake") }.configureEach {
+    doFirst {
+        val assetsDir = generatedLibopenmwDir.get().asFile
+        if (!assetsDir.exists() || assetsDir.listFiles().isNullOrEmpty()) {
+            val stampFiles = fileTree(".cxx") {
+                include("**/openmw-stamp/openmw-install")
+            }
+            if (stampFiles.any { it.exists() }) {
+                stampFiles.forEach { it.delete() }
+                println("Deleted stale openmw-install stamp — generated_assets missing")
+            }
+        }
+    }
+}
+
 android {
     namespace = "org.openmw"
     compileSdk = 37
