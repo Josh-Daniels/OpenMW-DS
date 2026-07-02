@@ -1,3 +1,9 @@
 /build
 /src/main/cpp/downloads
 /src/main/cpp/prefix
+app/src/main/jniLibs/
+src/main/jniLibs/arm64-v8a/libbsatool.so
+src/main/jniLibs/arm64-v8a/libSDL2.so
+src/main/jniLibs/arm64-v8a/libopenal.so
+src/main/jniLibs/arm64-v8a/libng_gl4es.so
+src/main/jniLibs/arm64-v8a/libcollada-dom2.5-dp.so
