@@ -154,6 +154,9 @@ private val MwData    = FontFamily.Monospace
 
 private const val TOP_BAR_SPACE = 76
 private const val BOTTOM_BAR_SPACE = 76
+// Shared height for the "top box" on Inventory (EQUIPPED strip) and Spells
+// (Active Spell) so the two panels line up. Content is vertically centered.
+private val TOP_BOX_HEIGHT = 54.dp
 
 private val ICON_CACHE_DIR by lazy {
     File("${Constants.USER_FILE_STORAGE}/companion_icons").also { it.mkdirs() }
@@ -792,19 +795,22 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                             Spacer(Modifier.width(6.dp))
                             EffectDot(effect.harmful, 8.dp)
                             Spacer(Modifier.width(8.dp))
-                            Text(
-                                effect.name,
-                                color = Bone, fontSize = 12.sp,
-                                fontFamily = MwBody,
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (effect.magnitude > 0) {
-                                Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
                                 Text(
-                                    effect.magnitude.toString(),
-                                    color = BoneDim, fontSize = 11.sp,
-                                    fontFamily = MwData
+                                    effect.name,
+                                    color = Bone, fontSize = 12.sp,
+                                    fontFamily = MwBody,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
                                 )
+                                val subtitle = effectSubtitle(effect)
+                                if (subtitle.isNotEmpty()) {
+                                    Text(
+                                        subtitle,
+                                        color = BoneDim, fontSize = 10.sp,
+                                        fontFamily = MwData,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -1435,7 +1441,7 @@ private fun EquippedStrip(state: GameState) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(50.dp)
+            .height(TOP_BOX_HEIGHT)
             .mwPanel()
             .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1522,7 +1528,7 @@ private fun CategoryTab(label: String, active: Boolean, onClick: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 5.dp)
     ) {
         Text(
-            label,
+            label.uppercase(),
             color = if (active) StoneDark else Bone,
             fontSize = 12.sp,
             fontFamily = MwDisplay,
@@ -1842,14 +1848,16 @@ private fun MagicPanel(state: GameState) {
         modifier = Modifier
             .fillMaxSize()
             .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         // ---- Active spell panel ----
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .height(TOP_BOX_HEIGHT)
                 .mwPanel()
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(horizontal = 14.dp),
+            contentAlignment = Alignment.CenterStart
         ) {
             if (sel != null) {
                 val selName = state.spells.find { it.id == sel }?.displayName() ?: prettify(sel)
@@ -1894,11 +1902,54 @@ private fun MagicPanel(state: GameState) {
                 state.spells.filter { it.type == "scroll" }.sortedWith(bySelectionThenName)
             }
 
-            Column(Modifier.weight(1f).mwPanel().padding(8.dp)) {
-                LazyColumn(Modifier.fillMaxSize()) {
-                    if (powers.isNotEmpty()) {
-                        item {
-                            SpellSectionHeader("Powers")
+            // Category filter tabs — only present (non-empty) categories get a tab.
+            // ALL is always shown. Mirrors InventoryPanel's CategorySubTabs pattern.
+            var selectedMagicTab by remember { mutableStateOf("ALL") }
+            val presentMagicTabs = remember(powers, spells, scrolls) {
+                buildList {
+                    if (powers.isNotEmpty()) add("POWERS")
+                    if (spells.isNotEmpty()) add("SPELLS")
+                    if (scrolls.isNotEmpty()) add("SCROLLS")
+                }
+            }
+            // Reset to ALL if the selected category became empty (spells removed mid-game).
+            LaunchedEffect(presentMagicTabs) {
+                if (selectedMagicTab != "ALL" && selectedMagicTab !in presentMagicTabs) {
+                    selectedMagicTab = "ALL"
+                }
+            }
+
+            val showPowers = selectedMagicTab == "ALL" || selectedMagicTab == "POWERS"
+            val showSpells = selectedMagicTab == "ALL" || selectedMagicTab == "SPELLS"
+            val showScrolls = selectedMagicTab == "ALL" || selectedMagicTab == "SCROLLS"
+            // Section headers only in the "ALL" view; a single-category tab is self-labelling.
+            val showHeaders = selectedMagicTab == "ALL"
+
+            // Tabs + list live in one mwPanel box, matching InventoryPanel.
+            Column(Modifier.weight(1f).mwPanel()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CategoryTab(label = "ALL", active = selectedMagicTab == "ALL") {
+                        selectedMagicTab = "ALL"
+                    }
+                    presentMagicTabs.forEach { label ->
+                        CategoryTab(label = label, active = selectedMagicTab == label) {
+                            selectedMagicTab = label
+                        }
+                    }
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+                LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp)) {
+                    if (showPowers && powers.isNotEmpty()) {
+                        if (showHeaders) {
+                            item {
+                                SpellSectionHeader("Powers")
+                            }
                         }
                         items(powers) { spell ->
                             SpellRow(
@@ -1914,9 +1965,11 @@ private fun MagicPanel(state: GameState) {
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
-                    if (spells.isNotEmpty()) {
-                        item {
-                            SpellSectionHeader("Spells")
+                    if (showSpells && spells.isNotEmpty()) {
+                        if (showHeaders) {
+                            item {
+                                SpellSectionHeader("Spells")
+                            }
                         }
                         items(spells) { spell ->
                             SpellRow(
@@ -1932,9 +1985,11 @@ private fun MagicPanel(state: GameState) {
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
-                    if (scrolls.isNotEmpty()) {
-                        item {
-                            SpellSectionHeader("Scrolls")
+                    if (showScrolls && scrolls.isNotEmpty()) {
+                        if (showHeaders) {
+                            item {
+                                SpellSectionHeader("Scrolls")
+                            }
                         }
                         items(scrolls) { spell ->
                             SpellRow(
@@ -1950,6 +2005,7 @@ private fun MagicPanel(state: GameState) {
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
+                    item { Spacer(Modifier.height(4.dp)) }
                 }
             }
         }
@@ -1979,7 +2035,7 @@ private fun SpellRow(
                         onClick = onTap,
                         onLongClick = { if (onAddToFavourites != null || onInfo != null) { menuOpen = true; DropdownState.open() } }
                     )
-                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                    .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Icon box (leftmost). Placeholder empty slot until the icon
@@ -2010,7 +2066,7 @@ private fun SpellRow(
                     fontSize = 14.sp, fontFamily = MwBody,
                     fontWeight = FontWeight.Normal,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(end = 8.dp)
+                    modifier = Modifier.weight(1f).padding(end = 12.dp)
                 )
                 if (selected) {
                     Text(
@@ -2023,7 +2079,7 @@ private fun SpellRow(
                     )
                 }
             }
-            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
         }
         if (onAddToFavourites != null || onInfo != null) {
             DropdownMenu(
@@ -2503,6 +2559,7 @@ private sealed interface StatInfo {
     data class FactionInfo(val faction: FactionMembership) : StatInfo
     data class ReputationInfo(val value: Int) : StatInfo
     data class BountyInfo(val value: Int) : StatInfo
+    data class ActiveEffectInfo(val effect: ActiveEffect) : StatInfo
 }
 
 /** Uniform, render-ready popup contents produced from any [StatInfo]. */
@@ -2516,7 +2573,9 @@ private data class StatPopupContent(
     /** Optional progress bar (skill increase / level-up progress). */
     val progress: StatProgress? = null,
     /** Header title color; defaults to the usual BronzeLight. */
-    val titleColor: Color = BronzeLight
+    val titleColor: Color = BronzeLight,
+    /** Optional per-row value colors, aligned by index with [rows]; null/absent = Bone. */
+    val rowValueColors: List<Color?> = emptyList()
 )
 
 /** A labelled 0..1 progress bar with a caption line beneath it. */
@@ -2630,6 +2689,31 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
         // Match the row's red-when-wanted styling in the popup header.
         titleColor = if (value > 0) Color(0xFFC75C5C) else BronzeLight
     )
+    is StatInfo.ActiveEffectInfo -> StatPopupContent(
+        // No description is exported for effects — just name, type, source, magnitude, icon.
+        title = effect.name,
+        rows = buildList {
+            add("Type" to if (effect.harmful) "Harmful" else "Beneficial")
+            if (effect.source.isNotBlank()) add("Source" to effect.source)
+            if (effect.magnitude > 0) add("Magnitude" to "${effect.magnitude} pts")
+        },
+        sections = emptyList(),
+        description = "",
+        icon = effect.icon,
+        // Colour only the Type value (index 0): red when harmful, dim when beneficial.
+        rowValueColors = listOf(if (effect.harmful) Color(0xFFC75C5C) else BoneDim)
+    )
+}
+
+/**
+ * Vanilla-style effect subtitle: "<source>: <mag> pts", or just the source / just
+ * the magnitude when only one is available; "" when neither is.
+ */
+private fun effectSubtitle(e: ActiveEffect): String = when {
+    e.source.isNotBlank() && e.magnitude > 0 -> "${e.source}: ${e.magnitude} pts"
+    e.source.isNotBlank() -> e.source
+    e.magnitude > 0 -> "${e.magnitude} pts"
+    else -> ""
 }
 
 /**
@@ -2699,7 +2783,7 @@ private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
                     Text(label, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
                     Text(
                         value,
-                        color = Bone,
+                        color = content.rowValueColors.getOrNull(i) ?: Bone,
                         fontSize = 12.sp,
                         fontFamily = MwData,
                         modifier = Modifier.padding(start = 12.dp)
@@ -2950,7 +3034,9 @@ private fun AttributesAndEffectsPanel(
             )
         } else {
             Column(Modifier.padding(top = 4.dp)) {
-                state.activeEffects.forEach { effect -> ActiveEffectRow(effect) }
+                state.activeEffects.forEach { effect ->
+                    ActiveEffectRow(effect, onTap = { onSelectStat(StatInfo.ActiveEffectInfo(effect)) })
+                }
             }
         }
     }
@@ -3049,24 +3135,50 @@ private fun AttributeRow(attr: AttributeStat, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ActiveEffectRow(effect: ActiveEffect) {
+private fun ActiveEffectRow(effect: ActiveEffect, onTap: (() -> Unit)? = null) {
+    // Vanilla layout: effect icon, then the effect name, with "<source>: <mag> pts"
+    // beneath it (e.g. "Fortify Attack" / "Warwyrd: 10 pts").
+    val icon = rememberItemIcon(effect.icon)
+    val subtitle = effectSubtitle(effect)
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Modifier
+            .fillMaxWidth()
+            .let { if (onTap != null) it.clickable(onClick = onTap) else it }
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(SlotBg)
+                .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+        ) {
+            if (icon != null) {
+                Image(
+                    bitmap = icon,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        Spacer(Modifier.width(8.dp))
         EffectDot(effect.harmful, 8.dp)
-        Text(
-            effect.name,
-            color = Bone, fontSize = 12.sp, fontFamily = MwBody,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        if (effect.magnitude > 0) {
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
             Text(
-                effect.magnitude.toString(),
-                color = BoneDim, fontSize = 11.sp, fontFamily = MwData
+                effect.name,
+                color = Bone, fontSize = 12.sp, fontFamily = MwBody,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
             )
+            if (subtitle.isNotEmpty()) {
+                Text(
+                    subtitle,
+                    color = BoneDim, fontSize = 10.sp, fontFamily = MwData,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

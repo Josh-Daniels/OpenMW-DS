@@ -198,105 +198,57 @@ local SKILL_IDS = {
     "longblade","marksman","mediumarmor","mercantile","mysticism","restoration","security",
     "shortblade","sneak","spear","speechcraft","unarmored"
 }
--- Effects that require a second param and are handled explicitly below.
-local ATTR_EFFECT_IDS = {"absorbattribute","damageattribute","drainattribute","fortifyattribute","restoreattribute"}
-local SKILL_EFFECT_IDS = {"absorbskill","damageskill","drainskill","fortifyskill","restoreskill"}
+-- Resolve the affected attribute/skill display name for a parameterized effect
+-- (e.g. "Strength" for Fortify Attribute). Returns nil for plain effects.
+local function effectArgName(e)
+    local attr = e.affectedAttribute
+    if attr then
+        local arec = core.stats.Attribute.records[attr]
+        return (arec and arec.name and arec.name ~= '') and arec.name or attr
+    end
+    local skill = e.affectedSkill
+    if skill then
+        local srec = core.stats.Skill.records[skill]
+        return (srec and srec.name and srec.name ~= '') and srec.name or skill
+    end
+    return nil
+end
 
+-- Active magic effects for the HUD/Stats display. We iterate ACTIVE SPELLS
+-- (types.Actor.activeSpells — the spells/abilities/enchantments/potions currently
+-- in force), NOT the aggregate types.Actor.activeEffects query object. activeSpells
+-- is exactly what the vanilla magic menu reads: it exposes each source's display
+-- name (params.name, e.g. "Warwyrd") and each individual effect's own magnitude,
+-- attribute/skill target, and icon. This lets us render "Fortify Attack —
+-- Warwyrd: 10 pts" like the game does, which the query object cannot (it only
+-- gives aggregate magnitude per effect id, with no source).
 local function exportActiveEffects()
     local parts = {}
-    local effectsObj = types.Actor.activeEffects(self)
 
-    -- Mark which effectIds are handled as parameterized (skip in non-param loop).
-    local paramSet = {}
-    for _, e in ipairs(ATTR_EFFECT_IDS) do paramSet[e] = true end
-    for _, e in ipairs(SKILL_EFFECT_IDS) do paramSet[e] = true end
-
-    -- Collect non-parameterized active effects.
-    -- Strategy: build a list of effectIds from EFFECT_TYPE (preferred) or records.
-    -- IMPORTANT: getEffect() always returns a non-nil ActiveEffect — check magnitude > 0
-    -- to distinguish genuinely active effects from inactive defaults.
-    local effectIds = {}
-
-    -- Try EFFECT_TYPE: if values are strings they ARE the effectIds; otherwise try keys.
-    local gotFromType = false
     pcall(function()
-        for k, v in pairs(core.magic.EFFECT_TYPE) do
-            if type(v) == 'string' then
-                effectIds[#effectIds+1] = v
-            elseif type(k) == 'string' then
-                effectIds[#effectIds+1] = k:lower()
-            end
-        end
-        gotFromType = #effectIds > 0
-    end)
-
-    -- Fallback: keys of effects.records.
-    if not gotFromType then
-        pcall(function()
-            for k, _ in pairs(core.magic.effects.records) do
-                effectIds[#effectIds+1] = tostring(k)
-            end
-        end)
-    end
-
-    for _, eid in ipairs(effectIds) do
-        if not paramSet[eid] then
-            pcall(function()
-                local p = effectsObj:getEffect(eid)
-                if p and p.magnitude > 0 then
-                    local rec = core.magic.effects.records[eid]
-                    local name = (rec and rec.name and rec.name ~= '') and rec.name or eid
+        for _, params in pairs(types.Actor.activeSpells(self)) do
+            local source = ''
+            pcall(function() source = params.name or '' end)
+            for _, e in ipairs(params.effects) do
+                pcall(function()
+                    local rec = core.magic.effects.records[e.id]
+                    local name = (rec and rec.name and rec.name ~= '') and rec.name or tostring(e.id)
+                    local arg = effectArgName(e)
+                    if arg and arg ~= '' then name = name .. ' ' .. arg end
                     local harmful = (rec and rec.harmful) or false
                     local icon = (rec and rec.icon) or ''
-                    local mag = math.floor(p.magnitude + 0.5)
-                    parts[#parts+1] = string.format('{"name":"%s","harmful":%s,"icon":"%s","magnitude":%d}',
-                        jsonEscape(name), harmful and 'true' or 'false', jsonEscape(icon), mag)
-                end
-            end)
+                    -- ActiveSpellEffect exposes the current magnitude as
+                    -- `magnitudeThisFrame` (there is NO `.magnitude` on this usertype);
+                    -- it's nil for NoMagnitude effects (water walking, etc.) → 0 = no "pts".
+                    local mag = math.floor((e.magnitudeThisFrame or 0) + 0.5)
+                    parts[#parts+1] = string.format(
+                        '{"name":"%s","source":"%s","harmful":%s,"icon":"%s","magnitude":%d}',
+                        jsonEscape(name), jsonEscape(source),
+                        harmful and 'true' or 'false', jsonEscape(icon), mag)
+                end)
+            end
         end
-    end
-
-    local function cap(s) return s:sub(1,1):upper() .. s:sub(2) end
-
-    -- Attribute-parameterized effects (e.g. "Fortify Strength" = fortifyattribute + strength).
-    for _, eid in ipairs(ATTR_EFFECT_IDS) do
-        local rec = nil
-        pcall(function() rec = core.magic.effects.records[eid] end)
-        local baseName = (rec and rec.name and rec.name ~= '') and rec.name or eid
-        local harmful = (rec and rec.harmful) or false
-        local icon = (rec and rec.icon) or ''
-        for _, attr in ipairs(ATTR_IDS) do
-            pcall(function()
-                local p = effectsObj:getEffect(eid, attr)
-                if p and p.magnitude > 0 then
-                    local mag = math.floor(p.magnitude + 0.5)
-                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s","magnitude":%d}',
-                        jsonEscape(baseName), cap(attr), harmful and 'true' or 'false',
-                        jsonEscape(icon), mag)
-                end
-            end)
-        end
-    end
-
-    -- Skill-parameterized effects (e.g. "Fortify Acrobatics" = fortifyskill + acrobatics).
-    for _, eid in ipairs(SKILL_EFFECT_IDS) do
-        local rec = nil
-        pcall(function() rec = core.magic.effects.records[eid] end)
-        local baseName = (rec and rec.name and rec.name ~= '') and rec.name or eid
-        local harmful = (rec and rec.harmful) or false
-        local icon = (rec and rec.icon) or ''
-        for _, skill in ipairs(SKILL_IDS) do
-            pcall(function()
-                local p = effectsObj:getEffect(eid, skill)
-                if p and p.magnitude > 0 then
-                    local mag = math.floor(p.magnitude + 0.5)
-                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s","magnitude":%d}',
-                        jsonEscape(baseName), cap(skill), harmful and 'true' or 'false',
-                        jsonEscape(icon), mag)
-                end
-            end)
-        end
-    end
+    end)
 
     local str = table.concat(parts, ',')
     if str == lastActiveEffectsStr then return end

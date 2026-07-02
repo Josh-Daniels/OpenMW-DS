@@ -218,7 +218,8 @@ object LogParser {
                 name = o.optString("name", ""),
                 harmful = o.optBoolean("harmful", false),
                 icon = o.optString("icon", ""),
-                magnitude = o.optInt("magnitude", 0)
+                magnitude = o.optInt("magnitude", 0),
+                source = o.optString("source", "")
             )
         }
     }

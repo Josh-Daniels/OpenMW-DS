@@ -1,0 +1,59 @@
+Suppress the gamepad GUI cursor while OpenMW's in-game Hide UI is active.
+
+With Hide UI on, the companion (second) screen handles all interaction, so the
+top-screen gamepad cursor is unwanted. WindowManager::setHudVisibility() already
+calls setCursorActive(false) once on toggle, but ControllerManager re-enables the
+cursor on EVERY controller button/axis event via
+    mGamepadGuiCursorEnabled = topWin->isGamepadCursorAllowed();
+so the left thumbstick immediately brings the cursor back.
+
+ControllerManager has no access to WindowManager's private mHudEnabled, and the
+base InputManager interface exposes no getControllerManager(). Rather than widen
+that cross-cutting interface for an Android-only feature, we reuse the existing
+companion Hide-UI bridge: companionDeliverHudVisibility() (androidmain.cpp, fed
+from setHudVisibility) caches the state, and ControllerManager reads it through a
+new extern "C" companionHudEnabled(). Both cursor-enable sites (the axis handler
+and the controller-button handler) are gated with `&& companionHudEnabled()`, all
+under #ifdef __ANDROID__ so desktop behavior is unchanged.
+
+diff --git a/apps/openmw/mwinput/controllermanager.cpp b/apps/openmw/mwinput/controllermanager.cpp
+index d921376f9c..b3d3ebabe5 100644
+--- a/apps/openmw/mwinput/controllermanager.cpp
++++ b/apps/openmw/mwinput/controllermanager.cpp
+@@ -22,6 +22,13 @@
+ #include "bindingsmanager.hpp"
+ #include "mousemanager.hpp"
+ 
++#ifdef __ANDROID__
++// COMPANION: defined in androidmain.cpp. Returns false while OpenMW's in-game
++// Hide UI is active; used below to keep the gamepad GUI cursor suppressed so the
++// left thumbstick can't re-summon it over barter/map/service windows.
++extern "C" bool companionHudEnabled();
++#endif
++
+ namespace MWInput
+ {
+     ControllerManager::ControllerManager(BindingsManager* bindingsManager, MouseManager* mouseManager,
+@@ -271,6 +278,10 @@ namespace MWInput
+                     treatAsMouse = false;
+ 
+                 mGamepadGuiCursorEnabled = topWin->isGamepadCursorAllowed();
++#ifdef __ANDROID__
++                // COMPANION: never enable the gamepad cursor while Hide UI is active.
++                mGamepadGuiCursorEnabled = mGamepadGuiCursorEnabled && companionHudEnabled();
++#endif
+ 
+                 // Fall through to mouse click
+                 if (mGamepadGuiCursorEnabled && treatAsMouse && arg.button == SDL_CONTROLLER_BUTTON_A)
+@@ -381,6 +392,11 @@ namespace MWInput
+             {
+                 // Update cursor state
+                 mGamepadGuiCursorEnabled = topWin->isGamepadCursorAllowed();
++#ifdef __ANDROID__
++                // COMPANION: never enable the gamepad cursor while Hide UI is active,
++                // so the left thumbstick can't re-summon it over barter/map windows.
++                mGamepadGuiCursorEnabled = mGamepadGuiCursorEnabled && companionHudEnabled();
++#endif
+                 if (!mGamepadGuiCursorEnabled)
+                     winMgr->setCursorActive(false);
+ 

@@ -40,7 +40,9 @@ data class ActiveEffect(
     val harmful: Boolean,
     val icon: String = "",  // VFS icon path, empty = no icon
     /** Rounded effect magnitude for display; 0 = unknown/not applicable. */
-    val magnitude: Int = 0
+    val magnitude: Int = 0,
+    /** Display name of the source spell/ability/item (e.g. "Warwyrd"); "" if unknown. */
+    val source: String = ""
 )
 
 /** One effect row in an item/spell info popup. */
