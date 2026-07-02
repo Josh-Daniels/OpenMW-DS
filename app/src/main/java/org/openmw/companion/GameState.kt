@@ -38,7 +38,9 @@ data class SpellEntry(
 data class ActiveEffect(
     val name: String,
     val harmful: Boolean,
-    val icon: String = ""   // VFS icon path, empty = no icon
+    val icon: String = "",  // VFS icon path, empty = no icon
+    /** Rounded effect magnitude for display; 0 = unknown/not applicable. */
+    val magnitude: Int = 0
 )
 
 /** One effect row in an item/spell info popup. */
@@ -100,6 +102,17 @@ data class SkillStat(
     val progress: Float = 0f
 )
 
+/**
+ * One faction the player belongs to. `rank` is the (1-based) rank index;
+ * `rankName` is the localized rank title (e.g. "Operative"), "" if unknown.
+ */
+data class FactionMembership(
+    val id: String,
+    val name: String,
+    val rank: Int,
+    val rankName: String = ""
+)
+
 data class CharacterInfo(
     val name: String = "",
     val race: String = "",
@@ -108,6 +121,12 @@ data class CharacterInfo(
     val level: Int = 0,
     val attributes: List<AttributeStat> = emptyList(),
     val skills: List<SkillStat> = emptyList(),
+    // --- Player standing (streamed separately via COMPANION_PLAYER_STATUS,
+    // merged in by GameStateRepository the same way as CHARDETAIL). ---
+    val reputation: Int = 0,
+    /** Crime bounty; > 0 means wanted by guards. */
+    val bounty: Int = 0,
+    val factions: List<FactionMembership> = emptyList(),
     // --- Description / metadata for the tappable Stats popups (streamed
     // separately via COMPANION_CHARDETAIL_*, merged in by GameStateRepository). ---
     val healthDesc: String = "",

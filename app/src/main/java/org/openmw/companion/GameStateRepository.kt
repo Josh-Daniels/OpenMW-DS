@@ -154,6 +154,17 @@ object GameStateRepository {
     private var detailBuffer: DetailBuilder? = null
     private var lastDetail: DetailBuilder? = null
 
+    // Last-seen player standing (reputation/bounty/factions), streamed on its own
+    // COMPANION_PLAYER_STATUS line. Like lastDetail, it's re-merged onto every fresh
+    // COMPANION_CHARACTER (which rebuilds the character without these fields).
+    private var lastPlayerStatus: LogParser.PlayerStatus? = null
+
+    /** Folds the last-seen player-standing values onto a (possibly rebuilt) character. */
+    private fun mergePlayerStatus(ch: CharacterInfo, s: LogParser.PlayerStatus?): CharacterInfo {
+        if (s == null) return ch
+        return ch.copy(reputation = s.reputation, bounty = s.bounty, factions = s.factions)
+    }
+
     /** Folds the last-seen description batch onto a (possibly freshly rebuilt) character. */
     private fun mergeDetail(ch: CharacterInfo, d: DetailBuilder?): CharacterInfo {
         if (d == null) return ch
@@ -540,12 +551,24 @@ object GameStateRepository {
                 }
                 detailBuffer = null
             }
+            // Player standing (reputation/bounty/factions). Merged onto the character
+            // now and re-merged on each fresh CHARACTER (which rebuilds it without these).
+            // Checked before P_CHARACTER: "CHARACTER" is not a substring of this prefix,
+            // but keeping it above avoids any future contains() ambiguity.
+            trimmed.contains(LogParser.P_PLAYER_STATUS) -> {
+                val idx = trimmed.indexOf(LogParser.P_PLAYER_STATUS) + LogParser.P_PLAYER_STATUS.length
+                LogParser.parsePlayerStatus(trimmed.substring(idx).trim())?.let { ps ->
+                    lastPlayerStatus = ps
+                    _state.update { it.copy(character = mergePlayerStatus(it.character, ps)) }
+                }
+            }
             // A fresh COMPANION_CHARACTER rebuilds attributes/skills from scratch
             // (no descriptions), so re-apply the last description batch on top.
             trimmed.contains(LogParser.P_CHARACTER) -> {
                 _state.update { cur ->
                     val next = LogParser.parseLine(trimmed, cur) ?: cur
-                    next.copy(character = mergeDetail(next.character, lastDetail))
+                    val merged = mergeDetail(next.character, lastDetail)
+                    next.copy(character = mergePlayerStatus(merged, lastPlayerStatus))
                 }
             }
             // Note: interior segment cleanup happens in onMapTexture (keyed off segment

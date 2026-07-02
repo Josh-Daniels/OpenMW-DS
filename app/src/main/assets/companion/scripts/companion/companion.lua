@@ -248,8 +248,9 @@ local function exportActiveEffects()
                     local name = (rec and rec.name and rec.name ~= '') and rec.name or eid
                     local harmful = (rec and rec.harmful) or false
                     local icon = (rec and rec.icon) or ''
-                    parts[#parts+1] = string.format('{"name":"%s","harmful":%s,"icon":"%s"}',
-                        jsonEscape(name), harmful and 'true' or 'false', jsonEscape(icon))
+                    local mag = math.floor(p.magnitude + 0.5)
+                    parts[#parts+1] = string.format('{"name":"%s","harmful":%s,"icon":"%s","magnitude":%d}',
+                        jsonEscape(name), harmful and 'true' or 'false', jsonEscape(icon), mag)
                 end
             end)
         end
@@ -268,9 +269,10 @@ local function exportActiveEffects()
             pcall(function()
                 local p = effectsObj:getEffect(eid, attr)
                 if p and p.magnitude > 0 then
-                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s"}',
+                    local mag = math.floor(p.magnitude + 0.5)
+                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s","magnitude":%d}',
                         jsonEscape(baseName), cap(attr), harmful and 'true' or 'false',
-                        jsonEscape(icon))
+                        jsonEscape(icon), mag)
                 end
             end)
         end
@@ -287,9 +289,10 @@ local function exportActiveEffects()
             pcall(function()
                 local p = effectsObj:getEffect(eid, skill)
                 if p and p.magnitude > 0 then
-                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s"}',
+                    local mag = math.floor(p.magnitude + 0.5)
+                    parts[#parts+1] = string.format('{"name":"%s %s","harmful":%s,"icon":"%s","magnitude":%d}',
                         jsonEscape(baseName), cap(skill), harmful and 'true' or 'false',
-                        jsonEscape(icon))
+                        jsonEscape(icon), mag)
                 end
             end)
         end
@@ -821,6 +824,59 @@ local function exportTarget()
     print('COMPANION_TARGET:' .. str)
 end
 
+-- Player standing: reputation, crime bounty, and faction memberships for the
+-- Stats screen. Small payload, single line (a handful of factions at most, well
+-- under the 4096-byte stdout-flush limit), change-detected. Verified against
+-- OpenMW 0.52 mwlua source:
+--   reputation:  types.NPC.stats.reputation(self).current   (stats.cpp:660 — on
+--                the NPC stats table, NOT types.Actor)
+--   bounty:      types.Player.getCrimeLevel(self)            (player.cpp:425 → int)
+--   factions:    types.NPC.getFactions(self)                 (npc.cpp:494 → array of
+--                serializeText faction ids)
+--   rank:        types.NPC.getFactionRank(self, id)          (npc.cpp:311 → 1-based
+--                Lua index, so it indexes .ranks directly)
+--   name / rank title: core.factions.records[id].name /
+--                core.factions.records[id].ranks[rank].name  (factionbindings.cpp:
+--                57/61/100 — ranks is a 1-indexed array; rank from getFactionRank
+--                is already 1-based, so ranks[rank] is the matching entry)
+local lastPlayerStatusStr = nil
+local function exportPlayerStatus()
+    local reputation = 0
+    pcall(function()
+        reputation = math.floor((types.NPC.stats.reputation(self).current or 0) + 0.5)
+    end)
+
+    local bounty = 0
+    pcall(function() bounty = types.Player.getCrimeLevel(self) or 0 end)
+
+    local factionParts = {}
+    pcall(function()
+        for _, fid in ipairs(types.NPC.getFactions(self)) do
+            local name, rank, rankName = fid, 0, ""
+            pcall(function()
+                local frec = core.factions.records[fid]
+                if frec then
+                    if frec.name and frec.name ~= "" then name = frec.name end
+                    rank = types.NPC.getFactionRank(self, fid) or 0
+                    local rankRec = frec.ranks and frec.ranks[rank]
+                    if rankRec and rankRec.name and rankRec.name ~= "" then
+                        rankName = rankRec.name
+                    end
+                end
+            end)
+            factionParts[#factionParts + 1] = string.format(
+                '{"id":"%s","name":"%s","rank":%d,"rankName":"%s"}',
+                jsonEscape(fid), jsonEscape(name), rank, jsonEscape(rankName))
+        end
+    end)
+
+    local str = string.format('{"reputation":%d,"bounty":%d,"factions":[%s]}',
+        reputation, bounty, table.concat(factionParts, ','))
+    if str == lastPlayerStatusStr then return end
+    lastPlayerStatusStr = str
+    print('COMPANION_PLAYER_STATUS:' .. str)
+end
+
 -- Play a generic equip/unequip sound (the data path skips the engine's
 -- normal equip sound, so we trigger one ourselves). Polish per-item later.
 local function playEquipSound(equipping)
@@ -1145,6 +1201,14 @@ local function dispatchCommand(command)
         exportJournal()
         return
     end
+    if payload == "openmap" then
+        -- 'Map' is a WINDOW of the 'Interface' mode (GM_Inventory), not a mode
+        -- itself. Open Interface showing only the Map window (same as the ui.lua
+        -- doc example I.UI.setMode('Interface', {windows = {'Map'}})). Reuses the
+        -- AddUiMode event already used by the 'read' handler.
+        self:sendEvent('AddUiMode', { mode = 'Interface', windows = { 'Map' } })
+        return
+    end
     local action, arg = string.match(payload, "^(%S+)%s+(.+)$")
     if not action then return end
 
@@ -1219,6 +1283,7 @@ local function onUpdate(dt)
         exportCharacter()
         exportCharacterDetail()
         exportTarget()
+        exportPlayerStatus()
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then

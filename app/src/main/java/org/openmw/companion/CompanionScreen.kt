@@ -246,10 +246,15 @@ fun CompanionScreen() {
         // (below) so its scrim covers the tab bars, exactly like ItemInfoOverlay.
         var selectedStat by remember { mutableStateOf<StatInfo?>(null) }
 
+        // Hoisted above the tab content so MapPanel can gate its map-canvas
+        // clickable on it — otherwise a tap meant to dismiss the splash lands on
+        // the map canvas (HUD is the default tab) and fires openWorldMap instead.
+        var splashVisible by remember { mutableStateOf(true) }
+
         when (tab) {
             Tab.INVENTORY -> InventoryPanel(state)
             Tab.MAGIC -> MagicPanel(state)
-            Tab.HUD -> MapPanel(state)
+            Tab.HUD -> MapPanel(state, splashVisible = splashVisible)
             Tab.STATS -> StatsPanel(state, onSelectStat = { selectedStat = it })
             Tab.JOURNAL -> JournalPanel()
         }
@@ -307,9 +312,14 @@ fun CompanionScreen() {
             )
         }
 
-        var splashVisible by remember { mutableStateOf(true) }
-        LaunchedEffect(state.lastUpdateMs) {
-            if (state.lastUpdateMs > 0L && splashVisible) {
+        // Key on the stable hasData boolean (false→true once), NOT on
+        // state.lastUpdateMs: COMPANION_STATS ticks every 0.1s, so keying on
+        // lastUpdateMs cancels+restarts this effect every ~100ms and the
+        // delay(500ms) can never complete — the splash would only ever dismiss
+        // on a manual tap. hasData flips exactly once, so the delay runs to
+        // completion and auto-dismisses on first load.
+        LaunchedEffect(state.hasData) {
+            if (state.hasData && splashVisible) {
                 delay(500L.milliseconds)
                 splashVisible = false
             }
@@ -756,7 +766,9 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                     state.activeEffects.forEach { effect ->
                         val effectIcon = rememberItemIcon(effect.icon)
                         Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            modifier = Modifier
+                                .widthIn(min = 170.dp)
+                                .padding(horizontal = 12.dp, vertical = 7.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             // Compact 20dp icon box (same placeholder styling as
@@ -783,8 +795,17 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                             Text(
                                 effect.name,
                                 color = Bone, fontSize = 12.sp,
-                                fontFamily = MwBody
+                                fontFamily = MwBody,
+                                modifier = Modifier.weight(1f)
                             )
+                            if (effect.magnitude > 0) {
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    effect.magnitude.toString(),
+                                    color = BoneDim, fontSize = 11.sp,
+                                    fontFamily = MwData
+                                )
+                            }
                         }
                     }
                 }
@@ -844,7 +865,7 @@ private fun CompactStat(
 /* ---- Map: local-map texture from the engine + player direction arrow ---- */
 
 @Composable
-private fun MapPanel(state: GameState) {
+private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     val exteriorMaps by GameStateRepository.exteriorMapBitmaps.collectAsState()
     val interiorMaps by GameStateRepository.interiorMapBitmaps.collectAsState()
 
@@ -878,8 +899,16 @@ private fun MapPanel(state: GameState) {
             .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
             .mwPanel()
     ) {
-        // Canvas fills the whole panel; labels float over it.
-        Canvas(Modifier.fillMaxSize()) {
+        // Canvas fills the whole panel; labels float over it. Tapping the map
+        // (anywhere not covered by an overlay declared later in this Box — those
+        // consume the tap first via Compose z-order) opens the in-game world map.
+        Canvas(
+            Modifier
+                .fillMaxSize()
+                // Disabled while the splash is up so a splash-dismiss tap doesn't
+                // fall through to the map canvas and open the world map instead.
+                .clickable(enabled = !splashVisible) { CompanionActions.openWorldMap() }
+        ) {
             val cx = size.width / 2f
             val cy = size.height / 2f
             val cellPx = size.minDimension / MINIMAP_CROP_FRACTION
@@ -2471,6 +2500,9 @@ private sealed interface StatInfo {
     data class LevelInfo(val level: Int, val progress: Int, val total: Int) : StatInfo
     data class RaceInfo(val character: CharacterInfo) : StatInfo
     data class ClassInfo(val character: CharacterInfo) : StatInfo
+    data class FactionInfo(val faction: FactionMembership) : StatInfo
+    data class ReputationInfo(val value: Int) : StatInfo
+    data class BountyInfo(val value: Int) : StatInfo
 }
 
 /** Uniform, render-ready popup contents produced from any [StatInfo]. */
@@ -2482,7 +2514,9 @@ private data class StatPopupContent(
     /** VFS icon path for the header, "" when the popup has no icon. */
     val icon: String = "",
     /** Optional progress bar (skill increase / level-up progress). */
-    val progress: StatProgress? = null
+    val progress: StatProgress? = null,
+    /** Header title color; defaults to the usual BronzeLight. */
+    val titleColor: Color = BronzeLight
 )
 
 /** A labelled 0..1 progress bar with a caption line beneath it. */
@@ -2569,6 +2603,33 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
         },
         description = character.classDesc
     )
+    is StatInfo.FactionInfo -> StatPopupContent(
+        title = faction.name.ifBlank { faction.id },
+        rows = buildList {
+            if (faction.rankName.isNotBlank()) add("Rank" to faction.rankName)
+            if (faction.rank > 0) add("Rank Number" to faction.rank.toString())
+        },
+        sections = emptyList(),
+        description = ""
+    )
+    is StatInfo.ReputationInfo -> StatPopupContent(
+        title = "Reputation",
+        rows = listOf("Reputation" to value.toString()),
+        sections = emptyList(),
+        description = "Reputation reflects your renown across Vvardenfell. Higher " +
+            "reputation improves NPC disposition toward you, which in turn lowers " +
+            "merchant prices and makes people more willing to help."
+    )
+    is StatInfo.BountyInfo -> StatPopupContent(
+        title = "Bounty",
+        rows = listOf("Bounty" to value.toString()),
+        sections = emptyList(),
+        description = "Your bounty is the total fine for crimes witnessed by others. " +
+            "While it is above zero, guards will demand you pay the fine, go to jail, " +
+            "or resist arrest — clearing it restores your standing with the law.",
+        // Match the row's red-when-wanted styling in the popup header.
+        titleColor = if (value > 0) Color(0xFFC75C5C) else BronzeLight
+    )
 }
 
 /**
@@ -2620,7 +2681,7 @@ private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
                 }
                 Text(
                     content.title,
-                    color = BronzeLight,
+                    color = content.titleColor,
                     fontSize = 16.sp,
                     fontFamily = MwDisplay,
                     fontWeight = FontWeight.Bold
@@ -2847,6 +2908,38 @@ private fun AttributesAndEffectsPanel(
         }
 
         Spacer(Modifier.height(4.dp))
+        SpellSectionHeader("Standing")
+        Column(Modifier.padding(top = 4.dp)) {
+            StandingRow("Reputation", character.reputation.toString(), BronzeLight) {
+                onSelectStat(StatInfo.ReputationInfo(character.reputation))
+            }
+            // Bounty in red when the player is wanted, dim when clean.
+            StandingRow(
+                "Bounty", character.bounty.toString(),
+                if (character.bounty > 0) Color(0xFFC75C5C) else BoneDim
+            ) {
+                onSelectStat(StatInfo.BountyInfo(character.bounty))
+            }
+        }
+
+        Spacer(Modifier.height(4.dp))
+        SpellSectionHeader("Factions")
+        if (character.factions.isEmpty()) {
+            Text(
+                "None",
+                color = BoneDim, fontSize = 12.sp, fontFamily = MwBody,
+                fontStyle = FontStyle.Italic,
+                modifier = Modifier.padding(top = 6.dp, start = 2.dp)
+            )
+        } else {
+            Column(Modifier.padding(top = 4.dp)) {
+                character.factions.forEach { faction ->
+                    FactionRow(faction) { onSelectStat(StatInfo.FactionInfo(faction)) }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(4.dp))
         SpellSectionHeader("Active Effects")
         if (state.activeEffects.isEmpty()) {
             Text(
@@ -2860,6 +2953,38 @@ private fun AttributesAndEffectsPanel(
                 state.activeEffects.forEach { effect -> ActiveEffectRow(effect) }
             }
         }
+    }
+}
+
+@Composable
+private fun StandingRow(label: String, value: String, valueColor: Color, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = Bone, fontSize = 13.sp, fontFamily = MwBody)
+        Text(
+            value,
+            color = valueColor, fontSize = 13.sp,
+            fontFamily = MwData, fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun FactionRow(faction: FactionMembership, onClick: () -> Unit) {
+    // Rank title is intentionally omitted here — it's revealed in the tap popup.
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            faction.name.ifBlank { faction.id },
+            color = Bone, fontSize = 13.sp, fontFamily = MwBody,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
@@ -2934,8 +3059,15 @@ private fun ActiveEffectRow(effect: ActiveEffect) {
         Text(
             effect.name,
             color = Bone, fontSize = 12.sp, fontFamily = MwBody,
-            maxLines = 1, overflow = TextOverflow.Ellipsis
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
         )
+        if (effect.magnitude > 0) {
+            Text(
+                effect.magnitude.toString(),
+                color = BoneDim, fontSize = 11.sp, fontFamily = MwData
+            )
+        }
     }
 }
 

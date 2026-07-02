@@ -9,9 +9,14 @@ state to EngineActivity.onHudVisibilityChanged over JNI. The Kotlin side
 combines it with the app's own isUIHidden preference to show/hide OverlayUI
 (touch controls, gear icon, arrow) in sync with the game HUD.
 
+We also call setCursorActive(mHudEnabled) here: with Hide UI active the
+companion screen handles all interaction, so the top-screen gamepad cursor
+(summoned by the left thumbstick over barter/map/service windows) is unwanted.
+Toggling Hide UI off (mHudEnabled = true) re-enables the cursor.
+
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
-@@ -1806,10 +1806,18 @@
+@@ -1806,10 +1806,21 @@
          mQuickKeysMenu->activateQuickKey(index);
      }
 
@@ -27,6 +32,9 @@ combines it with the app's own isUIHidden preference to show/hide OverlayUI
 +#ifdef __ANDROID__
 +        // COMPANION: sync the Alpha3 second-screen overlay with the in-game Hide UI.
 +        companionDeliverHudVisibility(mHudEnabled);
++        // COMPANION: disable the gamepad cursor while Hide UI is active so the
++        // thumbstick doesn't summon a cursor over barter/map/service windows.
++        setCursorActive(mHudEnabled);
 +#endif
          return mHudEnabled;
      }

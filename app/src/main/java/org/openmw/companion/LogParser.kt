@@ -24,6 +24,9 @@ object LogParser {
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
+    // Player standing (reputation/bounty/factions). Single small line, merged onto
+    // the character in GameStateRepository and re-merged on each fresh CHARACTER.
+    const val P_PLAYER_STATUS = "COMPANION_PLAYER_STATUS:"
     private const val P_TARGET = "COMPANION_TARGET:"
     const val P_INFO = "COMPANION_INFO:"
     const val P_JOURNAL_START = "COMPANION_JOURNAL_START:"
@@ -214,7 +217,8 @@ object LogParser {
             ActiveEffect(
                 name = o.optString("name", ""),
                 harmful = o.optBoolean("harmful", false),
-                icon = o.optString("icon", "")
+                icon = o.optString("icon", ""),
+                magnitude = o.optInt("magnitude", 0)
             )
         }
     }
@@ -297,6 +301,26 @@ object LogParser {
                 h.getDouble("max").toFloat()
             )
         )
+    }
+
+    /** Parsed COMPANION_PLAYER_STATUS payload; merged onto CharacterInfo by the repo. */
+    data class PlayerStatus(val reputation: Int, val bounty: Int, val factions: List<FactionMembership>)
+
+    fun parsePlayerStatus(json: String): PlayerStatus? = try {
+        val o = JSONObject(json)
+        val arr = o.optJSONArray("factions")
+        val factions = if (arr == null) emptyList() else (0 until arr.length()).map { i ->
+            val f = arr.getJSONObject(i)
+            FactionMembership(
+                id = f.optString("id", ""),
+                name = f.optString("name", ""),
+                rank = f.optInt("rank", 0),
+                rankName = f.optString("rankName", "")
+            )
+        }
+        PlayerStatus(o.optInt("reputation", 0), o.optInt("bounty", 0), factions)
+    } catch (e: Exception) {
+        null
     }
 
     private fun parseSelectedSpell(payload: String): String? {

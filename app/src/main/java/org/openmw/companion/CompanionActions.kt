@@ -20,6 +20,9 @@ object CompanionActions {
 
     fun refreshJournal() = runCommand("CMP:journal")
 
+    // Opens the in-game world map (Lua handles CMP:openmap via AddUiMode).
+    fun openWorldMap() = runCommand("CMP:openmap")
+
     // Quest completion status is C++-only (androidmain.cpp handles this natively,
     // NOT Lua); reply arrives as a streamed COMPANION_JOURNAL_FINISHED_* block.
     fun refreshQuestStatus() = runCommand("CMP:questStatus")

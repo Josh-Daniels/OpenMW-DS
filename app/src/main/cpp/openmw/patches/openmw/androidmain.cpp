@@ -52,6 +52,14 @@ static jmethodID g_companionMethod = nullptr;
 static jmethodID g_mapTextureMethod = nullptr;
 static jmethodID g_hudVisibilityMethod = nullptr;
 
+// Mirrors OpenMW's in-game Hide UI state (mHudEnabled), updated on every toggle
+// from companionDeliverHudVisibility(). Read by ControllerManager via the
+// companionHudEnabled() bridge below to suppress the gamepad GUI cursor while
+// Hide UI is active (the left thumbstick would otherwise re-summon it on every
+// axis event). std::atomic: written on the engine thread, read on the input
+// thread. See companion-hideui-gamepad-cursor.patch.
+static std::atomic<bool> g_companionHudEnabled{ true };
+
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
 // g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
@@ -296,6 +304,9 @@ extern "C" void companionDeliverMapTexture(
 // second-screen overlay (touch controls / gear icon) via a static Kotlin method.
 extern "C" void companionDeliverHudVisibility(bool visible)
 {
+    // Cache for ControllerManager's gamepad-cursor gate (companionHudEnabled()).
+    g_companionHudEnabled.store(visible);
+
     if (!g_companionVm || !g_companionClass || !g_hudVisibilityMethod) return;
 
     JNIEnv* e = nullptr;
@@ -305,6 +316,13 @@ extern "C" void companionDeliverHudVisibility(bool visible)
         e->ExceptionDescribe();
         e->ExceptionClear();
     }
+}
+// Read by ControllerManager (companion-hideui-gamepad-cursor.patch) to gate the
+// gamepad GUI cursor: returns false while OpenMW's Hide UI is active so the left
+// thumbstick can't re-enable the cursor over barter/map/service windows.
+extern "C" bool companionHudEnabled()
+{
+    return g_companionHudEnabled.load();
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.
