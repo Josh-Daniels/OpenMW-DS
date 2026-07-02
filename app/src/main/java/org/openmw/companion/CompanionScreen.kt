@@ -38,8 +38,12 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.ui.window.PopupProperties
@@ -88,6 +92,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.time.Duration.Companion.milliseconds
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
@@ -231,10 +236,31 @@ fun CompanionScreen() {
     }
 
     val context = LocalContext.current
-    // Load synchronously during composition (not LaunchedEffect) so favourite
-    // pills show their persisted content on the very first frame, with no
-    // post-composition flash of empty slots.
+    // Load the last-known character's favourites synchronously during composition
+    // (not LaunchedEffect) so favourite pills show persisted content on the very
+    // first frame, with no post-composition flash of empty slots.
     remember(context) { FavouritesRepository.init(context) }
+
+    // Favourites are save-dependent (keyed by character name). Once the live
+    // character is known — and whenever the player loads a different save at
+    // runtime — swap to that character's bucket, THEN prune any favourite whose
+    // item/spell no longer exists in the loaded save. Ordering matters: switch
+    // first so reconcile only ever prunes the ACTIVE character's set.
+    //
+    // A category is pruned only when its source list is non-empty; passing null
+    // while inventory/spells are still empty (the save-load window) prevents a
+    // transient blank state from wiping favourites.
+    LaunchedEffect(state.character.name, state.inventory, state.spells) {
+        val name = state.character.name
+        if (name.isNotBlank()) {
+            FavouritesRepository.setCharacter(context, name)
+            FavouritesRepository.reconcile(
+                context,
+                inventoryIds = state.inventory.takeIf { it.isNotEmpty() }?.map { it.id }?.toSet(),
+                spellIds = state.spells.takeIf { it.isNotEmpty() }?.map { it.id }?.toSet()
+            )
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -882,6 +908,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         interiorMaps.isNotEmpty()
 
     val favs by FavouritesRepository.state.collectAsState()
+    val context = LocalContext.current
 
     val weaponId = state.equipment["weapon"]
     val weaponItem = weaponId?.let {
@@ -1069,7 +1096,50 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     else
                         state.equipment.values.contains(slot.id)
                 )
-                FavSlotView(slot = slot, borderColor = BronzeLight, equipped = slotWorn) {
+                FavSlotView(
+                    slot = slot,
+                    borderColor = BronzeLight,
+                    equipped = slotWorn,
+                    menuItems = { s, dismiss ->
+                        val item = state.inventory.find { it.id == s.id }
+                        val readable = item?.category == "book" || item?.category == "scroll"
+                        val equippable = item != null && item.category != "misc" && !readable
+                        val target = item?.stackId?.takeIf { it.isNotEmpty() } ?: s.id
+                        val worn = if (item?.stackId?.isNotEmpty() == true)
+                            state.equipment.values.contains(item.stackId)
+                        else
+                            state.equipment.values.contains(s.id)
+                        val colors = MenuDefaults.itemColors(textColor = Bone)
+                        if (equippable) {
+                            DropdownMenuItem(
+                                text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
+                                onClick = {
+                                    dismiss()
+                                    if (worn) CompanionActions.unequipItem(target)
+                                    else CompanionActions.equipItem(target)
+                                },
+                                colors = colors
+                            )
+                        }
+                        if (readable) {
+                            DropdownMenuItem(
+                                text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
+                                onClick = { dismiss(); CompanionActions.readItem(s.id) },
+                                colors = colors
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
+                            onClick = { dismiss(); CompanionActions.dropItem(s.id, item?.count ?: 1) },
+                            colors = colors
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Unfavourite", fontFamily = MwBody, fontSize = 13.sp) },
+                            onClick = { dismiss(); FavouritesRepository.clearGear(context, idx) },
+                            colors = colors
+                        )
+                    }
+                ) {
                     val s = slot ?: return@FavSlotView
                     val item = state.inventory.find { it.id == s.id }
                     val readable = item?.category == "book" || item?.category == "scroll"
@@ -1105,7 +1175,24 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             repeat(2) { idx ->
                 val slot = favs.magic.getOrNull(idx)
                 val slotSelected = slot != null && state.selectedSpell == slot.id
-                FavSlotView(slot = slot, borderColor = BronzeLight, equipped = slotSelected) {
+                FavSlotView(
+                    slot = slot,
+                    borderColor = BronzeLight,
+                    equipped = slotSelected,
+                    menuItems = { s, dismiss ->
+                        val colors = MenuDefaults.itemColors(textColor = Bone)
+                        DropdownMenuItem(
+                            text = { Text("Set as active spell", fontFamily = MwBody, fontSize = 13.sp) },
+                            onClick = { dismiss(); CompanionActions.selectSpell(s.id) },
+                            colors = colors
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Unfavourite", fontFamily = MwBody, fontSize = 13.sp) },
+                            onClick = { dismiss(); FavouritesRepository.clearMagic(context, idx) },
+                            colors = colors
+                        )
+                    }
+                ) {
                     slot?.let { CompanionActions.selectSpell(it.id) }
                 }
             }
@@ -1333,13 +1420,100 @@ private fun MapButton(label: String, filled: Boolean, onClick: () -> Unit) {
     }
 }
 
+/* ---- Favourites: shared helpers ---- */
+
+/** Small gold star drawn to the RIGHT of a favourited item/spell name. It's a
+ *  standalone Icon (never concatenated into the name string) so it appears and
+ *  disappears the instant the favourites state changes. */
+@Composable
+private fun FavStar() {
+    Icon(
+        imageVector = Icons.Filled.Star,
+        contentDescription = "Favourite",
+        tint = BronzeLight,
+        modifier = Modifier.size(13.dp)
+    )
+}
+
+/**
+ * Favourites section for an item/spell long-press dropdown (rendered inside a
+ * DropdownMenu's ColumnScope). Shows "Unfavourite" when the record already
+ * occupies a slot; otherwise "Add to favourites" when a slot is free, or an
+ * explicit two-slot picker when BOTH are full — the old auto-pick always
+ * clobbered slot 1, so slot 2 could never be replaced. `isGear` selects the
+ * gear vs magic slot pair; `makeSlot` builds the FavSlot with the live name.
+ */
+@Composable
+private fun ColumnScope.FavouriteMenuItems(
+    context: Context,
+    isGear: Boolean,
+    itemId: String,
+    makeSlot: () -> FavSlot,
+    onDone: () -> Unit
+) {
+    val favs by FavouritesRepository.state.collectAsState()
+    val slots = if (isGear) favs.gear else favs.magic
+    val colors = MenuDefaults.itemColors(textColor = Bone)
+    val favIdx = slots.indexOfFirst { it?.id == itemId }
+
+    fun assign(index: Int) {
+        onDone()
+        if (isGear) FavouritesRepository.assignGear(context, makeSlot(), index)
+        else FavouritesRepository.assignMagic(context, makeSlot(), index)
+    }
+
+    if (favIdx >= 0) {
+        DropdownMenuItem(
+            text = { Text("Unfavourite", fontFamily = MwBody, fontSize = 13.sp) },
+            onClick = {
+                onDone()
+                if (isGear) FavouritesRepository.clearGear(context, favIdx)
+                else FavouritesRepository.clearMagic(context, favIdx)
+            },
+            colors = colors
+        )
+    } else {
+        val emptyIdx = slots.indexOfFirst { it == null }
+        if (emptyIdx >= 0) {
+            DropdownMenuItem(
+                text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { assign(emptyIdx) },
+                colors = colors
+            )
+        } else {
+            // Both slots full — let the user choose which one to overwrite.
+            Text(
+                "Replace favourite…",
+                color = BoneDim, fontSize = 10.sp, fontFamily = MwDisplay,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 2.dp)
+            )
+            slots.forEachIndexed { i, s ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            "Slot ${i + 1}: ${s?.name ?: "—"}",
+                            fontFamily = MwBody, fontSize = 13.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    onClick = { assign(i) },
+                    colors = colors
+                )
+            }
+        }
+    }
+}
+
 /* ---- Favourite slots (floating over the map) ---- */
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FavSlotView(
     slot: FavSlot?,
     borderColor: Color,
     equipped: Boolean = false,
+    menuItems: (@Composable ColumnScope.(slot: FavSlot, dismiss: () -> Unit) -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val isEmpty = slot == null
@@ -1349,6 +1523,17 @@ private fun FavSlotView(
     val bgColor    = if (equipped) SlotWorn else Color(0xC0151210)
     val slotBorder = if (equipped) borderColor else BronzeDark
     val textColor  = if (equipped) BoneBright else BoneMuted
+
+    var menuOpen by remember { mutableStateOf(false) }
+    // Snapshot the slot the menu was opened for. The menu renders from this, NOT
+    // the live `slot`, so that Unfavourite (which nulls the live slot the instant
+    // it's tapped) doesn't blank the menu content mid-close and make the popup
+    // reposition/"slide" — it fades in place like the other actions. Never reset
+    // on dismiss; it's overwritten on the next long-press.
+    var menuSlot by remember { mutableStateOf<FavSlot?>(null) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
 
     Box(
         modifier = Modifier
@@ -1364,7 +1549,15 @@ private fun FavSlotView(
                     if (!isEmpty) Modifier.border(1.dp, slotBorder, RoundedCornerShape(4.dp))
                     else Modifier
                 )
-                .clickable(enabled = !isEmpty) { onClick() },
+                .combinedClickable(
+                    enabled = !isEmpty,
+                    onClick = { onClick() },
+                    onLongClick = {
+                        if (menuItems != null && slot != null) {
+                            menuSlot = slot; menuOpen = true; DropdownState.open()
+                        }
+                    }
+                ),
             contentAlignment = Alignment.Center
         ) {
             Text(
@@ -1377,6 +1570,29 @@ private fun FavSlotView(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 6.dp)
             )
+        }
+        if (menuItems != null) {
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+                properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+                containerColor = StonePanel,
+                shadowElevation = 0.dp,
+                border = BorderStroke(1.dp, Bronze),
+                shape = RoundedCornerShape(3.dp)
+            ) {
+                menuSlot?.let { s ->
+                    Text(
+                        s.name,
+                        color = BronzeLight, fontSize = 12.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+                    menuItems(s) { menuOpen = false; DropdownState.closeAll() }
+                }
+            }
         }
         // Dashed border for empty slots drawn as Canvas overlay (avoids clip-halving issue)
         if (isEmpty) {
@@ -1642,6 +1858,8 @@ private fun ItemRow(
         if (DropdownState.closeRequest > 0) menuOpen = false
     }
     val label = item.displayName()
+    val favs by FavouritesRepository.state.collectAsState()
+    val isFav = favs.gear.any { it?.id == item.id }
 
     Box {
         Column {
@@ -1683,16 +1901,28 @@ private fun ItemRow(
                     }
                 }
                 Spacer(Modifier.width(10.dp))
-                Text(
-                    label,
-                    color = if (worn) BoneBright else BoneMuted,
-                    fontSize = 14.sp,
-                    fontFamily = MwBody,
-                    fontWeight = FontWeight.Normal,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(end = 12.dp)
-                )
+                // Name + (optional) favourite star share the flex column so the
+                // name truncates before the star, and the star stays a standalone
+                // Icon — never concatenated into the name string.
+                Row(
+                    modifier = Modifier.weight(1f).padding(end = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        label,
+                        color = if (worn) BoneBright else BoneMuted,
+                        fontSize = 14.sp,
+                        fontFamily = MwBody,
+                        fontWeight = FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isFav) {
+                        Spacer(Modifier.width(4.dp))
+                        FavStar()
+                    }
+                }
                 // Trailing columns are fixed-width slots (empty when N/A) so the
                 // stat value, condition bar and worn/count tag always sit in the
                 // same horizontal position across every row.
@@ -1822,17 +2052,17 @@ private fun ItemRow(
                 colors = menuItemColors
             )
             DropdownMenuItem(
-                text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = {
-                    menuOpen = false; DropdownState.closeAll()
-                    FavouritesRepository.assignGear(context, FavSlot(item.id, label))
-                },
-                colors = menuItemColors
-            )
-            DropdownMenuItem(
                 text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
                 onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.dropItem(item.id, item.count) },
                 colors = menuItemColors
+            )
+            // Add to favourites / Unfavourite / replace-slot picker.
+            FavouriteMenuItems(
+                context = context,
+                isGear = true,
+                itemId = item.id,
+                makeSlot = { FavSlot(item.id, label) },
+                onDone = { menuOpen = false; DropdownState.closeAll() }
             )
         }
     }
@@ -1856,7 +2086,6 @@ private fun SpellSectionHeader(title: String) {
 @Composable
 private fun MagicPanel(state: GameState) {
     val sel = state.selectedSpell
-    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -1967,13 +2196,9 @@ private fun MagicPanel(state: GameState) {
                         }
                         items(powers) { spell ->
                             SpellRow(
+                                spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
-                                onAddToFavourites = {
-                                    FavouritesRepository.assignMagic(
-                                        context, FavSlot(spell.id, spell.displayName())
-                                    )
-                                },
                                 onInfo = { CompanionActions.requestSpellInfo(spell.id) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -1987,13 +2212,9 @@ private fun MagicPanel(state: GameState) {
                         }
                         items(spells) { spell ->
                             SpellRow(
+                                spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
-                                onAddToFavourites = {
-                                    FavouritesRepository.assignMagic(
-                                        context, FavSlot(spell.id, spell.displayName())
-                                    )
-                                },
                                 onInfo = { CompanionActions.requestSpellInfo(spell.id) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -2007,13 +2228,9 @@ private fun MagicPanel(state: GameState) {
                         }
                         items(scrolls) { spell ->
                             SpellRow(
+                                spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = false,
-                                onAddToFavourites = {
-                                    FavouritesRepository.assignMagic(
-                                        context, FavSlot(spell.id, spell.displayName())
-                                    )
-                                },
                                 onInfo = { CompanionActions.requestSpellInfo(spell.id) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -2029,17 +2246,20 @@ private fun MagicPanel(state: GameState) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SpellRow(
+    spellId: String,
     title: String,
     selected: Boolean = false,
-    onAddToFavourites: (() -> Unit)? = null,
     onInfo: (() -> Unit)? = null,
     iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
 ) {
+    val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     LaunchedEffect(DropdownState.closeRequest) {
         if (DropdownState.closeRequest > 0) menuOpen = false
     }
+    val favs by FavouritesRepository.state.collectAsState()
+    val isFav = favs.magic.any { it?.id == spellId }
     Box {
         Column {
             Row(
@@ -2047,7 +2267,7 @@ private fun SpellRow(
                     .fillMaxWidth()
                     .combinedClickable(
                         onClick = onTap,
-                        onLongClick = { if (onAddToFavourites != null || onInfo != null) { menuOpen = true; DropdownState.open() } }
+                        onLongClick = { menuOpen = true; DropdownState.open() }
                     )
                     .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -2075,13 +2295,24 @@ private fun SpellRow(
                 // Text colours mirror the inventory worn/unworn styling: the
                 // equipped spell is the brighter BoneBright (like a worn item)
                 // with an "EQUIPPED" tag, rather than a bronze/bold highlight.
-                Text(
-                    title, color = if (selected) BoneBright else BoneMuted,
-                    fontSize = 14.sp, fontFamily = MwBody,
-                    fontWeight = FontWeight.Normal,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(end = 12.dp)
-                )
+                // Name + (optional) favourite star share the flex column so the
+                // name truncates before the star; the star is a standalone Icon.
+                Row(
+                    modifier = Modifier.weight(1f).padding(end = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        title, color = if (selected) BoneBright else BoneMuted,
+                        fontSize = 14.sp, fontFamily = MwBody,
+                        fontWeight = FontWeight.Normal,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isFav) {
+                        Spacer(Modifier.width(4.dp))
+                        FavStar()
+                    }
+                }
                 if (selected) {
                     Text(
                         "EQUIPPED",
@@ -2095,38 +2326,38 @@ private fun SpellRow(
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
         }
-        if (onAddToFavourites != null || onInfo != null) {
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-                properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-                containerColor = StonePanel,
-                shadowElevation = 0.dp,
-                border = BorderStroke(1.dp, Bronze),
-                shape = RoundedCornerShape(3.dp)
-            ) {
-                Text(
-                    title,
-                    color = BronzeLight, fontSize = 12.sp,
-                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+            containerColor = StonePanel,
+            shadowElevation = 0.dp,
+            border = BorderStroke(1.dp, Bronze),
+            shape = RoundedCornerShape(3.dp)
+        ) {
+            Text(
+                title,
+                color = BronzeLight, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            if (onInfo != null) {
+                DropdownMenuItem(
+                    text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+                    onClick = { menuOpen = false; DropdownState.closeAll(); onInfo() },
+                    colors = MenuDefaults.itemColors(textColor = Bone)
                 )
-                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
-                if (onInfo != null) {
-                    DropdownMenuItem(
-                        text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
-                        onClick = { menuOpen = false; DropdownState.closeAll(); onInfo() },
-                        colors = MenuDefaults.itemColors(textColor = Bone)
-                    )
-                }
-                if (onAddToFavourites != null) {
-                    DropdownMenuItem(
-                        text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
-                        onClick = { menuOpen = false; DropdownState.closeAll(); onAddToFavourites() },
-                        colors = MenuDefaults.itemColors(textColor = Bone)
-                    )
-                }
             }
+            // Add to favourites / Unfavourite / replace-slot picker (magic slots).
+            FavouriteMenuItems(
+                context = context,
+                isGear = false,
+                itemId = spellId,
+                makeSlot = { FavSlot(spellId, title) },
+                onDone = { menuOpen = false; DropdownState.closeAll() }
+            )
         }
     }
 }

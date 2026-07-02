@@ -755,6 +755,11 @@ end
 local COMBAT_TARGET_TIMEOUT = 3.0  -- clear if no update within this many seconds
 local combatTarget = nil           -- { actor = <GameObject>, health = {current,max} }
 local combatTargetTimer = 0.0      -- seconds until the stored target is cleared
+local targetIsFocused = false      -- true only when combatTarget was set by a
+                                   -- player ATTACK (reason='hit'). A focused
+                                   -- target owns the bar: ambient reports from
+                                   -- OTHER actors and being-hit by OTHER actors
+                                   -- cannot displace it (see onPlayerHit).
 local lastTargetStr = nil
 
 -- Build the COMPANION_TARGET JSON from the stored combat target. Reads name +
@@ -791,6 +796,7 @@ local function exportTarget()
         if combatTargetTimer <= 0 then
             combatTarget = nil
             combatTargetTimer = 0.0
+            targetIsFocused = false
         end
     end
     local str = targetJson() or '{}'
@@ -800,27 +806,61 @@ local function exportTarget()
     print('COMPANION_TARGET:' .. str)
 end
 
--- Event from companion_actor.lua: an actor's Combat AI package targets us.
-local function onCombatTarget(data)
-    combatTarget = data
-    combatTargetTimer = COMBAT_TARGET_TIMEOUT
+-- Priority of the three ways the bar's target gets set (highest first):
+--   1. player ATTACKS an actor  (onCombatTarget, reason='hit')  → FOCUSED
+--   2. player is HIT by an actor (onPlayerHit)                  → weak
+--   3. actor's Combat AI targets the player (reason='ai')       → weak, ambient
+-- A FOCUSED target (you're actively swinging at it) owns the bar: neither a
+-- different enemy's ambient report nor being hit by a different enemy can pull
+-- the bar off it. This keeps the display on the enemy you're fighting during a
+-- group brawl instead of flicking to whatever fast attacker last chipped you.
+-- Focus is only ever set by an attack, and is dropped when the target ages out.
+local function sameAsCurrentTarget(actor)
+    if not combatTarget or not combatTarget.actor then return false end
+    local same = false
+    pcall(function() same = (combatTarget.actor.id == actor.id) end)
+    return same
 end
 
--- PART 4 fallback: the player was hit ("Hit" is a local event delivered to the
--- victim). If the actor script hasn't reported a target yet (e.g. the attacker
--- struck before its next update tick), seed one from data.attacker so the bar
--- appears immediately. Real reports from companion_actor.lua take over as soon
--- as they arrive (they refresh combatTargetTimer regardless).
-local function onPlayerHit(data)
-    if data and data.attacker and combatTarget == nil then
-        local hp
-        pcall(function()
-            local h = types.Actor.stats.dynamic.health(data.attacker)
-            hp = { current = h.current, max = h.base }
-        end)
-        combatTarget = { actor = data.attacker, health = hp }
+local function onCombatTarget(data)
+    if not data or not data.actor then return end
+    if data.reason == 'hit' then
+        -- The player attacked this actor: it becomes the FOCUSED target.
+        combatTarget = data
+        combatTargetTimer = COMBAT_TARGET_TIMEOUT
+        targetIsFocused = true
+        return
+    end
+    -- Ambient AI report: seed if empty, or refresh the same actor (preserving
+    -- the focus flag); otherwise leave the current target in place.
+    if combatTarget == nil then
+        combatTarget = data
+        combatTargetTimer = COMBAT_TARGET_TIMEOUT
+        targetIsFocused = false
+    elseif sameAsCurrentTarget(data.actor) then
+        combatTarget = data
         combatTargetTimer = COMBAT_TARGET_TIMEOUT
     end
+end
+
+-- The player was hit ("Hit" is a local event delivered to the victim — us).
+-- Being hit is a WEAK signal: it must NOT drag the bar off the enemy the player
+-- is actively attacking (a focused target). So it only seeds/updates when there
+-- is no focused target — or when the attacker already IS the current target
+-- (it's hitting you back, so just refresh it). It never sets focus itself; only
+-- attacking does. This is the "only fire if I don't already have a focused
+-- target" rule, and also covers the window before an attacker's own onUpdate
+-- tick reports it when you have no target yet.
+local function onPlayerHit(data)
+    if not (data and data.attacker) then return end
+    if targetIsFocused and not sameAsCurrentTarget(data.attacker) then return end
+    local hp
+    pcall(function()
+        local h = types.Actor.stats.dynamic.health(data.attacker)
+        hp = { current = h.current, max = h.base }
+    end)
+    combatTarget = { actor = data.attacker, health = hp }
+    combatTargetTimer = COMBAT_TARGET_TIMEOUT
 end
 
 -- Player standing: reputation, crime bounty, and faction memberships for the
