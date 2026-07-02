@@ -26,6 +26,22 @@ val generateOpenMWAssets = tasks.register("generateOpenMWAssets") {
     }
 }
 
+// Task to restore pinned native libraries after CMake overwrites them.
+// These libraries must match the versions used in the working backup build
+// (openmw-ds-20260702.apk) — fresh CMake builds produce incompatible versions.
+val restorePinnedLibs = tasks.register("restorePinnedLibs") {
+    val backupLibsDir = file("src/main/backup-libs/arm64-v8a")
+    val jniLibsDir = file("src/main/jniLibs/arm64-v8a")
+    inputs.dir(backupLibsDir)
+    outputs.dir(jniLibsDir)
+    doLast {
+        backupLibsDir.listFiles()?.forEach { lib ->
+            lib.copyTo(File(jniLibsDir, lib.name), overwrite = true)
+            println("Restored pinned lib: ${lib.name}")
+        }
+    }
+}
+
 android {
     namespace = "org.openmw"
     compileSdk = 37
@@ -84,8 +100,11 @@ android {
         tasks.withType<MergeSourceSetFolders>().configureEach {
             if (name == "merge${cap}Assets") {
                 dependsOn(generateOpenMWAssets)
-                dependsOn("externalNativeBuild$cap")
+                dependsOn("buildCMake$cap[arm64-v8a]")
             }
+        }
+        tasks.matching { it.name == "buildCMake${cap}[arm64-v8a]" }.configureEach {
+            finalizedBy(restorePinnedLibs)
         }
     }
 
