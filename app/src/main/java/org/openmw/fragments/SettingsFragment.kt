@@ -190,10 +190,11 @@ private fun scanForGameFiles(dataFilesFolder: DocumentFile): GameFiles {
 
 private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedData: String) {
     val cfgFile = File(Constants.OPENMW_CFG)
-    val regexData = Regex("""^data\s*=\s*".*?"""")
+    val regexData = Regex("""^data\s*=\s*"specify-me!"""")
     val replacementStringData = """data="${savedPath}/Data Files""""
     val vfsPathLine = "data=${Constants.USER_RESOURCES}/vfs-mw"
     val overridePathLine = "data-local=${Constants.USER_FILE_STORAGE}/OpenMW/Override"
+    val companionPathLine = """data="${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion""""
 
     val currentLines = if (cfgFile.exists()) cfgFile.readLines() else emptyList()
 
@@ -223,6 +224,8 @@ private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedD
         }
 
         if (!modifiedLines.contains(overridePathLine)) appendLine(overridePathLine)
+
+        if (!modifiedLines.contains(companionPathLine)) appendLine(companionPathLine)
     }
 
     cfgFile.writeText(finalContent.trimEnd() + "\n")

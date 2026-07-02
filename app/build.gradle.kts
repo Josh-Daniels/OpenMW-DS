@@ -102,6 +102,9 @@ android {
                 dependsOn(generateOpenMWAssets)
                 dependsOn("buildCMake$cap[arm64-v8a]")
             }
+            if (name == "merge${cap}JniLibFolders") {
+                dependsOn(restorePinnedLibs)
+            }
         }
         tasks.matching { it.name == "buildCMake${cap}[arm64-v8a]" }.configureEach {
             finalizedBy(restorePinnedLibs)
