@@ -1,2 +1,3 @@
 PLAYER: scripts/companion/companion.lua
 GLOBAL: scripts/companion/companion_global.lua
+NPC,CREATURE: scripts/companion/companion_actor.lua

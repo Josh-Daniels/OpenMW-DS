@@ -738,79 +738,89 @@ end
 
 
 
--- ===== Combat target export =====
+-- ===== Combat target export (concept (b): true combat target) =====
 --
--- CONCEPT USED: (a) crosshair target. OpenMW 0.52 Lua does NOT expose a
--- combat/attack target or AI packages for querying (verified: neither the
--- I.Combat interface nor types.Actor exposes getActiveAiPackage / a target
--- field — see openmw.readthedocs.io/en/stable/reference/lua-scripting/
--- interface_combat.html and openmw_types.html, and the master
--- files/lua_api/openmw/types.lua). So concept (b) "most recently hit / actively
--- fought" is unavailable to a player script. Instead we raycast from the camera
--- through the viewport centre (the crosshair) to find the actor under it, and
--- gate on combat stance (weapon or spell readied) so the bar only shows "during
--- combat" rather than for every NPC the player glances at.
+-- The combat target is reported to us by companion_actor.lua, a NPC,CREATURE-
+-- context script that watches each actor's active-Combat AI package and, when
+-- it targets the player, sends a `CompanionCombatTarget` event carrying that
+-- actor + a health snapshot. A player script cannot read this itself:
+-- openmw.interfaces.AI is @context local (AI.getTargets("Combat") reads the
+-- attached actor's AI sequence) and the player has no combat AI package — so
+-- each actor must report itself. This replaced the old crosshair raycast
+-- (concept a) July 2026; see CLAUDE.md "Combat target" and companion_actor.lua.
 --
--- APIs (all verified against the stable docs):
---   camera.getPosition() -> Vector3           (openmw_camera.html)
---   camera.viewportToWorldVector(vector2)      -> Vector3 direction through a
---       viewport point; (0.5,0.5) = crosshair  (openmw_camera.html)
---   nearby.castRay(from, to, {ignore=...})     -> RayCastingResult
---       {hit, hitPos, hitNormal, hitObject}    (openmw_nearby.html)
---   types.Actor.getStance(actor) / STANCE      (openmw_types.html)
---   types.Actor.stats.dynamic.health(actor)    -> {current, base}; works on any
---       actor, not just the player             (files/lua_api/.../types.lua)
-local TARGET_RAY_RANGE = 8192  -- ~one cell; covers melee, marksman and spells.
+-- The event handler (onCombatTarget below) stores the latest report and refills
+-- a short timeout; exportTarget ages that timeout down each slow tick and
+-- clears the target once the actor stops reporting (combat ended / unloaded).
+local COMBAT_TARGET_TIMEOUT = 3.0  -- clear if no update within this many seconds
+local combatTarget = nil           -- { actor = <GameObject>, health = {current,max} }
+local combatTargetTimer = 0.0      -- seconds until the stored target is cleared
+local lastTargetStr = nil
 
-local function currentTargetActor()
-    local ok, obj = pcall(function()
-        -- Only while a weapon or spell is readied ("during combat").
-        if types.Actor.getStance(self) == types.Actor.STANCE.Nothing then
-            return nil
-        end
-        local origin = camera.getPosition()
-        local dir = camera.viewportToWorldVector(util.vector2(0.5, 0.5))
-        local dest = origin + dir * TARGET_RAY_RANGE
-        local r = nearby.castRay(origin, dest, { ignore = self.object })
-        if r and r.hit and r.hitObject then
-            local o = r.hitObject
-            if types.NPC.objectIsInstance(o) or types.Creature.objectIsInstance(o) then
-                -- Skip corpses: only report actors that are still alive.
-                if types.Actor.stats.dynamic.health(o).current > 0 then
-                    return o
-                end
-            end
-        end
-        return nil
+-- Build the COMPANION_TARGET JSON from the stored combat target. Reads name +
+-- health FRESH from the live actor object when possible (so the bar stays
+-- current between the actor's ~0.2s reports), falling back to the health
+-- snapshot carried in the event. Returns nil when there's nothing to show.
+local function targetJson()
+    if not combatTarget or not combatTarget.actor then return nil end
+    local obj = combatTarget.actor
+    local nm = ""
+    pcall(function()
+        local rec = obj.type.record(obj)
+        if rec and rec.name and rec.name ~= "" then nm = rec.name end
     end)
-    if ok then return obj end
-    return nil
+    if nm == "" then nm = obj.recordId or "?" end
+    local cur, mx
+    pcall(function()
+        local hp = types.Actor.stats.dynamic.health(obj)
+        cur, mx = hp.current, hp.base
+    end)
+    if cur == nil and combatTarget.health then
+        cur, mx = combatTarget.health.current, combatTarget.health.max
+    end
+    if cur == nil then return nil end
+    return string.format(
+        '{"name":"%s","health":{"current":%.1f,"max":%.1f}}',
+        jsonEscape(nm), cur, mx)
 end
 
-local lastTargetStr = nil
 local function exportTarget()
-    local obj = currentTargetActor()
-    local str = '{}'
-    if obj then
-        local nm = ""
-        pcall(function()
-            local rec = obj.type.record(obj)
-            if rec and rec.name and rec.name ~= "" then nm = rec.name end
-        end)
-        if nm == "" then nm = obj.recordId or "?" end
-        local cur, mx = 0, 0
-        pcall(function()
-            local hp = types.Actor.stats.dynamic.health(obj)
-            cur, mx = hp.current, hp.base
-        end)
-        str = string.format(
-            '{"name":"%s","health":{"current":%.1f,"max":%.1f}}',
-            jsonEscape(nm), cur, mx)
+    -- Age out the stored target if the actor script has gone quiet.
+    if combatTargetTimer > 0 then
+        combatTargetTimer = combatTargetTimer - SLOW_INTERVAL
+        if combatTargetTimer <= 0 then
+            combatTarget = nil
+            combatTargetTimer = 0.0
+        end
     end
+    local str = targetJson() or '{}'
     -- Change-detection: only print when the target or its health changed.
     if str == lastTargetStr then return end
     lastTargetStr = str
     print('COMPANION_TARGET:' .. str)
+end
+
+-- Event from companion_actor.lua: an actor's Combat AI package targets us.
+local function onCombatTarget(data)
+    combatTarget = data
+    combatTargetTimer = COMBAT_TARGET_TIMEOUT
+end
+
+-- PART 4 fallback: the player was hit ("Hit" is a local event delivered to the
+-- victim). If the actor script hasn't reported a target yet (e.g. the attacker
+-- struck before its next update tick), seed one from data.attacker so the bar
+-- appears immediately. Real reports from companion_actor.lua take over as soon
+-- as they arrive (they refresh combatTargetTimer regardless).
+local function onPlayerHit(data)
+    if data and data.attacker and combatTarget == nil then
+        local hp
+        pcall(function()
+            local h = types.Actor.stats.dynamic.health(data.attacker)
+            hp = { current = h.current, max = h.base }
+        end)
+        combatTarget = { actor = data.attacker, health = hp }
+        combatTargetTimer = COMBAT_TARGET_TIMEOUT
+    end
 end
 
 -- Player standing: reputation, crime bounty, and faction memberships for the
@@ -1291,5 +1301,9 @@ return {
         onUpdate = onUpdate,
         onActive = onActive,
         onConsoleCommand = onConsoleCommand,
-    }
+    },
+    eventHandlers = {
+        CompanionCombatTarget = onCombatTarget,
+        Hit = onPlayerHit,
+    },
 }

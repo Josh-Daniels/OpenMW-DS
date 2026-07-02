@@ -16,7 +16,7 @@ Toggling Hide UI off (mHudEnabled = true) re-enables the cursor.
 
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
-@@ -1806,10 +1806,21 @@
+@@ -1806,10 +1806,24 @@
          mQuickKeysMenu->activateQuickKey(index);
      }
 
@@ -28,7 +28,11 @@ Toggling Hide UI off (mHudEnabled = true) re-enables the cursor.
      {
          mHudEnabled = show;
          updateVisible();
-         mMessageBoxManager->setVisible(mHudEnabled);
+-        mMessageBoxManager->setVisible(mHudEnabled);
++        // COMPANION: keep notification & interactive message boxes (crime notices,
++        // gold/level-up alerts, yes/no prompts) visible even when Hide UI is active —
++        // notifications must be seen and prompts must be answerable on the top screen.
++        mMessageBoxManager->setVisible(true);
 +#ifdef __ANDROID__
 +        // COMPANION: sync the Alpha3 second-screen overlay with the in-game Hide UI.
 +        companionDeliverHudVisibility(mHudEnabled);
