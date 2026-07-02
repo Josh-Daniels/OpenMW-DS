@@ -24,6 +24,10 @@ object CompanionActions {
     // NOT Lua); reply arrives as a streamed COMPANION_JOURNAL_FINISHED_* block.
     fun refreshQuestStatus() = runCommand("CMP:questStatus")
 
+    // Known dialogue topics are C++-only (not exposed to Lua); handled natively in
+    // androidmain.cpp. Reply arrives as a streamed COMPANION_TOPICS_* block.
+    fun refreshTopics() = runCommand("CMP:refreshTopics")
+
     // Request an on-demand detail export; reply arrives as a COMPANION_INFO line.
     fun requestItemInfo(itemId: String) = runCommand("CMP:info item:$itemId")
 

@@ -34,6 +34,17 @@ object LogParser {
     const val P_JOURNAL_FINISHED_START = "COMPANION_JOURNAL_FINISHED_START:"
     const val P_JOURNAL_FINISHED_QUEST = "COMPANION_JOURNAL_FINISHED_QUEST:"
     const val P_JOURNAL_FINISHED_END = "COMPANION_JOURNAL_FINISHED_END:"
+    // Known dialogue topics with their seen responses, exported natively
+    // (androidmain.cpp) on CMP:refreshTopics. Streamed one small line each so a
+    // long topic list / long response never trips the engine's 4096-byte stdout
+    // flush. TOPICS_START/_END bracket the whole batch; TOPIC_START/_ENTRY/_END
+    // bracket each topic. The trailing "S" on TOPICS_* keeps the outer and inner
+    // prefixes from colliding under contains() (TOPIC_START ⊄ TOPICS_START, etc.).
+    const val P_TOPICS_START = "COMPANION_TOPICS_START:"
+    const val P_TOPICS_END = "COMPANION_TOPICS_END"
+    const val P_TOPIC_START = "COMPANION_TOPIC_START:"
+    const val P_TOPIC_ENTRY = "COMPANION_TOPIC_ENTRY:"
+    const val P_TOPIC_END = "COMPANION_TOPIC_END"
     // Streamed dialogue topic list (one topic per line so a long list never trips
     // the engine's 4096-byte stdout flush). Topic payloads are plain strings, not JSON.
     // CLOSED signals the conversation ended → clear the list.
@@ -257,6 +268,20 @@ object LogParser {
     } catch (e: Exception) {
         Log.e(TAG, "Journal entry parse failed: $json", e)
         null
+    }
+
+    /**
+     * Parses a COMPANION_TOPIC_ENTRY payload ("<actorName>|<text>"). actorName is
+     * the first field (never contains a pipe) and may be empty; everything after
+     * the first pipe is the response text. Null only if the pipe is missing.
+     */
+    fun parseTopicEntry(payload: String): TopicEntry? {
+        val sep = payload.indexOf('|')
+        if (sep < 0) return null
+        return TopicEntry(
+            actorName = payload.substring(0, sep),
+            text = payload.substring(sep + 1)
+        )
     }
 
     /** Empty payload {} or a missing name/health → null (no current target). */

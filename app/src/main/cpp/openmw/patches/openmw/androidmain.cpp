@@ -9,6 +9,7 @@ int stderr = 0; // Hack: fix linker error
 #include "mwbase/luamanager.hpp"
 #include "mwbase/windowmanager.hpp"
 #include "mwdialogue/quest.hpp"
+#include "mwdialogue/topic.hpp"
 #include "mwsound/soundbridge.hpp"
 #include "mwworld/ptr.hpp"
 #include <components/esm/refid.hpp>
@@ -27,11 +28,13 @@ int stderr = 0; // Hack: fix linker error
 #include <osg/OperationThread>
 #include <osgDB/WriteFile>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 /*******************************************************************************
  * Functions called by JNI
@@ -92,6 +95,64 @@ static void exportFinishedQuests()
     Log(Debug::Info) << "COMPANION_JOURNAL_FINISHED_END:" << finished;
 }
 
+// Replaces newlines/carriage returns with spaces so a response body always
+// fits on a single COMPANION_ log line (same 4096-byte single-line constraint
+// the other streamed exports respect).
+static std::string flattenText(std::string_view in)
+{
+    std::string out(in);
+    for (char& c : out)
+        if (c == '\n' || c == '\r') c = ' ';
+    return out;
+}
+
+// Exports the set of KNOWN dialogue topics (with every seen response entry) as a
+// streamed COMPANION block. Known topics are not exposed to Lua in this build, so
+// this reads the C++ journal's topic store directly — the same source the in-game
+// journal "Topics" list uses (journalwindow.cpp). Triggered on demand by the
+// CMP:refreshTopics command (sent by the Kotlin JournalPanel when the TOPICS tab
+// is first opened), NOT per frame — topics change rarely and can be numerous, so
+// on-demand keeps the log clean and matches the existing CMP:journal/questStatus
+// pattern. Streamed one small line each (START/ENTRY/END) to stay clear of the
+// 4096-byte stdout-flush truncation that bites single long COMPANION_ lines.
+// Topics are sorted alphabetically by display name before emitting so the Kotlin
+// side can just store them in received order.
+static void exportTopics()
+{
+    MWBase::Journal* journal = MWBase::Environment::get().getJournal();
+    if (!journal) return;
+
+    const auto& topics = journal->getTopics();
+
+    // getTopics() is keyed by RefId, not display name — collect pointers and sort
+    // by mName so emission order is alphabetical.
+    std::vector<const MWDialogue::Topic*> sorted;
+    sorted.reserve(topics.size());
+    for (const auto& it : topics)
+    {
+        if (it.second.size() == 0) continue; // only topics with at least one entry
+        sorted.push_back(&it.second);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const MWDialogue::Topic* a, const MWDialogue::Topic* b) {
+                  return a->getName() < b->getName();
+              });
+
+    Log(Debug::Info) << "COMPANION_TOPICS_START:" << sorted.size();
+    for (const MWDialogue::Topic* topic : sorted)
+    {
+        Log(Debug::Info) << "COMPANION_TOPIC_START:" << topic->getName();
+        for (auto it = topic->begin(); it != topic->end(); ++it)
+        {
+            // actorName may be empty — always emit the pipe so the parser sees it.
+            Log(Debug::Info) << "COMPANION_TOPIC_ENTRY:" << it->mActorName << "|"
+                             << flattenText(it->mText);
+        }
+        Log(Debug::Info) << "COMPANION_TOPIC_END";
+    }
+    Log(Debug::Info) << "COMPANION_TOPICS_END";
+}
+
 // Called from InputWrapper::capture() every frame on the engine thread.
 void drainCompanionCommands()
 {
@@ -137,6 +198,11 @@ void drainCompanionCommands()
             // Quest completion is C++-only in this build; handle natively rather
             // than forwarding to Lua (which has no way to answer it).
             exportFinishedQuests();
+        }
+        else if (cmd.rfind("CMP:refreshTopics", 0) == 0)
+        {
+            // Known topics are not exposed to Lua; read them from the C++ journal.
+            exportTopics();
         }
         else
         {

@@ -128,6 +128,21 @@ data class CharacterInfo(
     val levelTotal: Int = 0
 )
 
+/**
+ * One seen response for a known dialogue topic. `actorName` is who said it (may
+ * be empty). Transient — held in its own StateFlow, not part of GameState.
+ */
+data class TopicEntry(
+    val actorName: String,
+    val text: String
+)
+
+/** A known dialogue topic with all its seen response entries (received order). */
+data class TopicInfo(
+    val name: String,
+    val entries: List<TopicEntry>
+)
+
 data class JournalEntry(
     val questId: String,
     val questName: String = "",  // display name from core.dialogue; empty = fall back to prettified ID

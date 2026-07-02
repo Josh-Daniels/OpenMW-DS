@@ -2048,9 +2048,12 @@ private fun morrowindMonthName(month: Int): String = listOf(
 private fun JournalPanel() {
     val state by GameStateRepository.state.collectAsState()
     val finishedQuestIds by GameStateRepository.finishedQuestIds.collectAsState()
+    val topics by GameStateRepository.journalTopics.collectAsState()
     var selectedJournalTab by remember { mutableStateOf(JournalTab.Journal) }
     // Sub-navigation within the QUESTS tab: null = quest list, non-null = detail.
     var selectedQuestId by remember { mutableStateOf<String?>(null) }
+    // Sub-navigation within the TOPICS tab: null = topic list, non-null = detail.
+    var selectedTopic by remember { mutableStateOf<TopicInfo?>(null) }
 
     LaunchedEffect(Unit) {
         CompanionActions.refreshJournal()
@@ -2067,7 +2070,13 @@ private fun JournalPanel() {
             Spacer(Modifier.height(8.dp))
             Box(Modifier.fillMaxSize()) {
                 when (selectedJournalTab) {
-                    JournalTab.Topics -> JournalTopicsPlaceholder()
+                    JournalTab.Topics -> {
+                        val sel = selectedTopic
+                        if (sel == null)
+                            JournalTopicsList(topics = topics, onTopic = { selectedTopic = it })
+                        else
+                            JournalTopicDetail(topic = sel, onBack = { selectedTopic = null })
+                    }
                     JournalTab.Journal ->
                         if (state.journalEntries.isEmpty()) JournalEmptyState()
                         else JournalChronological(state.journalEntries)
@@ -2138,10 +2147,104 @@ private fun JournalEmptyState() {
 }
 
 @Composable
-private fun JournalTopicsPlaceholder() {
-    // Topics require a native C++ export (separate task); placeholder for now.
-    Box(Modifier.fillMaxSize().mwPanel(), contentAlignment = Alignment.Center) {
-        Text("Coming soon", color = BoneDim, fontSize = 15.sp, fontFamily = MwBody)
+private fun JournalTopicsList(topics: List<TopicInfo>, onTopic: (TopicInfo) -> Unit) {
+    // Ask the engine for the known-topic list whenever this view is (re)shown —
+    // new topics may have been learned since the last visit. Native reply arrives
+    // as the streamed COMPANION_TOPICS_* block. Mirrors JournalPanel's refreshJournal().
+    LaunchedEffect(Unit) { CompanionActions.refreshTopics() }
+
+    if (topics.isEmpty()) {
+        Box(Modifier.fillMaxSize().mwPanel(), contentAlignment = Alignment.Center) {
+            Text("Loading topics…", color = BoneDim, fontSize = 15.sp, fontFamily = MwBody)
+        }
+        return
+    }
+
+    // Group by uppercased first letter (non-letter initials → "#"), keys sorted
+    // with "#" first. Native emits topics already alphabetical, so groupBy keeps
+    // each letter's topics in that order.
+    val grouped = remember(topics) {
+        topics.groupBy { t ->
+            val c = t.name.trim().firstOrNull()
+            if (c != null && c.isLetter()) c.uppercaseChar().toString() else "#"
+        }.toSortedMap(compareBy { if (it == "#") "" else it })
+    }
+
+    Column(Modifier.fillMaxSize().mwPanel()) {
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+            grouped.forEach { (letter, list) ->
+                item(key = "hdr_$letter") { TopicLetterHeader(letter) }
+                // No item key: topic display names are usually but not guaranteed
+                // unique (keyed by RefId engine-side), and duplicate keys crash LazyColumn.
+                items(list) { topic ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onTopic(topic) }
+                            .padding(horizontal = 10.dp, vertical = 11.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(topic.name, color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                            modifier = Modifier.weight(1f))
+                        Text("▶", color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody)
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+                }
+            }
+            item { Spacer(Modifier.height(8.dp)) }
+        }
+    }
+}
+
+// Single-letter alphabet divider for the topics list — SpellSectionHeader style,
+// bumped to 16sp for the letter.
+@Composable
+private fun TopicLetterHeader(letter: String) {
+    Column {
+        Text(
+            letter,
+            color = BronzeLight, fontSize = 16.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+            modifier = Modifier.fillMaxWidth().padding(start = 6.dp, top = 8.dp, bottom = 4.dp)
+        )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+    }
+}
+
+@Composable
+private fun JournalTopicDetail(topic: TopicInfo, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().mwPanel()) {
+        // Back nav (matches the journal back-navigation style).
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("◀ Topics", color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody,
+                modifier = Modifier.clickable { onBack() }.padding(4.dp))
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+        // Topic name header.
+        Text(topic.name, color = BronzeLight, fontSize = 16.sp, fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 6.dp))
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+            itemsIndexed(topic.entries) { idx, entry ->
+                if (entry.actorName.isNotEmpty()) {
+                    Text(entry.actorName, color = BronzeLight, fontSize = 12.sp,
+                        fontFamily = MwBody, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
+                }
+                Text(entry.text, color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                    lineHeight = 22.4.sp,
+                    modifier = Modifier.padding(
+                        start = 10.dp, end = 10.dp,
+                        top = if (entry.actorName.isEmpty()) 10.dp else 0.dp, bottom = 8.dp))
+                if (idx < topic.entries.lastIndex)
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+            }
+            item { Spacer(Modifier.height(8.dp)) }
+        }
     }
 }
 

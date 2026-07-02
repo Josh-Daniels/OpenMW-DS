@@ -87,6 +87,17 @@ object GameStateRepository {
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
+    // Known dialogue topics (with their seen responses), exported natively on
+    // CMP:refreshTopics. Empty = not yet loaded; native side emits alphabetically
+    // sorted, so we just store in received order. Transient, refreshed on demand
+    // when the TOPICS tab is viewed. Streamed one line each (TOPICS_START /
+    // TOPIC_START / TOPIC_ENTRY / TOPIC_END / TOPICS_END).
+    private val _journalTopics = MutableStateFlow<List<TopicInfo>>(emptyList())
+    val journalTopics: StateFlow<List<TopicInfo>> = _journalTopics.asStateFlow()
+    private var topicsBuffer: MutableList<TopicInfo>? = null
+    private var currentTopicName: String = ""
+    private var currentTopicEntries: MutableList<TopicEntry>? = null
+
     // Set of finished (completed) quest ids, exported natively on CMP:questStatus
     // (androidmain.cpp). Kept separate from GameState (transient, refreshed on demand
     // when the Journal tab is viewed). Ids match JournalEntry.questId (RefId text form).
@@ -300,6 +311,39 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_JOURNAL_FINISHED_END) -> {
                 finishedQuestBuffer?.let { _finishedQuestIds.value = it.toSet() }
                 finishedQuestBuffer = null
+            }
+            // Known-topics batch (native, on CMP:refreshTopics). ENTRY checked first
+            // (most frequent), then the per-topic and outer brackets. The trailing "S"
+            // on TOPICS_* means none of these collide under contains() (see LogParser).
+            trimmed.contains(LogParser.P_TOPIC_ENTRY) -> {
+                currentTopicEntries?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_TOPIC_ENTRY) + LogParser.P_TOPIC_ENTRY.length
+                    LogParser.parseTopicEntry(trimmed.substring(idx))?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_TOPIC_START) -> {
+                val idx = trimmed.indexOf(LogParser.P_TOPIC_START) + LogParser.P_TOPIC_START.length
+                currentTopicName = trimmed.substring(idx).trim()
+                currentTopicEntries = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_TOPIC_END) -> {
+                val entries = currentTopicEntries
+                if (entries != null) {
+                    topicsBuffer?.add(TopicInfo(currentTopicName, entries.toList()))
+                }
+                currentTopicName = ""
+                currentTopicEntries = null
+            }
+            trimmed.contains(LogParser.P_TOPICS_START) -> {
+                topicsBuffer = mutableListOf()
+                currentTopicName = ""
+                currentTopicEntries = null
+            }
+            trimmed.contains(LogParser.P_TOPICS_END) -> {
+                topicsBuffer?.let { _journalTopics.value = it.toList() }
+                topicsBuffer = null
+                currentTopicName = ""
+                currentTopicEntries = null
             }
             trimmed.contains(LogParser.P_INVENTORY_ITEM) -> {
                 inventoryBuffer?.let { buf ->
