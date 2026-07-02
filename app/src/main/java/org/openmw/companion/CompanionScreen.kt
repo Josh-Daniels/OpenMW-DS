@@ -90,6 +90,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.time.Duration.Companion.milliseconds
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.util.Log
 import androidx.compose.ui.graphics.ImageBitmap
 import org.openmw.Constants
@@ -1606,7 +1607,20 @@ private fun rememberItemIcon(iconPath: String): ImageBitmap? {
                 CompanionActions.exportIconToPng(iconPath, cacheFile.absolutePath)
             }
             if (cacheFile.exists()) {
-                BitmapFactory.decodeFile(cacheFile.absolutePath)?.asImageBitmap()
+                val rawBitmap = BitmapFactory.decodeFile(cacheFile.absolutePath)
+                if (rawBitmap == null) {
+                    null
+                } else {
+                    // Flip vertically: OpenGL row 0 = bottom, Android bitmap row 0
+                    // = top, so exported icon PNGs come out upside-down (same as
+                    // the minimap flip in GameStateRepository).
+                    val flipMatrix = Matrix().apply { preScale(1f, -1f) }
+                    val flipped = Bitmap.createBitmap(
+                        rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, flipMatrix, false
+                    )
+                    rawBitmap.recycle()
+                    flipped.asImageBitmap()
+                }
             } else null
         }
     }
