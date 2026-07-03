@@ -1378,9 +1378,11 @@ local function dispatchCommand(command)
     end
     if payload == "container_dispose" then
         if containerObj then
+            -- dispose = take all + REMOVE the corpse (dir='dispose', handled in
+            -- companion_global.lua) + close the container window. Plain take-all does
+            -- not remove the body, which is the whole point of "Dispose of Corpse".
             core.sendGlobalEvent('CompanionContainerTransfer',
-                { container = containerObj, player = self.object, dir = 'takeall' })
-            -- dispose = take all + close the container window
+                { container = containerObj, player = self.object, dir = 'dispose' })
             pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
             print("COMPANION_DEBUG: container dispose")
         end

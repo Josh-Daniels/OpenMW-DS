@@ -1134,8 +1134,14 @@ private fun LootingOverlay(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 LootButton(
+                    // Always enabled (like Close). Gating on containerItems.isNotEmpty()
+                    // made the button go dead — and non-responsive to taps — once the
+                    // local list had been optimistically emptied (which is exactly the
+                    // state you're in after taking items via the companion, e.g. under
+                    // Hide UI where the companion is the only take path). Take All over
+                    // an empty container simply closes, which is harmless.
                     label = "Take All", hint = "X",
-                    enabled = containerItems.isNotEmpty(),
+                    enabled = true,
                     modifier = Modifier.weight(1f)
                 ) {
                     // Optimistically empty the container; the Lua handler takes all AND

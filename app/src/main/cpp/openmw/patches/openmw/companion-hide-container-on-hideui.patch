@@ -38,12 +38,39 @@ Hide UI (never during normal inventory use, and not during Barter/Companion).
   re-adds the ItemTransfer target that onClose() removes, so toggling Hide UI
   back on during a loot restores native shift-click transfer — nothing breaks.
 
+Hunk 3 — restore pickpocket detection under Hide UI (popGuiMode). Getting caught
+pickpocketing is rolled in ContainerWindow::onClose() -> PickpocketItemModel::
+onClose() (pickpocket.finish()). That runs via the mode-pop's
+GuiModeState::update(false) -> WindowBase::setVisible(false), which fires onClose()
+ONLY on a visible->hidden transition. Once hunk 1 has hidden the container window
+(Hide UI active), the mode-pop's setVisible(false) is a no-op, so onClose() never
+fires and pickpocketing is never detected under Hide UI (it works with the native
+window visible, because then the pop is the visible->hidden transition).
+
+This is the same class of bug as the COMPANION_DIALOGUE_CLOSED-when-hidden gotcha,
+but it CANNOT be fixed in ContainerWindow::exit() the way the dialogue signal was:
+popGuiMode(true) calls window->exit() BEFORE popping the mode, and BOTH
+ContainerWindow::onClose() and PickpocketItemModel::onClose() early-return while
+containsMode(GM_Container) is true — so the finish roll can only run POST-pop.
+Instead, in popGuiMode, capture whether the container window was already hidden
+BEFORE the pop, and after mGuiModeStates[mode].update(false) call
+mContainerWindow->onClose() explicitly (containsMode(GM_Container) is now false, so
+the guards pass). The !isVisible() gate prevents a double-roll: when the window was
+visible, update(false) fires onClose() itself (and resetReference() nulls mModel);
+when it was hidden, update(false) is a no-op and our explicit call is the only one.
+Single roll either way, no change for the native-visible case, and it covers every
+close path (Close / Take All / Dispose / B-Escape / Lua removeMode) since they all
+funnel through popGuiMode. NOTE: this restores only the ON-CLOSE finish roll; the
+per-take roll (PickpocketItemModel::stealItem) is still bypassed because companion
+takes move items via Lua moveInto rather than the native item model.
+
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
-@@ -660,6 +660,15 @@
+@@ -659,6 +659,15 @@
+         // mid-conversation does not end the dialogue or clear its history.
          if (mDialogueWindow && getMode() == GM_Dialogue)
              mDialogueWindow->setVisible(mHudEnabled && !loading);
- 
++
 +        // COMPANION: hide the container/loot/pickpocket window with Hide UI so the
 +        // companion (bottom) screen is the sole looting surface; restore it when Hide
 +        // UI is toggled back on (mHudEnabled true). ContainerWindow::onClose() early-
@@ -52,10 +79,9 @@ Hide UI (never during normal inventory use, and not during Barter/Companion).
 +        // session ends normally only when the container mode is actually removed.
 +        if (mContainerWindow)
 +            mContainerWindow->setVisible(mHudEnabled && containsMode(GM_Container));
-+
+ 
          bool gameMode = !isGuiMode();
  
-         MWBase::Environment::get().getInputManager()->changeInputMode(!gameMode);
 @@ -711,6 +720,16 @@
              mHud->setDrowningBarVisible(false);
              mInventoryWindow->setVisible(
@@ -73,3 +99,25 @@ Hide UI (never during normal inventory use, and not during Barter/Companion).
          }
  
          GuiMode mode = mGuiModes.back();
+@@ -1501,8 +1520,21 @@
+             mKeyboardNavigation->saveFocus(mode);
+             if (containsMode(mode))
+             {
++                // COMPANION: if the container window was already hidden by the Hide UI
++                // patch, the update(false) below hides it via a no-op setVisible(false)
++                // that will NOT fire onClose() — so the pickpocket finish roll
++                // (ContainerWindow::onClose -> PickpocketItemModel::onClose) is skipped,
++                // and pickpocketing under Hide UI is never detected. Capture that here
++                // and run onClose() explicitly AFTER the pop, when containsMode(GM_Container)
++                // is false so the onClose guards pass. When the window was visible,
++                // update(false) fires onClose() itself (and resetReference() nulls mModel),
++                // so we must not double-run — hence the !isVisible() gate.
++                const bool containerHiddenOnPop
++                    = (mode == GM_Container && mContainerWindow && !mContainerWindow->isVisible());
+                 mGuiModes.pop_back();
+                 mGuiModeStates[mode].update(false);
++                if (containerHiddenOnPop)
++                    mContainerWindow->onClose();
+                 MWBase::Environment::get().getLuaManager()->uiModeChanged(MWWorld::Ptr());
+             }
+         }
