@@ -84,6 +84,24 @@ object GameStateRepository {
     private val _dialogueChoices = MutableStateFlow<List<DialogueChoice>>(emptyList())
     val dialogueChoices: StateFlow<List<DialogueChoice>> = _dialogueChoices.asStateFlow()
 
+    // Current NPC disposition (0-100) for the conversation disposition bar. -1 = unknown
+    // (not an NPC, or not yet received). Set from COMPANION_DIALOGUE_DISPOSITION; reset to
+    // -1 on a new actor (COMPANION_DIALOGUE_NPC) and on _CLOSED.
+    private val _dialogueDisposition = MutableStateFlow(-1)
+    val dialogueDisposition: StateFlow<Int> = _dialogueDisposition.asStateFlow()
+
+    // Player gold during dialogue, for the persuasion popup's Gold readout. -1 = not yet
+    // received (callers fall back to the inventory gold_001 count). Set from
+    // COMPANION_DIALOGUE_GOLD; reset to -1 on new actor and _CLOSED.
+    private val _dialogueGold = MutableStateFlow(-1)
+    val dialogueGold: StateFlow<Int> = _dialogueGold.asStateFlow()
+
+    // Whether this NPC offers persuasion (drives the bottom-screen persuasion popup). Set
+    // from the COMPANION_DIALOGUE_PERSUADE_AVAILABLE flag inside the services block;
+    // committed on SERVICES_END, reset on new actor and _CLOSED.
+    private val _dialoguePersuadeAvailable = MutableStateFlow(false)
+    val dialoguePersuadeAvailable: StateFlow<Boolean> = _dialoguePersuadeAvailable.asStateFlow()
+
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
@@ -116,6 +134,10 @@ object GameStateRepository {
 
     // Accumulates services across DIALOGUE_SERVICES_START / DIALOGUE_SERVICE / DIALOGUE_SERVICES_END.
     private var dialogueServiceBuffer: MutableList<String>? = null
+
+    // Persuade-availability flag seen within the current SERVICES_START/_END block;
+    // committed to _dialoguePersuadeAvailable on SERVICES_END.
+    private var dialoguePersuadePending = false
 
     // In-flight NPC response: topic title + physical lines, committed to history on SAY_END.
     private var sayTopicBuffer: String = ""
@@ -408,6 +430,22 @@ object GameStateRepository {
                 _dialogueNpcName.value = ""
                 _dialogueHistory.value = emptyList()
                 _dialogueChoices.value = emptyList()
+                _dialogueDisposition.value = -1
+                _dialogueGold.value = -1
+                _dialoguePersuadeAvailable.value = false
+                dialoguePersuadePending = false
+            }
+            // Disposition (0-100) for the conversation disposition bar. Matched before the
+            // generic dialogue branches — its token is not a substring of any other prefix.
+            trimmed.contains(LogParser.P_DIALOGUE_DISPOSITION) -> {
+                val idx = trimmed.indexOf(LogParser.P_DIALOGUE_DISPOSITION) + LogParser.P_DIALOGUE_DISPOSITION.length
+                trimmed.substring(idx).trim().toIntOrNull()?.let { _dialogueDisposition.value = it }
+            }
+            // Player gold — emitted alongside disposition; token is not a substring of any
+            // other prefix, and DISPOSITION above doesn't match a GOLD line either.
+            trimmed.contains(LogParser.P_DIALOGUE_GOLD) -> {
+                val idx = trimmed.indexOf(LogParser.P_DIALOGUE_GOLD) + LogParser.P_DIALOGUE_GOLD.length
+                trimmed.substring(idx).trim().toIntOrNull()?.let { _dialogueGold.value = it }
             }
             // Question/answer choices, streamed CHOICE_START / CHOICE:<text>|<id> / CHOICE_END.
             // The colon on CHOICE keeps it from matching CHOICE_START/_END under contains.
@@ -436,6 +474,13 @@ object GameStateRepository {
                 _dialogueNpcName.value = trimmed.substring(idx).trim()
                 _dialogueHistory.value = emptyList()
                 sayLineBuffer = null
+                // Reset until the fresh DISPOSITION line for this actor arrives (emitted
+                // immediately after, from setPtr → updateDisposition).
+                _dialogueDisposition.value = -1
+                _dialogueGold.value = -1
+                // Persuade availability is re-asserted by the new actor's services block.
+                _dialoguePersuadeAvailable.value = false
+                dialoguePersuadePending = false
             }
             // Response text, streamed SAY_START / SAY_TOPIC / SAY_LINE* / SAY_END, then an
             // optional SAY_LINKS attached to the just-published entry. Buffer until END so
@@ -492,12 +537,22 @@ object GameStateRepository {
                     if (service.isNotEmpty()) buf.add(service)
                 }
             }
+            // Persuade-availability flag — emitted inside the services block, before
+            // SERVICES_END. Its token is not a substring of any other prefix, so checking
+            // it before SERVICES_START/_END is safe (and it must precede them so a
+            // contains() on SERVICES_* doesn't shadow it — it doesn't here, but keep it
+            // first for clarity).
+            trimmed.contains(LogParser.P_DIALOGUE_PERSUADE_AVAILABLE) -> {
+                dialoguePersuadePending = true
+            }
             trimmed.contains(LogParser.P_DIALOGUE_SERVICES_START) -> {
                 dialogueServiceBuffer = mutableListOf()
+                dialoguePersuadePending = false
             }
             trimmed.contains(LogParser.P_DIALOGUE_SERVICES_END) -> {
                 dialogueServiceBuffer?.let { buf -> _dialogueServices.value = buf.toList() }
                 dialogueServiceBuffer = null
+                _dialoguePersuadeAvailable.value = dialoguePersuadePending
             }
             // Character-description batch. Buffered, then merged into the character
             // on END (and re-merged onto any later COMPANION_CHARACTER, see below).

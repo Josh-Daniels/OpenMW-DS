@@ -49,6 +49,10 @@ object CompanionActions {
     // Answer a mid-dialogue question/choice by its integer id.
     fun activateDialogueChoice(id: Int) = runCommand("CMPDLG:choice:$id")
 
+    // Persuasion action, driven by the bottom-screen popup (the native modal is never
+    // shown). type 0..5 = Admire / Intimidate / Taunt / Bribe10 / Bribe100 / Bribe1000.
+    fun persuade(type: Int) = runCommand("CMPDLG:persuade:$type")
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

@@ -28,6 +28,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.horizontalScroll
@@ -422,11 +423,19 @@ fun CompanionScreen() {
         val dialogueNpcName by GameStateRepository.dialogueNpcName.collectAsState()
         val dialogueHistory by GameStateRepository.dialogueHistory.collectAsState()
         val dialogueChoices by GameStateRepository.dialogueChoices.collectAsState()
+        val dialogueDisposition by GameStateRepository.dialogueDisposition.collectAsState()
+        val dialoguePersuadeAvailable by GameStateRepository.dialoguePersuadeAvailable.collectAsState()
+        val dialogueGold by GameStateRepository.dialogueGold.collectAsState()
         if (dialogueNpcName.isNotEmpty() || dialogueTopics.isNotEmpty() ||
             dialogueServices.isNotEmpty() || dialogueHistory.isNotEmpty() ||
             dialogueChoices.isNotEmpty()
         ) {
-            DialogueTopicsOverlay(dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices, dialogueChoices)
+            // Player gold for the persuasion popup. Prefer the live COMPANION_DIALOGUE_GOLD
+            // value (emitted from updateDisposition, so it updates after a bribe); fall back
+            // to the inventory gold_001 count until the first gold line arrives.
+            val playerGold = if (dialogueGold >= 0) dialogueGold
+                else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+            DialogueTopicsOverlay(dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices, dialogueChoices, dialogueDisposition, dialoguePersuadeAvailable, playerGold)
         }
     }
 }
@@ -439,8 +448,16 @@ private fun DialogueTopicsOverlay(
     history: List<DialogueSay>,
     topics: List<String>,
     services: List<String>,
-    choices: List<DialogueChoice>
+    choices: List<DialogueChoice>,
+    disposition: Int,
+    persuadeAvailable: Boolean,
+    playerGold: Int
 ) {
+    // Local popup visibility. Keyed on npcName so switching NPCs mid-session closes any
+    // open popup; it also disappears automatically when the whole overlay leaves the
+    // composition on COMPANION_DIALOGUE_CLOSED. A choice being active suppresses it.
+    var showPersuasion by remember(npcName) { mutableStateOf(false) }
+
     // Non-interactive dark scrim (NOT a Dialog — that crashes on the Presentation
     // display). It has NO tap-away dismiss; the empty detectTapGestures just swallows
     // taps on the exposed margins so they don't fall through to the tab underneath.
@@ -474,60 +491,113 @@ private fun DialogueTopicsOverlay(
             // ---- Two columns: dialogue history (75%) | topics/services (25%) ----
             Row(Modifier.fillMaxSize()) {
                 DialogueHistoryColumn(
-                    history,
-                    choices,
+                    history, choices,
                     modifier = Modifier.weight(0.75f).fillMaxHeight().padding(8.dp)
                 )
                 Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
-                Column(Modifier.weight(0.25f).fillMaxHeight().padding(8.dp)) {
-                    // Right column ALWAYS shows services/topics/goodbye. While a choice is
-                    // active (choices non-empty) they're DIMMED and inert — the choice buttons
-                    // render inline in the left column instead (see DialogueHistoryColumn).
-                    val dimmed = choices.isNotEmpty()
+                DialogueRightColumn(
+                    topics = topics, services = services, disposition = disposition,
+                    persuadeAvailable = persuadeAvailable,
+                    // While a choice is active, the Persuade row and every topic/service row
+                    // stay visible but greyed and non-tappable (interactive = false) — the
+                    // inline choices in the history take priority over topic selection.
+                    choicesActive = choices.isNotEmpty(),
+                    interactive = choices.isEmpty(),
+                    onPersuadeTapped = { showPersuasion = true },
+                    modifier = Modifier.weight(0.25f).fillMaxHeight().padding(8.dp)
+                )
+            }
+        }
 
-                    // Services (fixed, no scroll; hidden when the NPC has none). Styled
-                    // identically to topic rows — only the section header distinguishes them.
-                    if (services.isNotEmpty()) {
-                        SpellSectionHeader("SERVICES")
-                        Spacer(Modifier.height(4.dp))
-                        services.forEach { service ->
-                            DialogueOptionRow(service, dimmed = dimmed) {
-                                if (!dimmed) CompanionActions.activateDialogueService(service)
-                            }
-                        }
-                        Spacer(Modifier.height(6.dp))
-                    }
+        // Persuasion popup — centred overlay + scrim over the conversation panel, shown
+        // when the player tapped Persuade. Suppressed while a choice is active (Persuade is
+        // non-tappable then). Each action sends the command and closes the popup (matches
+        // native Morrowind — reopen Persuade for another attempt); Cancel / scrim-tap also
+        // dismisses. Leaves automatically on COMPANION_DIALOGUE_CLOSED (overlay disposed).
+        if (showPersuasion && choices.isEmpty()) {
+            PersuasionPopup(
+                gold = playerGold,
+                onPersuade = { type ->
+                    CompanionActions.persuade(type)
+                    showPersuasion = false
+                },
+                onCancel = { showPersuasion = false }
+            )
+        }
+    }
+}
 
-                    // Topics (fills remaining space, scrollable)
-                    SpellSectionHeader("TOPICS")
-                    Spacer(Modifier.height(4.dp))
-                    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        items(topics) { topic ->
-                            DialogueOptionRow(topic, dimmed = dimmed) {
-                                if (!dimmed) CompanionActions.selectDialogueTopic(topic)
-                            }
-                        }
-                    }
-
-                    // Goodbye (fixed at the bottom of the right column)
-                    Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(BronzeDark.copy(alpha = 0.2f))
-                            .clickable { if (!dimmed) CompanionActions.dialogueGoodbye() }
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "GOODBYE",
-                            color = if (dimmed) BoneDim else BronzeLight, fontSize = 14.sp,
-                            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                            letterSpacing = 2.sp
-                        )
-                    }
+/** The dialogue right column — services, disposition bar, the Persuade trigger, the
+ *  scrolling topics list and the Goodbye button. [choicesActive] greys the rows (a
+ *  mid-dialogue question is showing its answers in the left column); [interactive] gates
+ *  every tap — off while a choice is active OR while the persuasion column owns input. */
+@Composable
+private fun DialogueRightColumn(
+    topics: List<String>,
+    services: List<String>,
+    disposition: Int,
+    persuadeAvailable: Boolean,
+    choicesActive: Boolean,
+    interactive: Boolean,
+    onPersuadeTapped: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier) {
+        // Services (fixed, no scroll; hidden when the NPC has none). Styled identically to
+        // topic rows — only the section header distinguishes them.
+        if (services.isNotEmpty()) {
+            SpellSectionHeader("SERVICES")
+            Spacer(Modifier.height(4.dp))
+            services.forEach { service ->
+                DialogueOptionRow(service, dimmed = choicesActive) {
+                    if (interactive) CompanionActions.activateDialogueService(service)
                 }
             }
+            Spacer(Modifier.height(6.dp))
+        }
+
+        // Disposition bar — sits just above the topics list. Hidden when disposition is
+        // unknown (< 0, e.g. a creature, or before the first DISPOSITION line).
+        if (disposition >= 0) {
+            DispositionBar(disposition)
+            Spacer(Modifier.height(6.dp))
+        }
+
+        // Persuade trigger — opens the middle persuasion column.
+        if (persuadeAvailable) {
+            DialogueActionRow("PERSUADE", dimmed = choicesActive) {
+                if (interactive) onPersuadeTapped()
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+
+        // Topics (fills remaining space, scrollable)
+        SpellSectionHeader("TOPICS")
+        Spacer(Modifier.height(4.dp))
+        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            items(topics) { topic ->
+                DialogueOptionRow(topic, dimmed = choicesActive) {
+                    if (interactive) CompanionActions.selectDialogueTopic(topic)
+                }
+            }
+        }
+
+        // Goodbye (fixed at the bottom of the column)
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(BronzeDark.copy(alpha = 0.2f))
+                .clickable { if (interactive) CompanionActions.dialogueGoodbye() }
+                .padding(vertical = 10.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "GOODBYE",
+                color = if (choicesActive) BoneDim else BronzeLight, fontSize = 14.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp
+            )
         }
     }
 }
@@ -550,6 +620,154 @@ private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: (
     }
 }
 
+/** A highlighted action row in the right column (e.g. PERSUADE) — visually distinct from
+ *  the plain topic/service rows via the SlotWorn fill + bright bronze border, so it reads
+ *  as a button rather than a topic. Inert (dimmed, no click) while a choice is active. */
+@Composable
+private fun DialogueActionRow(label: String, dimmed: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(2.dp))
+            .background(if (dimmed) SlotBg else SlotWorn)
+            .border(1.dp, if (dimmed) BronzeDark else BronzeLight, RoundedCornerShape(2.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (dimmed) BoneDim else BronzeLight, fontSize = 13.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp
+        )
+    }
+}
+
+/** Persuasion popup — a centred in-window overlay (NOT a Dialog; that crashes on the
+ *  Presentation display) + scrim over the conversation panel. Six persuasion option rows
+ *  (bribes greyed + non-tappable when the player can't afford them, live gold via
+ *  dialogueGold), a gold readout and a Cancel button. Each option sends CMPDLG:persuade:
+ *  <type> and closes the popup (matches native Morrowind — reopen Persuade for another
+ *  attempt); Cancel / scrim-tap dismisses locally (the native modal is never shown, so
+ *  there is nothing to cancel engine-side). */
+@Composable
+private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -> Unit) {
+    // label, persuade type (matches native companionPersuade switch), gold cost
+    val options = listOf(
+        Triple("Admire", 0, 0),
+        Triple("Intimidate", 1, 0),
+        Triple("Taunt", 2, 0),
+        Triple("Bribe 10 Gold", 3, 10),
+        Triple("Bribe 100 Gold", 4, 100),
+        Triple("Bribe 1000 Gold", 5, 1000)
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(30f)
+            .background(Color(0x99000000))
+            .pointerInput(Unit) { detectTapGestures { onCancel() } },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(360.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            Text(
+                "Persuasion", color = BronzeLight, fontSize = 15.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            options.forEachIndexed { i, (label, type, cost) ->
+                val enabled = gold >= cost
+                // Alternating row backgrounds for readability.
+                val rowBg = if (i % 2 == 0) Color(0x22000000) else Color(0x11000000)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(rowBg)
+                        .then(if (enabled) Modifier.clickable { onPersuade(type) } else Modifier)
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Text(
+                        label,
+                        color = if (enabled) Bone else BoneDim,
+                        fontSize = 14.sp, fontFamily = MwBody
+                    )
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+            }
+
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Gold: $gold", color = BronzeLight, fontSize = 13.sp, fontFamily = MwData,
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                        .clickable { onCancel() }
+                        .padding(horizontal = 18.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        "CANCEL", color = BronzeLight, fontSize = 12.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Conversation disposition bar: "Disposition" label + "X/100" over a filled bar.
+ *  Fill colour follows disposition thresholds — green above 50, amber 30..50, red below
+ *  30. Same track/border/shape as [CompactStat] so it reads as one system. [value] is
+ *  clamped 0..100; callers hide it entirely when disposition is unknown (< 0). */
+@Composable
+private fun DispositionBar(value: Int) {
+    val v = value.coerceIn(0, 100)
+    val fillColor = when {
+        v > 50 -> Color(0xFF7FBF7F)   // green — beneficial (matches effect-dot green)
+        v >= 30 -> Color(0xFFD9A441)  // amber — neutral/wary
+        else -> Color(0xFFC75C5C)     // red — hostile (matches effect-dot red)
+    }
+    // No "Disposition" label (it overflowed the narrow column at 100/100). Just the bar
+    // with the value to its right.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(9.dp)
+                .clip(RoundedCornerShape(1.dp))
+                .background(Color(0xFF0E0B07))
+                .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(v / 100f)
+                    .height(9.dp)
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(fillColor)
+            )
+        }
+        Spacer(Modifier.width(6.dp))
+        Text("$v/100", color = Bone, fontSize = 12.sp, fontFamily = MwData)
+    }
+}
+
 /** Left column: the running NPC-response history, auto-scrolled to the newest line.
  *  When [choices] is non-empty (a mid-dialogue question) the choice buttons render
  *  inline as the LAST item of the list, directly below the most recent response. */
@@ -557,7 +775,8 @@ private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: (
 private fun DialogueHistoryColumn(
     history: List<DialogueSay>,
     choices: List<DialogueChoice>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     val listState = rememberLazyListState()
     // Auto-scroll to the newest item — a fresh response OR the choice block appearing.
@@ -592,7 +811,7 @@ private fun DialogueHistoryColumn(
                 )
             } else {
                 Text(
-                    dialogueAnnotated(say.text, say.hyperlinks),
+                    dialogueAnnotated(say.text, say.hyperlinks, interactive),
                     color = Bone, fontSize = 14.sp, fontFamily = MwBody, lineHeight = 22.4.sp,
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                 )
@@ -616,7 +835,15 @@ private fun DialogueHistoryColumn(
                             .clip(RoundedCornerShape(2.dp))
                             .background(BronzeLight.copy(alpha = 0.12f))
                             .border(1.dp, BronzeLight, RoundedCornerShape(2.dp))
-                            .clickable { CompanionActions.activateDialogueChoice(choice.id) }
+                            .clickable {
+                                if (interactive) {
+                                    // id -1 = the synthetic forced-goodbye prompt (NPC
+                                    // taunted into combat, etc.) — route it to goodbye, not
+                                    // a real choice answer.
+                                    if (choice.id == -1) CompanionActions.dialogueGoodbye()
+                                    else CompanionActions.activateDialogueChoice(choice.id)
+                                }
+                            }
                             .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
                         Text(
@@ -634,10 +861,12 @@ private fun DialogueHistoryColumn(
 /**
  * Builds the response text as an AnnotatedString with each topic-hyperlink phrase
  * rendered BronzeLight and tappable (→ selectDialogueTopic). Case-insensitive,
- * longest-match-wins at any position so "Imperial cult" beats "Imperial".
+ * longest-match-wins at any position so "Imperial cult" beats "Imperial". When
+ * [interactive] is false (e.g. the history column is dimmed during persuasion) the
+ * phrases stay highlighted BronzeLight but are NOT tappable.
  */
 @Composable
-private fun dialogueAnnotated(text: String, links: List<String>): AnnotatedString = remember(text, links) {
+private fun dialogueAnnotated(text: String, links: List<String>, interactive: Boolean = true): AnnotatedString = remember(text, links, interactive) {
     buildAnnotatedString {
         if (links.isEmpty()) {
             append(text)
@@ -663,13 +892,18 @@ private fun dialogueAnnotated(text: String, links: List<String>): AnnotatedStrin
             }
             if (bestStart > i) append(text.substring(i, bestStart))
             val phrase = text.substring(bestStart, bestStart + bestLen)  // preserve original case
-            withLink(
-                LinkAnnotation.Clickable(
-                    tag = "topic",
-                    styles = TextLinkStyles(style = SpanStyle(color = BronzeLight))
-                ) { CompanionActions.selectDialogueTopic(phrase) }
-            ) {
-                append(phrase)
+            if (interactive) {
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = "topic",
+                        styles = TextLinkStyles(style = SpanStyle(color = BronzeLight))
+                    ) { CompanionActions.selectDialogueTopic(phrase) }
+                ) {
+                    append(phrase)
+                }
+            } else {
+                // Dimmed/inert (persuasion active): keep the highlight, drop the link.
+                withStyle(SpanStyle(color = BronzeLight)) { append(phrase) }
             }
             i = bestStart + bestLen
         }

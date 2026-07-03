@@ -55,11 +55,21 @@ object LogParser {
     const val P_DIALOGUE_TOPIC = "COMPANION_DIALOGUE_TOPIC:"
     const val P_DIALOGUE_END = "COMPANION_DIALOGUE_END"
     const val P_DIALOGUE_CLOSED = "COMPANION_DIALOGUE_CLOSED"
+    // Current NPC disposition (0-100 int), single small line. Emitted natively from
+    // DialogueWindow::updateDisposition() on dialogue open and after each persuasion
+    // attempt (change-detected engine-side). Backs the conversation disposition bar.
+    const val P_DIALOGUE_DISPOSITION = "COMPANION_DIALOGUE_DISPOSITION:"
+    // Player gold (int), emitted natively alongside disposition (change-detected) so the
+    // persuasion popup's Gold readout stays live after a bribe without an inventory re-export.
+    const val P_DIALOGUE_GOLD = "COMPANION_DIALOGUE_GOLD:"
     // Service entries (Barter/Spells/Travel/...), streamed separately from topics.
     // The colon on _SERVICE disambiguates it from _SERVICES_START/_END under contains().
     const val P_DIALOGUE_SERVICES_START = "COMPANION_DIALOGUE_SERVICES_START"
     const val P_DIALOGUE_SERVICE = "COMPANION_DIALOGUE_SERVICE:"
     const val P_DIALOGUE_SERVICES_END = "COMPANION_DIALOGUE_SERVICES_END"
+    // Persuasion availability flag (NPCs only), emitted inside the services block in place
+    // of a routable service. Presence = the bottom-screen persuasion popup is offered.
+    const val P_DIALOGUE_PERSUADE_AVAILABLE = "COMPANION_DIALOGUE_PERSUADE_AVAILABLE"
     // NPC name (also the history-clear signal) + streamed response text. _SAY_LINE and
     // _SAY_LINKS carry the colon; _SAY_START/_TOPIC/_END are matched as-is. Order in the
     // repo's when() disambiguates _SAY_START from _SAY_START-prefixed lines via contains.

@@ -74,6 +74,7 @@ static std::atomic<MWBase::LuaManager*> g_luaManagerPtr{nullptr};
 extern "C" void companionDialogueSelectEntry(const char* entry);
 extern "C" void companionDialogueGoodbye();
 extern "C" void companionDialogueChoice(int id);
+extern "C" void companionPersuade(int type);
 
 // Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
 // Quest completion status is NOT exposed to Lua in this build (types.Player.journal
@@ -200,6 +201,14 @@ void drainCompanionCommands()
         {
             Log(Debug::Info) << "companion: goodbye";
             companionDialogueGoodbye();
+        }
+        else if (cmd.rfind("CMPDLG:persuade:", 0) == 0)
+        {
+            // Persuasion is driven from the bottom-screen popup; the native modal is
+            // never shown. type 0..5 = Admire/Intimidate/Taunt/Bribe10/Bribe100/Bribe1000.
+            const int type = std::atoi(cmd.c_str() + (sizeof("CMPDLG:persuade:") - 1));
+            Log(Debug::Info) << "companion: persuade " << type;
+            companionPersuade(type);
         }
         else if (cmd.rfind("CMP:questStatus", 0) == 0)
         {

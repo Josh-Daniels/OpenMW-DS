@@ -33,7 +33,7 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 
 --- a/apps/openmw/mwgui/dialogue.hpp
 +++ b/apps/openmw/mwgui/dialogue.hpp
-@@ -160,6 +160,12 @@
+@@ -160,6 +160,13 @@
  
          void updateTopics();
  
@@ -42,13 +42,14 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +        void companionSelectEntry(const std::string& entry);
 +        void companionGoodbye();
 +        void companionSelectChoice(int id);
++        void companionPersuade(int type);
 +
          void onClose() override;
  
          std::string_view getWindowIdForLua() const override { return "Dialogue"; }
 --- a/apps/openmw/mwgui/dialogue.cpp
 +++ b/apps/openmw/mwgui/dialogue.cpp
-@@ -33,6 +33,15 @@
+@@ -33,6 +33,23 @@
  
  #include "bookpage.hpp"
  #include "textcolours.hpp"
@@ -60,6 +61,14 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +    // (androidmain.cpp, engine main thread) can drive topic/service/goodbye without
 +    // reaching into WindowManager's private members.
 +    MWGui::DialogueWindow* gCompanionDialogueWindow = nullptr;
++    // Companion: last disposition value (0-100) emitted to the bottom screen, so
++    // updateDisposition() -- called every frame via onFrame -- only logs
++    // COMPANION_DIALOGUE_DISPOSITION on a real change instead of flooding the log.
++    // Reset to -1 on a new conversation (setPtr) to force a re-emit for the new actor.
++    int gCompanionLastDisposition = -1;
++    // Same change-detection for the player's gold (drives the persuasion popup's Gold
++    // readout so it updates live after a bribe). Reset with disposition on a new actor.
++    int gCompanionLastGold = -1;
 +}
  
  namespace MWGui
@@ -91,7 +100,7 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
              return true;
          }
      }
-@@ -406,8 +418,55 @@
+@@ -406,8 +418,82 @@
          {
              MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
          }
@@ -144,18 +153,52 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +        onChoiceActivated(id);
 +    }
 +
++    void DialogueWindow::companionPersuade(int type)
++    {
++        // Companion: drive a persuasion action from the bottom-screen popup without ever
++        // showing the native PersuasionDialog modal. Mirrors PersuasionDialog::onPersuade
++        // (persuade + updateTopics) using this window's own response callback so the result
++        // line lands in the shared history; the disposition bar refreshes via onFrame.
++        MWBase::MechanicsManager::PersuasionType t;
++        switch (type)
++        {
++            case 0: t = MWBase::MechanicsManager::PT_Admire; break;
++            case 1: t = MWBase::MechanicsManager::PT_Intimidate; break;
++            case 2: t = MWBase::MechanicsManager::PT_Taunt; break;
++            case 3: t = MWBase::MechanicsManager::PT_Bribe10; break;
++            case 4: t = MWBase::MechanicsManager::PT_Bribe100; break;
++            default: t = MWBase::MechanicsManager::PT_Bribe1000; break;
++        }
++        // Affordability guard for bribes (the native modal disables unaffordable buttons).
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int gold = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++        if ((t == MWBase::MechanicsManager::PT_Bribe10 && gold < 10)
++            || (t == MWBase::MechanicsManager::PT_Bribe100 && gold < 100)
++            || (t == MWBase::MechanicsManager::PT_Bribe1000 && gold < 1000))
++            return;
++        MWBase::Environment::get().getDialogueManager()->persuade(t, mCallback.get());
++        mCallback->updateTopics();
++    }
++
      void DialogueWindow::onSelectListItem(const std::string& topic, int /*id*/)
      {
          MWBase::DialogueManager* dialogueManager = MWBase::Environment::get().getDialogueManager();
-@@ -492,6 +530,12 @@
+@@ -492,6 +534,19 @@
          mGoodbye = false;
          mTopicsList->setEnabled(true);
  
 +        if (!sameActor)
++        {
 +            // Companion: new conversation — set the bottom-screen header name and clear
 +            // the accumulated response history. Emitted BEFORE startDialogue (which fires
 +            // the greeting's addResponse) so the clear precedes the first SAY, not after.
 +            Log(Debug::Info) << "COMPANION_DIALOGUE_NPC:" << mPtr.getClass().getName(mPtr);
++            // Force a disposition re-emit for the new actor even if the derived value
++            // equals the previous conversation's last-emitted disposition (see
++            // updateDisposition + gCompanionLastDisposition).
++            gCompanionLastDisposition = -1;
++            gCompanionLastGold = -1;
++        }
 +
          if (!MWBase::Environment::get().getDialogueManager()->startDialogue(actor, mGreetingCallback.get()))
          {
@@ -186,7 +229,7 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
          updateTopicsPane();
          return true;
      }
-@@ -618,6 +674,32 @@
+@@ -618,6 +674,34 @@
  
          if (isCompanion())
              mTopicsList->addItem(gmst.find("sCompanionShare")->mValue.getString());
@@ -197,8 +240,10 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +        // tapped service routed back through companionSelectEntry -> onSelectListItem
 +        // matches exactly. Empty START/END = NPC has no services (hide the section).
 +        Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICES_START";
++        // Companion: persuasion is handled by a bottom-screen popup (never the native
++        // modal), so flag its availability rather than listing it as a routable service.
 +        if (mPtr.getType() == ESM::NPC::sRecordId)
-+            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sPersuasion")->mValue.getString();
++            Log(Debug::Info) << "COMPANION_DIALOGUE_PERSUADE_AVAILABLE";
 +        if (services & ESM::NPC::AllItems)
 +            Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sBarter")->mValue.getString();
 +        if (services & ESM::NPC::Spells)
@@ -219,7 +264,7 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
  
          if (mTopicsList->getItemCount() > 0)
              mTopicsList->addSeparator();
-@@ -671,6 +753,16 @@
+@@ -671,6 +753,26 @@
          // choices
          const TextColours& textColours = MWBase::Environment::get().getWindowManager()->getTextColours();
          mChoices = MWBase::Environment::get().getDialogueManager()->getChoices();
@@ -232,6 +277,16 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +        Log(Debug::Info) << "COMPANION_DIALOGUE_CHOICE_START";
 +        for (const std::pair<std::string, int>& companionChoice : mChoices)
 +            Log(Debug::Info) << "COMPANION_DIALOGUE_CHOICE:" << companionChoice.first << "|" << companionChoice.second;
++        // Companion: the forced "Goodbye" prompt (e.g. an NPC taunted into combat) is a
++        // SEPARATE engine mechanism — isGoodbye()/mGoodbye, NOT a getChoices() entry — so
++        // surface it as a synthetic choice (id -1) inside this same block. It reuses all
++        // the existing choice plumbing (disabling Persuade + topics on the bottom screen);
++        // Kotlin maps id -1 -> CMPDLG:goodbye. mChoices is normally empty when isGoodbye().
++        if (MWBase::Environment::get().getDialogueManager()->isGoodbye())
++            Log(Debug::Info) << "COMPANION_DIALOGUE_CHOICE:"
++                             << MWBase::Environment::get().getESMStore()->get<ESM::GameSetting>()
++                                    .find("sGoodbye")->mValue.getString()
++                             << "|-1";
 +        Log(Debug::Info) << "COMPANION_DIALOGUE_CHOICE_END";
          mChoiceStyles.clear();
          mControllerChoice = -1; // -1 so you must make a choice (and can't accidentally pick the first answer)
@@ -291,7 +346,36 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +        // single short sentence with no newline, so one line is safe (no streaming).
 +        Log(Debug::Info) << "COMPANION_DIALOGUE_MSG:" << text;
      }
-@@ -1011,3 +1142,34 @@
+@@ -807,4 +982,28 @@
+             mDispositionText->setCaption(
+                 MyGUI::utility::toString(MWBase::Environment::get().getMechanicsManager()->getDerivedDisposition(mPtr))
+                 + std::string("/100"));
++
++            // Companion: mirror the derived disposition (0-100) onto the bottom-screen
++            // disposition bar. updateDisposition() is the single choke point for disposition
++            // changes (called from setPtr and every frame via onFrame), so change-detect
++            // against the last-emitted value to avoid logging an unchanged number each frame.
++            const int companionDisposition
++                = MWBase::Environment::get().getMechanicsManager()->getDerivedDisposition(mPtr);
++            if (companionDisposition != gCompanionLastDisposition)
++            {
++                gCompanionLastDisposition = companionDisposition;
++                Log(Debug::Info) << "COMPANION_DIALOGUE_DISPOSITION:" << companionDisposition;
++            }
++
++            // Companion: mirror the player's gold too (same per-frame choke point,
++            // change-detected) so the persuasion popup's Gold readout updates live after a
++            // bribe without a full inventory re-export.
++            MWWorld::Ptr companionPlayer = MWMechanics::getPlayer();
++            const int companionGold
++                = companionPlayer.getClass().getContainerStore(companionPlayer).count(MWWorld::ContainerStore::sGoldId);
++            if (companionGold != gCompanionLastGold)
++            {
++                gCompanionLastGold = companionGold;
++                Log(Debug::Info) << "COMPANION_DIALOGUE_GOLD:" << companionGold;
++            }
+         }
+@@ -1011,3 +1142,43 @@
          return true;
      }
  }
@@ -325,4 +409,13 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Dialogue))
 +        return;
 +    gCompanionDialogueWindow->companionSelectChoice(id);
++}
++
++extern "C" void companionPersuade(int type)
++{
++    if (!gCompanionDialogueWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Dialogue))
++        return;
++    gCompanionDialogueWindow->companionPersuade(type);
 +}
