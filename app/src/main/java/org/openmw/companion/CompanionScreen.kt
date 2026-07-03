@@ -1123,6 +1123,9 @@ private fun LootingOverlay(
                     isPlayerSide = false,
                     isWorn = { false },
                     onTransfer = { it, n -> take(it, n) },
+                    // Pickpocket: an empty visible list usually means your Sneak hid the
+                    // items (not that the NPC is broke) — say so. Corpses/chests: "Empty".
+                    emptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -1192,6 +1195,7 @@ private fun LootColumn(
     isPlayerSide: Boolean,
     isWorn: (InventoryItem) -> Boolean,
     onTransfer: (InventoryItem, Int) -> Unit,
+    emptyText: String = "Empty",
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
@@ -1210,7 +1214,7 @@ private fun LootColumn(
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
         if (items.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Empty", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
             }
         } else {
             // Sort worn-first (player side) then alphabetical, mirroring the inventory tab.

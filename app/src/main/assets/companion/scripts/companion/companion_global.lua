@@ -70,11 +70,17 @@ local function onContainerTransfer(data)
     if data.dir == 'takeall' or data.dir == 'dispose' then
         local inv = containerInv(container)
         if not inv then return end
-        -- Skip equipped items for a living NPC — Take All must match what the overlay
-        -- shows (dispose is corpse-only, so equippedSet returns nil there → takes all).
+        -- Skip equipped items (living NPC) AND items hidden by the pickpocket Sneak roll
+        -- (hiddenSids, computed + passed by companion.lua) — Take All must match exactly
+        -- what the overlay shows. Dispose is corpse-only, so both sets are empty there.
         local worn = equippedSet(container)
+        local hidden = {}
+        if data.hiddenSids then
+            for _, sid in ipairs(data.hiddenSids) do hidden[tostring(sid)] = true end
+        end
         for _, item in ipairs(inv:getAll()) do
-            if not (worn and worn[tostring(item.id)]) then
+            local sid = tostring(item.id)
+            if not (worn and worn[sid]) and not hidden[sid] then
                 pcall(function() item:moveInto(player) end)
             end
         end

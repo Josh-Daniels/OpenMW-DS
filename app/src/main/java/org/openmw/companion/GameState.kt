@@ -94,6 +94,9 @@ data class DialogueChoice(val text: String, val id: Int)
 data class ContainerSession(
     val containerName: String,
     val isCorpse: Boolean,
+    /** True = a living NPC (pickpocket); items may be hidden by the Sneak roll. Drives
+     *  the "Nothing you can lift" empty state. False for corpses and plain chests. */
+    val isPickpocket: Boolean = false,
     val items: List<InventoryItem> = emptyList(),
     /** True while a session is active; the overlay AND-gates this with Hide UI. */
     val isVisible: Boolean = true

@@ -221,12 +221,16 @@ object LogParser {
         null
     }
 
-    /** Header from a COMPANION_CONTAINER_OPEN line (name + corpse flag). */
-    data class ContainerHeader(val name: String, val isCorpse: Boolean)
+    /** Header from a COMPANION_CONTAINER_OPEN line (name + corpse/pickpocket flags). */
+    data class ContainerHeader(val name: String, val isCorpse: Boolean, val isPickpocket: Boolean)
 
     fun parseContainerOpen(json: String): ContainerHeader? = try {
         val o = JSONObject(json)
-        ContainerHeader(o.optString("name", ""), o.optBoolean("isCorpse", false))
+        ContainerHeader(
+            o.optString("name", ""),
+            o.optBoolean("isCorpse", false),
+            o.optBoolean("pickpocket", false)
+        )
     } catch (e: Exception) {
         null
     }

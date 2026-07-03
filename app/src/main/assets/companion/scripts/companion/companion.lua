@@ -669,6 +669,12 @@ end
 -- events to companion_global.lua (mirrors the CompanionDropItem pattern).
 local containerObj = nil
 local containerIsCorpse = false
+-- Living-NPC pickpocket flag (true = conscious/living actor, not a corpse or chest);
+-- drives the per-item Sneak hiding and the "Nothing you can lift" empty state.
+local containerIsPickpocket = false
+-- {[sid]=true} set of items hidden by the pickpocket Sneak roll (living NPC only),
+-- rolled ONCE at open and cached for the session; nil = nothing hidden.
+local containerHiddenSids = nil
 -- >0 = re-enumerate the container for a few ticks after a transfer. A transfer's
 -- moveInto runs as a queued (async) action, so the new contents aren't readable on
 -- the same frame; we re-export a couple of times afterward. Change-detection
@@ -731,17 +737,56 @@ local function equippedItemIds()
     return set
 end
 
+-- Per-item Sneak-based hiding for a LIVING NPC pickpocket, mirroring OpenMW's
+-- PickpocketItemModel: for each non-equipped item, hide it when a fresh roll(0..99)
+-- exceeds the player's modified Sneak. Rolled ONCE at open and cached
+-- (containerHiddenSids) so items don't flicker across refreshes; nil for corpses and
+-- plain containers. math.random is pre-seeded per game launch by the engine
+-- (luastate.cpp — randomseed is a no-op there), so we just roll. (Native also skips
+-- hiding for a KNOCKED-DOWN actor; that state isn't exposed to Lua, so hiding applies
+-- to any living NPC here — a rare edge case.)
+local function computeHiddenSids()
+    if not containerIsPickpocket then return nil end
+    local inv = containerInventory()
+    if not inv then return nil end
+    local ok, all = pcall(function() return inv:getAll() end)
+    if not ok or not all then return nil end
+    local sneak = 0
+    pcall(function() sneak = types.NPC.stats.skills.sneak(self).modified or 0 end)
+    local worn = equippedItemIds()
+    local hidden = {}
+    for _, item in ipairs(all) do
+        local sid = tostring(item.id)
+        if not (worn and worn[sid]) and math.random(0, 99) > sneak then
+            hidden[sid] = true
+        end
+    end
+    return hidden
+end
+
+-- Snapshot the hidden set as an array so it can ride the CompanionContainerTransfer
+-- event to the global script — Take All / Dispose skip the same items the display hides.
+local function hiddenSidList()
+    local list = {}
+    if containerHiddenSids then
+        for sid, _ in pairs(containerHiddenSids) do list[#list + 1] = sid end
+    end
+    return list
+end
+
 local function exportContainer(force)
     local inv = containerInventory()
     if not inv then return end
     local ok, all = pcall(function() return inv:getAll() end)
     if not ok or not all then return end
-    -- Filter out worn items for a living NPC (pickpocket); nil = no filtering.
+    -- Filter out worn items (living NPC) AND items hidden by the Sneak roll; nil sets
+    -- = no filtering (corpse/chest).
     local worn = equippedItemIds()
     local shown = {}
     local parts = {}
     for _, item in ipairs(all) do
-        if not (worn and worn[tostring(item.id)]) then
+        local sid = tostring(item.id)
+        if not (worn and worn[sid]) and not (containerHiddenSids and containerHiddenSids[sid]) then
             shown[#shown + 1] = item
             parts[#parts + 1] = itemJson(item)
         end
@@ -755,8 +800,9 @@ local function exportContainer(force)
     -- be corrupted by a stale/partial buffer left behind if an END was ever dropped.
     -- `force` now only bypasses change-detection (the first open); refreshes remain
     -- change-detected so an unchanged container still prints nothing.
-    print(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s}',
-        jsonEscape(containerDisplayName(containerObj)), tostring(containerIsCorpse)))
+    print(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s,"pickpocket":%s}',
+        jsonEscape(containerDisplayName(containerObj)), tostring(containerIsCorpse),
+        tostring(containerIsPickpocket)))
     for _, item in ipairs(shown) do
         print('COMPANION_CONTAINER_ITEM:' .. itemJson(item))
     end
@@ -1360,7 +1406,8 @@ local function dispatchCommand(command)
     if payload == "container_take_all" then
         if containerObj then
             core.sendGlobalEvent('CompanionContainerTransfer',
-                { container = containerObj, player = self.object, dir = 'takeall' })
+                { container = containerObj, player = self.object, dir = 'takeall',
+                  hiddenSids = hiddenSidList() })
             -- Take All closes the overlay after grabbing everything (same as Dispose):
             -- the queued moveInto still runs after removeMode, and the mode pop fires
             -- UiModeChanged -> COMPANION_CONTAINER_CLOSED, dismissing the overlay. No
@@ -1382,7 +1429,8 @@ local function dispatchCommand(command)
             -- companion_global.lua) + close the container window. Plain take-all does
             -- not remove the body, which is the whole point of "Dispose of Corpse".
             core.sendGlobalEvent('CompanionContainerTransfer',
-                { container = containerObj, player = self.object, dir = 'dispose' })
+                { container = containerObj, player = self.object, dir = 'dispose',
+                  hiddenSids = hiddenSidList() })
             pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
             print("COMPANION_DEBUG: container dispose")
         end
@@ -1476,11 +1524,19 @@ local function onUiModeChanged(data)
             containerIsCorpse = types.Actor.objectIsInstance(data.arg)
                 and types.Actor.isDead(data.arg)
         end)
+        -- pickpocket = a living (non-corpse) actor; excludes corpses AND plain chests.
+        containerIsPickpocket = false
+        pcall(function()
+            containerIsPickpocket = types.Actor.objectIsInstance(data.arg) and not containerIsCorpse
+        end)
+        containerHiddenSids = computeHiddenSids()   -- roll the Sneak-hidden set ONCE
         lastContainerJson = nil
         containerReexportTicks = 0
         exportContainer(true)
     elseif containerObj ~= nil and not isContainer then
         containerObj = nil
+        containerIsPickpocket = false
+        containerHiddenSids = nil
         lastContainerJson = nil
         containerReexportTicks = 0
         print('COMPANION_CONTAINER_CLOSED:')

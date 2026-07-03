@@ -139,6 +139,7 @@ object GameStateRepository {
     private var containerBuffer: MutableList<InventoryItem>? = null
     private var containerName: String = ""
     private var containerIsCorpse: Boolean = false
+    private var containerIsPickpocket: Boolean = false
 
     // Accumulates dialogue topics across DIALOGUE_START / DIALOGUE_TOPIC / DIALOGUE_END.
     private var dialogueBuffer: MutableList<String>? = null
@@ -428,19 +429,22 @@ object GameStateRepository {
                 LogParser.parseContainerOpen(trimmed.substring(idx).trim())?.let {
                     containerName = it.name
                     containerIsCorpse = it.isCorpse
+                    containerIsPickpocket = it.isPickpocket
                 }
                 containerBuffer = mutableListOf()
             }
             trimmed.contains(LogParser.P_CONTAINER_END) -> {
                 val buf = containerBuffer ?: mutableListOf()
-                _containerSession.value =
-                    ContainerSession(containerName, containerIsCorpse, buf.toList(), isVisible = true)
+                _containerSession.value = ContainerSession(
+                    containerName, containerIsCorpse, containerIsPickpocket, buf.toList(), isVisible = true
+                )
                 containerBuffer = null
             }
             trimmed.contains(LogParser.P_CONTAINER_CLOSED) -> {
                 containerBuffer = null
                 containerName = ""
                 containerIsCorpse = false
+                containerIsPickpocket = false
                 _containerSession.value = null
             }
             // Dialogue topic list. Streamed START/TOPIC/END while a conversation is
