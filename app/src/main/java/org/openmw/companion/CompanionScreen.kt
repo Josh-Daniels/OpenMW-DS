@@ -1989,9 +1989,10 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             )
         }
 
-        // Gear favourites — bottom-left, stacked vertically
+        // Gear favourites — bottom-right, stacked vertically
         Column(
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 8.dp),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp),
+            horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
@@ -2079,10 +2080,9 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             }
         }
 
-        // Magic favourites — bottom-right, stacked vertically
+        // Magic favourites — bottom-left, stacked vertically
         Column(
-            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp),
-            horizontalAlignment = Alignment.End,
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
