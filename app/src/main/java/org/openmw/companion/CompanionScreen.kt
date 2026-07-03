@@ -153,6 +153,35 @@ private object DropdownState {
     fun closeAll() { anyOpen = false; closeRequest++ }
 }
 
+// A pending "how many?" prompt. Set by a deeply-nested row (e.g. an inventory
+// Drop menu item) and observed by CompanionScreen, which renders the shared
+// QuantitySelector overlay. Mirrors the DropdownState global-holder pattern so
+// callers don't have to thread a callback through every list/panel layer.
+// The QuantitySelector composable itself stays fully reusable (name/max/
+// callbacks) — this holder is just the inventory's way of hosting it; looting
+// and bartering would host it with their own state the same way.
+private data class QuantityRequest(
+    val name: String,
+    val max: Int,
+    val confirmLabel: String,
+    val onConfirm: (Int) -> Unit,
+)
+
+private object QuantityRequestState {
+    var request by mutableStateOf<QuantityRequest?>(null)
+    fun clear() { request = null }
+
+    /** Show the selector only when it can matter: count > 1. For a single item,
+     *  invoke the action immediately with quantity 1 (no pointless prompt). */
+    fun requestOrRun(name: String, count: Int, confirmLabel: String, action: (Int) -> Unit) {
+        if (count > 1) {
+            request = QuantityRequest(name, count, confirmLabel) { n -> clear(); action(n) }
+        } else {
+            action(1)
+        }
+    }
+}
+
 // ---- type roles (swap to bundled Morrowind fonts later in one place) ----
 private val MwDisplay = FontFamily.Serif
 private val MwBody    = FontFamily.Serif
@@ -369,6 +398,19 @@ fun CompanionScreen() {
         // Stat detail popup (Stats screen). Same in-window overlay pattern as
         // ItemInfoOverlay — tap outside to dismiss.
         selectedStat?.let { StatInfoPopup(it, onDismiss = { selectedStat = null }) }
+
+        // Quantity prompt (e.g. "drop N of a stack"). Reusable in-window overlay
+        // driven by QuantityRequestState; the confirm callback already carries the
+        // action, so this just renders the picker.
+        QuantityRequestState.request?.let { req ->
+            QuantitySelector(
+                name = req.name,
+                max = req.max,
+                confirmLabel = req.confirmLabel,
+                onConfirm = req.onConfirm,
+                onCancel = { QuantityRequestState.clear() }
+            )
+        }
 
         // Active-dialogue overlay. Driven by COMPANION_DIALOGUE_* from the engine and
         // shown over whatever tab is active. There is NO tap-away dismiss: it closes
@@ -718,6 +760,163 @@ private fun ItemInfoOverlay(info: ItemInfo, onDismiss: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+/* ---- Reusable quantity picker ---- */
+
+// A standalone, reusable "how many?" overlay. Kept decoupled from inventory/
+// dropping so it can be dropped into looting (transfer N corpse→player) and
+// bartering (transfer N player↔vendor) later without changes: it only knows a
+// display name, a max, and confirm/cancel callbacks.
+//
+// In-window overlay (NOT a Compose Dialog): the companion UI lives inside a
+// Presentation on a secondary display, where a Dialog throws "Window type
+// mismatch" — see ItemInfoOverlay. Tapping the scrim cancels; taps inside the
+// panel are swallowed. +/- step by 1; ±10 buttons appear for larger stacks so
+// big quantities aren't a hundred taps. Quantity is always clamped to [1, max].
+@Composable
+private fun QuantitySelector(
+    name: String,
+    max: Int,
+    confirmLabel: String = "Confirm",
+    onConfirm: (Int) -> Unit,
+    onCancel: () -> Unit
+) {
+    val safeMax = max.coerceAtLeast(1)
+    // Default to 1 (a mis-tapped Confirm then only drops one item); the "Max"
+    // button jumps straight to the whole stack for dump-everything.
+    var qty by remember(name, safeMax) { mutableStateOf(1) }
+    fun set(v: Int) { qty = v.coerceIn(1, safeMax) }
+    val showTens = safeMax > 10
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(20f)
+            .background(Color(0xB3000000))
+            .pointerInput(Unit) { detectTapGestures(onTap = { onCancel() }) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(320.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures(onTap = {}) }
+                .padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                name,
+                color = BronzeLight,
+                fontSize = 16.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(16.dp))
+
+            // Stepper row: [-10] [-]  qty  [+] [+10]
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (showTens) {
+                    QtyButton("−10", enabled = qty > 1) { set(qty - 10) }
+                    Spacer(Modifier.width(6.dp))
+                }
+                QtyButton("−", enabled = qty > 1) { set(qty - 1) }
+                Text(
+                    qty.toString(),
+                    color = BoneBright,
+                    fontSize = 34.sp,
+                    fontFamily = MwData,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.width(84.dp)
+                )
+                QtyButton("+", enabled = qty < safeMax) { set(qty + 1) }
+                if (showTens) {
+                    Spacer(Modifier.width(6.dp))
+                    QtyButton("+10", enabled = qty < safeMax) { set(qty + 10) }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("of $safeMax", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                Spacer(Modifier.width(10.dp))
+                // Quick "Max" set — cheaper than tapping +10 up a big stack.
+                Text(
+                    "MAX",
+                    color = if (qty < safeMax) BronzeLight else BoneDim,
+                    fontSize = 12.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(3.dp))
+                        .clickable { set(safeMax) }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+
+            Spacer(Modifier.height(18.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                QtyActionButton("Cancel", Modifier.weight(1f), primary = false) { onCancel() }
+                QtyActionButton(confirmLabel, Modifier.weight(1f), primary = true) { onConfirm(qty) }
+            }
+        }
+    }
+}
+
+// Square +/- stepper button used by QuantitySelector.
+@Composable
+private fun QtyButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (enabled) SlotWorn else SlotBg)
+            .border(1.dp, if (enabled) Bronze else BronzeDark, RoundedCornerShape(4.dp))
+            .clickable(enabled = enabled) { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (enabled) BronzeLight else BoneDim,
+            fontSize = if (label.length > 1) 15.sp else 22.sp,
+            fontFamily = MwData,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+// Confirm / Cancel button used by QuantitySelector.
+@Composable
+private fun QtyActionButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    primary: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (primary) SlotWorn else BronzeDark.copy(alpha = 0.2f))
+            .border(1.dp, if (primary) Bronze else BronzeDark, RoundedCornerShape(3.dp))
+            .clickable { onClick() }
+            .padding(vertical = 11.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (primary) BronzeLight else Bone,
+            fontSize = 14.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
     }
 }
 
@@ -1130,7 +1329,13 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                         }
                         DropdownMenuItem(
                             text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
-                            onClick = { dismiss(); CompanionActions.dropItem(s.id, item?.count ?: 1) },
+                            onClick = {
+                                dismiss()
+                                val count = item?.count ?: 1
+                                QuantityRequestState.requestOrRun(s.name, count, "Drop") { n ->
+                                    CompanionActions.dropItem(s.id, n)
+                                }
+                            },
                             colors = colors
                         )
                         DropdownMenuItem(
@@ -2053,7 +2258,13 @@ private fun ItemRow(
             )
             DropdownMenuItem(
                 text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.dropItem(item.id, item.count) },
+                onClick = {
+                    menuOpen = false; DropdownState.closeAll()
+                    // count > 1 → ask how many; count == 1 drops immediately.
+                    QuantityRequestState.requestOrRun(label, item.count, "Drop") { n ->
+                        CompanionActions.dropItem(item.id, n)
+                    }
+                },
                 colors = menuItemColors
             )
             // Add to favourites / Unfavourite / replace-slot picker.
