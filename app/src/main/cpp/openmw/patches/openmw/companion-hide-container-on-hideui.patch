@@ -1,0 +1,75 @@
+Hide the in-game container/loot/pickpocket window AND the player inventory
+window when the HUD is hidden via "Hide UI", so the companion (bottom-screen)
+looting UI is the sole looting surface while Hide UI is active; restore both
+when Hide UI is toggled back on. Same pattern as
+companion-hide-dialogue-on-hideui.patch.
+
+Both gates live in updateVisible() (which setHudVisibility calls right after
+flipping mHudEnabled) — the single place Hide UI state is applied to windows.
+
+Hunk 1 — container window. Gate = mHudEnabled && containsMode(GM_Container):
+  * containsMode(GM_Container) is correct here (unlike the dialogue window's
+    getMode()==GM_Dialogue, which dodges a pushed Barter/Spells/Travel service
+    window): nothing is pushed on top of the container window during looting, and
+    it matches the guard in ContainerWindow::onClose() (container.cpp), which
+    early-returns while containsMode(GM_Container) is true. That guard is why
+    hiding mid-loot is safe — onClose() does not resolve the pickpocket, drop
+    over-encumbrance items, or reset the reference while the mode is still active.
+  * The companion overlay detects open/close via the Lua UiModeChanged event
+    (mode push/pop), NOT this window's visibility, so hiding it does not disturb
+    COMPANION_CONTAINER_OPEN/_CLOSED.
+
+Hunk 2 — player inventory window. GM_Container's GuiModeState shows BOTH the
+container window and the inventory window, so hunk 1 alone leaves the inventory
+window on the top screen. It must be hidden too, but ONLY during looting under
+Hide UI (never during normal inventory use, and not during Barter/Companion).
+
+  Placement matters: a few lines below hunk 1, updateVisible() has
+    mInventoryWindow->setVisible(getMode()==GM_Container || GM_Barter || GM_Companion);
+  which UNCONDITIONALLY re-shows the inventory window for GM_Container. Putting
+  the gate up next to the mContainerWindow line (as first drafted) is silently
+  overridden by that later line. So the hide is applied immediately AFTER it,
+  scoped to GM_Container:
+    if (mInventoryWindow && !mHudEnabled && getMode() == GM_Container)
+        mInventoryWindow->setVisible(false);
+  Truth table: normal inventory (GM_Inventory, this else-if not entered) → shown;
+  looting + HUD on (!mHudEnabled false) → shown; looting + Hide UI
+  (!mHudEnabled true && GM_Container) → hidden. InventoryWindow::onOpen()
+  re-adds the ItemTransfer target that onClose() removes, so toggling Hide UI
+  back on during a loot restores native shift-click transfer — nothing breaks.
+
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -660,6 +660,15 @@
+         if (mDialogueWindow && getMode() == GM_Dialogue)
+             mDialogueWindow->setVisible(mHudEnabled && !loading);
+ 
++        // COMPANION: hide the container/loot/pickpocket window with Hide UI so the
++        // companion (bottom) screen is the sole looting surface; restore it when Hide
++        // UI is toggled back on (mHudEnabled true). ContainerWindow::onClose() early-
++        // returns while containsMode(GM_Container) is true (see container.cpp), so
++        // hiding it mid-loot neither resolves the pickpocket nor drops items — the
++        // session ends normally only when the container mode is actually removed.
++        if (mContainerWindow)
++            mContainerWindow->setVisible(mHudEnabled && containsMode(GM_Container));
++
+         bool gameMode = !isGuiMode();
+ 
+         MWBase::Environment::get().getInputManager()->changeInputMode(!gameMode);
+@@ -711,6 +720,16 @@
+             mHud->setDrowningBarVisible(false);
+             mInventoryWindow->setVisible(
+                 getMode() == GM_Container || getMode() == GM_Barter || getMode() == GM_Companion);
++            // COMPANION: also hide the player inventory window while looting under
++            // Hide UI, so the top screen is fully clear (the companion bottom screen
++            // is the sole looting surface). This MUST come after the vanilla line
++            // above — that line unconditionally re-shows the inventory window for
++            // GM_Container, so gating it up by the mContainerWindow line would be
++            // overridden here. Scoped to GM_Container so normal inventory use and
++            // Barter/Companion are untouched; InventoryWindow::onOpen() re-adds the
++            // ItemTransfer target when Hide UI is toggled back on, so nothing breaks.
++            if (mInventoryWindow && !mHudEnabled && getMode() == GM_Container)
++                mInventoryWindow->setVisible(false);
+         }
+ 
+         GuiMode mode = mGuiModes.back();

@@ -21,6 +21,13 @@ object LogParser {
     const val P_INVENTORY_START = "COMPANION_INVENTORY_START"
     const val P_INVENTORY_ITEM = "COMPANION_INVENTORY_ITEM:"
     const val P_INVENTORY_END = "COMPANION_INVENTORY_END"
+    // Looting/pickpocketing container session. OPEN carries the header (name +
+    // isCorpse) on session start; ITEM/END stream the contents (re-emitted on
+    // change, one item per line for 4096-byte flush safety); CLOSED ends it.
+    const val P_CONTAINER_OPEN = "COMPANION_CONTAINER_OPEN:"
+    const val P_CONTAINER_ITEM = "COMPANION_CONTAINER_ITEM:"
+    const val P_CONTAINER_END = "COMPANION_CONTAINER_END"
+    const val P_CONTAINER_CLOSED = "COMPANION_CONTAINER_CLOSED"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
@@ -210,6 +217,16 @@ object LogParser {
             statKey = o.optString("statKey", ""),
             cond = if (o.has("cond")) o.optDouble("cond", 1.0).toFloat() else null
         )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Header from a COMPANION_CONTAINER_OPEN line (name + corpse flag). */
+    data class ContainerHeader(val name: String, val isCorpse: Boolean)
+
+    fun parseContainerOpen(json: String): ContainerHeader? = try {
+        val o = JSONObject(json)
+        ContainerHeader(o.optString("name", ""), o.optBoolean("isCorpse", false))
     } catch (e: Exception) {
         null
     }

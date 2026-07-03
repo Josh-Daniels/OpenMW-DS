@@ -413,6 +413,23 @@ fun CompanionScreen() {
             )
         }
 
+        // Looting / pickpocketing overlay. Driven by COMPANION_CONTAINER_* from the
+        // engine (via Lua). Shown whenever a container session is active, regardless
+        // of Hide UI — same as the dialogue overlay, so the panel stays available
+        // when the player hides the in-game HUD (the native container window is left
+        // in place; this overlay is additive, not a replacement). It renders at
+        // zIndex 8f — BELOW the dropdown-dismiss scrim (10f) so its long-press menus
+        // dismiss on tap-away, and below QuantitySelector (20f) so take/put quantity
+        // prompts stack above.
+        val containerSession by GameStateRepository.containerSession.collectAsState()
+        containerSession?.let { session ->
+            LootingOverlay(
+                session = session,
+                playerInventory = state.inventory,
+                playerEquipment = state.equipment
+            )
+        }
+
         // Active-dialogue overlay. Driven by COMPANION_DIALOGUE_* from the engine and
         // shown over whatever tab is active. There is NO tap-away dismiss: it closes
         // only when the conversation ends (engine sends COMPANION_DIALOGUE_CLOSED →
@@ -993,6 +1010,370 @@ private fun ItemInfoOverlay(info: ItemInfo, onDismiss: () -> Unit) {
                     }
                 }
             }
+        }
+    }
+}
+
+/* ---- Looting / pickpocketing overlay ---- */
+
+/**
+ * Two-panel looting/pickpocketing overlay: the player's inventory on the left,
+ * the container/corpse/NPC's contents on the right. Tapping a player item puts
+ * it into the container; tapping a container item takes it (a QuantitySelector
+ * prompt appears first for stacks > 1). Long-press exposes the fuller menu.
+ *
+ * In-window overlay (NOT a Compose Dialog — that crashes on the Presentation
+ * display; see ItemInfoOverlay). zIndex 8f sits above the tab content/bars but
+ * below the shared dropdown-dismiss scrim (10f) and QuantitySelector (20f).
+ * A non-interactive scrim dims and blocks the tabs beneath; there is NO
+ * tap-away dismiss (Close / B / the container window closing end the session).
+ */
+@Composable
+private fun LootingOverlay(
+    session: ContainerSession,
+    playerInventory: List<InventoryItem>,
+    playerEquipment: Map<String, String>
+) {
+    val playerGold = playerInventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+    val wornIds = remember(playerEquipment) { playerEquipment.values.toSet() }
+    fun isWorn(item: InventoryItem): Boolean =
+        if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId) else wornIds.contains(item.id)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(8f)
+            .background(Color(0xCC0F0C08))
+            .pointerInput(Unit) { detectTapGestures {} }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- Title bar: container name ----
+            Text(
+                session.containerName.ifBlank { "Container" },
+                color = BronzeLight, fontSize = 14.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            // ---- Two equal columns: player | container ----
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                LootColumn(
+                    header = "Player (${playerGold}g)",
+                    legend = "tap to put · long press for more",
+                    items = playerInventory,
+                    isPlayerSide = true,
+                    isWorn = { isWorn(it) },
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
+                )
+                // Dashed vertical divider between the two columns.
+                Canvas(Modifier.fillMaxHeight().width(1.dp)) {
+                    drawLine(
+                        color = BronzeDark,
+                        start = Offset(0f, 0f),
+                        end = Offset(0f, size.height),
+                        strokeWidth = size.width.coerceAtLeast(1f),
+                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 6f))
+                    )
+                }
+                LootColumn(
+                    header = session.containerName.ifBlank { "Container" },
+                    legend = "tap to take · long press for more",
+                    items = session.items,
+                    isPlayerSide = false,
+                    isWorn = { false },
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
+                )
+            }
+
+            // ---- Bottom action buttons (taller than standard rows) ----
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                LootButton(
+                    label = "Take All", hint = "X",
+                    enabled = session.items.isNotEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.containerTakeAll() }
+                if (session.isCorpse) {
+                    LootButton(
+                        label = "Dispose of Corpse", hint = "R1",
+                        enabled = true,
+                        modifier = Modifier.weight(1f)
+                    ) { CompanionActions.containerDispose() }
+                }
+                LootButton(
+                    label = "Close", hint = "B",
+                    enabled = true,
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.containerClose() }
+            }
+        }
+    }
+}
+
+/** One side of the looting overlay — header, legend, and a scrolling item list. */
+@Composable
+private fun LootColumn(
+    header: String,
+    legend: String,
+    items: List<InventoryItem>,
+    isPlayerSide: Boolean,
+    isWorn: (InventoryItem) -> Boolean,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier) {
+        Text(
+            header,
+            color = BronzeLight, fontSize = 13.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            legend,
+            color = BoneDim, fontSize = 9.sp, fontFamily = MwBody,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+        if (items.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Empty", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+            }
+        } else {
+            // Sort worn-first (player side) then alphabetical, mirroring the inventory tab.
+            val sorted = remember(items, isPlayerSide) {
+                items.sortedWith(
+                    compareByDescending<InventoryItem> { isPlayerSide && isWorn(it) }
+                        .thenBy { it.displayName().lowercase() }
+                )
+            }
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(sorted) { item ->
+                    LootRow(
+                        item = item,
+                        isPlayerSide = isPlayerSide,
+                        worn = isPlayerSide && isWorn(item),
+                        iconBitmap = rememberItemIcon(item.icon)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One item row in the looting overlay. Tap = transfer (put/take); long-press =
+ * the fuller menu. A stack > 1 routes through QuantityRequestState so the shared
+ * QuantitySelector asks "how many?" first.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LootRow(
+    item: InventoryItem,
+    isPlayerSide: Boolean,
+    worn: Boolean,
+    iconBitmap: ImageBitmap? = null
+) {
+    val context = LocalContext.current
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+    val label = item.displayName()
+    val sid = item.stackId.ifEmpty { item.id }
+    val favs by FavouritesRepository.state.collectAsState()
+    val isFav = isPlayerSide && favs.gear.any { it?.id == item.id }
+    val confirmLabel = if (isPlayerSide) "Put" else "Take"
+
+    // The tap action (put or take), prompting for a quantity when the stack > 1.
+    fun transfer() {
+        QuantityRequestState.requestOrRun(label, item.count, confirmLabel) { n ->
+            if (isPlayerSide) CompanionActions.containerPut(sid, n)
+            else CompanionActions.containerTake(sid, n)
+        }
+    }
+
+    Box {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = { transfer() },
+                        onLongClick = { menuOpen = true; DropdownState.open() }
+                    )
+                    .padding(start = 8.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Icon box.
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                ) {
+                    if (iconBitmap != null) {
+                        Image(
+                            bitmap = iconBitmap,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                // Name + sub-line (category · qty / cond).
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            label,
+                            color = if (worn) BoneBright else BoneMuted,
+                            fontSize = 13.sp, fontFamily = MwBody,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isFav) { Spacer(Modifier.width(4.dp)); FavStar() }
+                        if (worn) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "WORN",
+                                color = BronzeLight, fontSize = 9.sp,
+                                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.8.sp
+                            )
+                        }
+                    }
+                    Text(
+                        lootSubline(item),
+                        color = BoneDim, fontSize = 9.sp, fontFamily = MwBody,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+                // Tap hint (muted).
+                Text(
+                    if (isPlayerSide) "tap to put" else "tap to take",
+                    color = BoneDim.copy(alpha = 0.7f), fontSize = 8.sp,
+                    fontFamily = MwBody, letterSpacing = 0.3.sp
+                )
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+        }
+
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+            containerColor = StonePanel,
+            shadowElevation = 0.dp,
+            border = BorderStroke(1.dp, Bronze),
+            shape = RoundedCornerShape(3.dp)
+        ) {
+            Text(
+                label,
+                color = BronzeLight, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
+            // Primary transfer.
+            DropdownMenuItem(
+                text = { Text(if (isPlayerSide) "Put" else "Take", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); transfer() },
+                colors = menuItemColors
+            )
+            // Equip. Player side equips in place; container side takes the whole
+            // stack then equips it by record id (the taken instance re-stacks, so we
+            // can't target its new stackId — equipItem finds the first matching record).
+            val equippable = item.category !in setOf("misc", "potion", "ingredient", "book", "scroll")
+            if (equippable) {
+                DropdownMenuItem(
+                    text = { Text("Equip", fontFamily = MwBody, fontSize = 13.sp) },
+                    onClick = {
+                        menuOpen = false; DropdownState.closeAll()
+                        if (isPlayerSide) {
+                            CompanionActions.equipItem(sid)
+                        } else {
+                            CompanionActions.containerTake(sid, item.count)
+                            CompanionActions.equipItem(item.id)
+                        }
+                    },
+                    colors = menuItemColors
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                colors = menuItemColors
+            )
+            // Favourite (player side only).
+            if (isPlayerSide) {
+                FavouriteMenuItems(
+                    context = context,
+                    isGear = true,
+                    itemId = item.id,
+                    makeSlot = { FavSlot(item.id, label) },
+                    onDone = { menuOpen = false; DropdownState.closeAll() }
+                )
+            }
+        }
+    }
+}
+
+/** Sub-line under a loot item name: capitalized category + count + condition %. */
+private fun lootSubline(item: InventoryItem): String {
+    val parts = mutableListOf<String>()
+    if (item.category.isNotBlank()) {
+        parts.add(item.category.replaceFirstChar { it.uppercase() })
+    }
+    if (item.count > 1) parts.add("x${item.count}")
+    item.cond?.let { parts.add("${(it.coerceIn(0f, 1f) * 100).toInt()}%") }
+    return parts.joinToString(" · ")
+}
+
+/** A bottom action button in the looting overlay (Take All / Dispose / Close),
+ *  taller than a list row, with a controller-binding hint (display only). */
+@Composable
+private fun LootButton(
+    label: String,
+    hint: String,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .height(35.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(if (enabled) SlotWorn else SlotBg)
+            .border(1.dp, if (enabled) BronzeLight else BronzeDark, RoundedCornerShape(2.dp))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                color = if (enabled) BronzeLight else BoneDim, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "[$hint]",
+                color = if (enabled) BoneDim else BoneDim.copy(alpha = 0.5f),
+                fontSize = 10.sp, fontFamily = MwData
+            )
         }
     }
 }

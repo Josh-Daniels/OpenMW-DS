@@ -129,6 +129,17 @@ object GameStateRepository {
     // the engine's 4096-byte stdout flush and arrive truncated (see companion.lua).
     private var inventoryBuffer: MutableList<InventoryItem>? = null
 
+    // --- Looting/pickpocketing container session (COMPANION_CONTAINER_*) ---
+    // null = no container open. OPEN sets the header (name/isCorpse) and starts a
+    // fresh item buffer; ITEM/END stream the contents (re-emitted on every change,
+    // so END rebuilds the session atomically); CLOSED clears it. The header fields
+    // persist across re-emits (which send ITEM/END without a new OPEN).
+    private val _containerSession = MutableStateFlow<ContainerSession?>(null)
+    val containerSession: StateFlow<ContainerSession?> = _containerSession.asStateFlow()
+    private var containerBuffer: MutableList<InventoryItem>? = null
+    private var containerName: String = ""
+    private var containerIsCorpse: Boolean = false
+
     // Accumulates dialogue topics across DIALOGUE_START / DIALOGUE_TOPIC / DIALOGUE_END.
     private var dialogueBuffer: MutableList<String>? = null
 
@@ -402,6 +413,35 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_INFO) -> {
                 val idx = trimmed.indexOf(LogParser.P_INFO) + LogParser.P_INFO.length
                 LogParser.parseItemInfo(trimmed.substring(idx).trim())?.let { _itemInfo.value = it }
+            }
+            // Container/looting session. ITEM first (most frequent). The buffer is
+            // created lazily on the first ITEM so re-emits (which send ITEM/END with
+            // no fresh OPEN) still assemble correctly. None of these prefixes are a
+            // contains()-substring of another (END vs CLOSED differ past the underscore).
+            trimmed.contains(LogParser.P_CONTAINER_ITEM) -> {
+                val buf = containerBuffer ?: mutableListOf<InventoryItem>().also { containerBuffer = it }
+                val idx = trimmed.indexOf(LogParser.P_CONTAINER_ITEM) + LogParser.P_CONTAINER_ITEM.length
+                LogParser.parseInventoryItem(trimmed.substring(idx).trim())?.let { buf.add(it) }
+            }
+            trimmed.contains(LogParser.P_CONTAINER_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_CONTAINER_OPEN) + LogParser.P_CONTAINER_OPEN.length
+                LogParser.parseContainerOpen(trimmed.substring(idx).trim())?.let {
+                    containerName = it.name
+                    containerIsCorpse = it.isCorpse
+                }
+                containerBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_CONTAINER_END) -> {
+                val buf = containerBuffer ?: mutableListOf()
+                _containerSession.value =
+                    ContainerSession(containerName, containerIsCorpse, buf.toList(), isVisible = true)
+                containerBuffer = null
+            }
+            trimmed.contains(LogParser.P_CONTAINER_CLOSED) -> {
+                containerBuffer = null
+                containerName = ""
+                containerIsCorpse = false
+                _containerSession.value = null
             }
             // Dialogue topic list. Streamed START/TOPIC/END while a conversation is
             // open (re-sent on every topic-list change); CLOSED clears it. TOPIC

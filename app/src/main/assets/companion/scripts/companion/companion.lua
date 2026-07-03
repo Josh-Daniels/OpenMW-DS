@@ -6,6 +6,7 @@ local ambient = require('openmw.ambient')
 local camera = require('openmw.camera')
 local nearby = require('openmw.nearby')
 local util = require('openmw.util')
+local interfaces = require('openmw.interfaces')
 
 local statsTimer = 0
 local slowTimer = 0
@@ -634,24 +635,89 @@ end
 -- JSON array line. The engine's stdout sink flushes in 4096-byte chunks and
 -- only the first chunk keeps its COMPANION_ prefix, so a single long inventory
 -- line arrives truncated on the app side. Per-item lines stay well under that.
+-- Serialize a single inventory/container item to the shared item JSON shape
+-- (exactly the fields Kotlin's parseInventoryItem understands). Used by both the
+-- player inventory export and the container/looting export.
+local function itemJson(item)
+    local ok, rec = pcall(function() return item.type.record(item) end)
+    local icon = (ok and rec and rec.icon) or ""
+    local sid = stackId(item)
+    local cat = itemCategory(item)
+    local statVal, statKey, cond = itemStats(item, cat)
+    local condField = ""
+    if cond ~= nil then condField = string.format(',"cond":%.3f', cond) end
+    return string.format(
+        '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","statVal":"%s","statKey":"%s"%s}',
+        jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
+        item.count, cat, jsonEscape(icon),
+        jsonEscape(statVal), jsonEscape(statKey), condField)
+end
+
 local function exportInventory()
     local all = types.Actor.inventory(self):getAll()
     print('COMPANION_INVENTORY_START:' .. #all)
     for _, item in ipairs(all) do
-        local ok, rec = pcall(function() return item.type.record(item) end)
-        local icon = (ok and rec and rec.icon) or ""
-        local sid = stackId(item)
-        local cat = itemCategory(item)
-        local statVal, statKey, cond = itemStats(item, cat)
-        local condField = ""
-        if cond ~= nil then condField = string.format(',"cond":%.3f', cond) end
-        print(string.format(
-            'COMPANION_INVENTORY_ITEM:{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","statVal":"%s","statKey":"%s"%s}',
-            jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
-            item.count, cat, jsonEscape(icon),
-            jsonEscape(statVal), jsonEscape(statKey), condField))
+        print('COMPANION_INVENTORY_ITEM:' .. itemJson(item))
     end
     print('COMPANION_INVENTORY_END:' .. #all)
+end
+
+-- ===== Container / looting =====
+-- containerObj is the open container/corpse/NPC (from the UiModeChanged -> Container
+-- transition); nil when no container window is open. moveInto/split are
+-- global-script-only, so take/put/take-all are dispatched as CompanionContainerTransfer
+-- events to companion_global.lua (mirrors the CompanionDropItem pattern).
+local containerObj = nil
+local containerIsCorpse = false
+-- >0 = re-enumerate the container on the next few slow ticks. A transfer's moveInto
+-- runs as a queued (async) action, so the new contents aren't readable on the same
+-- frame; we re-export for a couple ticks afterward. Change-detection (lastContainerJson)
+-- means an unchanged batch still prints nothing, so this never spams the log.
+local containerReexportTicks = 0
+local lastContainerJson = nil
+
+local function containerInventory()
+    if not containerObj then return nil end
+    local ok, inv = pcall(function()
+        if types.Actor.objectIsInstance(containerObj) then
+            return types.Actor.inventory(containerObj)
+        elseif types.Container.objectIsInstance(containerObj) then
+            return types.Container.content(containerObj)
+        end
+        return nil
+    end)
+    if ok then return inv end
+    return nil
+end
+
+local function containerDisplayName(obj)
+    local ok, rec = pcall(function() return obj.type.record(obj) end)
+    if ok and rec and rec.name and rec.name ~= "" then return rec.name end
+    return tostring(obj.recordId)
+end
+
+-- Emit the container's item list. announce=true prints COMPANION_CONTAINER_OPEN first
+-- (new session header: name + isCorpse). Re-emits (announce=false) are change-detected
+-- against the last batch so an unchanged container prints nothing. Streamed one item
+-- per line (4096-byte flush safety), same as the player inventory export.
+local function exportContainer(announce)
+    local inv = containerInventory()
+    if not inv then return end
+    local ok, all = pcall(function() return inv:getAll() end)
+    if not ok or not all then return end
+    local parts = {}
+    for _, item in ipairs(all) do parts[#parts + 1] = itemJson(item) end
+    local batch = table.concat(parts, '\n')
+    if not announce and batch == lastContainerJson then return end
+    lastContainerJson = batch
+    if announce then
+        print(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s}',
+            jsonEscape(containerDisplayName(containerObj)), tostring(containerIsCorpse)))
+    end
+    for _, item in ipairs(all) do
+        print('COMPANION_CONTAINER_ITEM:' .. itemJson(item))
+    end
+    print('COMPANION_CONTAINER_END:' .. #all)
 end
 
 local function exportEquipment()
@@ -1248,6 +1314,31 @@ local function dispatchCommand(command)
         self:sendEvent('AddUiMode', { mode = 'Interface', windows = { 'Map' } })
         return
     end
+    if payload == "container_take_all" then
+        if containerObj then
+            core.sendGlobalEvent('CompanionContainerTransfer',
+                { container = containerObj, player = self.object, dir = 'takeall' })
+            containerReexportTicks = 3
+            print("COMPANION_DEBUG: container take all")
+        end
+        return
+    end
+    if payload == "container_close" then
+        -- close the container window without taking anything
+        pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
+        print("COMPANION_DEBUG: container close")
+        return
+    end
+    if payload == "container_dispose" then
+        if containerObj then
+            core.sendGlobalEvent('CompanionContainerTransfer',
+                { container = containerObj, player = self.object, dir = 'takeall' })
+            -- dispose = take all + close the container window
+            pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
+            print("COMPANION_DEBUG: container dispose")
+        end
+        return
+    end
     local action, arg = string.match(payload, "^(%S+)%s+(.+)$")
     if not action then return end
 
@@ -1295,12 +1386,56 @@ local function dispatchCommand(command)
         end
     elseif action == "info" then
         exportInfo(arg)
+    elseif action == "container_take" then
+        local sid, countStr = string.match(arg, "^(.+)|(%d+)$")
+        if sid and containerObj then
+            core.sendGlobalEvent('CompanionContainerTransfer',
+                { container = containerObj, player = self.object, sid = sid,
+                  count = tonumber(countStr), dir = 'take' })
+            containerReexportTicks = 3
+            print("COMPANION_DEBUG: container take " .. sid .. " x" .. countStr)
+        end
+    elseif action == "container_put" then
+        local sid, countStr = string.match(arg, "^(.+)|(%d+)$")
+        if sid and containerObj then
+            core.sendGlobalEvent('CompanionContainerTransfer',
+                { container = containerObj, player = self.object, sid = sid,
+                  count = tonumber(countStr), dir = 'put' })
+            containerReexportTicks = 3
+            print("COMPANION_DEBUG: container put " .. sid .. " x" .. countStr)
+        end
     end
 end
 
 local function onConsoleCommand(mode, command)
     if mode ~= "Companion" then return end
     dispatchCommand(command)
+end
+
+-- Container open/close, driven by the omw/ui.lua UiModeChanged event
+-- ({oldMode, newMode, arg}). arg is the container/corpse/NPC being opened.
+local function onUiModeChanged(data)
+    local isContainer = false
+    local ok = pcall(function()
+        isContainer = (data.newMode == interfaces.UI.MODE.Container)
+    end)
+    if not ok then return end
+    if isContainer and data.arg then
+        containerObj = data.arg
+        containerIsCorpse = false
+        pcall(function()
+            containerIsCorpse = types.Actor.objectIsInstance(data.arg)
+                and types.Actor.isDead(data.arg)
+        end)
+        lastContainerJson = nil
+        containerReexportTicks = 0
+        exportContainer(true)
+    elseif containerObj ~= nil and not isContainer then
+        containerObj = nil
+        lastContainerJson = nil
+        containerReexportTicks = 0
+        print('COMPANION_CONTAINER_CLOSED:')
+    end
 end
 
 -- ===== Handlers =====
@@ -1323,6 +1458,12 @@ local function onUpdate(dt)
         exportCharacterDetail()
         exportTarget()
         exportPlayerStatus()
+        -- Re-enumerate the open container for a few ticks after a transfer (the
+        -- moveInto action is async); change-detection gates the actual print.
+        if containerObj and containerReexportTicks > 0 then
+            containerReexportTicks = containerReexportTicks - 1
+            exportContainer(false)
+        end
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then
@@ -1345,5 +1486,6 @@ return {
     eventHandlers = {
         CompanionCombatTarget = onCombatTarget,
         Hit = onPlayerHit,
+        UiModeChanged = onUiModeChanged,
     },
 }

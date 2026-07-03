@@ -80,6 +80,25 @@ data class DialogueSay(
 /** A question/answer choice offered mid-dialogue (shown instead of topics while active). */
 data class DialogueChoice(val text: String, val id: Int)
 
+/**
+ * An open looting/pickpocketing session (container, corpse, or living NPC).
+ * Transient — held in its own StateFlow, not part of GameState; null = no
+ * container open.
+ *
+ * `items` are the container's contents. They parse with the exact same JSON
+ * shape as the player inventory, so we reuse [InventoryItem] rather than a
+ * parallel type — there is no "side" field because the two columns come from
+ * two lists: left = GameState.inventory (the player), right = this.items (the
+ * container). `isCorpse` toggles the "Dispose of Corpse" button.
+ */
+data class ContainerSession(
+    val containerName: String,
+    val isCorpse: Boolean,
+    val items: List<InventoryItem> = emptyList(),
+    /** True while a session is active; the overlay AND-gates this with Hide UI. */
+    val isVisible: Boolean = true
+)
+
 data class AttributeStat(
     val id: String, val name: String, val current: Float, val base: Float,
     /** In-game description (from the streamed CHARDETAIL batch); "" until it lands. */
