@@ -418,9 +418,9 @@ fun CompanionScreen() {
         // of Hide UI — same as the dialogue overlay, so the panel stays available
         // when the player hides the in-game HUD (the native container window is left
         // in place; this overlay is additive, not a replacement). It renders at
-        // zIndex 8f — BELOW the dropdown-dismiss scrim (10f) so its long-press menus
-        // dismiss on tap-away, and below QuantitySelector (20f) so take/put quantity
-        // prompts stack above.
+        // zIndex 15f (above the global dropdown-dismiss scrim so its buttons stay
+        // tappable; it hosts its own local dismiss-scrim) and below QuantitySelector
+        // (20f) so take/put quantity prompts stack above it.
         val containerSession by GameStateRepository.containerSession.collectAsState()
         containerSession?.let { session ->
             LootingOverlay(
@@ -1034,15 +1034,47 @@ private fun LootingOverlay(
     playerInventory: List<InventoryItem>,
     playerEquipment: Map<String, String>
 ) {
-    val playerGold = playerInventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+    // Optimistic local copies of both item lists. GM_Container pauses the sim, which
+    // freezes the Lua slow tick AND starves the companion UI of background frames, so
+    // engine re-exports can't refresh the display mid-session. Instead we mutate these
+    // copies locally on each tap — the tap drives its own recomposition, so the move
+    // shows instantly — while the CMP:container_* command still performs the REAL move
+    // in the engine. Initialized once when the overlay enters composition (on open) and
+    // deliberately NOT re-synced from later `session` emissions (stale/frame-starved
+    // while paused). On close→reopen the overlay leaves+re-enters composition, so these
+    // re-initialize from the fresh session/inventory and the true GameState reconciles.
+    var containerItems by remember { mutableStateOf(session.items) }
+    var playerItems by remember { mutableStateOf(playerInventory) }
+
+    val playerGold = playerItems.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
     val wornIds = remember(playerEquipment) { playerEquipment.values.toSet() }
     fun isWorn(item: InventoryItem): Boolean =
         if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId) else wornIds.contains(item.id)
 
+    // Take: container → player (optimistic) + real CMP:container_take. Put: the reverse.
+    fun take(item: InventoryItem, n: Int) {
+        val (c, p) = moveOptimistic(containerItems, playerItems, item, n)
+        containerItems = c; playerItems = p
+        CompanionActions.containerTake(item.stackId.ifEmpty { item.id }, n)
+    }
+    fun put(item: InventoryItem, n: Int) {
+        val (p, c) = moveOptimistic(playerItems, containerItems, item, n)
+        playerItems = p; containerItems = c
+        CompanionActions.containerPut(item.stackId.ifEmpty { item.id }, n)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .zIndex(8f)
+            // zIndex 15f (same as the dialogue overlay) — ABOVE the global
+            // dropdown-dismiss scrim (10f). At the old 8f it sat BELOW that scrim,
+            // so whenever the scrim was active (a LootRow long-press menu open, or
+            // its anyOpen state stuck after a row left composition on a container
+            // re-emit) it covered the whole overlay and swallowed every tap —
+            // including the bottom buttons. Still below QuantitySelector/ItemInfo (20f)
+            // so those stack above. Long-press-menu dismissal is handled by the local
+            // scrim below (we can no longer rely on the global one from up here).
+            .zIndex(15f)
             .background(Color(0xCC0F0C08))
             .pointerInput(Unit) { detectTapGestures {} }
     ) {
@@ -1068,9 +1100,10 @@ private fun LootingOverlay(
                 LootColumn(
                     header = "Player (${playerGold}g)",
                     legend = "tap to put · long press for more",
-                    items = playerInventory,
+                    items = playerItems,
                     isPlayerSide = true,
                     isWorn = { isWorn(it) },
+                    onTransfer = { it, n -> put(it, n) },
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
                 // Dashed vertical divider between the two columns.
@@ -1086,9 +1119,10 @@ private fun LootingOverlay(
                 LootColumn(
                     header = session.containerName.ifBlank { "Container" },
                     legend = "tap to take · long press for more",
-                    items = session.items,
+                    items = containerItems,
                     isPlayerSide = false,
                     isWorn = { false },
+                    onTransfer = { it, n -> take(it, n) },
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -1101,9 +1135,17 @@ private fun LootingOverlay(
             ) {
                 LootButton(
                     label = "Take All", hint = "X",
-                    enabled = session.items.isNotEmpty(),
+                    enabled = containerItems.isNotEmpty(),
                     modifier = Modifier.weight(1f)
-                ) { CompanionActions.containerTakeAll() }
+                ) {
+                    // Optimistically empty the container; the Lua handler takes all AND
+                    // closes the overlay (removeMode → COMPANION_CONTAINER_CLOSED).
+                    playerItems = containerItems.fold(playerItems) { acc, it ->
+                        moveOptimistic(listOf(it), acc, it, it.count).second
+                    }
+                    containerItems = emptyList()
+                    CompanionActions.containerTakeAll()
+                }
                 if (session.isCorpse) {
                     LootButton(
                         label = "Dispose of Corpse", hint = "R1",
@@ -1118,6 +1160,20 @@ private fun LootingOverlay(
                 ) { CompanionActions.containerClose() }
             }
         }
+
+        // Local dropdown-dismiss scrim for the LootRow long-press menus. Because this
+        // overlay renders ABOVE the global DropdownState scrim (10f) — required so its
+        // own buttons stay tappable — we can't lean on that global scrim to close a
+        // menu on tap-away. Replicate it here: rendered only while a menu is open,
+        // above the panel content but below the DropdownMenu popup window, so a tap
+        // outside the menu dismisses it instead of tapping through to a row/button.
+        if (DropdownState.anyOpen) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures { DropdownState.closeAll() } }
+            )
+        }
     }
 }
 
@@ -1129,6 +1185,7 @@ private fun LootColumn(
     items: List<InventoryItem>,
     isPlayerSide: Boolean,
     isWorn: (InventoryItem) -> Boolean,
+    onTransfer: (InventoryItem, Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
@@ -1163,7 +1220,8 @@ private fun LootColumn(
                         item = item,
                         isPlayerSide = isPlayerSide,
                         worn = isPlayerSide && isWorn(item),
-                        iconBitmap = rememberItemIcon(item.icon)
+                        iconBitmap = rememberItemIcon(item.icon),
+                        onTransfer = onTransfer
                     )
                 }
             }
@@ -1182,7 +1240,8 @@ private fun LootRow(
     item: InventoryItem,
     isPlayerSide: Boolean,
     worn: Boolean,
-    iconBitmap: ImageBitmap? = null
+    iconBitmap: ImageBitmap? = null,
+    onTransfer: (InventoryItem, Int) -> Unit
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
@@ -1196,10 +1255,10 @@ private fun LootRow(
     val confirmLabel = if (isPlayerSide) "Put" else "Take"
 
     // The tap action (put or take), prompting for a quantity when the stack > 1.
+    // onTransfer performs BOTH the optimistic list move and the CMP:container_* command.
     fun transfer() {
         QuantityRequestState.requestOrRun(label, item.count, confirmLabel) { n ->
-            if (isPlayerSide) CompanionActions.containerPut(sid, n)
-            else CompanionActions.containerTake(sid, n)
+            onTransfer(item, n)
         }
     }
 
@@ -1305,7 +1364,9 @@ private fun LootRow(
                         if (isPlayerSide) {
                             CompanionActions.equipItem(sid)
                         } else {
-                            CompanionActions.containerTake(sid, item.count)
+                            // Optimistically take the whole stack (list move + command),
+                            // then equip the taken item by record id.
+                            onTransfer(item, item.count)
                             CompanionActions.equipItem(item.id)
                         }
                     },
@@ -1329,6 +1390,35 @@ private fun LootRow(
             }
         }
     }
+}
+
+/**
+ * Move `n` of `item` from `source` to `dest` for the optimistic looting UI. Reduces
+ * (or removes at 0) the matched stack in `source` — matched by stackId when present,
+ * else by record id — and merges `n` into a same-record stack in `dest`, else appends
+ * a new stack. Approximate (e.g. distinct-condition stacks may merge for display); the
+ * real GameState reconciles when the container closes. Returns (newSource, newDest).
+ */
+private fun moveOptimistic(
+    source: List<InventoryItem>,
+    dest: List<InventoryItem>,
+    item: InventoryItem,
+    n: Int
+): Pair<List<InventoryItem>, List<InventoryItem>> {
+    val moved = n.coerceIn(1, item.count)
+    fun sameStack(a: InventoryItem): Boolean =
+        if (a.stackId.isNotEmpty() && item.stackId.isNotEmpty()) a.stackId == item.stackId
+        else a.id == item.id
+    val newSource = source.mapNotNull { s ->
+        if (sameStack(s)) (if (s.count > moved) s.copy(count = s.count - moved) else null) else s
+    }
+    val idx = dest.indexOfFirst { it.id == item.id }
+    val newDest = if (idx >= 0) {
+        dest.mapIndexed { i, d -> if (i == idx) d.copy(count = d.count + moved) else d }
+    } else {
+        dest + item.copy(count = moved)
+    }
+    return newSource to newDest
 }
 
 /** Sub-line under a loot item name: capitalized category + count + condition %. */

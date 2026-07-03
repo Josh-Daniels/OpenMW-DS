@@ -669,12 +669,25 @@ end
 -- events to companion_global.lua (mirrors the CompanionDropItem pattern).
 local containerObj = nil
 local containerIsCorpse = false
--- >0 = re-enumerate the container on the next few slow ticks. A transfer's moveInto
--- runs as a queued (async) action, so the new contents aren't readable on the same
--- frame; we re-export for a couple ticks afterward. Change-detection (lastContainerJson)
--- means an unchanged batch still prints nothing, so this never spams the log.
+-- >0 = re-enumerate the container for a few ticks after a transfer. A transfer's
+-- moveInto runs as a queued (async) action, so the new contents aren't readable on
+-- the same frame; we re-export a couple of times afterward. Change-detection
+-- (lastContainerJson) means an unchanged batch still prints nothing.
+-- CRITICAL: the container GUI PAUSES the game, so onUpdate is called with dt=0 and
+-- the whole slow tick (incl. exportInventory + this re-export) freezes while the
+-- overlay is open. The re-export is therefore driven from onFrame (which DOES fire
+-- while paused — luamanagerimp.cpp), throttled by containerRefreshTimer.
 local containerReexportTicks = 0
+local containerRefreshTimer = 0
+local CONTAINER_REFRESH_INTERVAL = 0.08
 local lastContainerJson = nil
+
+-- Schedule a post-transfer refresh burst (consumed by onFrame). Resets the throttle
+-- so the first refresh waits a full interval, giving the async moveInto time to land.
+local function scheduleContainerRefresh()
+    containerReexportTicks = 3
+    containerRefreshTimer = 0
+end
 
 local function containerInventory()
     if not containerObj then return nil end
@@ -700,24 +713,54 @@ end
 -- (new session header: name + isCorpse). Re-emits (announce=false) are change-detected
 -- against the last batch so an unchanged container prints nothing. Streamed one item
 -- per line (4096-byte flush safety), same as the player inventory export.
-local function exportContainer(announce)
+-- For a LIVING NPC (pickpocket) the native UI hides items the NPC is wearing, so
+-- the companion overlay must too. Returns a set of equipped instance-ids to skip,
+-- keyed by tostring(item.id) (matches the sid used in itemJson). nil for corpses
+-- and plain containers (nothing to filter). types.Actor.getEquipment reads any
+-- actor (verified against actor.cpp getAllEquipment(const Object&)); wrapped in
+-- pcall so a failure just means "don't filter" rather than an empty overlay.
+local function equippedItemIds()
+    if containerIsCorpse then return nil end
+    if not (containerObj and types.Actor.objectIsInstance(containerObj)) then return nil end
+    local ok, eq = pcall(function() return types.Actor.getEquipment(containerObj) end)
+    if not ok or not eq then return nil end
+    local set = {}
+    for _, witem in pairs(eq) do
+        if witem then set[tostring(witem.id)] = true end
+    end
+    return set
+end
+
+local function exportContainer(force)
     local inv = containerInventory()
     if not inv then return end
     local ok, all = pcall(function() return inv:getAll() end)
     if not ok or not all then return end
+    -- Filter out worn items for a living NPC (pickpocket); nil = no filtering.
+    local worn = equippedItemIds()
+    local shown = {}
     local parts = {}
-    for _, item in ipairs(all) do parts[#parts + 1] = itemJson(item) end
-    local batch = table.concat(parts, '\n')
-    if not announce and batch == lastContainerJson then return end
-    lastContainerJson = batch
-    if announce then
-        print(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s}',
-            jsonEscape(containerDisplayName(containerObj)), tostring(containerIsCorpse)))
-    end
     for _, item in ipairs(all) do
+        if not (worn and worn[tostring(item.id)]) then
+            shown[#shown + 1] = item
+            parts[#parts + 1] = itemJson(item)
+        end
+    end
+    local batch = table.concat(parts, '\n')
+    if not force and batch == lastContainerJson then return end
+    lastContainerJson = batch
+    -- Always emit OPEN, not just on the first open. The Kotlin side then rebuilds the
+    -- session atomically on EVERY refresh, identical to the initial open (the known-
+    -- working path): the OPEN branch force-resets the item buffer, so a refresh can't
+    -- be corrupted by a stale/partial buffer left behind if an END was ever dropped.
+    -- `force` now only bypasses change-detection (the first open); refreshes remain
+    -- change-detected so an unchanged container still prints nothing.
+    print(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s}',
+        jsonEscape(containerDisplayName(containerObj)), tostring(containerIsCorpse)))
+    for _, item in ipairs(shown) do
         print('COMPANION_CONTAINER_ITEM:' .. itemJson(item))
     end
-    print('COMPANION_CONTAINER_END:' .. #all)
+    print('COMPANION_CONTAINER_END:' .. #shown)
 end
 
 local function exportEquipment()
@@ -1318,8 +1361,12 @@ local function dispatchCommand(command)
         if containerObj then
             core.sendGlobalEvent('CompanionContainerTransfer',
                 { container = containerObj, player = self.object, dir = 'takeall' })
-            containerReexportTicks = 3
-            print("COMPANION_DEBUG: container take all")
+            -- Take All closes the overlay after grabbing everything (same as Dispose):
+            -- the queued moveInto still runs after removeMode, and the mode pop fires
+            -- UiModeChanged -> COMPANION_CONTAINER_CLOSED, dismissing the overlay. No
+            -- refresh scheduled since the session ends.
+            pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
+            print("COMPANION_DEBUG: container take all + close")
         end
         return
     end
@@ -1392,7 +1439,7 @@ local function dispatchCommand(command)
             core.sendGlobalEvent('CompanionContainerTransfer',
                 { container = containerObj, player = self.object, sid = sid,
                   count = tonumber(countStr), dir = 'take' })
-            containerReexportTicks = 3
+            scheduleContainerRefresh()
             print("COMPANION_DEBUG: container take " .. sid .. " x" .. countStr)
         end
     elseif action == "container_put" then
@@ -1401,7 +1448,7 @@ local function dispatchCommand(command)
             core.sendGlobalEvent('CompanionContainerTransfer',
                 { container = containerObj, player = self.object, sid = sid,
                   count = tonumber(countStr), dir = 'put' })
-            containerReexportTicks = 3
+            scheduleContainerRefresh()
             print("COMPANION_DEBUG: container put " .. sid .. " x" .. countStr)
         end
     end
@@ -1458,17 +1505,32 @@ local function onUpdate(dt)
         exportCharacterDetail()
         exportTarget()
         exportPlayerStatus()
-        -- Re-enumerate the open container for a few ticks after a transfer (the
-        -- moveInto action is async); change-detection gates the actual print.
-        if containerObj and containerReexportTicks > 0 then
-            containerReexportTicks = containerReexportTicks - 1
-            exportContainer(false)
-        end
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then
         journalTimer = 0
         exportJournal()
+    end
+end
+
+-- Fires every real frame, INCLUDING while the game is paused (luamanagerimp.cpp
+-- calls onFrame with the real frame duration regardless of pause, whereas onUpdate
+-- gets dt=0 when paused). The container GUI pauses the game, so this is the ONLY
+-- place a post-transfer refresh can run while the looting overlay is open. Only
+-- does work when a container is open and a transfer is pending, so it's free
+-- otherwise. Refreshes BOTH sides: exportContainer (the container list, change-
+-- detected) and exportInventory (the player list, which is otherwise frozen by the
+-- paused slow tick). Throttled so a transfer emits ~3 refreshes over ~0.24s, which
+-- covers the async moveInto completing (~1-2 frames).
+local function onFrame(dt)
+    if containerObj and containerReexportTicks > 0 then
+        containerRefreshTimer = containerRefreshTimer + dt
+        if containerRefreshTimer >= CONTAINER_REFRESH_INTERVAL then
+            containerRefreshTimer = 0
+            containerReexportTicks = containerReexportTicks - 1
+            exportContainer(false)
+            exportInventory()
+        end
     end
 end
 
@@ -1480,6 +1542,7 @@ end
 return {
     engineHandlers = {
         onUpdate = onUpdate,
+        onFrame = onFrame,
         onActive = onActive,
         onConsoleCommand = onConsoleCommand,
     },
