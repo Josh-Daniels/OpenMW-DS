@@ -59,6 +59,39 @@ object GameStateRepository {
         _itemInfo.value = null
     }
 
+    // --- Barter optimistic UI mutators (Phase 3 UI calls these alongside the CMP:barter_*
+    // commands; the engine reconciles the authoritative balance via COMPANION_BARTER_OFFER).
+    // The sim is paused during barter, so selection must feel instant rather than waiting
+    // for the command round-trip. Items are matched by id (the coarse serialized RefId). ---
+
+    /** Optimistically select/deselect a barter item and set its selected quantity. */
+    fun applyBarterSelection(side: BarterSide, id: String, selected: Boolean, count: Int) {
+        _barterSession.update { s ->
+            if (s == null) return@update null
+            val mapped = { list: List<BarterItem> ->
+                list.map {
+                    if (it.id == id) it.copy(
+                        isSelected = selected,
+                        selectedCount = if (selected) count.coerceIn(1, it.count) else 0
+                    ) else it
+                }
+            }
+            when (side) {
+                BarterSide.VENDOR -> s.copy(vendorItems = mapped(s.vendorItems))
+                BarterSide.PLAYER -> s.copy(playerItems = mapped(s.playerItems))
+            }
+        }
+    }
+
+    /** Optimistically set the manual extra-gold offset (the engine OFFER reconciles balance). */
+    fun applyBarterExtraGold(extra: Int) {
+        _barterSession.update { it?.copy(extraGoldOffer = extra) }
+    }
+
+    fun dismissBarterResult() {
+        _barterResult.value = null
+    }
+
     // Active dialogue topic list for the bottom-screen overlay. Streamed from the
     // engine (COMPANION_DIALOGUE_START/_TOPIC/_END) whenever the topic list changes,
     // and emptied on COMPANION_DIALOGUE_CLOSED. Empty list = no active dialogue.
@@ -140,6 +173,24 @@ object GameStateRepository {
     private var containerName: String = ""
     private var containerIsCorpse: Boolean = false
     private var containerIsPickpocket: Boolean = false
+
+    // --- Barter session (COMPANION_BARTER_*) ---
+    // null = not bartering. OPEN sets the header + starts vendor/player item buffers;
+    // ITEM/END stream both sides (END rebuilds the session, preserving nothing — a fresh
+    // OPEN is only sent on a new merchant); OFFER updates the running balance/gold without
+    // touching items or the user's optimistic selection; ACCEPTED/REJECTED set the transient
+    // result; CLOSED clears everything. Header fields persist across OFFER re-emits.
+    private val _barterSession = MutableStateFlow<BarterSession?>(null)
+    val barterSession: StateFlow<BarterSession?> = _barterSession.asStateFlow()
+    private var barterVendorBuffer: MutableList<BarterItem>? = null
+    private var barterPlayerBuffer: MutableList<BarterItem>? = null
+    private var barterVendorName: String = ""
+    private var barterVendorGold: Int = 0
+    private var barterPlayerGold: Int = 0
+    // Transient offer outcome (rejection alert / accepted-close); cleared on dismiss,
+    // on the next OFFER, and on CLOSED.
+    private val _barterResult = MutableStateFlow<BarterResult?>(null)
+    val barterResult: StateFlow<BarterResult?> = _barterResult.asStateFlow()
 
     // Accumulates dialogue topics across DIALOGUE_START / DIALOGUE_TOPIC / DIALOGUE_END.
     private var dialogueBuffer: MutableList<String>? = null
@@ -446,6 +497,83 @@ object GameStateRepository {
                 containerIsCorpse = false
                 containerIsPickpocket = false
                 _containerSession.value = null
+            }
+            // Barter session. ITEM first (most frequent). Each ITEM carries its own side,
+            // so vendor/player items go to separate buffers. None of these prefixes is a
+            // contains()-substring of another: OFFER: (trailing colon) does NOT match the
+            // OFFER_ACCEPTED / OFFER_REJECTED: lines, and OPEN:/END/CLOSED are all distinct.
+            trimmed.contains(LogParser.P_BARTER_ITEM) -> {
+                val idx = trimmed.indexOf(LogParser.P_BARTER_ITEM) + LogParser.P_BARTER_ITEM.length
+                LogParser.parseBarterItem(trimmed.substring(idx).trim())?.let { item ->
+                    when (item.side) {
+                        BarterSide.VENDOR ->
+                            (barterVendorBuffer ?: mutableListOf<BarterItem>().also { barterVendorBuffer = it }).add(item)
+                        BarterSide.PLAYER ->
+                            (barterPlayerBuffer ?: mutableListOf<BarterItem>().also { barterPlayerBuffer = it }).add(item)
+                    }
+                }
+            }
+            trimmed.contains(LogParser.P_BARTER_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_BARTER_OPEN) + LogParser.P_BARTER_OPEN.length
+                LogParser.parseBarterOpen(trimmed.substring(idx).trim())?.let {
+                    barterVendorName = it.vendorName
+                    barterVendorGold = it.vendorGold
+                    barterPlayerGold = it.playerGold
+                }
+                barterVendorBuffer = mutableListOf()
+                barterPlayerBuffer = mutableListOf()
+                _barterResult.value = null
+            }
+            trimmed.contains(LogParser.P_BARTER_END) -> {
+                _barterSession.value = BarterSession(
+                    vendorName = barterVendorName,
+                    vendorGold = barterVendorGold,
+                    playerGold = barterPlayerGold,
+                    playerItems = barterPlayerBuffer?.toList() ?: emptyList(),
+                    vendorItems = barterVendorBuffer?.toList() ?: emptyList(),
+                    isVisible = true
+                )
+                barterVendorBuffer = null
+                barterPlayerBuffer = null
+            }
+            // ACCEPTED / REJECTED checked before the plain OFFER (defensive — the trailing
+            // colon on OFFER: already excludes them).
+            trimmed.contains(LogParser.P_BARTER_OFFER_ACCEPTED) -> {
+                _barterResult.value = BarterResult.Accepted
+                // Session also closes on the COMPANION_BARTER_CLOSED that follows; clearing
+                // here too keeps the overlay from lingering if CLOSED is ever delayed.
+                _barterSession.value = null
+            }
+            trimmed.contains(LogParser.P_BARTER_OFFER_REJECTED) -> {
+                val idx = trimmed.indexOf(LogParser.P_BARTER_OFFER_REJECTED) + LogParser.P_BARTER_OFFER_REJECTED.length
+                _barterResult.value = BarterResult.Rejected(
+                    LogParser.parseBarterRejectReason(trimmed.substring(idx).trim())
+                )
+            }
+            trimmed.contains(LogParser.P_BARTER_OFFER) -> {
+                val idx = trimmed.indexOf(LogParser.P_BARTER_OFFER) + LogParser.P_BARTER_OFFER.length
+                LogParser.parseBarterOffer(trimmed.substring(idx).trim())?.let { off ->
+                    _barterSession.update { s ->
+                        s?.copy(
+                            merchantOffer = off.merchantOffer,
+                            balance = off.balance,
+                            extraGoldOffer = off.extraGold,
+                            vendorGold = off.vendorGold,
+                            playerGold = off.playerGold
+                        )
+                    }
+                    // A fresh offer (player adjusted) supersedes any stale rejection alert.
+                    _barterResult.value = null
+                }
+            }
+            trimmed.contains(LogParser.P_BARTER_CLOSED) -> {
+                barterVendorBuffer = null
+                barterPlayerBuffer = null
+                barterVendorName = ""
+                barterVendorGold = 0
+                barterPlayerGold = 0
+                _barterSession.value = null
+                _barterResult.value = null
             }
             // Dialogue topic list. Streamed START/TOPIC/END while a conversation is
             // open (re-sent on every topic-list change); CLOSED clears it. TOPIC

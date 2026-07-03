@@ -28,6 +28,19 @@ object LogParser {
     const val P_CONTAINER_ITEM = "COMPANION_CONTAINER_ITEM:"
     const val P_CONTAINER_END = "COMPANION_CONTAINER_END"
     const val P_CONTAINER_CLOSED = "COMPANION_CONTAINER_CLOSED"
+
+    // Barter session (native GM_Barter TradeWindow, streamed one small line each).
+    // OPEN{vendor,vendorGold,playerGold} → ITEM{side,id,sid,name,count,value,cat,icon,worn}*
+    // → END; then a running OFFER{merchantOffer,balance,extraGold,vendorGold,playerGold}
+    // after every change; OFFER_ACCEPTED / OFFER_REJECTED{reason} on submit; CLOSED on
+    // close. Order of the contains() checks matters — see GameStateRepository.onRawLine.
+    const val P_BARTER_OPEN = "COMPANION_BARTER_OPEN:"
+    const val P_BARTER_ITEM = "COMPANION_BARTER_ITEM:"
+    const val P_BARTER_END = "COMPANION_BARTER_END"
+    const val P_BARTER_OFFER = "COMPANION_BARTER_OFFER:"
+    const val P_BARTER_OFFER_ACCEPTED = "COMPANION_BARTER_OFFER_ACCEPTED"
+    const val P_BARTER_OFFER_REJECTED = "COMPANION_BARTER_OFFER_REJECTED:"
+    const val P_BARTER_CLOSED = "COMPANION_BARTER_CLOSED"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
@@ -233,6 +246,58 @@ object LogParser {
         )
     } catch (e: Exception) {
         null
+    }
+
+    /** Header from a COMPANION_BARTER_OPEN line (vendor name + both gold amounts). */
+    data class BarterHeader(val vendorName: String, val vendorGold: Int, val playerGold: Int)
+
+    fun parseBarterOpen(json: String): BarterHeader? = try {
+        val o = JSONObject(json)
+        BarterHeader(o.optString("vendor", ""), o.optInt("vendorGold", 0), o.optInt("playerGold", 0))
+    } catch (e: Exception) {
+        null
+    }
+
+    /** A single COMPANION_BARTER_ITEM. Optimistic selection fields default unselected. */
+    fun parseBarterItem(json: String): BarterItem? = try {
+        val o = JSONObject(json)
+        val side = if (o.optString("side", "vendor") == "player") BarterSide.PLAYER else BarterSide.VENDOR
+        BarterItem(
+            id = o.optString("id", ""),
+            stackId = o.optString("sid", ""),
+            name = o.optString("name", ""),
+            count = o.optInt("count", 1),
+            value = o.optInt("value", 0),
+            category = o.optString("cat", "misc"),
+            icon = o.optString("icon", ""),
+            side = side,
+            worn = o.optBoolean("worn", false)
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** The authoritative running offer from COMPANION_BARTER_OFFER. */
+    data class BarterOffer(
+        val merchantOffer: Int, val balance: Int, val extraGold: Int,
+        val vendorGold: Int, val playerGold: Int
+    )
+
+    fun parseBarterOffer(json: String): BarterOffer? = try {
+        val o = JSONObject(json)
+        BarterOffer(
+            o.optInt("merchantOffer", 0), o.optInt("balance", 0), o.optInt("extraGold", 0),
+            o.optInt("vendorGold", 0), o.optInt("playerGold", 0)
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** The reason field from COMPANION_BARTER_OFFER_REJECTED (e.g. "haggle"). */
+    fun parseBarterRejectReason(json: String): String = try {
+        JSONObject(json).optString("reason", "")
+    } catch (e: Exception) {
+        ""
     }
 
     private fun parseEquipment(json: String): Map<String, String> {

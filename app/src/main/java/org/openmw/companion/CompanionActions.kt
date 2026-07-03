@@ -68,6 +68,29 @@ object CompanionActions {
     // shown). type 0..5 = Admire / Intimidate / Taunt / Bribe10 / Bribe100 / Bribe1000.
     fun persuade(type: Int) = runCommand("CMPDLG:persuade:$type")
 
+    // Barter (bottom-screen) — handled NATIVELY in drainCompanionCommands, NOT Lua (the
+    // merchant Ptr, gold pool, mercantile-adjusted prices and haggle all live in the C++
+    // TradeWindow). borrow/return wire format is "<count>|<side>|<refId>": count leads and
+    // refId is the tail because refIds contain spaces (but no '|'). The engine re-exports
+    // COMPANION_BARTER_OFFER after each, reconciling the authoritative balance.
+    fun barterBorrow(side: BarterSide, refId: String, count: Int = 1) =
+        runCommand("CMP:barter_borrow $count|${side.wire}|$refId")
+
+    fun barterReturn(side: BarterSide, refId: String, count: Int = 1) =
+        runCommand("CMP:barter_return $count|${side.wire}|$refId")
+
+    // Manual extra-gold offset (the +/- gold row); may be negative.
+    fun barterSetExtraGold(extra: Int) = runCommand("CMP:barter_gold $extra")
+
+    // Submit the current staged offer; reply is COMPANION_BARTER_OFFER_ACCEPTED/_REJECTED.
+    fun barterOffer() = runCommand("CMP:barter_offer")
+
+    // Cancel barter (aborts the staged offer + closes the native window).
+    fun barterCancel() = runCommand("CMP:barter_cancel")
+
+    private val BarterSide.wire: String
+        get() = if (this == BarterSide.VENDOR) "vendor" else "player"
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

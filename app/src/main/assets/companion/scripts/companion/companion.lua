@@ -1312,14 +1312,32 @@ local function exportInfo(arg)
             if it.recordId == id then item = it; break end
         end
         if not item then item = types.Actor.inventory(self):find(id) end
-        if not item then print("COMPANION_DEBUG: info - item not found: " .. id); return end
-        local okr, rec = pcall(function() return item.type.record(item) end)
-        if not okr or not rec then print("COMPANION_DEBUG: info - no record: " .. id); return end
+        -- Resolve the record. A player item gives both an instance (for live condition) and
+        -- a record; a VENDOR's barter item is NOT in the player inventory, so fall back to
+        -- probing the item record stores by id so buying-side Info still works (record-level
+        -- only — the Condition rows, which need an instance, are omitted). foundType lets the
+        -- type checks below work with or without an instance.
+        local rec, foundType = nil, nil
+        if item then
+            local okr; okr, rec = pcall(function() return item.type.record(item) end)
+            if okr and rec then foundType = item.type else rec = nil end
+        end
+        if not rec then
+            for _, ty in ipairs({ types.Weapon, types.Armor, types.Clothing, types.Potion,
+                                  types.Ingredient, types.Lockpick, types.Probe, types.Book,
+                                  types.Apparatus, types.Repair, types.Light, types.Miscellaneous }) do
+                local ok, r = pcall(function() return ty.records[id] end)
+                if ok and r then rec = r; foundType = ty; break end
+            end
+        end
+        if not rec then print("COMPANION_DEBUG: info - no record: " .. id); return end
+        local function isType(ty) return foundType == ty or (item ~= nil and ty.objectIsInstance(item)) end
         name = (rec.name and rec.name ~= "" and rec.name) or id
 
-        -- Instance condition (current / max), not the record's max health.
+        -- Instance condition (current / max), not the record's max health. nil when there is
+        -- no instance (vendor items), which omits the Condition row.
         local function condStr(maxHealth)
-            if not maxHealth or maxHealth <= 0 then return nil end
+            if not maxHealth or maxHealth <= 0 or not item then return nil end
             local cur = maxHealth
             pcall(function()
                 local data = types.Item.itemData(item)
@@ -1335,14 +1353,14 @@ local function exportInfo(arg)
 
         -- Weight, with an armor class suffix for armor pieces, e.g. "16 (Heavy)".
         local weightStr = fmtNum(rec.weight)
-        if weightStr and types.Armor.objectIsInstance(item) then
+        if weightStr and isType(types.Armor) then
             local cls = armorWeightClass(rec)
             if cls then weightStr = weightStr .. " (" .. cls .. ")" end
         end
         addRow(rows, "Weight", weightStr)
         addRow(rows, "Value", fmtNum(rec.value))
 
-        if types.Weapon.objectIsInstance(item) then
+        if isType(types.Weapon) then
             addRow(rows, "Chop", string.format("%d-%d",
                 math.floor((rec.chopMinDamage or 0) + 0.5), math.floor((rec.chopMaxDamage or 0) + 0.5)))
             addRow(rows, "Slash", string.format("%d-%d",
@@ -1354,22 +1372,22 @@ local function exportInfo(arg)
             enchantPts()
             addRow(rows, "Condition", condStr(rec.health))
             appendEnchantEffects(rec.enchant, effects)
-        elseif types.Armor.objectIsInstance(item) then
+        elseif isType(types.Armor) then
             addRow(rows, "Armor Rating", fmtNum(rec.baseArmor))
             enchantPts()
             addRow(rows, "Condition", condStr(rec.health))
             appendEnchantEffects(rec.enchant, effects)
-        elseif types.Clothing.objectIsInstance(item) then
+        elseif isType(types.Clothing) then
             enchantPts()
             appendEnchantEffects(rec.enchant, effects)
-        elseif types.Potion.objectIsInstance(item) then
+        elseif isType(types.Potion) then
             appendEffectList(rec.effects, effects, false)
-        elseif types.Ingredient.objectIsInstance(item) then
+        elseif isType(types.Ingredient) then
             appendEffectList(rec.effects, effects, false)
-        elseif types.Lockpick.objectIsInstance(item) or types.Probe.objectIsInstance(item) then
+        elseif isType(types.Lockpick) or isType(types.Probe) then
             addRow(rows, "Quality", fmtNum(rec.quality))
             addRow(rows, "Uses Left", condStr(rec.maxCondition))
-        elseif types.Book.objectIsInstance(item) then
+        elseif isType(types.Book) then
             if rec.isScroll then
                 appendEnchantEffects(rec.enchant, effects)
             elseif rec.skill and rec.skill ~= "" then

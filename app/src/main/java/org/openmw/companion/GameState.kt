@@ -102,6 +102,75 @@ data class ContainerSession(
     val isVisible: Boolean = true
 )
 
+/** Which side of a barter transaction an item belongs to. */
+enum class BarterSide { PLAYER, VENDOR }
+
+/**
+ * One item in a barter session. `value` is the merchant's actual per-unit barter
+ * price (mercantile-/disposition-adjusted, from the engine) — NOT the base value —
+ * so the displayed net matches what the merchant charges. `isSelected`/`selectedCount`
+ * are Kotlin-owned optimistic UI state (the sim pauses during barter, so selection is
+ * tracked locally and reconciled against the authoritative COMPANION_BARTER_OFFER).
+ */
+data class BarterItem(
+    val id: String,
+    val stackId: String = "",
+    val name: String = "",
+    val count: Int = 1,
+    val value: Int = 0,
+    val category: String = "misc",
+    val icon: String = "",
+    val side: BarterSide = BarterSide.VENDOR,
+    /** Currently equipped (player side only); vendor items are always false. */
+    val worn: Boolean = false,
+    val isSelected: Boolean = false,
+    val selectedCount: Int = 0
+)
+
+/**
+ * An open barter session (the native GM_Barter TradeWindow, mirrored to the bottom
+ * screen). Transient — held in its own StateFlow, not part of GameState; null = not
+ * bartering.
+ *
+ * `balance` is the engine's authoritative running offer (= merchantOffer + extraGoldOffer):
+ * positive = the player receives gold, negative = the player pays. It is what haggle()
+ * ultimately compares, so it — not the Kotlin-computed [netTotal] — is the real offer.
+ * [netTotal] is a per-item estimate for instant feedback during the optimistic-selection
+ * window before the engine re-exports COMPANION_BARTER_OFFER.
+ */
+data class BarterSession(
+    val vendorName: String,
+    val vendorGold: Int,
+    val playerGold: Int,
+    val playerItems: List<BarterItem> = emptyList(),
+    val vendorItems: List<BarterItem> = emptyList(),
+    /** Engine fair-price offer for the currently-staged items (signed like [balance]). */
+    val merchantOffer: Int = 0,
+    /** Engine authoritative net offer (merchantOffer + extraGoldOffer). */
+    val balance: Int = 0,
+    /** Player's manual gold adjustment (the +/- gold row); starts at 0. */
+    val extraGoldOffer: Int = 0,
+    val isVisible: Boolean = true
+) {
+    /** Value the player is giving up (selected player items). */
+    val playerItemsValue: Int
+        get() = playerItems.filter { it.isSelected }.sumOf { it.value * it.selectedCount }
+
+    /** Value the player is receiving (selected vendor items). */
+    val vendorItemsValue: Int
+        get() = vendorItems.filter { it.isSelected }.sumOf { it.value * it.selectedCount }
+
+    /** Kotlin-side net estimate (positive = player receives gold). See [balance] for the
+     *  authoritative value. */
+    val netTotal: Int get() = playerItemsValue - vendorItemsValue + extraGoldOffer
+}
+
+/** Outcome of a submitted barter offer (transient — drives the rejection alert / close). */
+sealed interface BarterResult {
+    data class Rejected(val reason: String) : BarterResult
+    data object Accepted : BarterResult
+}
+
 data class AttributeStat(
     val id: String, val name: String, val current: Float, val base: Float,
     /** In-game description (from the streamed CHARDETAIL batch); "" until it lands. */

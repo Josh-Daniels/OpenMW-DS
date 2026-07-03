@@ -75,6 +75,12 @@ extern "C" void companionDialogueSelectEntry(const char* entry);
 extern "C" void companionDialogueGoodbye();
 extern "C" void companionDialogueChoice(int id);
 extern "C" void companionPersuade(int type);
+// Bottom-screen barter (tradewindow.cpp). Items matched by serialized RefId.
+extern "C" void companionBarterBorrow(const char* side, const char* refId, int count);
+extern "C" void companionBarterReturn(const char* side, const char* refId, int count);
+extern "C" void companionBarterSetGold(int extra);
+extern "C" void companionBarterOffer();
+extern "C" void companionBarterCancel();
 
 // Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
 // Quest completion status is NOT exposed to Lua in this build (types.Player.journal
@@ -220,6 +226,47 @@ void drainCompanionCommands()
         {
             // Known topics are not exposed to Lua; read them from the C++ journal.
             exportTopics();
+        }
+        // Barter (CMP:barter_*) is driven natively — the merchant Ptr, the gold pool, the
+        // mercantile-adjusted prices and the haggle result all live in the C++ TradeWindow,
+        // none of which Lua can reach. See companion-barter-export.patch.
+        else if (cmd.rfind("CMP:barter_borrow ", 0) == 0 || cmd.rfind("CMP:barter_return ", 0) == 0)
+        {
+            // arg = "<count>|<side>|<refId>". refId may contain spaces (it is the tail), so
+            // split only the first two '|' fields off the front.
+            const bool isBorrow = (cmd.rfind("CMP:barter_borrow ", 0) == 0);
+            std::string arg = cmd.substr(
+                (isBorrow ? sizeof("CMP:barter_borrow ") : sizeof("CMP:barter_return ")) - 1);
+            const std::size_t p1 = arg.find('|');
+            const std::size_t p2 = (p1 == std::string::npos) ? std::string::npos : arg.find('|', p1 + 1);
+            if (p1 != std::string::npos && p2 != std::string::npos)
+            {
+                const int count = std::atoi(arg.substr(0, p1).c_str());
+                const std::string side = arg.substr(p1 + 1, p2 - p1 - 1);
+                const std::string refId = arg.substr(p2 + 1);
+                Log(Debug::Info) << "companion: barter " << (isBorrow ? "borrow " : "return ") << count << " "
+                                 << side << " " << refId;
+                if (isBorrow)
+                    companionBarterBorrow(side.c_str(), refId.c_str(), count);
+                else
+                    companionBarterReturn(side.c_str(), refId.c_str(), count);
+            }
+        }
+        else if (cmd.rfind("CMP:barter_gold ", 0) == 0)
+        {
+            const int extra = std::atoi(cmd.c_str() + (sizeof("CMP:barter_gold ") - 1));
+            Log(Debug::Info) << "companion: barter gold " << extra;
+            companionBarterSetGold(extra);
+        }
+        else if (cmd.rfind("CMP:barter_offer", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: barter offer";
+            companionBarterOffer();
+        }
+        else if (cmd.rfind("CMP:barter_cancel", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: barter cancel";
+            companionBarterCancel();
         }
         else
         {

@@ -215,6 +215,9 @@ private fun InventoryItem.displayName(): String =
 private fun SpellEntry.displayName(): String =
     if (name.isNotBlank()) name else prettify(id)
 
+private fun BarterItem.displayName(): String =
+    if (name.isNotBlank()) name else prettify(id)
+
 private val EQUIPMENT_SLOT_ORDER = listOf(
     "weapon", "ammo", "shield",
     "lockpick", "probe",
@@ -241,6 +244,21 @@ private val INV_CATEGORIES = listOf(
     InvCategory("Books",       setOf("book", "scroll")),
     InvCategory("Consumables", setOf("potion", "ingredient")),
     InvCategory("Misc",        setOf("misc", "carried_left")),
+)
+
+// Barter overlay category tabs — one bucket per tab, matching the coarse `cat` the
+// engine emits on COMPANION_BARTER_ITEM (weapon/armor/apparel/tools/consumable/misc).
+// Deliberately NOT the inventory's fine slot categories: the barter screen groups into
+// these seven tabs directly.
+private data class BarterCat(val label: String, val cat: String)
+
+private val BARTER_CATEGORIES = listOf(
+    BarterCat("Weapons", "weapon"),
+    BarterCat("Armor", "armor"),
+    BarterCat("Apparel", "apparel"),
+    BarterCat("Tools", "tools"),
+    BarterCat("Consumables", "consumable"),
+    BarterCat("Misc", "misc"),
 )
 
 /** Stone panel with a bronze frame — the signature Morrowind window look. */
@@ -454,6 +472,25 @@ fun CompanionScreen() {
                 else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
             DialogueTopicsOverlay(dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices, dialogueChoices, dialogueDisposition, dialoguePersuadeAvailable, playerGold)
         }
+
+        // Barter overlay. Driven by COMPANION_BARTER_* from the engine (native TradeWindow),
+        // shown over whatever tab/dialogue is active whenever a barter session exists —
+        // regardless of Hide UI (the companion-hide-barter-on-hideui patch makes the bottom
+        // screen the sole barter surface). Renders above the dialogue overlay (barter is
+        // pushed on top of the conversation) at zIndex 16f; the rejection alert stacks above
+        // at 18f; the shared QuantitySelector (20f) stacks above both for stack-split prompts.
+        // The disposition bar reuses the dialogue disposition (the native TradeWindow re-emits
+        // COMPANION_DIALOGUE_DISPOSITION during barter — DialogueWindow::onFrame is dormant then).
+        val barterSession by GameStateRepository.barterSession.collectAsState()
+        val barterResult by GameStateRepository.barterResult.collectAsState()
+        barterSession?.let { session ->
+            BarterOverlay(session = session, disposition = dialogueDisposition)
+        }
+        if (barterSession != null) {
+            (barterResult as? BarterResult.Rejected)?.let { rej ->
+                BarterRejectedAlert(rej.reason) { GameStateRepository.dismissBarterResult() }
+            }
+        }
     }
 }
 
@@ -485,12 +522,13 @@ private fun DialogueTopicsOverlay(
             .background(Color(0xCC0F0C08))
             .pointerInput(Unit) { detectTapGestures {} }
     ) {
-        // Same footprint as the Spells-tab list box: full width minus 12dp side padding,
-        // top 12dp down to just above the nav bar.
+        // Fills the full screen height (bottom = 12.dp, not BOTTOM_BAR_SPACE): dialogue is a
+        // modal interaction left via Goodbye, so the panel covers the bottom tab bar — same
+        // approach as the barter overlay. 12dp matches the top/side insets.
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+                .padding(top = 12.dp, bottom = 12.dp, start = 12.dp, end = 12.dp)
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
@@ -509,7 +547,7 @@ private fun DialogueTopicsOverlay(
             Row(Modifier.fillMaxSize()) {
                 DialogueHistoryColumn(
                     history, choices,
-                    modifier = Modifier.weight(0.75f).fillMaxHeight().padding(8.dp)
+                    modifier = Modifier.weight(0.65f).fillMaxHeight().padding(8.dp)
                 )
                 Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
                 DialogueRightColumn(
@@ -521,7 +559,7 @@ private fun DialogueTopicsOverlay(
                     choicesActive = choices.isNotEmpty(),
                     interactive = choices.isEmpty(),
                     onPersuadeTapped = { showPersuasion = true },
-                    modifier = Modifier.weight(0.25f).fillMaxHeight().padding(8.dp)
+                    modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
                 )
             }
         }
@@ -559,39 +597,56 @@ private fun DialogueRightColumn(
     onPersuadeTapped: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Barter is pulled out of the services list so it can sit above the divider (matched by
+    // its display string). EVERY other service drops into the scrollable list with the topics.
+    val barterService = services.firstOrNull { it.equals("Barter", ignoreCase = true) }
+    val otherServices = services.filter { it != barterService }
+
     Column(modifier) {
-        // Services (fixed, no scroll; hidden when the NPC has none). Styled identically to
-        // topic rows — only the section header distinguishes them.
-        if (services.isNotEmpty()) {
-            SpellSectionHeader("SERVICES")
+        // 1. Disposition bar (fixed at the top). Hidden when unknown (< 0, e.g. a creature).
+        //    A small divider below it stays put (outside the LazyColumn) while topics scroll.
+        if (disposition >= 0) {
+            DispositionBar(disposition)
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
             Spacer(Modifier.height(4.dp))
-            services.forEach { service ->
+        }
+
+        // 2-5. Barter, Persuade, the divider, any OTHER services, and the dialogue topics all
+        //      live in ONE LazyColumn so they scroll together. No "Services"/"Topics" headings.
+        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            // Barter (if the NPC offers it) — a plain row, identical to the topic rows.
+            if (barterService != null) {
+                item {
+                    DialogueOptionRow(barterService, dimmed = choicesActive) {
+                        if (interactive) CompanionActions.activateDialogueService(barterService)
+                    }
+                }
+            }
+            // Persuade (if available) — SAME styling as Barter.
+            if (persuadeAvailable) {
+                item {
+                    DialogueOptionRow("Persuade", dimmed = choicesActive) {
+                        if (interactive) onPersuadeTapped()
+                    }
+                }
+            }
+            // Divider between the Barter/Persuade block and the topics (only if something's
+            // above it). No leading gap: the last action row already draws its own faint
+            // under-divider, so the bold divider sits flush against it and reads as a single
+            // section divider rather than a second line floating below the faint one.
+            if (barterService != null || persuadeAvailable) {
+                item {
+                    Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
+            // Any other services first, then the dialogue topics.
+            items(otherServices) { service ->
                 DialogueOptionRow(service, dimmed = choicesActive) {
                     if (interactive) CompanionActions.activateDialogueService(service)
                 }
             }
-            Spacer(Modifier.height(6.dp))
-        }
-
-        // Disposition bar — sits just above the topics list. Hidden when disposition is
-        // unknown (< 0, e.g. a creature, or before the first DISPOSITION line).
-        if (disposition >= 0) {
-            DispositionBar(disposition)
-            Spacer(Modifier.height(6.dp))
-        }
-
-        // Persuade trigger — opens the middle persuasion column.
-        if (persuadeAvailable) {
-            DialogueActionRow("PERSUADE", dimmed = choicesActive) {
-                if (interactive) onPersuadeTapped()
-            }
-            Spacer(Modifier.height(6.dp))
-        }
-
-        // Topics (fills remaining space, scrollable)
-        SpellSectionHeader("TOPICS")
-        Spacer(Modifier.height(4.dp))
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
             items(topics) { topic ->
                 DialogueOptionRow(topic, dimmed = choicesActive) {
                     if (interactive) CompanionActions.selectDialogueTopic(topic)
@@ -599,7 +654,7 @@ private fun DialogueRightColumn(
             }
         }
 
-        // Goodbye (fixed at the bottom of the column)
+        // 6. Goodbye (pinned to the bottom of the column).
         Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
         Box(
             modifier = Modifier
@@ -634,29 +689,6 @@ private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: (
             modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 4.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
-    }
-}
-
-/** A highlighted action row in the right column (e.g. PERSUADE) — visually distinct from
- *  the plain topic/service rows via the SlotWorn fill + bright bronze border, so it reads
- *  as a button rather than a topic. Inert (dimmed, no click) while a choice is active. */
-@Composable
-private fun DialogueActionRow(label: String, dimmed: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(2.dp))
-            .background(if (dimmed) SlotBg else SlotWorn)
-            .border(1.dp, if (dimmed) BronzeDark else BronzeLight, RoundedCornerShape(2.dp))
-            .clickable(onClick = onClick)
-            .padding(vertical = 8.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            label,
-            color = if (dimmed) BoneDim else BronzeLight, fontSize = 13.sp,
-            fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp
-        )
     }
 }
 
@@ -1081,7 +1113,10 @@ private fun LootingOverlay(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
+                // Fills the full screen height (bottom = 12.dp, not BOTTOM_BAR_SPACE): looting is
+                // a modal interaction left via Close / Take All / B, so the panel covers the
+                // bottom tab bar — same approach as the barter overlay. 12dp matches the insets.
+                .padding(top = 12.dp, bottom = 12.dp, start = 12.dp, end = 12.dp)
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
@@ -1632,6 +1667,501 @@ private fun QtyActionButton(
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp
         )
+    }
+}
+
+/* ---- Barter overlay (bottom screen) ---- */
+
+private val BarterGreen = Color(0xFF7FBF7F)   // Offer / "player receives" (matches effect green)
+private val BarterRed = Color(0xFFC75C5C)     // "player pays" / rejected (matches effect red)
+private val BarterBlue = Color(0xFF6E93C9)    // Cancel
+
+/**
+ * Bottom-screen barter overlay. Driven by COMPANION_BARTER_* (native TradeWindow),
+ * shown whenever [GameStateRepository.barterSession] is non-null. NOT a Compose Dialog
+ * (crashes on the Presentation display — see ItemInfoOverlay); an in-window Box at
+ * zIndex 16f (above the dialogue overlay it sits on top of, below QuantitySelector 20f).
+ *
+ * Item selection is OPTIMISTIC and local: GM_Barter pauses the sim, so the engine's
+ * COMPANION_BARTER_OFFER re-exports are frame-starved and can't refresh the display mid-
+ * session (same as LootingOverlay). Each tap mutates the local lists (driving its own
+ * recomposition) AND sends the real CMP:barter_* command; the engine reconciles the
+ * authoritative balance. Lists are initialized once on open and NOT re-synced from later
+ * `session` emissions; on close→reopen the overlay re-enters composition and re-inits.
+ */
+@Composable
+private fun BarterOverlay(session: BarterSession, disposition: Int) {
+    var vendorItems by remember { mutableStateOf(session.vendorItems) }
+    var playerItems by remember { mutableStateOf(session.playerItems) }
+    var extraGold by remember { mutableStateOf(session.extraGoldOffer) }
+    var vendorCat by remember { mutableStateOf<String?>(null) }
+    var playerCat by remember { mutableStateOf<String?>(null) }
+
+    // Net estimate from the optimistic selection (positive = player receives gold). `value`
+    // is the merchant's actual barter price per unit, so this tracks the engine balance.
+    val playerSelValue = playerItems.filter { it.isSelected }.sumOf { it.value * it.selectedCount }
+    val vendorSelValue = vendorItems.filter { it.isSelected }.sumOf { it.value * it.selectedCount }
+    val net = playerSelValue - vendorSelValue + extraGold
+    val anySelected = playerItems.any { it.isSelected } || vendorItems.any { it.isSelected }
+
+    // The actual gold changing hands = the engine's fair price for the selected items
+    // (merchantOffer, updated by COMPANION_BARTER_OFFER) + the player's manual offset.
+    // Positive = the player receives gold, negative = the player pays.
+    val offerBalance = session.merchantOffer + extraGold
+
+    val playerCantAfford = net < 0 && -net > session.playerGold
+    val vendorCantAfford = net > 0 && net > session.vendorGold
+    // Enabled when there's anything to offer (items OR a gold adjustment) and it's
+    // affordable. A gold-only offer (no items) is still submittable so the engine's
+    // no_items rejection surfaces as feedback; a completely empty offer stays disabled.
+    val offerEnabled = (anySelected || extraGold != 0) && !playerCantAfford && !vendorCantAfford
+    val offerLabel = when {
+        playerCantAfford -> "Insufficient gold"
+        vendorCantAfford -> "Vendor lacks gold"
+        else -> "Offer"
+    }
+
+    fun mutate(side: BarterSide, id: String, transform: (BarterItem) -> BarterItem) {
+        if (side == BarterSide.VENDOR) vendorItems = vendorItems.map { if (it.id == id) transform(it) else it }
+        else playerItems = playerItems.map { if (it.id == id) transform(it) else it }
+    }
+
+    fun toggle(item: BarterItem) {
+        if (item.isSelected) {
+            mutate(item.side, item.id) { it.copy(isSelected = false, selectedCount = 0) }
+            CompanionActions.barterReturn(item.side, item.id, item.selectedCount)
+        } else {
+            // Stack > 1 → ask "how many?" via the shared QuantitySelector (20f, above this).
+            QuantityRequestState.requestOrRun(item.displayName(), item.count, "Select") { n ->
+                mutate(item.side, item.id) { it.copy(isSelected = true, selectedCount = n) }
+                CompanionActions.barterBorrow(item.side, item.id, n)
+            }
+        }
+    }
+    // Step the gold offset, clamping the resulting balance to what each side can pay
+    // (you can't offer to pay more than you have, nor demand more than the vendor's gold).
+    fun adjustGold(delta: Int) {
+        val current = session.merchantOffer + extraGold
+        val target = (current + delta).coerceIn(-session.playerGold, session.vendorGold)
+        extraGold = target - session.merchantOffer
+        CompanionActions.barterSetExtraGold(extraGold)
+    }
+    // Tapping the centre resets the manual offset (back to the fair market price).
+    fun resetGold() {
+        extraGold = 0
+        CompanionActions.barterSetExtraGold(0)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(16f)
+            .background(Color(0xCC0F0C08))
+            .pointerInput(Unit) { detectTapGestures {} }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                // bottom = 12.dp (not BOTTOM_BAR_SPACE): barter is a modal interaction left
+                // via Cancel / B, so the panel fills over the bottom tab bar rather than
+                // reserving space for it. 12dp matches the top/side insets.
+                .padding(top = 12.dp, bottom = 12.dp, start = 12.dp, end = 12.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- Title bar: "Vendor — Barter" + disposition bar ----
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "${session.vendorName.ifBlank { "Merchant" }} — Barter",
+                    color = BronzeLight, fontSize = 14.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (disposition >= 0) {
+                    Spacer(Modifier.width(12.dp))
+                    Box(Modifier.width(120.dp)) { DispositionBar(disposition) }
+                }
+            }
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            // ---- Two equal columns: player | vendor ----
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                BarterColumn(
+                    header = "You (${session.playerGold}g)",
+                    items = playerItems,
+                    isPlayerSide = true,
+                    selectedCategory = playerCat,
+                    onSelectCategory = { playerCat = it },
+                    onToggle = ::toggle,
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
+                )
+                // Dashed vertical divider.
+                Canvas(Modifier.fillMaxHeight().width(1.dp)) {
+                    drawLine(
+                        color = BronzeDark,
+                        start = Offset(0f, 0f),
+                        end = Offset(0f, size.height),
+                        strokeWidth = size.width.coerceAtLeast(1f),
+                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 6f))
+                    )
+                }
+                BarterColumn(
+                    header = "${session.vendorName.ifBlank { "Merchant" }} (${session.vendorGold}g)",
+                    items = vendorItems,
+                    isPlayerSide = false,
+                    selectedCategory = vendorCat,
+                    onSelectCategory = { vendorCat = it },
+                    onToggle = ::toggle,
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
+                )
+            }
+
+            // ---- Offer section: a single compact gold row ----
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            BarterGoldBar(balance = offerBalance, onStep = ::adjustGold, onReset = ::resetGold)
+
+            // ---- Buttons ----
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                BarterButton(
+                    label = offerLabel, color = BarterGreen, enabled = offerEnabled,
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.barterOffer() }
+                BarterButton(
+                    label = "Cancel", hint = "B", color = BarterBlue, enabled = true,
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.barterCancel() }
+            }
+        }
+
+        // Local dropdown-dismiss scrim for BarterRow long-press (Info) menus — same as
+        // LootingOverlay (this overlay renders above the global scrim at 10f).
+        if (DropdownState.anyOpen) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures { DropdownState.closeAll() } }
+            )
+        }
+    }
+}
+
+/** One side of the barter overlay — header, per-side category tabs, scrolling item list. */
+@Composable
+private fun BarterColumn(
+    header: String,
+    items: List<BarterItem>,
+    isPlayerSide: Boolean,
+    selectedCategory: String?,
+    onSelectCategory: (String?) -> Unit,
+    onToggle: (BarterItem) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier) {
+        Text(
+            header,
+            color = BronzeLight, fontSize = 13.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(4.dp))
+        // Category tabs — All + only the buckets present on this side.
+        val presentCats = remember(items) { items.map { it.category }.toSet() }
+        val tabs = remember(presentCats) { BARTER_CATEGORIES.filter { it.cat in presentCats } }
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CategoryTab("All", active = selectedCategory == null) { onSelectCategory(null) }
+            tabs.forEach { c ->
+                CategoryTab(c.label, active = selectedCategory == c.cat) { onSelectCategory(c.cat) }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+
+        // Selected-first, then worn-first (player), then alphabetical — mirrors inventory.
+        val visible = remember(items, selectedCategory, isPlayerSide) {
+            items.filter { selectedCategory == null || it.category == selectedCategory }
+                .sortedWith(
+                    compareByDescending<BarterItem> { it.isSelected }
+                        .thenByDescending { isPlayerSide && it.worn }
+                        .thenBy { it.displayName().lowercase() }
+                )
+        }
+        // weight(1f) so the list explicitly takes ALL remaining height in the column —
+        // the item lists expand to fill the overlay (matching the looting overlay).
+        if (visible.isEmpty()) {
+            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Text("Nothing to trade", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                items(visible) { item ->
+                    BarterRow(
+                        item = item,
+                        isPlayerSide = isPlayerSide,
+                        iconBitmap = rememberItemIcon(item.icon),
+                        onToggle = onToggle
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One barter item row. Tap = select/deselect (add to / remove from the offer); a stack
+ * > 1 routes the SELECT through QuantityRequestState first. Long-press = Info. Selected
+ * rows get a SlotWorn highlight + a green "✓ selling"/"✓ buying" tag replacing the tap hint.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BarterRow(
+    item: BarterItem,
+    isPlayerSide: Boolean,
+    iconBitmap: ImageBitmap? = null,
+    onToggle: (BarterItem) -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+    val selected = item.isSelected
+    val label = item.displayName()
+    Box {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(if (selected) SlotWorn else Color.Transparent)
+                    .combinedClickable(
+                        onClick = { onToggle(item) },
+                        onLongClick = { menuOpen = true; DropdownState.open() }
+                    )
+                    .padding(horizontal = 6.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Icon box.
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                ) {
+                    if (iconBitmap != null) {
+                        Image(
+                            bitmap = iconBitmap,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                // Name + sub-line (qty · value).
+                Column(Modifier.weight(1f).padding(end = 6.dp)) {
+                    Text(
+                        label,
+                        color = if (selected) BoneBright else Bone,
+                        fontSize = 13.sp, fontFamily = MwBody,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                    val sub = buildString {
+                        if (item.count > 1) append("×${item.count}  ")
+                        append("${item.value}g")
+                    }
+                    Text(sub, color = BoneDim, fontSize = 9.sp, fontFamily = MwData)
+                }
+                // Right column: selection state / tap hint + worn tag.
+                Column(horizontalAlignment = Alignment.End) {
+                    if (selected) {
+                        val n = if (item.selectedCount > 1) " ×${item.selectedCount}" else ""
+                        Text(
+                            (if (isPlayerSide) "✓ selling" else "✓ buying") + n,
+                            color = BarterGreen, fontSize = 10.sp,
+                            fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Text(
+                            if (isPlayerSide) "tap to sell" else "tap to buy",
+                            color = BoneDim.copy(alpha = 0.7f), fontSize = 9.sp, fontFamily = MwBody
+                        )
+                    }
+                    if (isPlayerSide && item.worn) {
+                        Text(
+                            "WORN", color = BronzeLight, fontSize = 8.sp,
+                            fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp
+                        )
+                    }
+                }
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+        }
+
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+            containerColor = StonePanel,
+            shadowElevation = 0.dp,
+            border = BorderStroke(1.dp, Bronze),
+            shape = RoundedCornerShape(3.dp)
+        ) {
+            Text(
+                label,
+                color = BronzeLight, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (selected) "Remove from offer"
+                        else if (isPlayerSide) "Sell" else "Buy",
+                        fontFamily = MwBody, fontSize = 13.sp
+                    )
+                },
+                onClick = { menuOpen = false; DropdownState.closeAll(); onToggle(item) },
+                colors = menuItemColors
+            )
+            DropdownMenuItem(
+                text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                colors = menuItemColors
+            )
+        }
+    }
+}
+
+/**
+ * Compact offer bar: [−100] [−10] [ balance ] [+10] [+100]. The centre shows the gold
+ * actually changing hands (the engine's fair price + the manual offset): green = you
+ * receive, red = you pay. Tapping the centre resets the offset to the fair price. No
+ * other text.
+ */
+@Composable
+private fun BarterGoldBar(balance: Int, onStep: (Int) -> Unit, onReset: () -> Unit) {
+    val balanceColor = when {
+        balance > 0 -> BarterGreen
+        balance < 0 -> BarterRed
+        else -> Bone
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        GoldStep("−100", Modifier.weight(1f)) { onStep(-100) }
+        GoldStep("−10", Modifier.weight(1f)) { onStep(-10) }
+        // Centre: gold changing hands; tap to reset to the fair market price.
+        Box(
+            modifier = Modifier
+                .weight(1.4f)
+                .height(44.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .clickable { onReset() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                if (balance > 0) "+${balance}g" else "${balance}g",
+                color = balanceColor, fontSize = 20.sp, fontFamily = MwData, fontWeight = FontWeight.Bold
+            )
+        }
+        GoldStep("+10", Modifier.weight(1f)) { onStep(10) }
+        GoldStep("+100", Modifier.weight(1f)) { onStep(100) }
+    }
+}
+
+/** A gold-adjust stepper button — ≥40dp tall for easy tapping. */
+@Composable
+private fun GoldStep(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(SlotWorn)
+            .border(1.dp, Bronze, RoundedCornerShape(3.dp))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = BronzeLight, fontSize = 15.sp, fontFamily = MwData, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Offer / Cancel button — colored border + tinted fill + colored label (theme-consistent
+ *  take on the spec's "green Offer / blue Cancel"). Disabled → dim, non-tappable. */
+@Composable
+private fun BarterButton(
+    label: String,
+    color: Color,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    hint: String? = null,
+    onClick: () -> Unit
+) {
+    val c = if (enabled) color else BoneDim
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (enabled) color.copy(alpha = 0.18f) else SlotBg)
+            .border(1.dp, c, RoundedCornerShape(3.dp))
+            .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
+            .padding(vertical = 11.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = c, fontSize = 14.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            if (hint != null) {
+                Spacer(Modifier.width(6.dp))
+                Text("[$hint]", color = c.copy(alpha = 0.7f), fontSize = 11.sp, fontFamily = MwData)
+            }
+        }
+    }
+}
+
+/** Offer-rejected alert — in-window Box overlay (NOT a Dialog). Tap scrim or OK to dismiss;
+ *  the barter session stays open so the player can adjust and try again. */
+@Composable
+private fun BarterRejectedAlert(reason: String, onDismiss: () -> Unit) {
+    val msg = when (reason) {
+        "player_gold" -> "You don't have enough gold for that."
+        "vendor_gold" -> "The merchant can't afford that."
+        "no_items" -> "Select something to trade first."
+        "stolen" -> "That item was stolen — it has been confiscated."
+        else -> "The merchant refused your offer."
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(18f)
+            .background(Color(0x99000000))
+            .pointerInput(Unit) { detectTapGestures { onDismiss() } },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(320.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("Offer rejected", color = BarterRed, fontSize = 16.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            Text(msg, color = Bone, fontSize = 13.sp, fontFamily = MwBody, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(16.dp))
+            QtyActionButton("OK", Modifier.fillMaxWidth(), primary = true) { onDismiss() }
+        }
     }
 }
 

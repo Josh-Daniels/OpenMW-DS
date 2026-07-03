@@ -1,0 +1,581 @@
+Companion (bottom-screen barter) — export + control bridge for the native
+TradeWindow (GM_Barter). Mirrors companion-dialogue-export.patch:
+
+Outbound (COMPANION_BARTER_*, streamed one small line each for 4096-byte flush
+safety): OPEN{vendor,vendorGold,playerGold} → ITEM{side,id,sid,name,count,value,
+cat,icon,worn}* (vendor items then player items; value = the merchant's actual
+per-unit barter price via getBarterOffer, NOT base value) → END; then a running
+OFFER{merchantOffer,balance,extraGold,vendorGold,playerGold} after every change
+(balance = the authoritative net the player is offering); OFFER_ACCEPTED /
+OFFER_REJECTED{reason} on an offer; CLOSED on close. Also re-emits the existing
+COMPANION_DIALOGUE_DISPOSITION prefix from TradeWindow::onFrame, because
+DialogueWindow::onFrame (the normal emit site) does NOT run while GM_Barter is
+the top mode, so the bottom-screen disposition bar would otherwise freeze.
+
+Inbound: a file-static gCompanionTradeWindow (set in the ctor) plus five
+extern "C" bridges — companionBarterBorrow/Return/SetGold/Offer/Cancel — let
+drainCompanionCommands drive the offer from CMP:barter_* commands. Items are
+matched by serialized RefId. gCompanionExtraGold holds the player's manual gold
+offset so it survives item changes (updateOffer only shifts the balance by the
+merchant-offer delta). companionOffer() mirrors onOfferButtonClicked but reports
+each rejection reason to the bottom screen instead of a native messageBox.
+
+Each bridge no-ops unless containsMode(GM_Barter) (stale-window guard).
+diff --git a/apps/openmw/mwgui/tradewindow.cpp b/apps/openmw/mwgui/tradewindow.cpp
+index 93d5abb29f..4cce58ef68 100644
+--- a/apps/openmw/mwgui/tradewindow.cpp
++++ b/apps/openmw/mwgui/tradewindow.cpp
+@@ -6,8 +6,21 @@
+ #include <MyGUI_ImageBox.h>
+ #include <MyGUI_InputManager.h>
+ 
++#include <algorithm>
++#include <sstream>
++
++#include <components/esm3/loadalch.hpp>
++#include <components/esm3/loadarmo.hpp>
++#include <components/esm3/loadclot.hpp>
++#include <components/esm3/loadingr.hpp>
++#include <components/esm3/loadlock.hpp>
++#include <components/esm3/loadprob.hpp>
++#include <components/esm3/loadweap.hpp>
++#include <components/misc/resourcehelpers.hpp>
+ #include <components/misc/rng.hpp>
+ #include <components/misc/strings/format.hpp>
++#include <components/resource/resourcesystem.hpp>
++#include <components/vfs/manager.hpp>
+ #include <components/widgets/numericeditbox.hpp>
+ 
+ #include "../mwbase/dialoguemanager.hpp"
+@@ -34,6 +47,63 @@
+ 
+ namespace
+ {
++    // Companion (bottom-screen barter): the single live TradeWindow, set in its
++    // constructor, used by the extern "C" bridges below so drainCompanionCommands
++    // (androidmain.cpp, engine main thread) can drive barter without reaching into
++    // WindowManager's private members. Mirrors gCompanionDialogueWindow.
++    MWGui::TradeWindow* gCompanionTradeWindow = nullptr;
++    // Player's manual gold offset (the spec's extraGoldOffer): balance = merchantOffer +
++    // gCompanionExtraGold. Re-applied after every borrow/return so it survives item
++    // changes (updateOffer only shifts the balance by the merchant-offer delta). Reset
++    // to 0 on a new merchant (setPtr).
++    int gCompanionExtraGold = 0;
++    // Change-detection so onFrame only logs COMPANION_DIALOGUE_DISPOSITION (reused
++    // prefix — DialogueWindow::onFrame does NOT run while GM_Barter is on top) and
++    // COMPANION_BARTER_OFFER on a real change. Reset on a new merchant.
++    int gCompanionLastBarterDisposition = -1;
++    std::string gCompanionLastBarterOffer;
++
++    // JSON-escape a string for a COMPANION_BARTER_* payload. Inventory icon paths
++    // contain backslashes and item names can contain quotes, so both must be escaped.
++    std::string companionJsonEscape(std::string_view s)
++    {
++        std::string out;
++        out.reserve(s.size() + 8);
++        for (const char c : s)
++        {
++            switch (c)
++            {
++                case '"': out += "\\\""; break;
++                case '\\': out += "\\\\"; break;
++                case '\n': out += "\\n"; break;
++                case '\r': out += "\\r"; break;
++                case '\t': out += "\\t"; break;
++                default: out += c; break;
++            }
++        }
++        return out;
++    }
++
++    // Companion: coarse category matching the bottom-screen barter tabs
++    // (All / Weapons / Armor / Apparel / Tools / Consumables / Misc). Deliberately
++    // coarser than the inventory's fine slot categories — the barter screen groups
++    // into these seven buckets only. Books/lights/apparatus/repair/misc all fall to
++    // "misc" (there is no Books tab on the barter screen).
++    const char* companionBarterCategory(const MWWorld::Ptr& item)
++    {
++        const auto type = item.getType();
++        if (type == ESM::Weapon::sRecordId)
++            return "weapon";
++        if (type == ESM::Armor::sRecordId)
++            return "armor";
++        if (type == ESM::Clothing::sRecordId)
++            return "apparel";
++        if (type == ESM::Lockpick::sRecordId || type == ESM::Probe::sRecordId)
++            return "tools";
++        if (type == ESM::Potion::sRecordId || type == ESM::Ingredient::sRecordId)
++            return "consumable";
++        return "misc";
++    }
+ 
+     int getEffectiveValue(MWWorld::Ptr item, int count)
+     {
+@@ -194,6 +264,8 @@ namespace MWGui
+             mControllerButtons.mR3 = "#{Interface:Info}";
+             mControllerButtons.mL2 = "#{Interface:Inventory}";
+         }
++
++        gCompanionTradeWindow = this;
+     }
+ 
+     void TradeWindow::setPtr(const MWWorld::Ptr& actor)
+@@ -231,6 +303,14 @@ namespace MWGui
+         // Cycle to the buy window if it's not active.
+         if (Settings::gui().mControllerMenus && !mActiveControllerWindow)
+             MWBase::Environment::get().getWindowManager()->cycleActiveControllerWindow(true);
++
++        // Companion: a fresh merchant clears the manual gold offset and change-detection,
++        // then exports the whole barter session (vendor + player items, gold, disposition)
++        // to the bottom screen.
++        gCompanionExtraGold = 0;
++        gCompanionLastBarterDisposition = -1;
++        gCompanionLastBarterOffer.clear();
++        companionExportOpen();
+     }
+ 
+     void TradeWindow::onFrame(float dt)
+@@ -246,6 +326,22 @@ namespace MWGui
+             updateOffer();
+             mUpdateNextFrame = false;
+         }
++
++        // Companion: mirror the derived disposition onto the bottom-screen disposition bar
++        // during barter. NOT gated on isVisible(): DialogueWindow::onFrame (the normal emit
++        // site) is dormant under GM_Barter, and under Hide UI the trade window is HIDDEN yet
++        // onFrame still runs on it (called on every top-mode window regardless of visibility)
++        // — that hidden state is the companion's normal case. Reuses the DISPOSITION prefix.
++        if (!mPtr.isEmpty() && mPtr.getClass().isNpc())
++        {
++            const int disposition
++                = MWBase::Environment::get().getMechanicsManager()->getDerivedDisposition(mPtr);
++            if (disposition != gCompanionLastBarterDisposition)
++            {
++                gCompanionLastBarterDisposition = disposition;
++                Log(Debug::Info) << "COMPANION_DIALOGUE_DISPOSITION:" << disposition;
++            }
++        }
+     }
+ 
+     void TradeWindow::onNameFilterChanged(MyGUI::EditBox* sender)
+@@ -658,6 +754,319 @@ namespace MWGui
+         return merchantGold;
+     }
+ 
++    // ================= Companion (bottom-screen barter) =================
++
++    void TradeWindow::companionExportModelItems(TradeItemModel* model, const std::string& side)
++    {
++        if (!model)
++            return;
++        // side == "vendor": the player is buying, so price each item at the merchant's
++        // buying offer; side == "player": the player is selling, price at the selling offer.
++        const bool buying = (side == "vendor");
++        const VFS::Manager* const vfs = MWBase::Environment::get().getResourceSystem()->getVFS();
++        const std::size_t itemCount = model->getItemCount();
++        for (std::size_t i = 0; i < itemCount; ++i)
++        {
++            const ItemStack& item = model->getItem(static_cast<int>(i));
++            // Skip items already staged into an offer (Type_Barter) — they are shown as
++            // selected on the bottom screen (tracked optimistically there); re-listing them
++            // as available would double-count them.
++            if (item.mType == ItemStack::Type_Barter)
++                continue;
++            MWWorld::Ptr base = item.mBase;
++            const int stackCount = static_cast<int>(item.mCount);
++            // Per-unit barter price (mercantile-/disposition-adjusted). The AUTHORITATIVE
++            // net is still the native running balance in COMPANION_BARTER_OFFER; this is a
++            // per-item display estimate so the bottom screen can show each item's price.
++            const int basePrice = getEffectiveValue(base, 1);
++            const int unitValue
++                = MWBase::Environment::get().getMechanicsManager()->getBarterOffer(mPtr, basePrice, buying);
++            const std::string refId = base.getCellRef().getRefId().serializeText();
++            const std::string name{ base.getClass().getName(base) };
++            std::string icon;
++            const std::string_view rawIcon = base.getClass().getInventoryIcon(base);
++            if (!rawIcon.empty() && vfs)
++                icon = Misc::ResourceHelpers::correctIconPath(VFS::Path::toNormalized(rawIcon), *vfs);
++            const bool worn = (item.mType == ItemStack::Type_Equipped);
++
++            std::ostringstream out;
++            out << "COMPANION_BARTER_ITEM:{\"side\":\"" << side << "\""
++                << ",\"id\":\"" << companionJsonEscape(refId) << "\""
++                << ",\"sid\":\"" << companionJsonEscape(refId) << "\""
++                << ",\"name\":\"" << companionJsonEscape(name) << "\""
++                << ",\"count\":" << stackCount
++                << ",\"value\":" << unitValue
++                << ",\"cat\":\"" << companionBarterCategory(base) << "\""
++                << ",\"icon\":\"" << companionJsonEscape(icon) << "\""
++                << ",\"worn\":" << (worn ? "true" : "false") << "}";
++            Log(Debug::Info) << out.str();
++        }
++    }
++
++    void TradeWindow::companionExportOpen()
++    {
++        if (!mTradeModel || mPtr.isEmpty())
++            return;
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int playerGold
++            = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++
++        std::ostringstream header;
++        header << "COMPANION_BARTER_OPEN:{\"vendor\":\"" << companionJsonEscape(mPtr.getClass().getName(mPtr))
++               << "\",\"vendorGold\":" << getMerchantGold() << ",\"playerGold\":" << playerGold << "}";
++        Log(Debug::Info) << header.str();
++
++        // Vendor items first (already service-filtered by TradeItemModel), then the
++        // player's own sellable items. Streamed one small line each (4096-byte flush safety).
++        mTradeModel->update();
++        companionExportModelItems(mTradeModel, "vendor");
++
++        TradeItemModel* playerTradeModel
++            = MWBase::Environment::get().getWindowManager()->getInventoryWindow()->getTradeModel();
++        if (playerTradeModel)
++        {
++            playerTradeModel->update();
++            companionExportModelItems(playerTradeModel, "player");
++        }
++
++        Log(Debug::Info) << "COMPANION_BARTER_END";
++
++        // Force the first offer line to emit (fresh session starts at a zero offer).
++        gCompanionLastBarterOffer.clear();
++        companionExportOffer();
++    }
++
++    void TradeWindow::companionExportOffer()
++    {
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int playerGold
++            = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++
++        // merchantOffer = the fair price (native, authoritative direction); balance = the
++        // actual offer the player is making (= merchantOffer + extraGold), which is what
++        // haggle() ultimately compares. The Kotlin net readout uses `balance`.
++        std::ostringstream out;
++        out << "{\"merchantOffer\":" << mCurrentMerchantOffer << ",\"balance\":" << mCurrentBalance
++            << ",\"extraGold\":" << gCompanionExtraGold << ",\"vendorGold\":" << getMerchantGold()
++            << ",\"playerGold\":" << playerGold << "}";
++        const std::string payload = out.str();
++        if (payload == gCompanionLastBarterOffer)
++            return; // change-detection: unchanged offer prints nothing
++        gCompanionLastBarterOffer = payload;
++        Log(Debug::Info) << "COMPANION_BARTER_OFFER:" << payload;
++    }
++
++    int TradeWindow::companionFindIndex(TradeItemModel* model, const std::string& refId, bool borrowed)
++    {
++        if (!model)
++            return -1;
++        // Rebuild mItems so borrowed (Type_Barter) items are enumerated with the current
++        // staged state (TradeItemModel::update appends mBorrowedToUs as Type_Barter). The
++        // returned index is used immediately by the caller with no intervening update.
++        model->update();
++        const std::size_t itemCount = model->getItemCount();
++        for (std::size_t i = 0; i < itemCount; ++i)
++        {
++            const ItemStack& item = model->getItem(static_cast<int>(i));
++            const bool isBorrowed = (item.mType == ItemStack::Type_Barter);
++            if (isBorrowed != borrowed)
++                continue;
++            if (item.mBase.getCellRef().getRefId().serializeText() == refId)
++                return static_cast<int>(i);
++        }
++        return -1;
++    }
++
++    void TradeWindow::companionBorrow(const std::string& side, const std::string& refId, int count)
++    {
++        if (!mTradeModel || count <= 0)
++            return;
++        TradeItemModel* playerTradeModel
++            = MWBase::Environment::get().getWindowManager()->getInventoryWindow()->getTradeModel();
++        if (!playerTradeModel)
++            return;
++
++        if (side == "vendor")
++        {
++            // Player buys a vendor item: borrow it from the merchant to the player
++            // (mirrors sellItem's normal-item branch).
++            const int idx = companionFindIndex(mTradeModel, refId, /*borrowed=*/false);
++            if (idx < 0)
++                return;
++            const std::size_t avail = mTradeModel->getItem(idx).mCount;
++            const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), avail);
++            playerTradeModel->borrowItemToUs(idx, mTradeModel, n);
++            mTradeModel->borrowItemFromUs(idx, n);
++        }
++        else
++        {
++            // Player sells their own item: borrow it from the player to the merchant
++            // (mirrors the standalone borrowItem()).
++            const int idx = companionFindIndex(playerTradeModel, refId, /*borrowed=*/false);
++            if (idx < 0)
++                return;
++            const std::size_t avail = playerTradeModel->getItem(idx).mCount;
++            const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), avail);
++            mTradeModel->borrowItemToUs(idx, playerTradeModel, n);
++        }
++
++        MWBase::Environment::get().getWindowManager()->getInventoryWindow()->updateItemView();
++        mItemView->update();
++        updateOffer();
++        // Preserve the player's manual gold offset across item changes (updateOffer only
++        // shifts the balance by the merchant-offer delta, and resets it to 0 when both
++        // sides are empty). See gCompanionExtraGold.
++        mCurrentBalance = mCurrentMerchantOffer + gCompanionExtraGold;
++        updateLabels();
++        companionExportOffer();
++    }
++
++    void TradeWindow::companionReturn(const std::string& side, const std::string& refId, int count)
++    {
++        if (!mTradeModel || count <= 0)
++            return;
++        TradeItemModel* playerTradeModel
++            = MWBase::Environment::get().getWindowManager()->getInventoryWindow()->getTradeModel();
++        if (!playerTradeModel)
++            return;
++
++        if (side == "vendor")
++        {
++            // Un-stage a bought vendor item: it sits (Type_Barter) in the PLAYER model,
++            // borrowed from the merchant to the player.
++            const int idx = companionFindIndex(playerTradeModel, refId, /*borrowed=*/true);
++            if (idx < 0)
++                return;
++            const std::size_t held = playerTradeModel->getItem(idx).mCount;
++            const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), held);
++            playerTradeModel->returnItemBorrowedToUs(idx, n);
++            mTradeModel->returnItemBorrowedFromUs(idx, playerTradeModel, n);
++        }
++        else
++        {
++            // Un-stage a sold player item: it sits (Type_Barter) in the MERCHANT model,
++            // borrowed from the player to the merchant (mirrors sellItem's Type_Barter branch).
++            const int idx = companionFindIndex(mTradeModel, refId, /*borrowed=*/true);
++            if (idx < 0)
++                return;
++            const std::size_t held = mTradeModel->getItem(idx).mCount;
++            const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), held);
++            mTradeModel->returnItemBorrowedToUs(idx, n);
++            playerTradeModel->returnItemBorrowedFromUs(idx, mTradeModel, n);
++        }
++
++        MWBase::Environment::get().getWindowManager()->getInventoryWindow()->updateItemView();
++        mItemView->update();
++        updateOffer();
++        mCurrentBalance = mCurrentMerchantOffer + gCompanionExtraGold;
++        updateLabels();
++        companionExportOffer();
++    }
++
++    void TradeWindow::companionSetExtraGold(int extra)
++    {
++        gCompanionExtraGold = extra;
++        mCurrentBalance = mCurrentMerchantOffer + gCompanionExtraGold;
++        updateLabels();
++        companionExportOffer();
++    }
++
++    void TradeWindow::companionOffer()
++    {
++        if (!mTradeModel)
++            return;
++        TradeItemModel* playerItemModel
++            = MWBase::Environment::get().getWindowManager()->getInventoryWindow()->getTradeModel();
++        if (!playerItemModel)
++            return;
++
++        const MWWorld::Store<ESM::GameSetting>& gmst
++            = MWBase::Environment::get().getESMStore()->get<ESM::GameSetting>();
++
++        // Mirror onOfferButtonClicked's checks, but report each rejection reason to the
++        // bottom screen instead of popping a native messageBox.
++        const std::vector<ItemStack>& playerBought = playerItemModel->getItemsBorrowedToUs();
++        const std::vector<ItemStack>& merchantBought = mTradeModel->getItemsBorrowedToUs();
++        if (playerBought.empty() && merchantBought.empty())
++        {
++            Log(Debug::Info) << "COMPANION_BARTER_OFFER_REJECTED:{\"reason\":\"no_items\"}";
++            return;
++        }
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int playerGold
++            = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++
++        if (mCurrentBalance < 0 && playerGold < std::abs(mCurrentBalance))
++        {
++            Log(Debug::Info) << "COMPANION_BARTER_OFFER_REJECTED:{\"reason\":\"player_gold\"}";
++            return;
++        }
++        if (mCurrentBalance > 0 && getMerchantGold() < mCurrentBalance)
++        {
++            Log(Debug::Info) << "COMPANION_BARTER_OFFER_REJECTED:{\"reason\":\"vendor_gold\"}";
++            return;
++        }
++
++        // Stolen-item path: confiscate and abort barter, same as vanilla.
++        for (const ItemStack& itemStack : merchantBought)
++        {
++            if (MWBase::Environment::get().getMechanicsManager()->isItemStolenFrom(
++                    itemStack.mBase.getCellRef().getRefId(), mPtr))
++            {
++                std::string msg = gmst.find("sNotifyMessage49")->mValue.getString();
++                msg = Misc::StringUtils::format(msg, itemStack.mBase.getClass().getName(itemStack.mBase));
++                MWBase::Environment::get().getWindowManager()->messageBox(msg);
++                MWBase::Environment::get().getMechanicsManager()->confiscateStolenItemToOwner(
++                    player, itemStack.mBase, mPtr, static_cast<int>(itemStack.mCount));
++                Log(Debug::Info) << "COMPANION_BARTER_OFFER_REJECTED:{\"reason\":\"stolen\"}";
++                onCancelButtonClicked(mCancelButton);
++                MWBase::Environment::get().getWindowManager()->exitCurrentGuiMode();
++                return;
++            }
++        }
++
++        const bool offerAccepted = haggle(player, mPtr, mCurrentBalance, mCurrentMerchantOffer);
++
++        if (mPtr.getClass().isNpc())
++        {
++            const int dispositionDelta = offerAccepted
++                ? gmst.find("iBarterSuccessDisposition")->mValue.getInteger()
++                : gmst.find("iBarterFailDisposition")->mValue.getInteger();
++            MWBase::Environment::get().getDialogueManager()->applyBarterDispositionChange(dispositionDelta);
++        }
++
++        if (!offerAccepted)
++        {
++            Log(Debug::Info) << "COMPANION_BARTER_OFFER_REJECTED:{\"reason\":\"haggle\"}";
++            // Force the disposition bar to re-emit its (now lower) value next frame.
++            gCompanionLastBarterDisposition = -1;
++            return;
++        }
++
++        mTradeModel->transferItems();
++        playerItemModel->transferItems();
++
++        if (mCurrentBalance != 0)
++        {
++            addOrRemoveGold(mCurrentBalance, player);
++            mPtr.getClass().getCreatureStats(mPtr).setGoldPool(
++                mPtr.getClass().getCreatureStats(mPtr).getGoldPool() - mCurrentBalance);
++        }
++
++        eventTradeDone();
++        MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Item Gold Up"));
++        Log(Debug::Info) << "COMPANION_BARTER_OFFER_ACCEPTED";
++        // Pops GM_Barter → TradeWindow::onClose() → COMPANION_BARTER_CLOSED.
++        MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Barter);
++    }
++
++    void TradeWindow::companionCancel()
++    {
++        // exit() + removeGuiMode(GM_Barter) → onClose() → COMPANION_BARTER_CLOSED.
++        onCancelButtonClicked(mCancelButton);
++    }
++
+     void TradeWindow::resetReference()
+     {
+         ReferenceInterface::resetReference();
+@@ -672,6 +1081,14 @@ namespace MWGui
+         if (MWBase::Environment::get().getWindowManager()->containsMode(GM_Barter))
+             return;
+         resetReference();
++
++        // Companion: the barter session ended (Offer accept, Cancel, Bye, or reference
++        // gone). Guarded by the containsMode early-return above, so this fires exactly
++        // once on a real close. NOTE (Phase 3): once companion-hide-barter-on-hideui hides
++        // the window under Hide UI, the mode-pop's setVisible(false) is a no-op that never
++        // calls onClose() — the hidden-window close signal will need an explicit emit then,
++        // same as the dialogue/container patches.
++        Log(Debug::Info) << "COMPANION_BARTER_CLOSED";
+     }
+ 
+     void TradeWindow::onDeleteCustomData(const MWWorld::Ptr& ptr)
+@@ -776,3 +1193,51 @@ namespace MWGui
+             mUpdateNextFrame = true;
+     }
+ }
++
++// Companion (bottom-screen barter): extern "C" bridges driven from drainCompanionCommands
++// (androidmain.cpp, engine main thread). Mirror the dialogue/persuasion bridges. Each
++// no-ops unless a barter session is actually live (containsMode guard, stale-window safe).
++extern "C" void companionBarterBorrow(const char* side, const char* refId, int count)
++{
++    if (!gCompanionTradeWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Barter))
++        return;
++    gCompanionTradeWindow->companionBorrow(side ? side : "", refId ? refId : "", count);
++}
++
++extern "C" void companionBarterReturn(const char* side, const char* refId, int count)
++{
++    if (!gCompanionTradeWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Barter))
++        return;
++    gCompanionTradeWindow->companionReturn(side ? side : "", refId ? refId : "", count);
++}
++
++extern "C" void companionBarterSetGold(int extra)
++{
++    if (!gCompanionTradeWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Barter))
++        return;
++    gCompanionTradeWindow->companionSetExtraGold(extra);
++}
++
++extern "C" void companionBarterOffer()
++{
++    if (!gCompanionTradeWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Barter))
++        return;
++    gCompanionTradeWindow->companionOffer();
++}
++
++extern "C" void companionBarterCancel()
++{
++    if (!gCompanionTradeWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Barter))
++        return;
++    gCompanionTradeWindow->companionCancel();
++}
+diff --git a/apps/openmw/mwgui/tradewindow.hpp b/apps/openmw/mwgui/tradewindow.hpp
+index 3322f4c17e..7d693d533b 100644
+--- a/apps/openmw/mwgui/tradewindow.hpp
++++ b/apps/openmw/mwgui/tradewindow.hpp
+@@ -49,6 +49,17 @@ namespace MWGui
+         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
+         void setActiveControllerWindow(bool active) override;
+ 
++        // Companion (bottom-screen barter): programmatic equivalents of the trade
++        // interactions, driven from drainCompanionCommands (androidmain.cpp) so the
++        // whole barter flow can be mirrored onto the bottom screen without ever
++        // showing the native TradeWindow. Items are matched by serialized RefId.
++        void companionExportOpen();
++        void companionBorrow(const std::string& side, const std::string& refId, int count);
++        void companionReturn(const std::string& side, const std::string& refId, int count);
++        void companionSetExtraGold(int extra);
++        void companionOffer();
++        void companionCancel();
++
+     private:
+         friend class InventoryWindow;
+ 
+@@ -89,6 +100,11 @@ namespace MWGui
+ 
+         void updateOffer();
+ 
++        // Companion helpers (see the public companion* entry points above).
++        void companionExportModelItems(TradeItemModel* model, const std::string& side);
++        void companionExportOffer();
++        int companionFindIndex(TradeItemModel* model, const std::string& refId, bool borrowed);
++
+         void onItemSelected(int index);
+         void sellItem(MyGUI::Widget* sender, std::size_t count);
+ 
