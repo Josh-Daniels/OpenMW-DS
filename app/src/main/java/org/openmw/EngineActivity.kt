@@ -14,6 +14,7 @@ import org.openmw.companion.GameStateRepository
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
+import android.graphics.PixelFormat // PAUSE OPTIONS POC — REMOVE ME
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -38,11 +39,13 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkOut
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background // PAUSE OPTIONS POC — REMOVE ME
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Text // PAUSE OPTIONS POC — REMOVE ME
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +63,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp // PAUSE OPTIONS POC — REMOVE ME
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -122,6 +126,9 @@ class EngineActivity : SDLActivity() {
     // For MorrowindDS
     private var companionPresentation: Presentation? = null
 
+    // PAUSE OPTIONS POC — REMOVE ME
+    private var pauseOverlayView: View? = null
+
     external fun getLastResourceName(): String
     external fun initAlpha3()
     private external fun installCompanionSink()
@@ -164,6 +171,9 @@ class EngineActivity : SDLActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+
+        // PAUSE OPTIONS POC — REMOVE ME
+        hidePauseOverlay()
 
         // MorrowindDS
         companionPresentation?.dismiss()
@@ -683,7 +693,63 @@ class EngineActivity : SDLActivity() {
         }.onFailure {
             Log.e(TAG, "Second-screen: show() failed", it)
         }
+
+        // PAUSE OPTIONS POC — REMOVE ME
+        // Add/remove a full-screen WindowManager overlay on the bottom-screen
+        // Presentation when the in-game pause/options menu opens/closes.
+        lifecycleScope.launch {
+            GameStateRepository.pauseMenuVisible.collect { visible ->
+                if (visible) showPauseOverlay() else hidePauseOverlay()
+            }
+        }
     }
+
+    // PAUSE OPTIONS POC — REMOVE ME
+    private fun showPauseOverlay() {
+        if (pauseOverlayView != null) return
+        val presentation = companionPresentation ?: return
+        val wm = presentation.window?.windowManager ?: return
+        val decor = presentation.window?.decorView ?: return
+        decor.post {
+            if (pauseOverlayView != null) return@post
+            val token = decor.windowToken ?: return@post
+            val overlay = ComposeView(presentation.context).apply {
+                setViewTreeLifecycleOwner(this@EngineActivity)
+                setViewTreeViewModelStoreOwner(this@EngineActivity)
+                setViewTreeSavedStateRegistryOwner(this@EngineActivity)
+                setContent {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xF0000000)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "OPTIONS MENU", color = Color.White, fontSize = 32.sp)
+                    }
+                }
+            }
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply { this.token = token }
+            runCatching { wm.addView(overlay, lp) }
+                .onSuccess { pauseOverlayView = overlay }
+                .onFailure { Log.e(TAG, "PAUSE POC: addView failed", it) }
+        }
+    }
+
+    // PAUSE OPTIONS POC — REMOVE ME
+    private fun hidePauseOverlay() {
+        val overlay = pauseOverlayView ?: return
+        val wm = companionPresentation?.window?.windowManager
+        runCatching { wm?.removeView(overlay) }
+        pauseOverlayView = null
+    }
+
 }
 
 @SuppressLint("CoroutineCreationDuringComposition")

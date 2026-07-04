@@ -1530,6 +1530,19 @@ end
 -- Container open/close, driven by the omw/ui.lua UiModeChanged event
 -- ({oldMode, newMode, arg}). arg is the container/corpse/NPC being opened.
 local function onUiModeChanged(data)
+    -- PAUSE OPTIONS POC — REMOVE ME
+    -- GM_MainMenu ("MainMenu") is the pause/options menu (Start button). It is
+    -- distinct from Container/Dialogue/Barter/etc., so it uniquely identifies the
+    -- pause menu opening and closing.
+    pcall(function()
+        local MM = interfaces.UI.MODE.MainMenu
+        if data.newMode == MM then
+            print('COMPANION_PAUSE_MENU_OPEN:')
+        elseif data.oldMode == MM and data.newMode ~= MM then
+            print('COMPANION_PAUSE_MENU_CLOSED:')
+        end
+    end)
+
     local isContainer = false
     local ok = pcall(function()
         isContainer = (data.newMode == interfaces.UI.MODE.Container)

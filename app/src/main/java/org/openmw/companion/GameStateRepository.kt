@@ -49,6 +49,12 @@ object GameStateRepository {
         _hudVisible.value = visible
     }
 
+    // PAUSE OPTIONS POC — REMOVE ME
+    // true while the in-game pause/options menu (GM_MainMenu) is open. Driven by
+    // COMPANION_PAUSE_MENU_OPEN / _CLOSED lines from companion.lua.
+    private val _pauseMenuVisible = MutableStateFlow(false)
+    val pauseMenuVisible: StateFlow<Boolean> = _pauseMenuVisible.asStateFlow()
+
     // Transient detail-popup contents, populated on demand by a CMP:info request
     // and its COMPANION_INFO reply. null = no popup showing. Kept separate from
     // the live GameState so opening the popup never interferes with stat updates.
@@ -497,6 +503,14 @@ object GameStateRepository {
                 containerIsCorpse = false
                 containerIsPickpocket = false
                 _containerSession.value = null
+            }
+            // PAUSE OPTIONS POC — REMOVE ME
+            trimmed.contains("COMPANION_PAUSE_MENU_OPEN") -> {
+                _pauseMenuVisible.value = true
+            }
+            // PAUSE OPTIONS POC — REMOVE ME
+            trimmed.contains("COMPANION_PAUSE_MENU_CLOSED") -> {
+                _pauseMenuVisible.value = false
             }
             // Barter session. ITEM first (most frequent). Each ITEM carries its own side,
             // so vendor/player items go to separate buffers. None of these prefixes is a
