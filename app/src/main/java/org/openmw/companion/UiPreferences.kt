@@ -60,6 +60,7 @@ val UI_ELEMENTS: List<UiElement> = listOf(
     UiElement("hud_effects", "Active effects", UiSection.HUD, ScreenRoute.BOTTOM),
     UiElement("hud_crosshair", "Crosshair", UiSection.HUD, ScreenRoute.BOTTOM),
     UiElement("hud_sneak", "Sneak indicator", UiSection.HUD, ScreenRoute.BOTTOM),
+    UiElement("hud_enemy", "Target health", UiSection.HUD, ScreenRoute.BOTTOM),
     // ---- Menus and overlays ----
     // NOTE: "Conversation" is NOT a generic route element — it's a dedicated three-way
     // ConversationLocation setting (BOTTOM/SPLIT/TOP), rendered by ConversationLocationRow
@@ -182,10 +183,28 @@ object UiPreferences {
     /** Master UI mode (DS = companion overlays active; VANILLA = suppressed). */
     fun uiModeFlow(): StateFlow<UiMode> = uiModeFlow.asStateFlow()
 
-    /** Set the master UI mode and persist. */
+    /** HUD element keys bulk-toggled by a DS/Vanilla mode switch. The crosshair is handled
+     *  separately (ON in both modes) and so is NOT in this list. */
+    private val MODE_HUD_KEYS = listOf(
+        "hud_vitals", "hud_equipped", "hud_minimap", "hud_effects", "hud_sneak", "hud_enemy",
+    )
+
+    /** Set the master UI mode and persist. Also bulk-sets the native HUD element toggles to
+     *  match the mode: DS hides every native top-screen HUD element (the companion draws them
+     *  on the bottom screen), Vanilla shows them all; the Alpha3 overlay follows the same rule.
+     *  The crosshair stays ON in both modes. Each write goes through setHudOn/setAlpha3Overlay,
+     *  so the shared StateFlows update immediately — EngineActivity's collectors push the new
+     *  values to the native JNI setters, and the options-menu rows (observing the same flows)
+     *  refresh at once — and each value is persisted. Only an explicit mode switch resets these;
+     *  init() loads the persisted per-element values on launch and never calls this. */
     fun setUiMode(context: Context, mode: UiMode) {
         uiModeFlow.value = mode
         editor(context).putString(UI_MODE, mode.name).apply()
+
+        val on = mode == UiMode.VANILLA
+        MODE_HUD_KEYS.forEach { setHudOn(context, it, on) }
+        setHudOn(context, "hud_crosshair", true) // crosshair on in both DS and Vanilla
+        setAlpha3Overlay(context, on)
     }
 
     /** Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). */

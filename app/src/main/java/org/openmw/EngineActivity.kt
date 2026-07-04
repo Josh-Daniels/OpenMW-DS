@@ -622,6 +622,7 @@ class EngineActivity : SDLActivity() {
         @JvmStatic external fun setCompanionHudEffects(on: Boolean)
         @JvmStatic external fun setCompanionHudSneak(on: Boolean)
         @JvmStatic external fun setCompanionHudCrosshair(on: Boolean)
+        @JvmStatic external fun setCompanionHudEnemy(on: Boolean)
 
         /**
          * Decodes an item icon from the VFS (BSA/loose files) and writes it as PNG.
@@ -761,6 +762,7 @@ class EngineActivity : SDLActivity() {
             "hud_effects" to { on: Boolean -> setCompanionHudEffects(on) },
             "hud_crosshair" to { on: Boolean -> setCompanionHudCrosshair(on) },
             "hud_sneak" to { on: Boolean -> setCompanionHudSneak(on) },
+            "hud_enemy" to { on: Boolean -> setCompanionHudEnemy(on) },
         )
         hudPushes.forEach { (key, push) ->
             lifecycleScope.launch {

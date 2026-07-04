@@ -1,18 +1,22 @@
 Per-element native HUD visibility gating (companion "Vanilla HUD Elements" options).
 
 Each native top-screen HUD element (health/magicka/fatigue bars, equipped weapon+spell,
-minimap, active effects, sneak indicator, crosshair) is gated on a companion Boolean,
-pushed from Kotlin into androidmain.cpp atomics and read here via companionHud*(). ANDing
-the native-intended visibility with the companion flag in each HUD-level setter is the
-independent chokepoint; a re-apply in HUD::onFrame (using the cached native intent) makes
-toggles take effect live, since weapon/sneak are not re-applied by updateVisible(). The
-crosshair setter is driven every frame from the camera, so it needs no onFrame re-apply.
-All #ifdef __ANDROID__ so desktop is unchanged.
+minimap, active effects, sneak indicator, crosshair, target/enemy health bar) is gated on
+a companion Boolean, pushed from Kotlin into androidmain.cpp atomics and read here via
+companionHud*(). ANDing the native-intended visibility with the companion flag in each
+HUD-level setter is the independent chokepoint; a re-apply in HUD::onFrame (using the
+cached native intent) makes toggles take effect live, since weapon/sneak are not re-applied
+by updateVisible(). The crosshair setter is driven every frame from the camera, so it needs
+no onFrame re-apply. The enemy health bar has no visibility setter (it is self-managed via
+setEnemy() + an onFrame fade timer), so it is gated by an early return in setEnemy() (which
+also skips the coupled mWeaponSpellBox -20px shift) plus an onFrame re-apply that force-
+hides a still-visible bar and restores the +20px shift (mirroring the vanilla timeout hide)
+for instant live toggling. All #ifdef __ANDROID__ so desktop is unchanged.
 
 diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 --- a/apps/openmw/mwgui/hud.cpp
 +++ b/apps/openmw/mwgui/hud.cpp
-@@ -31,4 +31,21 @@
+@@ -31,4 +31,22 @@
  #include "worlditemmodel.hpp"
  
 +#ifdef __ANDROID__
@@ -24,6 +28,7 @@ diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 +extern "C" bool companionHudEffects();
 +extern "C" bool companionHudSneak();
 +extern "C" bool companionHudCrosshair();
++extern "C" bool companionHudEnemy();
 +static bool sCompanionHmsNative = true;
 +static bool sCompanionWeapNative = true;
 +static bool sCompanionSpellNative = true;
@@ -34,7 +39,7 @@ diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 +
  namespace MWGui
  {
-@@ -309,5 +309,19 @@
+@@ -309,5 +309,26 @@
      void HUD::onFrame(float dt)
      {
          LocalMapBase::onFrame(dt);
@@ -50,6 +55,13 @@ diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 +        mMinimapBox->setVisible(sCompanionMinimapNative && companionHudMinimap());
 +        mEffectBox->setVisible(sCompanionEffectsNative && companionHudEffects());
 +        mSneakBox->setVisible(sCompanionSneakNative && companionHudSneak());
++        // COMPANION: force-hide the target/enemy health bar when toggled off; restore the
++        // +20px mWeaponSpellBox shift (mirrors the vanilla fade-timeout hide) to avoid drift.
++        if (!companionHudEnemy() && mEnemyHealth->getVisible())
++        {
++            mEnemyHealth->setVisible(false);
++            mWeaponSpellBox->setPosition(mWeaponSpellBox->getPosition() + MyGUI::IntPoint(0, 20));
++        }
 +        updatePositions();
 +#endif
  
@@ -116,3 +128,14 @@ diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 +#endif
          mMinimapBox->setVisible(visible);
          updatePositions();
+@@ -568,4 +634,10 @@
+     void HUD::setEnemy(const MWWorld::Ptr& enemy)
+     {
++#ifdef __ANDROID__
++        // COMPANION: gate the target/enemy health bar (no setter; self-managed here).
++        // Early-return also skips the coupled mWeaponSpellBox -20px shift.
++        if (!companionHudEnemy())
++            return;
++#endif
+         mEnemyActor = enemy.getCellRef().getRefNum();
+         mEnemyHealthTimer = MWBase::Environment::get()
