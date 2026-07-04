@@ -9,8 +9,11 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import org.openmw.companion.CompanionScreen
+import org.openmw.companion.ConversationHistoryOverlay
 import org.openmw.companion.GameStateRepository
 import org.openmw.companion.OptionsMenuOverlay
+import org.openmw.companion.ScreenRoute
+import org.openmw.companion.UiPreferences
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -69,6 +72,8 @@ import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -128,6 +133,11 @@ class EngineActivity : SDLActivity() {
     // shown while the in-game pause/options menu is open.
     private var pauseOverlayView: View? = null
 
+    // Read-only conversation-history overlay on the TOP screen (this activity's own
+    // window / Display 0), shown while a conversation is active AND the Conversation
+    // element is routed to the top screen (the split-conversation mode).
+    private var conversationTopView: View? = null
+
     external fun getLastResourceName(): String
     external fun initAlpha3()
     private external fun installCompanionSink()
@@ -172,6 +182,7 @@ class EngineActivity : SDLActivity() {
         super.onDestroy()
 
         hidePauseOverlay()
+        hideConversationTopOverlay()
 
         // MorrowindDS
         companionPresentation?.dismiss()
@@ -699,6 +710,66 @@ class EngineActivity : SDLActivity() {
                 if (visible) showPauseOverlay() else hidePauseOverlay()
             }
         }
+
+        // Split-conversation mode: show a read-only conversation-history overlay on the
+        // TOP screen while a conversation is active AND the Conversation element is routed
+        // to the top screen (UiPreferences "menu_conversation" == TOP). Independent of the
+        // Hide UI toggle — conversation is always visible when active.
+        UiPreferences.init(applicationContext)
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.dialogueNpcName,
+                GameStateRepository.dialogueHistory,
+                GameStateRepository.dialogueTopics,
+                GameStateRepository.dialogueServices,
+                GameStateRepository.dialogueChoices,
+            ) { npc, hist, topics, services, choices ->
+                npc.isNotEmpty() || hist.isNotEmpty() || topics.isNotEmpty() ||
+                    services.isNotEmpty() || choices.isNotEmpty()
+            }.combine(UiPreferences.routeFlow("menu_conversation")) { active, route ->
+                active && route == ScreenRoute.TOP
+            }.distinctUntilChanged().collect { show ->
+                if (show) showConversationTopOverlay() else hideConversationTopOverlay()
+            }
+        }
+    }
+
+    private fun showConversationTopOverlay() {
+        if (conversationTopView != null) return
+        // The top-screen overlay lives in THIS activity's own window (Display 0), unlike the
+        // pause overlay which lives in the bottom-screen Presentation. Same TYPE_APPLICATION_
+        // PANEL technique. FLAG_NOT_FOCUSABLE + FLAG_NOT_TOUCH_MODAL keep it from stealing focus
+        // from the game; FLAG_NOT_TOUCHABLE is deliberately omitted so the history panel can
+        // receive touch for scrolling (game-area touches above the panel still reach OpenMW).
+        // The window token is null until the decor is attached — defer via post.
+        val decor = window.decorView
+        decor.post {
+            if (conversationTopView != null) return@post
+            val token = decor.windowToken ?: return@post
+            val overlay = ComposeView(this).apply {
+                setViewTreeLifecycleOwner(this@EngineActivity)
+                setViewTreeViewModelStoreOwner(this@EngineActivity)
+                setViewTreeSavedStateRegistryOwner(this@EngineActivity)
+                setContent { ConversationHistoryOverlay() }
+            }
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply { this.token = token }
+            runCatching { windowManager.addView(overlay, lp) }
+                .onSuccess { conversationTopView = overlay }
+                .onFailure { Log.e(TAG, "CONVERSATION TOP: addView failed", it) }
+        }
+    }
+
+    private fun hideConversationTopOverlay() {
+        val overlay = conversationTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        conversationTopView = null
     }
 
     private fun showPauseOverlay() {

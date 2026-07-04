@@ -288,6 +288,8 @@ fun CompanionScreen() {
     // (not LaunchedEffect) so favourite pills show persisted content on the very
     // first frame, with no post-composition flash of empty slots.
     remember(context) { FavouritesRepository.init(context) }
+    // Load persisted UI routing (which screen the conversation lives on, etc.).
+    remember(context) { UiPreferences.init(context); true }
 
     // Favourites are save-dependent (keyed by character name). Once the live
     // character is known — and whenever the player loads a different save at
@@ -470,7 +472,17 @@ fun CompanionScreen() {
             // to the inventory gold_001 count until the first gold line arrives.
             val playerGold = if (dialogueGold >= 0) dialogueGold
                 else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
-            DialogueTopicsOverlay(dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices, dialogueChoices, dialogueDisposition, dialoguePersuadeAvailable, playerGold)
+            // When the conversation is routed to the TOP screen, the history lives in a
+            // separate WindowManager overlay on Display 0 (hosted by EngineActivity); the
+            // bottom screen then shows ONLY the controls (right column) full-width, with
+            // choices as a centred popup. When routed BOTTOM, the classic two-column
+            // overlay is shown here unchanged.
+            val conversationRoute by UiPreferences.routeFlow("menu_conversation").collectAsState()
+            DialogueTopicsOverlay(
+                dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices,
+                dialogueChoices, dialogueDisposition, dialoguePersuadeAvailable, playerGold,
+                conversationOnTop = conversationRoute == ScreenRoute.TOP
+            )
         }
 
         // Barter overlay. Driven by COMPANION_BARTER_* from the engine (native TradeWindow),
@@ -505,7 +517,8 @@ private fun DialogueTopicsOverlay(
     choices: List<DialogueChoice>,
     disposition: Int,
     persuadeAvailable: Boolean,
-    playerGold: Int
+    playerGold: Int,
+    conversationOnTop: Boolean
 ) {
     // Local popup visibility. Keyed on npcName so switching NPCs mid-session closes any
     // open popup; it also disappears automatically when the whole overlay leaves the
@@ -522,45 +535,80 @@ private fun DialogueTopicsOverlay(
             .background(Color(0xCC0F0C08))
             .pointerInput(Unit) { detectTapGestures {} }
     ) {
-        // Fills the full screen height (bottom = 12.dp, not BOTTOM_BAR_SPACE): dialogue is a
-        // modal interaction left via Goodbye, so the panel covers the bottom tab bar — same
-        // approach as the barter overlay. 12dp matches the top/side insets.
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = 12.dp, bottom = 12.dp, start = 12.dp, end = 12.dp)
-                .mwPanel()
-                .pointerInput(Unit) { detectTapGestures {} }
-        ) {
-            // ---- NPC name title bar (full width, window-title style) ----
-            if (npcName.isNotEmpty()) {
-                Text(
-                    npcName,
-                    color = BronzeLight, fontSize = 14.sp,
-                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
-                )
-                Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+        if (conversationOnTop) {
+            // Split layout: the conversation history is on the TOP screen (a separate
+            // WindowManager overlay hosted by EngineActivity). The bottom screen shows
+            // ONLY the controls (disposition, Barter, Persuade, topics, Goodbye) — the
+            // right column — centred at 50% of screen width, full height.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // Match the HUD map window's vertical band (top/bottom bar spacing) so
+                    // this panel is the same height as the map on the HUD page.
+                    .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth(0.65f)     // ~30% wider than the previous 0.5
+                        .fillMaxHeight()
+                        .mwPanel()
+                        .pointerInput(Unit) { detectTapGestures {} }
+                ) {
+                    DialogueRightColumn(
+                        topics = topics, services = services, disposition = disposition,
+                        persuadeAvailable = persuadeAvailable,
+                        // A choice question dims the topic/service/Goodbye rows; the answers
+                        // show in the centred choices popup instead of inline (the history
+                        // it would normally sit under is on the other screen).
+                        choicesActive = choices.isNotEmpty(),
+                        interactive = choices.isEmpty(),
+                        onPersuadeTapped = { showPersuasion = true },
+                        modifier = Modifier.fillMaxSize().padding(8.dp)
+                    )
+                }
             }
+        } else {
+            // Fills the full screen height (bottom = 12.dp, not BOTTOM_BAR_SPACE): dialogue is a
+            // modal interaction left via Goodbye, so the panel covers the bottom tab bar — same
+            // approach as the barter overlay. 12dp matches the top/side insets.
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 12.dp, bottom = 12.dp, start = 12.dp, end = 12.dp)
+                    .mwPanel()
+                    .pointerInput(Unit) { detectTapGestures {} }
+            ) {
+                // ---- NPC name title bar (full width, window-title style) ----
+                if (npcName.isNotEmpty()) {
+                    Text(
+                        npcName,
+                        color = BronzeLight, fontSize = 14.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                    Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+                }
 
-            // ---- Two columns: dialogue history (75%) | topics/services (25%) ----
-            Row(Modifier.fillMaxSize()) {
-                DialogueHistoryColumn(
-                    history, choices,
-                    modifier = Modifier.weight(0.65f).fillMaxHeight().padding(8.dp)
-                )
-                Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
-                DialogueRightColumn(
-                    topics = topics, services = services, disposition = disposition,
-                    persuadeAvailable = persuadeAvailable,
-                    // While a choice is active, the Persuade row and every topic/service row
-                    // stay visible but greyed and non-tappable (interactive = false) — the
-                    // inline choices in the history take priority over topic selection.
-                    choicesActive = choices.isNotEmpty(),
-                    interactive = choices.isEmpty(),
-                    onPersuadeTapped = { showPersuasion = true },
-                    modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
-                )
+                // ---- Two columns: dialogue history (75%) | topics/services (25%) ----
+                Row(Modifier.fillMaxSize()) {
+                    DialogueHistoryColumn(
+                        history, choices,
+                        modifier = Modifier.weight(0.65f).fillMaxHeight().padding(8.dp)
+                    )
+                    Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
+                    DialogueRightColumn(
+                        topics = topics, services = services, disposition = disposition,
+                        persuadeAvailable = persuadeAvailable,
+                        // While a choice is active, the Persuade row and every topic/service row
+                        // stay visible but greyed and non-tappable (interactive = false) — the
+                        // inline choices in the history take priority over topic selection.
+                        choicesActive = choices.isNotEmpty(),
+                        interactive = choices.isEmpty(),
+                        onPersuadeTapped = { showPersuasion = true },
+                        modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
+                    )
+                }
             }
         }
 
@@ -577,6 +625,122 @@ private fun DialogueTopicsOverlay(
                     showPersuasion = false
                 },
                 onCancel = { showPersuasion = false }
+            )
+        }
+
+        // Centred choices popup — only in the split (conversation-on-top) layout, where the
+        // choice question can't render inline in the history (that's on the other screen).
+        // No tap-outside dismiss: it stays until a choice is tapped or the dialogue closes.
+        if (conversationOnTop && choices.isNotEmpty()) {
+            DialogueChoicesPopup(choices)
+        }
+    }
+}
+
+/** Centred popup listing the current dialogue [choices] (guard confrontation, taunt
+ *  goodbye, etc.), used only in the split (conversation-on-top) layout. 50%-width panel,
+ *  bronze border, tappable choice rows. NO tap-outside dismiss — the scrim swallows taps
+ *  but never dismisses; the popup leaves when a choice is tapped or the dialogue closes. */
+@Composable
+private fun DialogueChoicesPopup(choices: List<DialogueChoice>) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(28f)
+            .background(Color(0x99000000))
+            .pointerInput(Unit) { detectTapGestures {} },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.5f)
+                .heightIn(max = 460.dp)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            Text(
+                "CHOOSE",
+                color = BronzeLight, fontSize = 13.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 2.sp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(12.dp)
+            ) {
+                choices.forEachIndexed { i, choice ->
+                    if (i > 0) Spacer(Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(BronzeLight.copy(alpha = 0.12f))
+                            .border(1.dp, BronzeLight, RoundedCornerShape(2.dp))
+                            .clickable {
+                                // id -1 = the synthetic forced-goodbye prompt (NPC taunted
+                                // into combat, etc.) — route it to goodbye, not a real answer.
+                                if (choice.id == -1) CompanionActions.dialogueGoodbye()
+                                else CompanionActions.activateDialogueChoice(choice.id)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Text(choice.text, color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * TOP-screen conversation history overlay (Display 0). Hosted by [org.openmw.EngineActivity]
+ * in a read-only WindowManager panel window when a conversation is active AND the Conversation
+ * element is routed to the top screen. Bottom-anchored panel, 35% of screen height, full width
+ * minus 12dp insets: NPC name (centred, bronze) + divider, then the scrolling read-only history
+ * (auto-scrolled to the newest line). No tap handlers — the panel window is FLAG_NOT_TOUCHABLE.
+ */
+@Composable
+fun ConversationHistoryOverlay() {
+    val npcName by GameStateRepository.dialogueNpcName.collectAsState()
+    val history by GameStateRepository.dialogueHistory.collectAsState()
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.75f)             // ~25% narrower than full width
+                .fillMaxHeight(0.51f)            // ~10% taller than the previous 0.46
+                .clip(RoundedCornerShape(3.dp))
+                .background(Color(0xED0D0A07))   // #0d0a07 @ ~93%
+                .border(2.dp, Bronze, RoundedCornerShape(3.dp))
+        ) {
+            if (npcName.isNotEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        npcName,
+                        color = BronzeLight, fontSize = 15.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                    )
+                }
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            }
+            // Read-only history: no inline choices (they live in the bottom-screen popup),
+            // interactive = false so topic hyperlinks stay highlighted but non-tappable.
+            DialogueHistoryColumn(
+                history = history,
+                choices = emptyList(),
+                modifier = Modifier.fillMaxSize().padding(12.dp),
+                interactive = false
             )
         }
     }

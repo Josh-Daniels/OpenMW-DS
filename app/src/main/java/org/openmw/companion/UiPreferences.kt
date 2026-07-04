@@ -45,7 +45,7 @@ val UI_ELEMENTS: List<UiElement> = listOf(
     UiElement("hud_crosshair", "Crosshair", UiSection.HUD, ScreenRoute.TOP, pending = true),
     UiElement("hud_sneak", "Sneak indicator", UiSection.HUD, ScreenRoute.TOP, pending = true),
     // ---- Menus and overlays ----
-    UiElement("menu_conversation", "Conversation", UiSection.MENUS, ScreenRoute.BOTTOM),
+    UiElement("menu_conversation", "Conversation", UiSection.MENUS, ScreenRoute.TOP),
     UiElement("menu_conversation_topics", "Conversation topics only", UiSection.MENUS, ScreenRoute.BOTTOM),
     UiElement("menu_persuasion", "Persuasion screen", UiSection.MENUS, ScreenRoute.BOTTOM),
     UiElement("menu_looting", "Looting", UiSection.MENUS, ScreenRoute.BOTTOM),
