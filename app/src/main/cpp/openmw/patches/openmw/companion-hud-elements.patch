@@ -1,0 +1,118 @@
+Per-element native HUD visibility gating (companion "Vanilla HUD Elements" options).
+
+Each native top-screen HUD element (health/magicka/fatigue bars, equipped weapon+spell,
+minimap, active effects, sneak indicator, crosshair) is gated on a companion Boolean,
+pushed from Kotlin into androidmain.cpp atomics and read here via companionHud*(). ANDing
+the native-intended visibility with the companion flag in each HUD-level setter is the
+independent chokepoint; a re-apply in HUD::onFrame (using the cached native intent) makes
+toggles take effect live, since weapon/sneak are not re-applied by updateVisible(). The
+crosshair setter is driven every frame from the camera, so it needs no onFrame re-apply.
+All #ifdef __ANDROID__ so desktop is unchanged.
+
+diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
+--- a/apps/openmw/mwgui/hud.cpp
++++ b/apps/openmw/mwgui/hud.cpp
+@@ -31,4 +31,21 @@
+ #include "worlditemmodel.hpp"
+ 
++#ifdef __ANDROID__
++// COMPANION: per-element native HUD visibility bridges (defined in androidmain.cpp) +
++// cached native intent so HUD::onFrame can re-apply (native && companion) every frame.
++extern "C" bool companionHudHms();
++extern "C" bool companionHudEquipped();
++extern "C" bool companionHudMinimap();
++extern "C" bool companionHudEffects();
++extern "C" bool companionHudSneak();
++extern "C" bool companionHudCrosshair();
++static bool sCompanionHmsNative = true;
++static bool sCompanionWeapNative = true;
++static bool sCompanionSpellNative = true;
++static bool sCompanionMinimapNative = true;
++static bool sCompanionEffectsNative = true;
++static bool sCompanionSneakNative = true;
++#endif
++
+ namespace MWGui
+ {
+@@ -309,5 +309,19 @@
+     void HUD::onFrame(float dt)
+     {
+         LocalMapBase::onFrame(dt);
++#ifdef __ANDROID__
++        // COMPANION: re-apply per-element HUD visibility (native intent & companion
++        // toggle) every frame so On/Off changes take effect live (weapon/sneak are not
++        // re-applied by updateVisible). Crosshair is driven every frame by the camera.
++        mHealth->setVisible(sCompanionHmsNative && companionHudHms());
++        mMagicka->setVisible(sCompanionHmsNative && companionHudHms());
++        mStamina->setVisible(sCompanionHmsNative && companionHudHms());
++        mWeapBox->setVisible(sCompanionWeapNative && companionHudEquipped());
++        mSpellBox->setVisible(sCompanionSpellNative && companionHudEquipped());
++        mMinimapBox->setVisible(sCompanionMinimapNative && companionHudMinimap());
++        mEffectBox->setVisible(sCompanionEffectsNative && companionHudEffects());
++        mSneakBox->setVisible(sCompanionSneakNative && companionHudSneak());
++        updatePositions();
++#endif
+ 
+         mCellNameTimer -= dt;
+@@ -470,4 +470,7 @@
+     void HUD::setCrosshairVisible(bool visible)
+     {
++#ifdef __ANDROID__
++        visible = visible && companionHudCrosshair();
++#endif
+         mCrosshair->setVisible(visible);
+     }
+@@ -487,4 +487,8 @@
+     void HUD::setHmsVisible(bool visible)
+     {
++#ifdef __ANDROID__
++        sCompanionHmsNative = visible;
++        visible = visible && companionHudHms();
++#endif
+         mHealth->setVisible(visible);
+         mMagicka->setVisible(visible);
+@@ -495,4 +495,8 @@
+     void HUD::setWeapVisible(bool visible)
+     {
++#ifdef __ANDROID__
++        sCompanionWeapNative = visible;
++        visible = visible && companionHudEquipped();
++#endif
+         mWeapBox->setVisible(visible);
+         updatePositions();
+@@ -501,4 +501,8 @@
+     void HUD::setSpellVisible(bool visible)
+     {
++#ifdef __ANDROID__
++        sCompanionSpellNative = visible;
++        visible = visible && companionHudEquipped();
++#endif
+         mSpellBox->setVisible(visible);
+         updatePositions();
+@@ -507,4 +507,8 @@
+     void HUD::setSneakVisible(bool visible)
+     {
++#ifdef __ANDROID__
++        sCompanionSneakNative = visible;
++        visible = visible && companionHudSneak();
++#endif
+         mSneakBox->setVisible(visible);
+         updatePositions();
+@@ -513,4 +513,8 @@
+     void HUD::setEffectVisible(bool visible)
+     {
++#ifdef __ANDROID__
++        sCompanionEffectsNative = visible;
++        visible = visible && companionHudEffects();
++#endif
+         mEffectBox->setVisible(visible);
+         updatePositions();
+@@ -519,4 +519,8 @@
+     void HUD::setMinimapVisible(bool visible)
+     {
++#ifdef __ANDROID__
++        sCompanionMinimapNative = visible;
++        visible = visible && companionHudMinimap();
++#endif
+         mMinimapBox->setVisible(visible);
+         updatePositions();

@@ -9,8 +9,24 @@ import kotlinx.coroutines.flow.asStateFlow
 /** Which physical screen a UI element is drawn on. */
 enum class ScreenRoute { TOP, BOTTOM }
 
+/**
+ * Where the conversation UI is drawn.
+ * - [BOTTOM]: original two-column layout entirely on the bottom screen.
+ * - [SPLIT]: history on the top screen, topics/controls on the bottom (current default).
+ * - [TOP]: full conversation on the top screen (not yet implemented — treated as [SPLIT]).
+ */
+enum class ConversationLocation { BOTTOM, SPLIT, TOP }
+
 /** How a top-screen element is rendered: vanilla OpenMW UI or the DS-styled replacement. */
 enum class UiStyle { VANILLA, DS }
+
+/**
+ * Master companion UI mode.
+ * - [DS] (default): all companion overlays/popups are active.
+ * - [VANILLA]: companion overlays are suppressed; native OpenMW UI handles everything.
+ * The tab UI (inventory, spells, stats, journal, HUD) works in both modes.
+ */
+enum class UiMode { VANILLA, DS }
 
 /** The two routing sections of the options menu (the UI-style section is derived, not stored). */
 enum class UiSection { HUD, MENUS }
@@ -42,10 +58,12 @@ val UI_ELEMENTS: List<UiElement> = listOf(
     UiElement("hud_equipped", "Equipped weapon and spell", UiSection.HUD, ScreenRoute.BOTTOM),
     UiElement("hud_minimap", "Minimap", UiSection.HUD, ScreenRoute.BOTTOM),
     UiElement("hud_effects", "Active effects", UiSection.HUD, ScreenRoute.BOTTOM),
-    UiElement("hud_crosshair", "Crosshair", UiSection.HUD, ScreenRoute.TOP, pending = true),
-    UiElement("hud_sneak", "Sneak indicator", UiSection.HUD, ScreenRoute.TOP, pending = true),
+    UiElement("hud_crosshair", "Crosshair", UiSection.HUD, ScreenRoute.BOTTOM),
+    UiElement("hud_sneak", "Sneak indicator", UiSection.HUD, ScreenRoute.BOTTOM),
     // ---- Menus and overlays ----
-    UiElement("menu_conversation", "Conversation", UiSection.MENUS, ScreenRoute.TOP),
+    // NOTE: "Conversation" is NOT a generic route element — it's a dedicated three-way
+    // ConversationLocation setting (BOTTOM/SPLIT/TOP), rendered by ConversationLocationRow
+    // and backed by conversationLocationFlow below.
     UiElement("menu_conversation_topics", "Conversation topics only", UiSection.MENUS, ScreenRoute.BOTTOM),
     UiElement("menu_persuasion", "Persuasion screen", UiSection.MENUS, ScreenRoute.BOTTOM),
     UiElement("menu_looting", "Looting", UiSection.MENUS, ScreenRoute.BOTTOM),
@@ -70,18 +88,38 @@ object UiPreferences {
     private const val ROUTE_PREFIX = "route_"
     private const val STYLE_PREFIX = "style_"
     private const val GAME_CURSOR = "game_cursor"
+    private const val CONVERSATION_LOCATION = "conversation_location"
+    private const val UI_MODE = "ui_mode"
+    private const val HUD_ON_PREFIX = "hud_on_"
+    private const val ALPHA3_OVERLAY = "alpha3_overlay"
 
     private var prefs: SharedPreferences? = null
+
+    // Master UI mode (DS = companion overlays active; VANILLA = suppressed). Default DS.
+    private val uiModeFlow = MutableStateFlow(UiMode.DS)
+
+    // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default SPLIT.
+    private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT)
 
     private val routeFlows: Map<String, MutableStateFlow<ScreenRoute>> =
         UI_ELEMENTS.associate { it.key to MutableStateFlow(it.default) }
     private val styleFlows: Map<String, MutableStateFlow<UiStyle>> =
         UI_ELEMENTS.associate { it.key to MutableStateFlow(UiStyle.VANILLA) }
 
+    // HUD elements are always drawn on the bottom screen by the companion; this Boolean toggles
+    // whether the NATIVE top-screen version is visible (true = On/visible, false = Off/hidden).
+    // Keyed by HUD element key, default true (On). Actual native hiding is implemented separately.
+    private val hudFlows: Map<String, MutableStateFlow<Boolean>> =
+        UI_ELEMENTS.filter { it.section == UiSection.HUD }.associate { it.key to MutableStateFlow(true) }
+
     // Input section: whether touch / thumbsticks drive the top-screen game cursor.
     // Default false (off). The actual cursor suppression lives in a native patch;
     // this only stores the preference.
     private val gameCursorFlow = MutableStateFlow(false)
+
+    // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default true.
+    // Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
+    private val alpha3OverlayFlow = MutableStateFlow(true)
 
     /** Load persisted values into the flows. Idempotent — safe to call on every compose. */
     fun init(context: Context) {
@@ -102,13 +140,62 @@ object UiPreferences {
             }
         }
         gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
+        p.getString(CONVERSATION_LOCATION, null)
+            ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
+            ?.let { conversationLocationFlow.value = it }
+        p.getString(UI_MODE, null)
+            ?.let { runCatching { UiMode.valueOf(it) }.getOrNull() }
+            ?.let { uiModeFlow.value = it }
+        // HUD element on/off (non-pending only; pending elements stay locked On).
+        UI_ELEMENTS.filter { it.section == UiSection.HUD && !it.pending }.forEach { el ->
+            hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, true)
+        }
+        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, true)
     }
 
     fun routeFlow(key: String): StateFlow<ScreenRoute> = routeFlows.getValue(key).asStateFlow()
     fun styleFlow(key: String): StateFlow<UiStyle> = styleFlows.getValue(key).asStateFlow()
 
+    /** HUD element on/off: whether the native top-screen version is visible (true = On). */
+    fun hudOnFlow(key: String): StateFlow<Boolean> = hudFlows.getValue(key).asStateFlow()
+
+    /** Set a HUD element's on/off state and persist. No-op for pending (locked) elements. */
+    fun setHudOn(context: Context, key: String, on: Boolean) {
+        val el = UI_ELEMENTS.firstOrNull { it.key == key } ?: return
+        if (el.pending) return
+        hudFlows.getValue(key).value = on
+        editor(context).putBoolean(HUD_ON_PREFIX + key, on).apply()
+    }
+
     /** Input: whether touch / thumbsticks control the top-screen game cursor. */
     fun gameCursorFlow(): StateFlow<Boolean> = gameCursorFlow.asStateFlow()
+
+    /** Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. */
+    fun alpha3OverlayFlow(): StateFlow<Boolean> = alpha3OverlayFlow.asStateFlow()
+
+    /** Show/hide the Alpha3 launcher overlay and persist. */
+    fun setAlpha3Overlay(context: Context, shown: Boolean) {
+        alpha3OverlayFlow.value = shown
+        editor(context).putBoolean(ALPHA3_OVERLAY, shown).apply()
+    }
+
+    /** Master UI mode (DS = companion overlays active; VANILLA = suppressed). */
+    fun uiModeFlow(): StateFlow<UiMode> = uiModeFlow.asStateFlow()
+
+    /** Set the master UI mode and persist. */
+    fun setUiMode(context: Context, mode: UiMode) {
+        uiModeFlow.value = mode
+        editor(context).putString(UI_MODE, mode.name).apply()
+    }
+
+    /** Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). */
+    fun conversationLocationFlow(): StateFlow<ConversationLocation> = conversationLocationFlow.asStateFlow()
+
+    /** Set the conversation location and persist. */
+    fun setConversationLocation(context: Context, loc: ConversationLocation) {
+        conversationLocationFlow.value = loc
+        editor(context).putString(CONVERSATION_LOCATION, loc.name).apply()
+    }
 
     /** Enable/disable the top-screen game cursor and persist. */
     fun setGameCursor(context: Context, enabled: Boolean) {

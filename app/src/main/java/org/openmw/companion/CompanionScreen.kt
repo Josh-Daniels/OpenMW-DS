@@ -8,6 +8,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -62,6 +63,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
@@ -102,7 +104,9 @@ import androidx.compose.ui.graphics.ImageBitmap
 import org.openmw.Constants
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.openmw.utils.GameFilesPreferences
 import java.io.File
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -433,6 +437,12 @@ fun CompanionScreen() {
             )
         }
 
+        // Master UI mode. In VANILLA, all companion overlays/popups (conversation, looting,
+        // barter and their popups) are suppressed so native OpenMW handles them; the tab UI
+        // (inventory/spells/stats/journal/HUD) still works in both modes.
+        val uiMode by UiPreferences.uiModeFlow().collectAsState()
+        val isDs = uiMode == UiMode.DS
+
         // Looting / pickpocketing overlay. Driven by COMPANION_CONTAINER_* from the
         // engine (via Lua). Shown whenever a container session is active, regardless
         // of Hide UI — same as the dialogue overlay, so the panel stays available
@@ -442,12 +452,14 @@ fun CompanionScreen() {
         // tappable; it hosts its own local dismiss-scrim) and below QuantitySelector
         // (20f) so take/put quantity prompts stack above it.
         val containerSession by GameStateRepository.containerSession.collectAsState()
-        containerSession?.let { session ->
-            LootingOverlay(
-                session = session,
-                playerInventory = state.inventory,
-                playerEquipment = state.equipment
-            )
+        if (isDs) {
+            containerSession?.let { session ->
+                LootingOverlay(
+                    session = session,
+                    playerInventory = state.inventory,
+                    playerEquipment = state.equipment
+                )
+            }
         }
 
         // Active-dialogue overlay. Driven by COMPANION_DIALOGUE_* from the engine and
@@ -463,25 +475,25 @@ fun CompanionScreen() {
         val dialogueDisposition by GameStateRepository.dialogueDisposition.collectAsState()
         val dialoguePersuadeAvailable by GameStateRepository.dialoguePersuadeAvailable.collectAsState()
         val dialogueGold by GameStateRepository.dialogueGold.collectAsState()
-        if (dialogueNpcName.isNotEmpty() || dialogueTopics.isNotEmpty() ||
-            dialogueServices.isNotEmpty() || dialogueHistory.isNotEmpty() ||
-            dialogueChoices.isNotEmpty()
+        if (isDs && (dialogueNpcName.isNotEmpty() || dialogueTopics.isNotEmpty() ||
+                dialogueServices.isNotEmpty() || dialogueHistory.isNotEmpty() ||
+                dialogueChoices.isNotEmpty())
         ) {
             // Player gold for the persuasion popup. Prefer the live COMPANION_DIALOGUE_GOLD
             // value (emitted from updateDisposition, so it updates after a bribe); fall back
             // to the inventory gold_001 count until the first gold line arrives.
             val playerGold = if (dialogueGold >= 0) dialogueGold
                 else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
-            // When the conversation is routed to the TOP screen, the history lives in a
-            // separate WindowManager overlay on Display 0 (hosted by EngineActivity); the
-            // bottom screen then shows ONLY the controls (right column) full-width, with
-            // choices as a centred popup. When routed BOTTOM, the classic two-column
-            // overlay is shown here unchanged.
-            val conversationRoute by UiPreferences.routeFlow("menu_conversation").collectAsState()
+            // Bottom-screen conversation UI depends on where the conversation is routed:
+            // - BOTTOM: the classic full two-column overlay here.
+            // - SPLIT: history is on the top screen; the bottom shows ONLY the controls.
+            // - TOP: the whole conversation is on the top screen (hosted by EngineActivity);
+            //   the bottom screen is just a dimmed, inert scrim over the current tab.
+            val conversationLocation by UiPreferences.conversationLocationFlow().collectAsState()
             DialogueTopicsOverlay(
                 dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices,
                 dialogueChoices, dialogueDisposition, dialoguePersuadeAvailable, playerGold,
-                conversationOnTop = conversationRoute == ScreenRoute.TOP
+                location = conversationLocation
             )
         }
 
@@ -495,12 +507,14 @@ fun CompanionScreen() {
         // COMPANION_DIALOGUE_DISPOSITION during barter — DialogueWindow::onFrame is dormant then).
         val barterSession by GameStateRepository.barterSession.collectAsState()
         val barterResult by GameStateRepository.barterResult.collectAsState()
-        barterSession?.let { session ->
-            BarterOverlay(session = session, disposition = dialogueDisposition)
-        }
-        if (barterSession != null) {
-            (barterResult as? BarterResult.Rejected)?.let { rej ->
-                BarterRejectedAlert(rej.reason) { GameStateRepository.dismissBarterResult() }
+        if (isDs) {
+            barterSession?.let { session ->
+                BarterOverlay(session = session, disposition = dialogueDisposition)
+            }
+            if (barterSession != null) {
+                (barterResult as? BarterResult.Rejected)?.let { rej ->
+                    BarterRejectedAlert(rej.reason) { GameStateRepository.dismissBarterResult() }
+                }
             }
         }
     }
@@ -518,16 +532,18 @@ private fun DialogueTopicsOverlay(
     disposition: Int,
     persuadeAvailable: Boolean,
     playerGold: Int,
-    conversationOnTop: Boolean
+    location: ConversationLocation
 ) {
-    // Local popup visibility. Keyed on npcName so switching NPCs mid-session closes any
-    // open popup; it also disappears automatically when the whole overlay leaves the
-    // composition on COMPANION_DIALOGUE_CLOSED. A choice being active suppresses it.
+    // Persuasion popup visibility for the SPLIT controls-only layout below (the BOTTOM full
+    // layout manages its own inside DialogueConversationOverlay). Keyed on npcName so
+    // switching NPCs mid-session closes any open popup; it also disappears when the whole
+    // overlay leaves the composition on COMPANION_DIALOGUE_CLOSED.
     var showPersuasion by remember(npcName) { mutableStateOf(false) }
 
-    // Non-interactive dark scrim (NOT a Dialog — that crashes on the Presentation
-    // display). It has NO tap-away dismiss; the empty detectTapGestures just swallows
-    // taps on the exposed margins so they don't fall through to the tab underneath.
+    // Non-interactive dark scrim (NOT a Dialog — that crashes on the Presentation display).
+    // NO tap-away dismiss; the empty detectTapGestures swallows taps so they don't fall
+    // through to the tab underneath. In TOP mode this scrim IS the entire bottom-screen UI:
+    // the conversation itself lives on the top screen (hosted by EngineActivity).
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -535,105 +551,158 @@ private fun DialogueTopicsOverlay(
             .background(Color(0xCC0F0C08))
             .pointerInput(Unit) { detectTapGestures {} }
     ) {
-        if (conversationOnTop) {
-            // Split layout: the conversation history is on the TOP screen (a separate
-            // WindowManager overlay hosted by EngineActivity). The bottom screen shows
-            // ONLY the controls (disposition, Barter, Persuade, topics, Goodbye) — the
-            // right column — centred at 50% of screen width, full height.
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    // Match the HUD map window's vertical band (top/bottom bar spacing) so
-                    // this panel is the same height as the map on the HUD page.
-                    .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp),
-                contentAlignment = Alignment.TopCenter
-            ) {
-                Column(
+        when (location) {
+            // TOP: the whole conversation is on the top screen; the bottom screen is just a
+            // dimmed, inert scrim (the active tab shows through). Nothing else to render.
+            ConversationLocation.TOP -> Unit
+
+            // SPLIT: history is on the top screen; the bottom screen shows ONLY the controls
+            // (disposition, Barter, Repair, Persuade, topics, Goodbye) centred at 65% width,
+            // with the persuasion/choices popups over it.
+            ConversationLocation.SPLIT -> {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth(0.65f)     // ~30% wider than the previous 0.5
-                        .fillMaxHeight()
-                        .mwPanel()
-                        .pointerInput(Unit) { detectTapGestures {} }
+                        .fillMaxSize()
+                        // Match the HUD map window's vertical band (top/bottom bar spacing) so
+                        // this panel is the same height as the map on the HUD page.
+                        .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp),
+                    contentAlignment = Alignment.TopCenter
                 ) {
-                    DialogueRightColumn(
-                        topics = topics, services = services, disposition = disposition,
-                        persuadeAvailable = persuadeAvailable,
-                        // A choice question dims the topic/service/Goodbye rows; the answers
-                        // show in the centred choices popup instead of inline (the history
-                        // it would normally sit under is on the other screen).
-                        choicesActive = choices.isNotEmpty(),
-                        interactive = choices.isEmpty(),
-                        onPersuadeTapped = { showPersuasion = true },
-                        modifier = Modifier.fillMaxSize().padding(8.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth(0.65f)
+                            .fillMaxHeight()
+                            .mwPanel()
+                            .pointerInput(Unit) { detectTapGestures {} }
+                    ) {
+                        DialogueRightColumn(
+                            topics = topics, services = services, disposition = disposition,
+                            persuadeAvailable = persuadeAvailable,
+                            // A choice question dims the topic/service/Goodbye rows; the answers
+                            // show in the centred choices popup instead of inline (the history
+                            // it would normally sit under is on the other screen).
+                            choicesActive = choices.isNotEmpty(),
+                            interactive = choices.isEmpty(),
+                            onPersuadeTapped = { showPersuasion = true },
+                            modifier = Modifier.fillMaxSize().padding(8.dp)
+                        )
+                    }
+                }
+                if (showPersuasion && choices.isEmpty()) {
+                    PersuasionPopup(
+                        gold = playerGold,
+                        onPersuade = { type -> CompanionActions.persuade(type); showPersuasion = false },
+                        onCancel = { showPersuasion = false }
                     )
+                }
+                if (choices.isNotEmpty()) {
+                    DialogueChoicesPopup(choices)
                 }
             }
-        } else {
-            // Fills the full screen height (bottom = 12.dp, not BOTTOM_BAR_SPACE): dialogue is a
-            // modal interaction left via Goodbye, so the panel covers the bottom tab bar — same
-            // approach as the barter overlay. 12dp matches the top/side insets.
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = 12.dp, bottom = 12.dp, start = 12.dp, end = 12.dp)
-                    .mwPanel()
-                    .pointerInput(Unit) { detectTapGestures {} }
-            ) {
-                // ---- NPC name title bar (full width, window-title style) ----
-                if (npcName.isNotEmpty()) {
-                    Text(
-                        npcName,
-                        color = BronzeLight, fontSize = 14.sp,
-                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
-                    )
-                    Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-                }
 
-                // ---- Two columns: dialogue history (75%) | topics/services (25%) ----
-                Row(Modifier.fillMaxSize()) {
-                    DialogueHistoryColumn(
-                        history, choices,
-                        modifier = Modifier.weight(0.65f).fillMaxHeight().padding(8.dp)
-                    )
-                    Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
-                    DialogueRightColumn(
-                        topics = topics, services = services, disposition = disposition,
-                        persuadeAvailable = persuadeAvailable,
-                        // While a choice is active, the Persuade row and every topic/service row
-                        // stay visible but greyed and non-tappable (interactive = false) — the
-                        // inline choices in the history take priority over topic selection.
-                        choicesActive = choices.isNotEmpty(),
-                        interactive = choices.isEmpty(),
-                        onPersuadeTapped = { showPersuasion = true },
-                        modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
-                    )
-                }
+            // BOTTOM: the classic full two-column conversation on the bottom screen (choices
+            // render inline in the history). Fills the screen (12dp insets, covering the tab
+            // bar — dialogue is a modal interaction left via Goodbye). Popups managed inside.
+            ConversationLocation.BOTTOM -> {
+                DialogueConversationOverlay(
+                    npcName = npcName, history = history, topics = topics, services = services,
+                    choices = choices, disposition = disposition,
+                    persuadeAvailable = persuadeAvailable, playerGold = playerGold,
+                    choicesInline = true,
+                    panelAlignment = Alignment.Center,
+                    panelWidthFraction = null, panelHeightFraction = null,
+                    panelPadding = PaddingValues(12.dp)
+                )
             }
         }
+    }
+}
 
-        // Persuasion popup — centred overlay + scrim over the conversation panel, shown
-        // when the player tapped Persuade. Suppressed while a choice is active (Persuade is
-        // non-tappable then). Each action sends the command and closes the popup (matches
-        // native Morrowind — reopen Persuade for another attempt); Cancel / scrim-tap also
-        // dismisses. Leaves automatically on COMPANION_DIALOGUE_CLOSED (overlay disposed).
-        if (showPersuasion && choices.isEmpty()) {
-            PersuasionPopup(
-                gold = playerGold,
-                onPersuade = { type ->
-                    CompanionActions.persuade(type)
-                    showPersuasion = false
-                },
-                onCancel = { showPersuasion = false }
-            )
-        }
+/** The full interactive two-column conversation — NPC title bar, scrollable history (left)
+ *  and the right column of controls — plus its persuasion/choices popups. Shared by the
+ *  BOTTOM-screen layout ([choicesInline] = true, choices render inline in the history) and
+ *  the TOP-screen full layout ([choicesInline] = false, choices render as a centred popup).
+ *  The panel is sized/anchored by [panelWidthFraction]/[panelHeightFraction]/[panelAlignment]
+ *  /[panelPadding] (null fraction = fill that axis); the popups always fill the whole overlay
+ *  so they centre over the entire screen. Must be placed inside a fillMaxSize parent Box. */
+@Composable
+private fun DialogueConversationOverlay(
+    npcName: String,
+    history: List<DialogueSay>,
+    topics: List<String>,
+    services: List<String>,
+    choices: List<DialogueChoice>,
+    disposition: Int,
+    persuadeAvailable: Boolean,
+    playerGold: Int,
+    choicesInline: Boolean,
+    panelAlignment: Alignment,
+    panelWidthFraction: Float?,
+    panelHeightFraction: Float?,
+    panelPadding: PaddingValues
+) {
+    var showPersuasion by remember(npcName) { mutableStateOf(false) }
 
-        // Centred choices popup — only in the split (conversation-on-top) layout, where the
-        // choice question can't render inline in the history (that's on the other screen).
-        // No tap-outside dismiss: it stays until a choice is tapped or the dialogue closes.
-        if (conversationOnTop && choices.isNotEmpty()) {
-            DialogueChoicesPopup(choices)
+    Box(
+        modifier = Modifier.fillMaxSize().padding(panelPadding),
+        contentAlignment = panelAlignment
+    ) {
+        Column(
+            modifier = Modifier
+                .then(if (panelWidthFraction != null) Modifier.fillMaxWidth(panelWidthFraction) else Modifier.fillMaxWidth())
+                .then(if (panelHeightFraction != null) Modifier.fillMaxHeight(panelHeightFraction) else Modifier.fillMaxHeight())
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- NPC name title bar (full width, window-title style) ----
+            if (npcName.isNotEmpty()) {
+                Text(
+                    npcName,
+                    color = BronzeLight, fontSize = 14.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
+                )
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            }
+
+            // ---- Two columns: dialogue history (65%) | topics/services (35%) ----
+            Row(Modifier.fillMaxSize()) {
+                DialogueHistoryColumn(
+                    // Inline choices only in BOTTOM mode; otherwise they show in the popup.
+                    history = history,
+                    choices = if (choicesInline) choices else emptyList(),
+                    modifier = Modifier.weight(0.65f).fillMaxHeight().padding(8.dp)
+                )
+                Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
+                DialogueRightColumn(
+                    topics = topics, services = services, disposition = disposition,
+                    persuadeAvailable = persuadeAvailable,
+                    // While a choice is active, the topic/service/Goodbye rows stay visible but
+                    // greyed and non-tappable — the choices take priority over topic selection.
+                    choicesActive = choices.isNotEmpty(),
+                    interactive = choices.isEmpty(),
+                    onPersuadeTapped = { showPersuasion = true },
+                    modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
+                )
+            }
         }
+    }
+
+    // Persuasion popup — centred over the whole overlay (its own scrim). Suppressed while a
+    // choice is active (Persuade is non-tappable then). Each action sends the command and
+    // closes the popup; Cancel / scrim-tap also dismisses.
+    if (showPersuasion && choices.isEmpty()) {
+        PersuasionPopup(
+            gold = playerGold,
+            onPersuade = { type -> CompanionActions.persuade(type); showPersuasion = false },
+            onCancel = { showPersuasion = false }
+        )
+    }
+
+    // Centred choices popup — only when choices don't render inline (i.e. the TOP layout).
+    // No tap-outside dismiss: it stays until a choice is tapped or the dialogue closes.
+    if (!choicesInline && choices.isNotEmpty()) {
+        DialogueChoicesPopup(choices)
     }
 }
 
@@ -696,17 +765,48 @@ private fun DialogueChoicesPopup(choices: List<DialogueChoice>) {
 }
 
 /**
- * TOP-screen conversation history overlay (Display 0). Hosted by [org.openmw.EngineActivity]
- * in a read-only WindowManager panel window when a conversation is active AND the Conversation
- * element is routed to the top screen. Bottom-anchored panel, 35% of screen height, full width
- * minus 12dp insets: NPC name (centred, bronze) + divider, then the scrolling read-only history
- * (auto-scrolled to the newest line). No tap handlers — the panel window is FLAG_NOT_TOUCHABLE.
+ * TOP-screen conversation overlay (Display 0). Hosted by [org.openmw.EngineActivity] in a
+ * WindowManager panel window while a conversation is active AND the Conversation location is
+ * SPLIT or TOP. Its content depends on the location:
+ *  - SPLIT: a read-only, bottom-anchored history box (75% width, 51% height) — NPC name +
+ *    scrolling history. The controls live on the bottom screen. (Touchable only for scrolling.)
+ *  - TOP: the full interactive two-column conversation (history + controls + popups), the SAME
+ *    75% width, expanded to 92% height. The bottom screen is a dimmed, inert scrim.
  */
 @Composable
 fun ConversationHistoryOverlay() {
+    val location by UiPreferences.conversationLocationFlow().collectAsState()
     val npcName by GameStateRepository.dialogueNpcName.collectAsState()
     val history by GameStateRepository.dialogueHistory.collectAsState()
 
+    if (location == ConversationLocation.TOP) {
+        // Full interactive conversation on the top screen (bottom screen is scrim-only).
+        val topics by GameStateRepository.dialogueTopics.collectAsState()
+        val services by GameStateRepository.dialogueServices.collectAsState()
+        val choices by GameStateRepository.dialogueChoices.collectAsState()
+        val disposition by GameStateRepository.dialogueDisposition.collectAsState()
+        val persuadeAvailable by GameStateRepository.dialoguePersuadeAvailable.collectAsState()
+        val dialogueGold by GameStateRepository.dialogueGold.collectAsState()
+        val state by GameStateRepository.state.collectAsState()
+        val playerGold = if (dialogueGold >= 0) dialogueGold
+            else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+
+        Box(Modifier.fillMaxSize()) {
+            DialogueConversationOverlay(
+                npcName = npcName, history = history, topics = topics, services = services,
+                choices = choices, disposition = disposition,
+                persuadeAvailable = persuadeAvailable, playerGold = playerGold,
+                choicesInline = false,
+                panelAlignment = Alignment.BottomCenter,
+                panelWidthFraction = 0.83f,   // ~10% wider than the SPLIT history box (0.75)
+                panelHeightFraction = 0.70f,  // taller than the previous 0.55
+                panelPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp)
+            )
+        }
+        return
+    }
+
+    // SPLIT: read-only history box (bottom-anchored, 75% width, 51% height).
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -734,13 +834,14 @@ fun ConversationHistoryOverlay() {
                 }
                 Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
             }
-            // Read-only history: no inline choices (they live in the bottom-screen popup),
-            // interactive = false so topic hyperlinks stay highlighted but non-tappable.
+            // No inline choices (they live in the bottom-screen popup). interactive = true so
+            // topic hyperlinks in the response text are tappable on the top screen (the panel
+            // window has FLAG_NOT_TOUCHABLE removed, so touch reaches these clickable spans).
             DialogueHistoryColumn(
                 history = history,
                 choices = emptyList(),
                 modifier = Modifier.fillMaxSize().padding(12.dp),
-                interactive = false
+                interactive = true
             )
         }
     }
@@ -761,10 +862,12 @@ private fun DialogueRightColumn(
     onPersuadeTapped: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Barter is pulled out of the services list so it can sit above the divider (matched by
-    // its display string). EVERY other service drops into the scrollable list with the topics.
+    // Barter and Repair are pulled out of the services list so they can sit above the divider
+    // (matched by their display strings — the sBarter/sRepair GMST values the engine exports).
+    // EVERY other service drops into the scrollable list with the topics.
     val barterService = services.firstOrNull { it.equals("Barter", ignoreCase = true) }
-    val otherServices = services.filter { it != barterService }
+    val repairService = services.firstOrNull { it.equals("Repair", ignoreCase = true) }
+    val otherServices = services.filter { it != barterService && it != repairService }
 
     Column(modifier) {
         // 1. Disposition bar (fixed at the top). Hidden when unknown (< 0, e.g. a creature).
@@ -795,11 +898,20 @@ private fun DialogueRightColumn(
                     }
                 }
             }
-            // Divider between the Barter/Persuade block and the topics (only if something's
-            // above it). No leading gap: the last action row already draws its own faint
-            // under-divider, so the bold divider sits flush against it and reads as a single
-            // section divider rather than a second line floating below the faint one.
-            if (barterService != null || persuadeAvailable) {
+            // Repair (if the NPC offers it) — SAME styling as Barter/Persuade, in the
+            // services block above the divider.
+            if (repairService != null) {
+                item {
+                    DialogueOptionRow(repairService, dimmed = choicesActive) {
+                        if (interactive) CompanionActions.activateDialogueService(repairService)
+                    }
+                }
+            }
+            // Divider between the Barter/Persuade/Repair block and the topics (only if
+            // something's above it). No leading gap: the last action row already draws its own
+            // faint under-divider, so the bold divider sits flush against it and reads as a
+            // single section divider rather than a second line floating below the faint one.
+            if (barterService != null || persuadeAvailable || repairService != null) {
                 item {
                     Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
                     Spacer(Modifier.height(4.dp))
@@ -849,7 +961,7 @@ private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: (
     ) {
         Text(
             label,
-            color = if (dimmed) BoneDim else Bone, fontSize = 14.sp, fontFamily = MwBody,
+            color = if (dimmed) BoneDim else Bone, fontSize = 13.sp, fontFamily = MwBody,
             modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 4.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
@@ -5244,6 +5356,12 @@ fun OptionsMenuOverlay() {
     val hudElements = remember { UI_ELEMENTS.filter { it.section == UiSection.HUD } }
     val menuElements = remember { UI_ELEMENTS.filter { it.section == UiSection.MENUS } }
 
+    // Master UI mode. When VANILLA, the "Menus and Overlays" + "UI Style" sections are
+    // irrelevant, so they render greyed out and non-interactive. The UI Mode row, the HUD
+    // Elements section (companion-side, always configurable) and Input stay active.
+    val uiMode by UiPreferences.uiModeFlow().collectAsState()
+    val isDs = uiMode == UiMode.DS
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -5273,13 +5391,21 @@ fun OptionsMenuOverlay() {
                 .padding(horizontal = 16.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
         ) {
-            item { OptionsSectionHeader("HUD Elements") }
-            items(hudElements, key = { it.key }) { ScreenRouteRow(it) }
+            // Master UI-mode toggle, above all sections (always interactive).
+            item { UiModeRow() }
 
-            item { OptionsSectionHeader("Menus and Overlays") }
-            items(menuElements, key = { it.key }) { ScreenRouteRow(it) }
+            // HUD elements are companion-side and always configurable, in both modes. The
+            // toggle controls whether the native top-screen version is shown (On) or hidden (Off).
+            item { OptionsSectionHeader("Vanilla HUD Elements") }
+            items(hudElements, key = { it.key }) { HudToggleRow(it) }
+            // The Alpha3 launcher overlay (gear + arrow cluster) — purely Kotlin-side.
+            item { Alpha3OverlayRow() }
 
-            item { OptionsSectionHeader("UI Style (top screen)") }
+            item { OptionsSectionHeader("Menus and Overlays", dimmed = !isDs) }
+            item { ConversationLocationRow(sectionEnabled = isDs) }
+            items(menuElements, key = { it.key }) { ScreenRouteRow(it, sectionEnabled = isDs) }
+
+            item { OptionsSectionHeader("UI Style (top screen)", dimmed = !isDs) }
             if (styleElements.isEmpty()) {
                 item {
                     Text(
@@ -5287,11 +5413,11 @@ fun OptionsMenuOverlay() {
                         color = BoneDim,
                         fontSize = 12.sp,
                         fontFamily = MwBody,
-                        modifier = Modifier.padding(vertical = 10.dp)
+                        modifier = Modifier.alpha(if (isDs) 1f else 0.4f).padding(vertical = 10.dp)
                     )
                 }
             } else {
-                items(styleElements, key = { "style_" + it.key }) { UiStyleRow(it) }
+                items(styleElements, key = { "style_" + it.key }) { UiStyleRow(it, sectionEnabled = isDs) }
             }
 
             item { OptionsSectionHeader("Input") }
@@ -5334,9 +5460,51 @@ private fun GameCursorRow() {
     }
 }
 
+/** The master UI-mode row: [Vanilla][DS] pill selector at the very top of the options menu.
+ *  DS (default) = all companion overlays active; Vanilla = suppressed (native UI handles
+ *  everything). Always interactive. Writes to UiPreferences on every tap. */
 @Composable
-private fun OptionsSectionHeader(title: String) {
-    Column(Modifier.padding(top = 18.dp, bottom = 2.dp)) {
+private fun UiModeRow() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val mode by UiPreferences.uiModeFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
+        Text("UI Mode", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Vanilla suppresses all companion overlays (native OpenMW UI handles them)",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Vanilla",
+                active = mode == UiMode.VANILLA,
+                enabled = true
+            ) {
+                UiPreferences.setUiMode(context, UiMode.VANILLA)
+                // Hide UI is meaningless in Vanilla (native UI must be visible) — force it off.
+                scope.launch { GameFilesPreferences.saveUIState(context, false) }
+            }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "DS",
+                active = mode == UiMode.DS,
+                enabled = true
+            ) { UiPreferences.setUiMode(context, UiMode.DS) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+    }
+}
+
+@Composable
+private fun OptionsSectionHeader(title: String, dimmed: Boolean = false) {
+    Column(Modifier.alpha(if (dimmed) 0.4f else 1f).padding(top = 18.dp, bottom = 2.dp)) {
         Text(
             title.uppercase(),
             color = BoneDim,
@@ -5350,13 +5518,139 @@ private fun OptionsSectionHeader(title: String) {
     }
 }
 
-/** A screen-routing row: element name (+ PENDING tag) over a [Top][Bottom] pill selector. */
+/** The Conversation location row: a three-option [Bottom][Split][Top] pill selector.
+ *  BOTTOM = original two-column layout; SPLIT = history top / topics bottom (default);
+ *  TOP = full conversation on top (not yet implemented — selectable, behaves like SPLIT).
+ *  Writes to UiPreferences on every tap. */
 @Composable
-private fun ScreenRouteRow(el: UiElement) {
+private fun ConversationLocationRow(sectionEnabled: Boolean = true) {
+    val context = LocalContext.current
+    val loc by UiPreferences.conversationLocationFlow().collectAsState()
+
+    // Dim the whole row when the section is disabled (UI Mode == Vanilla) and swallow taps
+    // (onClick guarded on sectionEnabled) — pills stay enabled=true so they don't double-dim.
+    Column(Modifier.fillMaxWidth().alpha(if (sectionEnabled) 1f else 0.4f).padding(vertical = 9.dp)) {
+        Text("Conversation", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Bottom",
+                active = loc == ConversationLocation.BOTTOM,
+                enabled = true
+            ) { if (sectionEnabled) UiPreferences.setConversationLocation(context, ConversationLocation.BOTTOM) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Split",
+                active = loc == ConversationLocation.SPLIT,
+                enabled = true
+            ) { if (sectionEnabled) UiPreferences.setConversationLocation(context, ConversationLocation.SPLIT) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Top",
+                active = loc == ConversationLocation.TOP,
+                enabled = true
+            ) { if (sectionEnabled) UiPreferences.setConversationLocation(context, ConversationLocation.TOP) }
+        }
+    }
+}
+
+/** Toggle for the Alpha3 launcher overlay (the gear + arrow cluster on the top screen).
+ *  [On][Off] pill selector (default On). On = shown; Off hides the whole cluster including the
+ *  arrow's expanded quick-action row (one composable). Purely Kotlin-side; writes on every tap. */
+@Composable
+private fun Alpha3OverlayRow() {
+    val context = LocalContext.current
+    val shown by UiPreferences.alpha3OverlayFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Alpha3 overlay", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "The gear + arrow menu cluster in the top corner",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = shown,
+                enabled = true
+            ) { UiPreferences.setAlpha3Overlay(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !shown,
+                enabled = true
+            ) { UiPreferences.setAlpha3Overlay(context, false) }
+        }
+    }
+}
+
+/** A HUD-element row: element name (+ PENDING tag) over an [On][Off] pill selector. On = the
+ *  native top-screen version is visible; Off = hidden (companion bottom-screen version only).
+ *  The companion always draws these on the bottom screen, so there is no Top/Bottom routing.
+ *  Writes a Boolean to UiPreferences on every tap. Pending elements show disabled pills. */
+@Composable
+private fun HudToggleRow(el: UiElement) {
+    val context = LocalContext.current
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                el.label,
+                color = if (el.pending) BoneDim else Bone,
+                fontSize = 14.sp,
+                fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            if (el.pending) {
+                Text(
+                    "PENDING",
+                    color = BoneDim.copy(alpha = 0.7f),
+                    fontSize = 9.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (el.pending) {
+                // Not adjustable yet — native version stays On, both pills disabled.
+                OptionPill(Modifier.weight(1f), label = "On", active = true, enabled = false) {}
+                OptionPill(Modifier.weight(1f), label = "Off", active = false, enabled = false) {}
+            } else {
+                val on by UiPreferences.hudOnFlow(el.key).collectAsState()
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = "On",
+                    active = on,
+                    enabled = true
+                ) { UiPreferences.setHudOn(context, el.key, true) }
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = "Off",
+                    active = !on,
+                    enabled = true
+                ) { UiPreferences.setHudOn(context, el.key, false) }
+            }
+        }
+    }
+}
+
+/** A screen-routing row: element name (+ PENDING tag) over a [Top][Bottom] pill selector.
+ *  [sectionEnabled] false (UI Mode == Vanilla) greys the row and swallows taps. */
+@Composable
+private fun ScreenRouteRow(el: UiElement, sectionEnabled: Boolean = true) {
     val context = LocalContext.current
     val route by UiPreferences.routeFlow(el.key).collectAsState()
 
-    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+    Column(Modifier.fillMaxWidth().alpha(if (sectionEnabled) 1f else 0.4f).padding(vertical = 9.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 el.label,
@@ -5398,25 +5692,26 @@ private fun ScreenRouteRow(el: UiElement) {
                     label = "Top",
                     active = route == ScreenRoute.TOP,
                     enabled = true
-                ) { UiPreferences.setRoute(context, el.key, ScreenRoute.TOP) }
+                ) { if (sectionEnabled) UiPreferences.setRoute(context, el.key, ScreenRoute.TOP) }
                 OptionPill(
                     Modifier.weight(1f),
                     label = "Bottom",
                     active = route == ScreenRoute.BOTTOM,
                     enabled = true
-                ) { UiPreferences.setRoute(context, el.key, ScreenRoute.BOTTOM) }
+                ) { if (sectionEnabled) UiPreferences.setRoute(context, el.key, ScreenRoute.BOTTOM) }
             }
         }
     }
 }
 
-/** A UI-style row: element name + "Top screen selected above" note over a [Vanilla][DS] selector. */
+/** A UI-style row: element name + "Top screen selected above" note over a [Vanilla][DS] selector.
+ *  [sectionEnabled] false (UI Mode == Vanilla) greys the row and swallows taps. */
 @Composable
-private fun UiStyleRow(el: UiElement) {
+private fun UiStyleRow(el: UiElement, sectionEnabled: Boolean = true) {
     val context = LocalContext.current
     val style by UiPreferences.styleFlow(el.key).collectAsState()
 
-    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+    Column(Modifier.fillMaxWidth().alpha(if (sectionEnabled) 1f else 0.4f).padding(vertical = 9.dp)) {
         Text(el.label, color = BoneMuted, fontSize = 13.sp, fontFamily = MwBody)
         Text(
             "Top screen selected above",
@@ -5432,13 +5727,13 @@ private fun UiStyleRow(el: UiElement) {
                 label = "Vanilla",
                 active = style == UiStyle.VANILLA,
                 enabled = true
-            ) { UiPreferences.setStyle(context, el.key, UiStyle.VANILLA) }
+            ) { if (sectionEnabled) UiPreferences.setStyle(context, el.key, UiStyle.VANILLA) }
             OptionPill(
                 Modifier.weight(1f),
                 label = "DS",
                 active = style == UiStyle.DS,
                 enabled = true
-            ) { UiPreferences.setStyle(context, el.key, UiStyle.DS) }
+            ) { if (sectionEnabled) UiPreferences.setStyle(context, el.key, UiStyle.DS) }
         }
     }
 }

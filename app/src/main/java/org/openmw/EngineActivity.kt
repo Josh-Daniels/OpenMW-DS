@@ -12,7 +12,8 @@ import org.openmw.companion.CompanionScreen
 import org.openmw.companion.ConversationHistoryOverlay
 import org.openmw.companion.GameStateRepository
 import org.openmw.companion.OptionsMenuOverlay
-import org.openmw.companion.ScreenRoute
+import org.openmw.companion.ConversationLocation
+import org.openmw.companion.UiMode
 import org.openmw.companion.UiPreferences
 
 import android.annotation.SuppressLint
@@ -262,6 +263,8 @@ class EngineActivity : SDLActivity() {
                         // onHudVisibilityChanged. The overlay shows only when the app's own
                         // hide preference is off AND the game HUD is currently visible.
                         val hudVisible by GameStateRepository.hudVisible.collectAsState()
+                        // Companion toggle for the Alpha3 launcher overlay (gear + arrow cluster).
+                        val showAlpha3Overlay by UiPreferences.alpha3OverlayFlow().collectAsState()
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
                         val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
                         val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
@@ -336,7 +339,7 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
-                        if (!isUIHidden && hudVisible) {
+                        if (!isUIHidden && hudVisible && showAlpha3Overlay) {
                             OverlayUI(
                                 context = this@EngineActivity,
                                 virtualKeyboard = virtualKeyboard,
@@ -608,6 +611,19 @@ class EngineActivity : SDLActivity() {
         external fun setCompanionCursorEnabled(enabled: Boolean)
 
         /**
+         * Per-element native HUD visibility (companion "Vanilla HUD Elements" options).
+         * true = native top-screen element shown; false = hidden. Read natively by
+         * companionHud*() (companion-hud-elements.patch). Pushed on change + at startup.
+         * "Equipped" gates both the weapon and spell boxes.
+         */
+        @JvmStatic external fun setCompanionHudHms(on: Boolean)
+        @JvmStatic external fun setCompanionHudEquipped(on: Boolean)
+        @JvmStatic external fun setCompanionHudMinimap(on: Boolean)
+        @JvmStatic external fun setCompanionHudEffects(on: Boolean)
+        @JvmStatic external fun setCompanionHudSneak(on: Boolean)
+        @JvmStatic external fun setCompanionHudCrosshair(on: Boolean)
+
+        /**
          * Decodes an item icon from the VFS (BSA/loose files) and writes it as PNG.
          * [iconPath] is the VFS-normalized path from rec.icon (e.g. "icons/m/misc_shirt_01.dds").
          * [outputPath] is the absolute filesystem path for the output PNG.
@@ -720,9 +736,9 @@ class EngineActivity : SDLActivity() {
         }
 
         // Split-conversation mode: show a read-only conversation-history overlay on the
-        // TOP screen while a conversation is active AND the Conversation element is routed
-        // to the top screen (UiPreferences "menu_conversation" == TOP). Independent of the
-        // Hide UI toggle — conversation is always visible when active.
+        // TOP screen while a conversation is active AND the Conversation location is SPLIT
+        // or TOP (i.e. anything but BOTTOM). Independent of the Hide UI toggle —
+        // conversation is always visible when active.
         UiPreferences.init(applicationContext)
 
         // Push the "Game cursor" option to native (companionCursorEnabled) so the
@@ -732,6 +748,25 @@ class EngineActivity : SDLActivity() {
             UiPreferences.gameCursorFlow().collect { enabled ->
                 runCatching { setCompanionCursorEnabled(enabled) }
                     .onFailure { Log.e(TAG, "setCompanionCursorEnabled failed", it) }
+            }
+        }
+
+        // Push each "Vanilla HUD Elements" On/Off option to native (companionHud*), so the
+        // engine hides/shows the corresponding native top-screen HUD element. Fires once with
+        // the persisted value, then on every toggle. "Equipped" gates weapon + spell together.
+        val hudPushes: List<Pair<String, (Boolean) -> Unit>> = listOf(
+            "hud_vitals" to { on: Boolean -> setCompanionHudHms(on) },
+            "hud_equipped" to { on: Boolean -> setCompanionHudEquipped(on) },
+            "hud_minimap" to { on: Boolean -> setCompanionHudMinimap(on) },
+            "hud_effects" to { on: Boolean -> setCompanionHudEffects(on) },
+            "hud_crosshair" to { on: Boolean -> setCompanionHudCrosshair(on) },
+            "hud_sneak" to { on: Boolean -> setCompanionHudSneak(on) },
+        )
+        hudPushes.forEach { (key, push) ->
+            lifecycleScope.launch {
+                UiPreferences.hudOnFlow(key).collect { on ->
+                    runCatching { push(on) }.onFailure { Log.e(TAG, "setCompanionHud[$key] failed", it) }
+                }
             }
         }
 
@@ -745,8 +780,11 @@ class EngineActivity : SDLActivity() {
             ) { npc, hist, topics, services, choices ->
                 npc.isNotEmpty() || hist.isNotEmpty() || topics.isNotEmpty() ||
                     services.isNotEmpty() || choices.isNotEmpty()
-            }.combine(UiPreferences.routeFlow("menu_conversation")) { active, route ->
-                active && route == ScreenRoute.TOP
+            }.combine(UiPreferences.conversationLocationFlow()) { active, loc ->
+                active && loc != ConversationLocation.BOTTOM
+            }.combine(UiPreferences.uiModeFlow()) { show, mode ->
+                // Suppress the top-screen conversation overlay entirely in Vanilla mode.
+                show && mode == UiMode.DS
             }.distinctUntilChanged().collect { show ->
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()
             }

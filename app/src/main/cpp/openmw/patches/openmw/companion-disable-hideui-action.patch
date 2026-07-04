@@ -1,0 +1,23 @@
+Disable the native OpenMW Hide UI input action (A_ToggleHUD).
+
+We want the Hide UI key/button (default F11, or any controller binding) to do
+nothing when triggered, because the companion drives HUD visibility itself
+(Vanilla/DS mode). Every binding dispatches through
+ActionManager::executeAction(A_ToggleHUD), so dropping the body of that one
+case — leaving just the break — disables the action for all bindings without
+touching anything else. The Lua I.UI.setHudVisibility binding and the mwscript
+ToggleHUD command are separate code paths and remain fully functional, so the
+companion can still control HUD visibility programmatically.
+
+diff --git a/apps/openmw/mwinput/actionmanager.cpp b/apps/openmw/mwinput/actionmanager.cpp
+--- a/apps/openmw/mwinput/actionmanager.cpp
++++ b/apps/openmw/mwinput/actionmanager.cpp
+@@ -116,6 +116,7 @@
+                 quickKey(10);
+                 break;
+             case A_ToggleHUD:
+-                windowManager->setHudVisibility(!windowManager->isHudVisible());
++                // COMPANION: native Hide UI action disabled - HUD visibility is driven by
++                // the companion (Vanilla/DS mode), not this key/button toggle.
+                 break;
+             case A_ToggleDebug:

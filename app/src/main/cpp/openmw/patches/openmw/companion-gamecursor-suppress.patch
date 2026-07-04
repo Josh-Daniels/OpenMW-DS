@@ -1,0 +1,86 @@
+Suppress the top-screen SDL cursor unless the companion "Game cursor" option is on.
+
+The investigation into the lingering gamepad cursor during split-conversation
+mode found that the cursor reappears through THREE paths that the earlier
+companion-hideui-gamepad-cursor.patch does not cover:
+  1. Left thumbstick  - ControllerManager::update() -> setCursorActive(true)
+  2. Right thumbstick  - same update() via the mouse-wheel term
+  3. Touch-to-mouse    - MouseManager::mouseMoved() -> setCursorActive(true)
+                         (also re-arms mGamepadGuiCursorEnabled, undoing the patch)
+All three ultimately show the SDL hardware cursor through the one per-frame call
+    InputManager::update -> setMouseVisible(getCursorVisible())
+so gating THAT single choke point catches all three at once, regardless of the
+mCursorActive/mCursorVisible flags the individual paths flip.
+
+The gate reads companionCursorEnabled() (androidmain.cpp), fed from Kotlin's
+UiPreferences "gameCursor" option via setCompanionCursorEnabled(); default false =
+cursor suppressed. A second, belt-and-suspenders gate is added to the menu-cursor
+path in WindowManager::updateVisible() (setCursorVisible(!gameMode)) that re-enables
+the cursor in GUI modes including GM_Dialogue, so it too respects the option.
+
+Both edits are #ifdef __ANDROID__ so desktop behavior is unchanged.
+
+diff --git a/apps/openmw/mwinput/inputmanagerimp.cpp b/apps/openmw/mwinput/inputmanagerimp.cpp
+--- a/apps/openmw/mwinput/inputmanagerimp.cpp
++++ b/apps/openmw/mwinput/inputmanagerimp.cpp
+@@ -23,5 +23,12 @@
+ #include "sensormanager.hpp"
+ 
++#ifdef __ANDROID__
++// COMPANION: defined in androidmain.cpp. Returns false while the companion "Game
++// cursor" option is off, so the top-screen SDL cursor is suppressed for touch and
++// both thumbsticks at once (all funnel through the per-frame setMouseVisible below).
++extern "C" bool companionCursorEnabled();
++#endif
++
+ namespace MWInput
+ {
+     InputManager::InputManager(SDL_Window* window, osg::ref_ptr<osgViewer::Viewer> viewer,
+@@ -58,6 +58,14 @@
+     void InputManager::update(float dt, bool disableControls, bool disableEvents)
+     {
+         mControlsDisabled = disableControls;
+ 
+-        mInputWrapper->setMouseVisible(MWBase::Environment::get().getWindowManager()->getCursorVisible());
++        bool companionCursorVisible = MWBase::Environment::get().getWindowManager()->getCursorVisible();
++#ifdef __ANDROID__
++        // COMPANION: keep the top-screen SDL cursor hidden while the "Game cursor"
++        // option is off. This single per-frame choke point catches left stick, right
++        // stick and touch-to-mouse at once, regardless of mCursorActive/mCursorVisible.
++        if (!companionCursorEnabled())
++            companionCursorVisible = false;
++#endif
++        mInputWrapper->setMouseVisible(companionCursorVisible);
+         mInputWrapper->capture(disableEvents);
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -125,6 +125,13 @@
+ #include "videowidget.hpp"
+ #include "waitdialog.hpp"
+ 
++#ifdef __ANDROID__
++// COMPANION: defined in androidmain.cpp. Returns false while the companion "Game
++// cursor" option is off; used to keep the menu-cursor path from re-enabling the
++// top-screen cursor in GUI modes (including GM_Dialogue).
++extern "C" bool companionCursorEnabled();
++#endif
++
+ namespace MWGui
+ {
+     namespace
+@@ -726,6 +726,13 @@
+         if (loading)
+             setCursorVisible(mMessageBoxManager && mMessageBoxManager->isInteractiveMessageBox());
+         else
+-            setCursorVisible(!gameMode);
++#ifdef __ANDROID__
++            // COMPANION: the menu-cursor path re-enables the cursor in any GUI mode
++            // (including GM_Dialogue). Also respect the "Game cursor" option so it
++            // can't re-show the top-screen cursor while that option is off.
++            setCursorVisible(!gameMode && companionCursorEnabled());
++#else
++            setCursorVisible(!gameMode);
++#endif
+ 
+         if (gameMode)

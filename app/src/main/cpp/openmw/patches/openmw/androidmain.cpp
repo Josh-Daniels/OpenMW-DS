@@ -68,6 +68,18 @@ static std::atomic<bool> g_companionHudEnabled{ true };
 // companion-gamecursor-suppress.patch.
 static std::atomic<bool> g_companionCursorEnabled{ false };
 
+// Per-element native HUD visibility (companion "Vanilla HUD Elements" options), pushed from
+// Kotlin. true = the native top-screen element is shown; false = hidden (companion bottom-screen
+// version is the sole display). Default true. Read by the engine (companion-hud-elements.patch)
+// via the companionHud*() bridges below. std::atomic: written on a JNI thread, read on the
+// GUI/engine thread. "Equipped" gates BOTH the weapon and spell boxes.
+static std::atomic<bool> g_companionHudHms{ true };
+static std::atomic<bool> g_companionHudEquipped{ true };
+static std::atomic<bool> g_companionHudMinimap{ true };
+static std::atomic<bool> g_companionHudEffects{ true };
+static std::atomic<bool> g_companionHudSneak{ true };
+static std::atomic<bool> g_companionHudCrosshair{ true };
+
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
 // g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
@@ -402,6 +414,46 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionCursorEnabled(JNIEnv* /*env*/, jclass /*cls*/, jboolean enabled)
 {
     g_companionCursorEnabled.store(enabled == JNI_TRUE);
+}
+// Per-element native HUD visibility bridges (companion-hud-elements.patch reads these in
+// hud.cpp to gate each element's setVisible). Each returns true when the native element
+// should be shown. Pushed from Kotlin (EngineActivity) on change + once at startup.
+extern "C" bool companionHudHms() { return g_companionHudHms.load(); }
+extern "C" bool companionHudEquipped() { return g_companionHudEquipped.load(); }
+extern "C" bool companionHudMinimap() { return g_companionHudMinimap.load(); }
+extern "C" bool companionHudEffects() { return g_companionHudEffects.load(); }
+extern "C" bool companionHudSneak() { return g_companionHudSneak.load(); }
+extern "C" bool companionHudCrosshair() { return g_companionHudCrosshair.load(); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionHudHms(JNIEnv*, jclass, jboolean on)
+{
+    g_companionHudHms.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionHudEquipped(JNIEnv*, jclass, jboolean on)
+{
+    g_companionHudEquipped.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionHudMinimap(JNIEnv*, jclass, jboolean on)
+{
+    g_companionHudMinimap.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionHudEffects(JNIEnv*, jclass, jboolean on)
+{
+    g_companionHudEffects.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionHudSneak(JNIEnv*, jclass, jboolean on)
+{
+    g_companionHudSneak.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionHudCrosshair(JNIEnv*, jclass, jboolean on)
+{
+    g_companionHudCrosshair.store(on == JNI_TRUE);
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.
