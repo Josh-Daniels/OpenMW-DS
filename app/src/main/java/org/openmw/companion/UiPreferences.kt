@@ -69,6 +69,7 @@ object UiPreferences {
     private const val PREFS = "companion_ui_settings"
     private const val ROUTE_PREFIX = "route_"
     private const val STYLE_PREFIX = "style_"
+    private const val GAME_CURSOR = "game_cursor"
 
     private var prefs: SharedPreferences? = null
 
@@ -76,6 +77,11 @@ object UiPreferences {
         UI_ELEMENTS.associate { it.key to MutableStateFlow(it.default) }
     private val styleFlows: Map<String, MutableStateFlow<UiStyle>> =
         UI_ELEMENTS.associate { it.key to MutableStateFlow(UiStyle.VANILLA) }
+
+    // Input section: whether touch / thumbsticks drive the top-screen game cursor.
+    // Default false (off). The actual cursor suppression lives in a native patch;
+    // this only stores the preference.
+    private val gameCursorFlow = MutableStateFlow(false)
 
     /** Load persisted values into the flows. Idempotent — safe to call on every compose. */
     fun init(context: Context) {
@@ -95,10 +101,20 @@ object UiPreferences {
                     ?.let { styleFlows.getValue(el.key).value = it }
             }
         }
+        gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
     }
 
     fun routeFlow(key: String): StateFlow<ScreenRoute> = routeFlows.getValue(key).asStateFlow()
     fun styleFlow(key: String): StateFlow<UiStyle> = styleFlows.getValue(key).asStateFlow()
+
+    /** Input: whether touch / thumbsticks control the top-screen game cursor. */
+    fun gameCursorFlow(): StateFlow<Boolean> = gameCursorFlow.asStateFlow()
+
+    /** Enable/disable the top-screen game cursor and persist. */
+    fun setGameCursor(context: Context, enabled: Boolean) {
+        gameCursorFlow.value = enabled
+        editor(context).putBoolean(GAME_CURSOR, enabled).apply()
+    }
 
     /** Route an element to [route] and persist. No-op for pending (locked) elements. */
     fun setRoute(context: Context, key: String, route: ScreenRoute) {

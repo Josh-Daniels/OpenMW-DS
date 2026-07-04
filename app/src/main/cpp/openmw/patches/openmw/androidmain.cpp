@@ -60,6 +60,14 @@ static jmethodID g_hudVisibilityMethod = nullptr;
 // thread. See companion-hideui-gamepad-cursor.patch.
 static std::atomic<bool> g_companionHudEnabled{ true };
 
+// Mirrors the companion "Game cursor" option (UiPreferences "gameCursor"), pushed
+// from Kotlin via setCompanionCursorEnabled(). Read by the engine through the
+// companionCursorEnabled() bridge to suppress the top-screen SDL cursor (touch +
+// both thumbsticks) while the option is off. Default false = cursor suppressed.
+// std::atomic: written on a JNI thread, read on the input/engine threads. See
+// companion-gamecursor-suppress.patch.
+static std::atomic<bool> g_companionCursorEnabled{ false };
+
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
 // g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
@@ -379,6 +387,21 @@ extern "C" void companionDeliverHudVisibility(bool visible)
 extern "C" bool companionHudEnabled()
 {
     return g_companionHudEnabled.load();
+}
+// Read by the engine (companion-gamecursor-suppress.patch) to gate the top-screen
+// SDL cursor: returns false while the companion "Game cursor" option is off, so
+// touch and both thumbsticks can't summon the cursor over the game.
+extern "C" bool companionCursorEnabled()
+{
+    return g_companionCursorEnabled.load();
+}
+// Pushed from Kotlin (EngineActivity) whenever the "Game cursor" option changes,
+// and once at startup with the persisted value. Caches into g_companionCursorEnabled
+// for companionCursorEnabled() above.
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionCursorEnabled(JNIEnv* /*env*/, jclass /*cls*/, jboolean enabled)
+{
+    g_companionCursorEnabled.store(enabled == JNI_TRUE);
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.

@@ -600,6 +600,14 @@ class EngineActivity : SDLActivity() {
         external fun sendCompanionCommand(cmd: String)
 
         /**
+         * Pushes the companion "Game cursor" option (UiPreferences "gameCursor") to
+         * native, where companionCursorEnabled() reads it to suppress the top-screen
+         * SDL cursor when off. Called on change and once at startup.
+         */
+        @JvmStatic
+        external fun setCompanionCursorEnabled(enabled: Boolean)
+
+        /**
          * Decodes an item icon from the VFS (BSA/loose files) and writes it as PNG.
          * [iconPath] is the VFS-normalized path from rec.icon (e.g. "icons/m/misc_shirt_01.dds").
          * [outputPath] is the absolute filesystem path for the output PNG.
@@ -716,6 +724,17 @@ class EngineActivity : SDLActivity() {
         // to the top screen (UiPreferences "menu_conversation" == TOP). Independent of the
         // Hide UI toggle — conversation is always visible when active.
         UiPreferences.init(applicationContext)
+
+        // Push the "Game cursor" option to native (companionCursorEnabled) so the
+        // engine suppresses the top-screen SDL cursor when off. Fires once with the
+        // persisted value, then on every toggle.
+        lifecycleScope.launch {
+            UiPreferences.gameCursorFlow().collect { enabled ->
+                runCatching { setCompanionCursorEnabled(enabled) }
+                    .onFailure { Log.e(TAG, "setCompanionCursorEnabled failed", it) }
+            }
+        }
+
         lifecycleScope.launch {
             combine(
                 GameStateRepository.dialogueNpcName,

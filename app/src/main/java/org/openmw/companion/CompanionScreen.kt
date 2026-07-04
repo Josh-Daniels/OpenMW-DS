@@ -5293,6 +5293,43 @@ fun OptionsMenuOverlay() {
             } else {
                 items(styleElements, key = { "style_" + it.key }) { UiStyleRow(it) }
             }
+
+            item { OptionsSectionHeader("Input") }
+            item { GameCursorRow() }
+        }
+    }
+}
+
+/** Input row: toggle whether touch / thumbsticks drive the top-screen game cursor.
+ *  [Off][On] pill selector (default Off), writing to UiPreferences on every tap. */
+@Composable
+private fun GameCursorRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.gameCursorFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Game cursor", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Touch and thumbsticks control the game cursor on the top screen",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setGameCursor(context, false) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setGameCursor(context, true) }
         }
     }
 }
