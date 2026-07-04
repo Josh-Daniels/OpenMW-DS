@@ -49,9 +49,9 @@ object GameStateRepository {
         _hudVisible.value = visible
     }
 
-    // PAUSE OPTIONS POC — REMOVE ME
     // true while the in-game pause/options menu (GM_MainMenu) is open. Driven by
-    // COMPANION_PAUSE_MENU_OPEN / _CLOSED lines from companion.lua.
+    // COMPANION_PAUSE_MENU_OPEN / _CLOSED lines from companion.lua. Gates the
+    // bottom-screen options/display-settings overlay (EngineActivity).
     private val _pauseMenuVisible = MutableStateFlow(false)
     val pauseMenuVisible: StateFlow<Boolean> = _pauseMenuVisible.asStateFlow()
 
@@ -504,11 +504,9 @@ object GameStateRepository {
                 containerIsPickpocket = false
                 _containerSession.value = null
             }
-            // PAUSE OPTIONS POC — REMOVE ME
             trimmed.contains("COMPANION_PAUSE_MENU_OPEN") -> {
                 _pauseMenuVisible.value = true
             }
-            // PAUSE OPTIONS POC — REMOVE ME
             trimmed.contains("COMPANION_PAUSE_MENU_CLOSED") -> {
                 _pauseMenuVisible.value = false
             }

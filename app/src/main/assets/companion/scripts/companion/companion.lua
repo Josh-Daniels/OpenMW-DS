@@ -1530,7 +1530,6 @@ end
 -- Container open/close, driven by the omw/ui.lua UiModeChanged event
 -- ({oldMode, newMode, arg}). arg is the container/corpse/NPC being opened.
 local function onUiModeChanged(data)
-    -- PAUSE OPTIONS POC — REMOVE ME
     -- GM_MainMenu ("MainMenu") is the pause/options menu (Start button). It is
     -- distinct from Container/Dialogue/Barter/etc., so it uniquely identifies the
     -- pause menu opening and closing.

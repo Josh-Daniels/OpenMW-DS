@@ -10,11 +10,12 @@ import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import org.openmw.companion.CompanionScreen
 import org.openmw.companion.GameStateRepository
+import org.openmw.companion.OptionsMenuOverlay
 
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
-import android.graphics.PixelFormat // PAUSE OPTIONS POC — REMOVE ME
+import android.graphics.PixelFormat
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -39,13 +40,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkOut
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background // PAUSE OPTIONS POC — REMOVE ME
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Text // PAUSE OPTIONS POC — REMOVE ME
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -63,7 +62,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp // PAUSE OPTIONS POC — REMOVE ME
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -126,7 +124,8 @@ class EngineActivity : SDLActivity() {
     // For MorrowindDS
     private var companionPresentation: Presentation? = null
 
-    // PAUSE OPTIONS POC — REMOVE ME
+    // Full-screen options/display-settings overlay on the bottom-screen Presentation,
+    // shown while the in-game pause/options menu is open.
     private var pauseOverlayView: View? = null
 
     external fun getLastResourceName(): String
@@ -172,7 +171,6 @@ class EngineActivity : SDLActivity() {
     override fun onDestroy() {
         super.onDestroy()
 
-        // PAUSE OPTIONS POC — REMOVE ME
         hidePauseOverlay()
 
         // MorrowindDS
@@ -694,7 +692,6 @@ class EngineActivity : SDLActivity() {
             Log.e(TAG, "Second-screen: show() failed", it)
         }
 
-        // PAUSE OPTIONS POC — REMOVE ME
         // Add/remove a full-screen WindowManager overlay on the bottom-screen
         // Presentation when the in-game pause/options menu opens/closes.
         lifecycleScope.launch {
@@ -704,7 +701,6 @@ class EngineActivity : SDLActivity() {
         }
     }
 
-    // PAUSE OPTIONS POC — REMOVE ME
     private fun showPauseOverlay() {
         if (pauseOverlayView != null) return
         val presentation = companionPresentation ?: return
@@ -718,14 +714,7 @@ class EngineActivity : SDLActivity() {
                 setViewTreeViewModelStoreOwner(this@EngineActivity)
                 setViewTreeSavedStateRegistryOwner(this@EngineActivity)
                 setContent {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color(0xF0000000)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(text = "OPTIONS MENU", color = Color.White, fontSize = 32.sp)
-                    }
+                    OptionsMenuOverlay()
                 }
             }
             val lp = WindowManager.LayoutParams(
@@ -742,7 +731,6 @@ class EngineActivity : SDLActivity() {
         }
     }
 
-    // PAUSE OPTIONS POC — REMOVE ME
     private fun hidePauseOverlay() {
         val overlay = pauseOverlayView ?: return
         val wm = companionPresentation?.window?.windowManager

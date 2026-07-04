@@ -5048,3 +5048,233 @@ private fun prettify(id: String): String =
         .joinToString(" ") { w ->
             if (w.isNotEmpty()) w.replaceFirstChar { it.uppercase() } else w
         }
+
+/* ---- Options / display-settings menu (shown on the bottom screen while the in-game
+ *      pause/options menu is open; hosted as a WindowManager panel by EngineActivity). ---- */
+
+/** Warm near-black background for the full-screen options menu. */
+private val OptionsBg = Color(0xFF1A1410)
+/** Fill of the "active" pill in the two-option selectors. */
+private val PillActiveBg = Color(0xFF3A2A10)
+
+/**
+ * The display-settings menu: route each HUD element / menu between the top and bottom
+ * screens, and choose the render style of top-screen elements. Full-screen, scrollable,
+ * BronzeLight-themed. Writes to [UiPreferences] live on every tap (no save/cancel).
+ *
+ * Public because [org.openmw.EngineActivity] hosts it in a WindowManager panel window on
+ * the companion Presentation when the pause/options menu opens.
+ */
+@Composable
+fun OptionsMenuOverlay() {
+    val context = LocalContext.current
+    remember(context) { UiPreferences.init(context); true }
+
+    // The UI-style section lists non-pending elements currently routed to the top screen.
+    // Collect their routes here (composable scope) so the LazyColumn body — a non-composable
+    // LazyListScope lambda — can just read the resulting list and re-render on route changes.
+    val styleElements = UI_ELEMENTS
+        .filter { it.hasCompanionUi }
+        .filter { UiPreferences.routeFlow(it.key).collectAsState().value == ScreenRoute.TOP }
+
+    val hudElements = remember { UI_ELEMENTS.filter { it.section == UiSection.HUD } }
+    val menuElements = remember { UI_ELEMENTS.filter { it.section == UiSection.MENUS } }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(OptionsBg)
+    ) {
+        // Title bar
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(StonePanel)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Text(
+                "Display settings",
+                color = BronzeLight,
+                fontSize = 18.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
+        ) {
+            item { OptionsSectionHeader("HUD Elements") }
+            items(hudElements, key = { it.key }) { ScreenRouteRow(it) }
+
+            item { OptionsSectionHeader("Menus and Overlays") }
+            items(menuElements, key = { it.key }) { ScreenRouteRow(it) }
+
+            item { OptionsSectionHeader("UI Style (top screen)") }
+            if (styleElements.isEmpty()) {
+                item {
+                    Text(
+                        "Route an element to Top screen to see style options",
+                        color = BoneDim,
+                        fontSize = 12.sp,
+                        fontFamily = MwBody,
+                        modifier = Modifier.padding(vertical = 10.dp)
+                    )
+                }
+            } else {
+                items(styleElements, key = { "style_" + it.key }) { UiStyleRow(it) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OptionsSectionHeader(title: String) {
+    Column(Modifier.padding(top = 18.dp, bottom = 2.dp)) {
+        Text(
+            title.uppercase(),
+            color = BoneDim,
+            fontSize = 11.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.5.sp,
+            modifier = Modifier.padding(bottom = 5.dp)
+        )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+    }
+}
+
+/** A screen-routing row: element name (+ PENDING tag) over a [Top][Bottom] pill selector. */
+@Composable
+private fun ScreenRouteRow(el: UiElement) {
+    val context = LocalContext.current
+    val route by UiPreferences.routeFlow(el.key).collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                el.label,
+                color = if (el.pending) BoneDim else Bone,
+                fontSize = 14.sp,
+                fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            if (el.pending) {
+                Text(
+                    "PENDING",
+                    color = BoneDim.copy(alpha = 0.7f),
+                    fontSize = 9.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (el.pending) {
+                val topLocked = el.lockedRoute == ScreenRoute.TOP
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = if (topLocked) "Top" else "Not yet available",
+                    active = topLocked,
+                    enabled = false
+                ) {}
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = if (!topLocked) "Bottom" else "Not yet available",
+                    active = !topLocked,
+                    enabled = false
+                ) {}
+            } else {
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = "Top",
+                    active = route == ScreenRoute.TOP,
+                    enabled = true
+                ) { UiPreferences.setRoute(context, el.key, ScreenRoute.TOP) }
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = "Bottom",
+                    active = route == ScreenRoute.BOTTOM,
+                    enabled = true
+                ) { UiPreferences.setRoute(context, el.key, ScreenRoute.BOTTOM) }
+            }
+        }
+    }
+}
+
+/** A UI-style row: element name + "Top screen selected above" note over a [Vanilla][DS] selector. */
+@Composable
+private fun UiStyleRow(el: UiElement) {
+    val context = LocalContext.current
+    val style by UiPreferences.styleFlow(el.key).collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text(el.label, color = BoneMuted, fontSize = 13.sp, fontFamily = MwBody)
+        Text(
+            "Top screen selected above",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Vanilla",
+                active = style == UiStyle.VANILLA,
+                enabled = true
+            ) { UiPreferences.setStyle(context, el.key, UiStyle.VANILLA) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "DS",
+                active = style == UiStyle.DS,
+                enabled = true
+            ) { UiPreferences.setStyle(context, el.key, UiStyle.DS) }
+        }
+    }
+}
+
+/**
+ * One option in a two-choice pill selector. Active = bronze-tinted fill + BronzeLight
+ * border/text with a trailing "●"; inactive = dark fill + muted border/text. When
+ * [enabled] is false the pill is dimmed and non-tappable (used for PENDING elements).
+ */
+@Composable
+private fun OptionPill(
+    modifier: Modifier,
+    label: String,
+    active: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val a = if (enabled) 1f else 0.4f
+    val bg = (if (active) PillActiveBg else SlotBg).copy(alpha = (if (active) 0.94f else 1f) * a)
+    val border = (if (active) BronzeLight else BronzeDark).copy(alpha = a)
+    val fg = (if (active) BronzeLight else BoneDim).copy(alpha = a)
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(4.dp))
+            .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
+            .padding(vertical = 8.dp, horizontal = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            if (active) "$label ●" else label,
+            color = fg,
+            fontSize = 12.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+    }
+}
