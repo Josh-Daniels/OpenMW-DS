@@ -6,112 +6,108 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** Which physical screen a UI element is drawn on. */
-enum class ScreenRoute { TOP, BOTTOM }
-
 /**
  * Where the conversation UI is drawn.
  * - [BOTTOM]: original two-column layout entirely on the bottom screen.
  * - [SPLIT]: history on the top screen, topics/controls on the bottom (current default).
  * - [TOP]: full conversation on the top screen (not yet implemented — treated as [SPLIT]).
+ *
+ * NOTE: distinct from [GameUiMode]. This only chooses which screen the (DS) conversation is
+ * drawn on; whether the companion draws conversation at all is the "game_ui_conversation"
+ * [GameUiMode]. No longer has a dedicated options-menu row — defaults to [SPLIT].
  */
 enum class ConversationLocation { BOTTOM, SPLIT, TOP }
 
-/** How a top-screen element is rendered: vanilla OpenMW UI or the DS-styled replacement. */
-enum class UiStyle { VANILLA, DS }
+/**
+ * Per-element rendering mode for a "Game UI" element (a menu/overlay the companion can take
+ * over from native OpenMW).
+ * - [DS]: the companion draws it on the bottom screen; the native top-screen version is suppressed.
+ * - [VANILLA]: native OpenMW handles it on the top screen as normal.
+ */
+enum class GameUiMode { DS, VANILLA }
 
 /**
- * Master companion UI mode.
- * - [DS] (default): all companion overlays/popups are active.
- * - [VANILLA]: companion overlays are suppressed; native OpenMW UI handles everything.
- * The tab UI (inventory, spells, stats, journal, HUD) works in both modes.
+ * One "Game UI" element in the options menu's GAME UI section, in display order.
+ * [pending] elements have no companion (DS) replacement yet: they are locked to [VANILLA]
+ * and their DS pill renders greyed with "not yet available".
  */
-enum class UiMode { VANILLA, DS }
-
-/** The two routing sections of the options menu (the UI-style section is derived, not stored). */
-enum class UiSection { HUD, MENUS }
-
-/**
- * One routable UI element. [pending] elements have no companion (DS) UI yet: their route is
- * locked to [default] and they expose no style choice.
- */
-data class UiElement(
+data class GameUiElement(
     val key: String,
     val label: String,
-    val section: UiSection,
-    val default: ScreenRoute,
     val pending: Boolean = false,
 ) {
-    /** A non-pending element has a DS companion replacement, so it gets a UI-style choice. */
-    val hasCompanionUi: Boolean get() = !pending
-    /** Pending elements are locked to their default route. */
-    val lockedRoute: ScreenRoute get() = default
+    /** Pending elements are locked to VANILLA; everything else defaults to DS. */
+    val defaultMode: GameUiMode get() = if (pending) GameUiMode.VANILLA else GameUiMode.DS
 }
 
-/**
- * Catalogue of every routable UI element, in display order. This is the single source of
- * truth the options menu renders from and [UiPreferences] persists.
- */
-val UI_ELEMENTS: List<UiElement> = listOf(
-    // ---- HUD elements ----
-    UiElement("hud_vitals", "Health / Magicka / Fatigue", UiSection.HUD, ScreenRoute.BOTTOM),
-    UiElement("hud_equipped", "Equipped weapon and spell", UiSection.HUD, ScreenRoute.BOTTOM),
-    UiElement("hud_minimap", "Minimap", UiSection.HUD, ScreenRoute.BOTTOM),
-    UiElement("hud_effects", "Active effects", UiSection.HUD, ScreenRoute.BOTTOM),
-    UiElement("hud_crosshair", "Crosshair", UiSection.HUD, ScreenRoute.BOTTOM),
-    UiElement("hud_sneak", "Sneak indicator", UiSection.HUD, ScreenRoute.BOTTOM),
-    UiElement("hud_enemy", "Target health", UiSection.HUD, ScreenRoute.BOTTOM),
-    // ---- Menus and overlays ----
-    // NOTE: "Conversation" is NOT a generic route element — it's a dedicated three-way
-    // ConversationLocation setting (BOTTOM/SPLIT/TOP), rendered by ConversationLocationRow
-    // and backed by conversationLocationFlow below.
-    UiElement("menu_conversation_topics", "Conversation topics only", UiSection.MENUS, ScreenRoute.BOTTOM),
-    UiElement("menu_persuasion", "Persuasion screen", UiSection.MENUS, ScreenRoute.BOTTOM),
-    UiElement("menu_looting", "Looting", UiSection.MENUS, ScreenRoute.BOTTOM),
-    UiElement("menu_pickpocket", "Pickpocket", UiSection.MENUS, ScreenRoute.BOTTOM),
-    UiElement("menu_bartering", "Bartering", UiSection.MENUS, ScreenRoute.BOTTOM),
-    UiElement("menu_repair", "Repair screen", UiSection.MENUS, ScreenRoute.TOP, pending = true),
-    UiElement("menu_levelup", "Level up screen", UiSection.MENUS, ScreenRoute.TOP, pending = true),
-    UiElement("menu_spellmaking", "Spellmaking / Enchanting", UiSection.MENUS, ScreenRoute.TOP, pending = true),
-    UiElement("menu_rest", "Rest / Wait screen", UiSection.MENUS, ScreenRoute.TOP, pending = true),
+/** Catalogue of every Game UI element, in display order — the single source of truth the
+ *  GAME UI section renders from and [UiPreferences] persists. */
+val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
+    GameUiElement("game_ui_conversation", "Conversation"),
+    GameUiElement("game_ui_looting", "Looting"),
+    GameUiElement("game_ui_bartering", "Bartering"),
+    GameUiElement("game_ui_persuasion", "Persuasion"),
+    GameUiElement("game_ui_repair", "Repair"),
+    GameUiElement("game_ui_levelup", "Level up", pending = true),
+    GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
+    GameUiElement("game_ui_restwait", "Rest / Wait", pending = true),
 )
 
 /**
- * Global (not per-character) UI settings: which screen each element is routed to, and the
- * rendering style of top-screen elements. Backed by SharedPreferences and exposed as
- * StateFlows so the options UI reacts live and future rendering code can observe changes.
+ * One native top-screen HUD element that the "Vanilla HUD" section can show/hide. [pending]
+ * elements have no native gate implemented yet: their On/Off pills render greyed and locked to On.
+ */
+data class UiElement(val key: String, val label: String, val pending: Boolean = false)
+
+/**
+ * Catalogue of the native top-screen HUD elements, in display order. The companion always draws
+ * these on the bottom screen; the On/Off toggle controls whether the NATIVE top-screen version is
+ * also visible (On) or hidden (Off). Keys must stay stable — [org.openmw.EngineActivity] pushes
+ * each to native by key and the persisted prefs are keyed on them.
+ */
+val HUD_ELEMENTS: List<UiElement> = listOf(
+    UiElement("hud_vitals", "Health / Magicka / Fatigue"),
+    UiElement("hud_equipped", "Equipped weapon and spell"),
+    UiElement("hud_minimap", "Minimap"),
+    UiElement("hud_effects", "Active effects"),
+    UiElement("hud_sneak", "Sneak indicator"),
+    UiElement("hud_enemy", "Target health"),
+    UiElement("hud_crosshair", "Crosshair"),
+    // Pending: pref exists (default On, persisted) but no native gate is wired yet, so
+    // EngineActivity does NOT push it and the row renders locked/greyed.
+    UiElement("hud_controller_tooltips", "Controller tooltips", pending = true),
+)
+
+/**
+ * Global (not per-character) UI settings: the per-element Game UI mode (DS/Vanilla), which native
+ * HUD elements are visible, and the input/overlay toggles. Backed by SharedPreferences and exposed
+ * as StateFlows so the options UI reacts live and rendering code can observe changes.
  *
- * A plain object so it survives Activity boundaries, matching [GameStateRepository]. Values
- * default from [UI_ELEMENTS]; pending elements always report their locked route.
+ * A plain object so it survives Activity boundaries, matching [GameStateRepository].
  */
 object UiPreferences {
     private const val PREFS = "companion_ui_settings"
-    private const val ROUTE_PREFIX = "route_"
-    private const val STYLE_PREFIX = "style_"
+    private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
     private const val GAME_CURSOR = "game_cursor"
     private const val CONVERSATION_LOCATION = "conversation_location"
-    private const val UI_MODE = "ui_mode"
     private const val HUD_ON_PREFIX = "hud_on_"
     private const val ALPHA3_OVERLAY = "alpha3_overlay"
 
     private var prefs: SharedPreferences? = null
 
-    // Master UI mode (DS = companion overlays active; VANILLA = suppressed). Default DS.
-    private val uiModeFlow = MutableStateFlow(UiMode.DS)
+    // Per-element Game UI mode (DS = companion draws it; VANILLA = native handles it). Pending
+    // elements are locked to their VANILLA default and never persisted/changed.
+    private val gameUiModeFlows: Map<String, MutableStateFlow<GameUiMode>> =
+        GAME_UI_ELEMENTS.associate { it.key to MutableStateFlow(it.defaultMode) }
 
     // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default SPLIT.
     private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT)
-
-    private val routeFlows: Map<String, MutableStateFlow<ScreenRoute>> =
-        UI_ELEMENTS.associate { it.key to MutableStateFlow(it.default) }
-    private val styleFlows: Map<String, MutableStateFlow<UiStyle>> =
-        UI_ELEMENTS.associate { it.key to MutableStateFlow(UiStyle.VANILLA) }
 
     // HUD elements are always drawn on the bottom screen by the companion; this Boolean toggles
     // whether the NATIVE top-screen version is visible (true = On/visible, false = Off/hidden).
     // Keyed by HUD element key, default true (On). Actual native hiding is implemented separately.
     private val hudFlows: Map<String, MutableStateFlow<Boolean>> =
-        UI_ELEMENTS.filter { it.section == UiSection.HUD }.associate { it.key to MutableStateFlow(true) }
+        HUD_ELEMENTS.associate { it.key to MutableStateFlow(true) }
 
     // Input section: whether touch / thumbsticks drive the top-screen game cursor.
     // Default false (off). The actual cursor suppression lives in a native patch;
@@ -127,44 +123,49 @@ object UiPreferences {
         if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs = p
-        UI_ELEMENTS.forEach { el ->
+        GAME_UI_ELEMENTS.forEach { el ->
             if (el.pending) {
-                // Pending elements ignore any stored value — the route is locked.
-                routeFlows.getValue(el.key).value = el.lockedRoute
+                // Pending elements ignore any stored value — the mode is locked to VANILLA.
+                gameUiModeFlows.getValue(el.key).value = GameUiMode.VANILLA
             } else {
-                p.getString(ROUTE_PREFIX + el.key, null)
-                    ?.let { runCatching { ScreenRoute.valueOf(it) }.getOrNull() }
-                    ?.let { routeFlows.getValue(el.key).value = it }
-                p.getString(STYLE_PREFIX + el.key, null)
-                    ?.let { runCatching { UiStyle.valueOf(it) }.getOrNull() }
-                    ?.let { styleFlows.getValue(el.key).value = it }
+                p.getString(GAME_UI_PREFIX + el.key, null)
+                    ?.let { runCatching { GameUiMode.valueOf(it) }.getOrNull() }
+                    ?.let { gameUiModeFlows.getValue(el.key).value = it }
             }
         }
         gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
             ?.let { conversationLocationFlow.value = it }
-        p.getString(UI_MODE, null)
-            ?.let { runCatching { UiMode.valueOf(it) }.getOrNull() }
-            ?.let { uiModeFlow.value = it }
-        // HUD element on/off (non-pending only; pending elements stay locked On).
-        UI_ELEMENTS.filter { it.section == UiSection.HUD && !it.pending }.forEach { el ->
+        HUD_ELEMENTS.forEach { el ->
             hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, true)
         }
         alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, true)
     }
 
-    fun routeFlow(key: String): StateFlow<ScreenRoute> = routeFlows.getValue(key).asStateFlow()
-    fun styleFlow(key: String): StateFlow<UiStyle> = styleFlows.getValue(key).asStateFlow()
+    /** The DS/Vanilla mode for a Game UI element (e.g. "game_ui_looting"). */
+    fun gameUiModeFlow(key: String): StateFlow<GameUiMode> = gameUiModeFlows.getValue(key).asStateFlow()
 
-    /** HUD element on/off: whether the native top-screen version is visible (true = On). */
+    /** Set a Game UI element's mode and persist. No-op for pending (locked) elements. */
+    fun setGameUiMode(context: Context, key: String, mode: GameUiMode) {
+        val el = GAME_UI_ELEMENTS.firstOrNull { it.key == key } ?: return
+        if (el.pending) return
+        gameUiModeFlows.getValue(key).value = mode
+        editor(context).putString(GAME_UI_PREFIX + key, mode.name).apply()
+    }
+
+    /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Vanilla" quick-set
+     *  buttons). Pending elements stay locked to VANILLA; Vanilla HUD toggles are NOT affected. */
+    fun setAllGameUi(context: Context, mode: GameUiMode) {
+        GAME_UI_ELEMENTS.filter { !it.pending }.forEach { setGameUiMode(context, it.key, mode) }
+    }
+
     fun hudOnFlow(key: String): StateFlow<Boolean> = hudFlows.getValue(key).asStateFlow()
 
-    /** Set a HUD element's on/off state and persist. No-op for pending (locked) elements. */
+    /** Set a HUD element's on/off state and persist. */
     fun setHudOn(context: Context, key: String, on: Boolean) {
-        val el = UI_ELEMENTS.firstOrNull { it.key == key } ?: return
-        if (el.pending) return
-        hudFlows.getValue(key).value = on
+        val flow = hudFlows[key] ?: return
+        flow.value = on
         editor(context).putBoolean(HUD_ON_PREFIX + key, on).apply()
     }
 
@@ -180,33 +181,6 @@ object UiPreferences {
         editor(context).putBoolean(ALPHA3_OVERLAY, shown).apply()
     }
 
-    /** Master UI mode (DS = companion overlays active; VANILLA = suppressed). */
-    fun uiModeFlow(): StateFlow<UiMode> = uiModeFlow.asStateFlow()
-
-    /** HUD element keys bulk-toggled by a DS/Vanilla mode switch. The crosshair is handled
-     *  separately (ON in both modes) and so is NOT in this list. */
-    private val MODE_HUD_KEYS = listOf(
-        "hud_vitals", "hud_equipped", "hud_minimap", "hud_effects", "hud_sneak", "hud_enemy",
-    )
-
-    /** Set the master UI mode and persist. Also bulk-sets the native HUD element toggles to
-     *  match the mode: DS hides every native top-screen HUD element (the companion draws them
-     *  on the bottom screen), Vanilla shows them all; the Alpha3 overlay follows the same rule.
-     *  The crosshair stays ON in both modes. Each write goes through setHudOn/setAlpha3Overlay,
-     *  so the shared StateFlows update immediately — EngineActivity's collectors push the new
-     *  values to the native JNI setters, and the options-menu rows (observing the same flows)
-     *  refresh at once — and each value is persisted. Only an explicit mode switch resets these;
-     *  init() loads the persisted per-element values on launch and never calls this. */
-    fun setUiMode(context: Context, mode: UiMode) {
-        uiModeFlow.value = mode
-        editor(context).putString(UI_MODE, mode.name).apply()
-
-        val on = mode == UiMode.VANILLA
-        MODE_HUD_KEYS.forEach { setHudOn(context, it, on) }
-        setHudOn(context, "hud_crosshair", true) // crosshair on in both DS and Vanilla
-        setAlpha3Overlay(context, on)
-    }
-
     /** Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). */
     fun conversationLocationFlow(): StateFlow<ConversationLocation> = conversationLocationFlow.asStateFlow()
 
@@ -220,22 +194,6 @@ object UiPreferences {
     fun setGameCursor(context: Context, enabled: Boolean) {
         gameCursorFlow.value = enabled
         editor(context).putBoolean(GAME_CURSOR, enabled).apply()
-    }
-
-    /** Route an element to [route] and persist. No-op for pending (locked) elements. */
-    fun setRoute(context: Context, key: String, route: ScreenRoute) {
-        val el = UI_ELEMENTS.firstOrNull { it.key == key } ?: return
-        if (el.pending) return
-        routeFlows.getValue(key).value = route
-        editor(context).putString(ROUTE_PREFIX + key, route.name).apply()
-    }
-
-    /** Set an element's top-screen render style and persist. No-op for pending elements. */
-    fun setStyle(context: Context, key: String, style: UiStyle) {
-        val el = UI_ELEMENTS.firstOrNull { it.key == key } ?: return
-        if (el.pending) return
-        styleFlows.getValue(key).value = style
-        editor(context).putString(STYLE_PREFIX + key, style.name).apply()
     }
 
     private fun editor(context: Context): SharedPreferences.Editor {

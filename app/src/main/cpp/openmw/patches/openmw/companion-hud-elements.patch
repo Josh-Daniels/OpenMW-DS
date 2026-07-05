@@ -16,10 +16,11 @@ for instant live toggling. All #ifdef __ANDROID__ so desktop is unchanged.
 diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 --- a/apps/openmw/mwgui/hud.cpp
 +++ b/apps/openmw/mwgui/hud.cpp
-@@ -31,4 +31,22 @@
+@@ -31,4 +31,23 @@
  #include "worlditemmodel.hpp"
  
 +#ifdef __ANDROID__
++#include <components/debug/debuglog.hpp>
 +// COMPANION: per-element native HUD visibility bridges (defined in androidmain.cpp) +
 +// cached native intent so HUD::onFrame can re-apply (native && companion) every frame.
 +extern "C" bool companionHudHms();
@@ -101,11 +102,22 @@ diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 +#endif
          mSpellBox->setVisible(visible);
          updatePositions();
-@@ -507,4 +507,8 @@
+@@ -507,4 +507,19 @@
      void HUD::setSneakVisible(bool visible)
      {
 +#ifdef __ANDROID__
 +        sCompanionSneakNative = visible;
++        // COMPANION: emit the true (sneaking && undetected) state - the raw native
++        // `visible` value before the companionHudSneak() On/Off gate - to the companion
++        // bottom screen, change-detected so the log is not flooded every frame.
++        {
++            static bool sLastSneakEmit = false;
++            if (visible != sLastSneakEmit)
++            {
++                sLastSneakEmit = visible;
++                Log(Debug::Info) << "COMPANION_SNEAK_VISIBLE:" << (visible ? "true" : "false");
++            }
++        }
 +        visible = visible && companionHudSneak();
 +#endif
          mSneakBox->setVisible(visible);

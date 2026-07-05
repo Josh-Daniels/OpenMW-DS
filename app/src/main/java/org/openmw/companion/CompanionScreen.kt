@@ -437,11 +437,13 @@ fun CompanionScreen() {
             )
         }
 
-        // Master UI mode. In VANILLA, all companion overlays/popups (conversation, looting,
-        // barter and their popups) are suppressed so native OpenMW handles them; the tab UI
-        // (inventory/spells/stats/journal/HUD) still works in both modes.
-        val uiMode by UiPreferences.uiModeFlow().collectAsState()
-        val isDs = uiMode == UiMode.DS
+        // Per-element Game UI mode. Each companion overlay is gated by its OWN element: when that
+        // element is VANILLA it's suppressed so native OpenMW handles it; DS shows the companion
+        // version. The tab UI (inventory/spells/stats/journal/HUD) works regardless.
+        val lootingDs by UiPreferences.gameUiModeFlow("game_ui_looting").collectAsState()
+        val conversationDs by UiPreferences.gameUiModeFlow("game_ui_conversation").collectAsState()
+        val barteringDs by UiPreferences.gameUiModeFlow("game_ui_bartering").collectAsState()
+        val persuasionDs by UiPreferences.gameUiModeFlow("game_ui_persuasion").collectAsState()
 
         // Looting / pickpocketing overlay. Driven by COMPANION_CONTAINER_* from the
         // engine (via Lua). Shown whenever a container session is active, regardless
@@ -452,7 +454,7 @@ fun CompanionScreen() {
         // tappable; it hosts its own local dismiss-scrim) and below QuantitySelector
         // (20f) so take/put quantity prompts stack above it.
         val containerSession by GameStateRepository.containerSession.collectAsState()
-        if (isDs) {
+        if (lootingDs == GameUiMode.DS) {
             containerSession?.let { session ->
                 LootingOverlay(
                     session = session,
@@ -475,7 +477,7 @@ fun CompanionScreen() {
         val dialogueDisposition by GameStateRepository.dialogueDisposition.collectAsState()
         val dialoguePersuadeAvailable by GameStateRepository.dialoguePersuadeAvailable.collectAsState()
         val dialogueGold by GameStateRepository.dialogueGold.collectAsState()
-        if (isDs && (dialogueNpcName.isNotEmpty() || dialogueTopics.isNotEmpty() ||
+        if (conversationDs == GameUiMode.DS && (dialogueNpcName.isNotEmpty() || dialogueTopics.isNotEmpty() ||
                 dialogueServices.isNotEmpty() || dialogueHistory.isNotEmpty() ||
                 dialogueChoices.isNotEmpty())
         ) {
@@ -490,9 +492,12 @@ fun CompanionScreen() {
             // - TOP: the whole conversation is on the top screen (hosted by EngineActivity);
             //   the bottom screen is just a dimmed, inert scrim over the current tab.
             val conversationLocation by UiPreferences.conversationLocationFlow().collectAsState()
+            // Persuasion is its own Game UI element: only surface the DS persuade affordance when
+            // it's set to DS (Vanilla → native OpenMW handles persuasion).
+            val persuadeAvailable = dialoguePersuadeAvailable && persuasionDs == GameUiMode.DS
             DialogueTopicsOverlay(
                 dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices,
-                dialogueChoices, dialogueDisposition, dialoguePersuadeAvailable, playerGold,
+                dialogueChoices, dialogueDisposition, persuadeAvailable, playerGold,
                 location = conversationLocation
             )
         }
@@ -507,7 +512,7 @@ fun CompanionScreen() {
         // COMPANION_DIALOGUE_DISPOSITION during barter — DialogueWindow::onFrame is dormant then).
         val barterSession by GameStateRepository.barterSession.collectAsState()
         val barterResult by GameStateRepository.barterResult.collectAsState()
-        if (isDs) {
+        if (barteringDs == GameUiMode.DS) {
             barterSession?.let { session ->
                 BarterOverlay(session = session, disposition = dialogueDisposition)
             }
@@ -2630,6 +2635,9 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     val favs by FavouritesRepository.state.collectAsState()
     val context = LocalContext.current
 
+    // Native sneak indicator (sneaking && undetected). Drives the stealth icon below.
+    val sneakVisible by GameStateRepository.sneakVisible.collectAsState()
+
     val weaponId = state.equipment["weapon"]
     val weaponItem = weaponId?.let {
         state.inventory.find { it.stackId == weaponId }
@@ -2762,6 +2770,16 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             showName = showSpellName,
             onToggle = { showSpellName = !showSpellName }
         )
+
+        // Sneak indicator — vanilla stealth icon (sneaking && undetected), shown just
+        // below the WEAPON icon at the same 40dp size. Clear of the name-label popouts
+        // (horizontal), the combat-target overlay (centre) and the bottom fav groups.
+        // Driven by the native COMPANION_SNEAK_VISIBLE signal.
+        if (sneakVisible) {
+            SneakCornerIcon(
+                modifier = Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 64.dp)
+            )
+        }
 
         // Name labels — absolutely-positioned siblings of the icon columns above,
         // so showing/hiding them never shifts the icons. Each sits beside its icon
@@ -3016,6 +3034,44 @@ private fun EquippedCornerIcon(
                 .background(SlotBg)
                 .border(1.dp, if (showName) BronzeLight else BronzeDark, RoundedCornerShape(2.dp))
                 .clickable { onToggle() }
+        ) {
+            if (icon != null) {
+                Image(
+                    bitmap = icon,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.size(40.dp)
+                )
+            }
+        }
+    }
+}
+
+// The sneak indicator icon (vanilla "sneaking && undetected" state). Mirrors
+// EquippedCornerIcon's 40dp box + caption but is non-interactive (no name toggle).
+// Rendered only while GameStateRepository.sneakVisible is true. The icon is the same
+// VFS DDS the native HUD uses (icons/k/stealth_sneak.dds), loaded via rememberItemIcon.
+@Composable
+private fun SneakCornerIcon(modifier: Modifier) {
+    val icon = rememberItemIcon("icons/k/stealth_sneak.dds")
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            "SNEAK",
+            color = BoneDim,
+            fontSize = 7.sp,
+            fontFamily = MwDisplay,
+            letterSpacing = 1.sp
+        )
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(SlotBg)
+                .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
         ) {
             if (icon != null) {
                 Image(
@@ -5334,9 +5390,10 @@ private val OptionsBg = Color(0xFF1A1410)
 private val PillActiveBg = Color(0xFF3A2A10)
 
 /**
- * The display-settings menu: route each HUD element / menu between the top and bottom
- * screens, and choose the render style of top-screen elements. Full-screen, scrollable,
- * BronzeLight-themed. Writes to [UiPreferences] live on every tap (no save/cancel).
+ * The display-settings menu. A quick-set row ([All DS]/[All Vanilla]), then three sections:
+ * GAME UI (per-element DS/Vanilla), VANILLA HUD (native top-screen HUD element On/Off toggles),
+ * and INPUT. Full-screen, scrollable, BronzeLight-themed. Writes to [UiPreferences] live on every
+ * tap (no save/cancel).
  *
  * Public because [org.openmw.EngineActivity] hosts it in a WindowManager panel window on
  * the companion Presentation when the pause/options menu opens.
@@ -5345,22 +5402,6 @@ private val PillActiveBg = Color(0xFF3A2A10)
 fun OptionsMenuOverlay() {
     val context = LocalContext.current
     remember(context) { UiPreferences.init(context); true }
-
-    // The UI-style section lists non-pending elements currently routed to the top screen.
-    // Collect their routes here (composable scope) so the LazyColumn body — a non-composable
-    // LazyListScope lambda — can just read the resulting list and re-render on route changes.
-    val styleElements = UI_ELEMENTS
-        .filter { it.hasCompanionUi }
-        .filter { UiPreferences.routeFlow(it.key).collectAsState().value == ScreenRoute.TOP }
-
-    val hudElements = remember { UI_ELEMENTS.filter { it.section == UiSection.HUD } }
-    val menuElements = remember { UI_ELEMENTS.filter { it.section == UiSection.MENUS } }
-
-    // Master UI mode. When VANILLA, the "Menus and Overlays" + "UI Style" sections are
-    // irrelevant, so they render greyed out and non-interactive. The UI Mode row, the HUD
-    // Elements section (companion-side, always configurable) and Input stay active.
-    val uiMode by UiPreferences.uiModeFlow().collectAsState()
-    val isDs = uiMode == UiMode.DS
 
     Column(
         modifier = Modifier
@@ -5391,37 +5432,182 @@ fun OptionsMenuOverlay() {
                 .padding(horizontal = 16.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
         ) {
-            // Master UI-mode toggle, above all sections (always interactive).
-            item { UiModeRow() }
+            // Quick-set row: bulk-set every (non-pending) Game UI element. Never touches HUD.
+            item { QuickSetRow() }
 
-            // HUD elements are companion-side and always configurable, in both modes. The
-            // toggle controls whether the native top-screen version is shown (On) or hidden (Off).
-            item { OptionsSectionHeader("Vanilla HUD Elements") }
-            items(hudElements, key = { it.key }) { HudToggleRow(it) }
+            // GAME UI: per-element DS/Vanilla. DS = companion draws it (native suppressed);
+            // Vanilla = native OpenMW shows on the top screen. Pending elements are locked Vanilla.
+            item { OptionsSectionHeader("Game UI") }
+            items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
+
+            // SCREEN LAYOUT: which screen each element is drawn on. Only Conversation
+            // (Bottom/Split/Top) is implemented; the rest are pending and locked to Bottom.
+            item { OptionsSectionHeader("Screen Layout") }
+            item { ConversationLocationRow() }
+            items(
+                GAME_UI_ELEMENTS.filter { it.key != "game_ui_conversation" },
+                key = { "layout_" + it.key }
+            ) { ScreenLayoutPendingRow(it) }
+
+            // VANILLA HUD: whether each native top-screen HUD element is shown (On) or hidden (Off).
+            // Always manual — the Quick set buttons never touch these.
+            item { OptionsSectionHeader("Vanilla HUD") }
+            items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
             // The Alpha3 launcher overlay (gear + arrow cluster) — purely Kotlin-side.
             item { Alpha3OverlayRow() }
 
-            item { OptionsSectionHeader("Menus and Overlays", dimmed = !isDs) }
-            item { ConversationLocationRow(sectionEnabled = isDs) }
-            items(menuElements, key = { it.key }) { ScreenRouteRow(it, sectionEnabled = isDs) }
-
-            item { OptionsSectionHeader("UI Style (top screen)", dimmed = !isDs) }
-            if (styleElements.isEmpty()) {
-                item {
-                    Text(
-                        "Route an element to Top screen to see style options",
-                        color = BoneDim,
-                        fontSize = 12.sp,
-                        fontFamily = MwBody,
-                        modifier = Modifier.alpha(if (isDs) 1f else 0.4f).padding(vertical = 10.dp)
-                    )
-                }
-            } else {
-                items(styleElements, key = { "style_" + it.key }) { UiStyleRow(it, sectionEnabled = isDs) }
-            }
-
             item { OptionsSectionHeader("Input") }
             item { GameCursorRow() }
+        }
+    }
+}
+
+/** The quick-set row: [All DS] [All Vanilla]. Bulk-sets every non-pending Game UI element; leaves
+ *  the Vanilla HUD toggles untouched. Individual rows can be overridden afterwards. */
+@Composable
+private fun QuickSetRow() {
+    val context = LocalContext.current
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
+        Text("Quick set", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Set every Game UI row at once (does not affect Vanilla HUD)",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(Modifier.weight(1f), label = "All DS", active = false, enabled = true) {
+                UiPreferences.setAllGameUi(context, GameUiMode.DS)
+            }
+            OptionPill(Modifier.weight(1f), label = "All Vanilla", active = false, enabled = true) {
+                UiPreferences.setAllGameUi(context, GameUiMode.VANILLA)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+    }
+}
+
+/** A GAME UI row: element name (+ PENDING tag) over a [DS][Vanilla] pill selector. Pending elements
+ *  are locked to Vanilla — their DS pill is disabled and labelled "Not yet available". Writes a
+ *  GameUiMode to UiPreferences on every tap. */
+@Composable
+private fun GameUiRow(el: GameUiElement) {
+    val context = LocalContext.current
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                el.label,
+                color = if (el.pending) BoneDim else Bone,
+                fontSize = 14.sp,
+                fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            if (el.pending) {
+                Text(
+                    "PENDING",
+                    color = BoneDim.copy(alpha = 0.7f),
+                    fontSize = 9.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (el.pending) {
+                // No companion replacement yet — DS disabled, Vanilla locked active.
+                OptionPill(Modifier.weight(1f), label = "Not yet available", active = false, enabled = false) {}
+                OptionPill(Modifier.weight(1f), label = "Vanilla", active = true, enabled = false) {}
+            } else {
+                val mode by UiPreferences.gameUiModeFlow(el.key).collectAsState()
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = "DS",
+                    active = mode == GameUiMode.DS,
+                    enabled = true
+                ) { UiPreferences.setGameUiMode(context, el.key, GameUiMode.DS) }
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = "Vanilla",
+                    active = mode == GameUiMode.VANILLA,
+                    enabled = true
+                ) { UiPreferences.setGameUiMode(context, el.key, GameUiMode.VANILLA) }
+            }
+        }
+    }
+}
+
+/** The Conversation location row: a three-option [Bottom][Split][Top] pill selector.
+ *  BOTTOM = original two-column layout; SPLIT = history top / topics bottom (default);
+ *  TOP = full conversation on top (not yet implemented — selectable, behaves like SPLIT).
+ *  Writes ConversationLocation to UiPreferences on every tap. Dimmed and inert when the
+ *  Conversation Game UI element is Vanilla (native handles it, so there's no layout to pick). */
+@Composable
+private fun ConversationLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.conversationLocationFlow().collectAsState()
+    val convMode by UiPreferences.gameUiModeFlow("game_ui_conversation").collectAsState()
+    val enabled = convMode == GameUiMode.DS
+
+    // Dim the whole row and swallow taps (onClick guarded on `enabled`) when Conversation is
+    // Vanilla; pills stay enabled=true so they don't double-dim under the column alpha.
+    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
+        Text("Conversation", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Bottom",
+                active = loc == ConversationLocation.BOTTOM,
+                enabled = true
+            ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.BOTTOM) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Split",
+                active = loc == ConversationLocation.SPLIT,
+                enabled = true
+            ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.SPLIT) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Top",
+                active = loc == ConversationLocation.TOP,
+                enabled = true
+            ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.TOP) }
+        }
+    }
+}
+
+/** A pending Screen Layout row: element name + PENDING tag over a locked [Bottom][Top] selector
+ *  (Bottom active, both pills disabled). Per-screen routing isn't implemented for these yet. */
+@Composable
+private fun ScreenLayoutPendingRow(el: GameUiElement) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                el.label,
+                color = BoneDim,
+                fontSize = 14.sp,
+                fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "PENDING",
+                color = BoneDim.copy(alpha = 0.7f),
+                fontSize = 9.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(Modifier.weight(1f), label = "Bottom", active = true, enabled = false) {}
+            OptionPill(Modifier.weight(1f), label = "Top", active = false, enabled = false) {}
         }
     }
 }
@@ -5460,48 +5646,6 @@ private fun GameCursorRow() {
     }
 }
 
-/** The master UI-mode row: [Vanilla][DS] pill selector at the very top of the options menu.
- *  DS (default) = all companion overlays active; Vanilla = suppressed (native UI handles
- *  everything). Always interactive. Writes to UiPreferences on every tap. */
-@Composable
-private fun UiModeRow() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val mode by UiPreferences.uiModeFlow().collectAsState()
-
-    Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
-        Text("UI Mode", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Text(
-            "Vanilla suppresses all companion overlays (native OpenMW UI handles them)",
-            color = BoneDim,
-            fontSize = 10.sp,
-            fontFamily = MwBody,
-            modifier = Modifier.padding(top = 1.dp)
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Vanilla",
-                active = mode == UiMode.VANILLA,
-                enabled = true
-            ) {
-                UiPreferences.setUiMode(context, UiMode.VANILLA)
-                // Hide UI is meaningless in Vanilla (native UI must be visible) — force it off.
-                scope.launch { GameFilesPreferences.saveUIState(context, false) }
-            }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "DS",
-                active = mode == UiMode.DS,
-                enabled = true
-            ) { UiPreferences.setUiMode(context, UiMode.DS) }
-        }
-        Spacer(Modifier.height(8.dp))
-        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-    }
-}
-
 @Composable
 private fun OptionsSectionHeader(title: String, dimmed: Boolean = false) {
     Column(Modifier.alpha(if (dimmed) 0.4f else 1f).padding(top = 18.dp, bottom = 2.dp)) {
@@ -5515,43 +5659,6 @@ private fun OptionsSectionHeader(title: String, dimmed: Boolean = false) {
             modifier = Modifier.padding(bottom = 5.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
-    }
-}
-
-/** The Conversation location row: a three-option [Bottom][Split][Top] pill selector.
- *  BOTTOM = original two-column layout; SPLIT = history top / topics bottom (default);
- *  TOP = full conversation on top (not yet implemented — selectable, behaves like SPLIT).
- *  Writes to UiPreferences on every tap. */
-@Composable
-private fun ConversationLocationRow(sectionEnabled: Boolean = true) {
-    val context = LocalContext.current
-    val loc by UiPreferences.conversationLocationFlow().collectAsState()
-
-    // Dim the whole row when the section is disabled (UI Mode == Vanilla) and swallow taps
-    // (onClick guarded on sectionEnabled) — pills stay enabled=true so they don't double-dim.
-    Column(Modifier.fillMaxWidth().alpha(if (sectionEnabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        Text("Conversation", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Bottom",
-                active = loc == ConversationLocation.BOTTOM,
-                enabled = true
-            ) { if (sectionEnabled) UiPreferences.setConversationLocation(context, ConversationLocation.BOTTOM) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Split",
-                active = loc == ConversationLocation.SPLIT,
-                enabled = true
-            ) { if (sectionEnabled) UiPreferences.setConversationLocation(context, ConversationLocation.SPLIT) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Top",
-                active = loc == ConversationLocation.TOP,
-                enabled = true
-            ) { if (sectionEnabled) UiPreferences.setConversationLocation(context, ConversationLocation.TOP) }
-        }
     }
 }
 
@@ -5590,10 +5697,10 @@ private fun Alpha3OverlayRow() {
     }
 }
 
-/** A HUD-element row: element name (+ PENDING tag) over an [On][Off] pill selector. On = the
- *  native top-screen version is visible; Off = hidden (companion bottom-screen version only).
- *  The companion always draws these on the bottom screen, so there is no Top/Bottom routing.
- *  Writes a Boolean to UiPreferences on every tap. Pending elements show disabled pills. */
+/** A HUD-element row: element name (+ PENDING tag) over an [On][Off] pill selector. On = the native
+ *  top-screen version is visible; Off = hidden (companion bottom-screen version only). The companion
+ *  always draws these on the bottom screen. Writes a Boolean to UiPreferences on every tap. Pending
+ *  elements (no native gate yet) render dimmed and locked to On. */
 @Composable
 private fun HudToggleRow(el: UiElement) {
     val context = LocalContext.current
@@ -5621,7 +5728,7 @@ private fun HudToggleRow(el: UiElement) {
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (el.pending) {
-                // Not adjustable yet — native version stays On, both pills disabled.
+                // Not gated yet — native version stays On, both pills disabled.
                 OptionPill(Modifier.weight(1f), label = "On", active = true, enabled = false) {}
                 OptionPill(Modifier.weight(1f), label = "Off", active = false, enabled = false) {}
             } else {
@@ -5639,101 +5746,6 @@ private fun HudToggleRow(el: UiElement) {
                     enabled = true
                 ) { UiPreferences.setHudOn(context, el.key, false) }
             }
-        }
-    }
-}
-
-/** A screen-routing row: element name (+ PENDING tag) over a [Top][Bottom] pill selector.
- *  [sectionEnabled] false (UI Mode == Vanilla) greys the row and swallows taps. */
-@Composable
-private fun ScreenRouteRow(el: UiElement, sectionEnabled: Boolean = true) {
-    val context = LocalContext.current
-    val route by UiPreferences.routeFlow(el.key).collectAsState()
-
-    Column(Modifier.fillMaxWidth().alpha(if (sectionEnabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                el.label,
-                color = if (el.pending) BoneDim else Bone,
-                fontSize = 14.sp,
-                fontFamily = MwBody,
-                modifier = Modifier.weight(1f)
-            )
-            if (el.pending) {
-                Text(
-                    "PENDING",
-                    color = BoneDim.copy(alpha = 0.7f),
-                    fontSize = 9.sp,
-                    fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (el.pending) {
-                val topLocked = el.lockedRoute == ScreenRoute.TOP
-                OptionPill(
-                    Modifier.weight(1f),
-                    label = if (topLocked) "Top" else "Not yet available",
-                    active = topLocked,
-                    enabled = false
-                ) {}
-                OptionPill(
-                    Modifier.weight(1f),
-                    label = if (!topLocked) "Bottom" else "Not yet available",
-                    active = !topLocked,
-                    enabled = false
-                ) {}
-            } else {
-                OptionPill(
-                    Modifier.weight(1f),
-                    label = "Top",
-                    active = route == ScreenRoute.TOP,
-                    enabled = true
-                ) { if (sectionEnabled) UiPreferences.setRoute(context, el.key, ScreenRoute.TOP) }
-                OptionPill(
-                    Modifier.weight(1f),
-                    label = "Bottom",
-                    active = route == ScreenRoute.BOTTOM,
-                    enabled = true
-                ) { if (sectionEnabled) UiPreferences.setRoute(context, el.key, ScreenRoute.BOTTOM) }
-            }
-        }
-    }
-}
-
-/** A UI-style row: element name + "Top screen selected above" note over a [Vanilla][DS] selector.
- *  [sectionEnabled] false (UI Mode == Vanilla) greys the row and swallows taps. */
-@Composable
-private fun UiStyleRow(el: UiElement, sectionEnabled: Boolean = true) {
-    val context = LocalContext.current
-    val style by UiPreferences.styleFlow(el.key).collectAsState()
-
-    Column(Modifier.fillMaxWidth().alpha(if (sectionEnabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        Text(el.label, color = BoneMuted, fontSize = 13.sp, fontFamily = MwBody)
-        Text(
-            "Top screen selected above",
-            color = BoneDim,
-            fontSize = 10.sp,
-            fontFamily = MwBody,
-            modifier = Modifier.padding(top = 1.dp)
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Vanilla",
-                active = style == UiStyle.VANILLA,
-                enabled = true
-            ) { if (sectionEnabled) UiPreferences.setStyle(context, el.key, UiStyle.VANILLA) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "DS",
-                active = style == UiStyle.DS,
-                enabled = true
-            ) { if (sectionEnabled) UiPreferences.setStyle(context, el.key, UiStyle.DS) }
         }
     }
 }

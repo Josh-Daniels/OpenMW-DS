@@ -13,7 +13,7 @@ import org.openmw.companion.ConversationHistoryOverlay
 import org.openmw.companion.GameStateRepository
 import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.ConversationLocation
-import org.openmw.companion.UiMode
+import org.openmw.companion.GameUiMode
 import org.openmw.companion.UiPreferences
 
 import android.annotation.SuppressLint
@@ -784,9 +784,9 @@ class EngineActivity : SDLActivity() {
                     services.isNotEmpty() || choices.isNotEmpty()
             }.combine(UiPreferences.conversationLocationFlow()) { active, loc ->
                 active && loc != ConversationLocation.BOTTOM
-            }.combine(UiPreferences.uiModeFlow()) { show, mode ->
-                // Suppress the top-screen conversation overlay entirely in Vanilla mode.
-                show && mode == UiMode.DS
+            }.combine(UiPreferences.gameUiModeFlow("game_ui_conversation")) { show, mode ->
+                // Suppress the top-screen conversation overlay entirely when conversation is Vanilla.
+                show && mode == GameUiMode.DS
             }.distinctUntilChanged().collect { show ->
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()
             }

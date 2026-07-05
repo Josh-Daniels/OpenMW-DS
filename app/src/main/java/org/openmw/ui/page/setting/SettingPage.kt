@@ -95,7 +95,6 @@ import org.openmw.ui.view.MyTopBar
 import org.openmw.ui.view.NoneBackground
 import org.openmw.ui.view.RotatingImageBackground
 import org.openmw.utils.FileBrowserPopup
-import org.openmw.companion.UiMode
 import org.openmw.companion.UiPreferences
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getBackgroundAnimationFlow
@@ -417,9 +416,7 @@ fun InterfaceSettingsSection() {
     val matchIconColorChecked by GameFilesPreferences.loadMatchIconColorState(context).collectAsState(initial = false)
     val iconGlowChecked by GameFilesPreferences.loadIconGlow(context).collectAsState(initial = true)
     val controllerConnected = isControllerConnected(context)
-    // Hide UI is only meaningful in DS mode; disable the toggle in Vanilla.
     remember(context) { UiPreferences.init(context); true }
-    val uiMode by UiPreferences.uiModeFlow().collectAsState()
 
     SettingSectionCard(
         title = stringResource(R.string.interface_and_overlay),
@@ -430,7 +427,6 @@ fun InterfaceSettingsSection() {
             subtitle = stringResource(R.string.set_the_ui_visible_state_tip)
         ) {
             Switch(
-                enabled = uiMode == UiMode.DS,
                 checked = isUIHidden,
                 onCheckedChange = { scope.launch { GameFilesPreferences.saveUIState(context, it) } }
             )
@@ -635,9 +631,7 @@ fun InGameSettings() {
     val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
     val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
     val controllerConnected = isControllerConnected(context)
-    // Hide UI is only meaningful in DS mode; disable the toggle in Vanilla.
     remember(context) { UiPreferences.init(context); true }
-    val uiMode by UiPreferences.uiModeFlow().collectAsState()
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (configureControls) {
@@ -689,7 +683,6 @@ fun InGameSettings() {
             title = if (controllerConnected || !isUIHidden) stringResource(R.string.ui_is_visible) else stringResource(R.string.ui_is_hidden)
         ) {
             Switch(
-                enabled = uiMode == UiMode.DS,
                 checked = isUIHidden,
                 onCheckedChange = { scope.launch { GameFilesPreferences.saveUIState(context, it) } }
             )

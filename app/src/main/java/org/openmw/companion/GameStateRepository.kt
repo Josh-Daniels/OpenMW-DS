@@ -49,6 +49,14 @@ object GameStateRepository {
         _hudVisible.value = visible
     }
 
+    // true while the vanilla sneak indicator (hand-reaching-into-bag icon) would show —
+    // i.e. the player is sneaking AND currently undetected. Driven by the native
+    // COMPANION_SNEAK_VISIBLE:true/false line emitted from HUD::setSneakVisible (the exact
+    // vanilla condition, change-detected). Backs the companion HUD sneak icon. Default false
+    // (game starts not sneaking).
+    private val _sneakVisible = MutableStateFlow(false)
+    val sneakVisible: StateFlow<Boolean> = _sneakVisible.asStateFlow()
+
     // true while the in-game pause/options menu (GM_MainMenu) is open. Driven by
     // COMPANION_PAUSE_MENU_OPEN / _CLOSED lines from companion.lua. Gates the
     // bottom-screen options/display-settings overlay (EngineActivity).
@@ -509,6 +517,11 @@ object GameStateRepository {
             }
             trimmed.contains("COMPANION_PAUSE_MENU_CLOSED") -> {
                 _pauseMenuVisible.value = false
+            }
+            // Native sneak indicator (sneaking && undetected), change-detected in
+            // HUD::setSneakVisible. Payload is "true"/"false".
+            trimmed.contains("COMPANION_SNEAK_VISIBLE:") -> {
+                _sneakVisible.value = trimmed.substringAfter("COMPANION_SNEAK_VISIBLE:").trim() == "true"
             }
             // Barter session. ITEM first (most frequent). Each ITEM carries its own side,
             // so vendor/player items go to separate buffers. None of these prefixes is a
