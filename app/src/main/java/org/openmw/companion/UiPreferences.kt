@@ -73,9 +73,10 @@ val HUD_ELEMENTS: List<UiElement> = listOf(
     UiElement("hud_sneak", "Sneak indicator"),
     UiElement("hud_enemy", "Target health"),
     UiElement("hud_crosshair", "Crosshair"),
-    // Pending: pref exists (default On, persisted) but no native gate is wired yet, so
-    // EngineActivity does NOT push it and the row renders locked/greyed.
-    UiElement("hud_controller_tooltips", "Controller tooltips", pending = true),
+    // The controller button-hint bar (bottom of the top screen). Gated natively in
+    // WindowManager::updateControllerButtonsOverlay via companionHudControllerTooltips()
+    // (companion-hud-elements.patch); pushed by EngineActivity like the other HUD toggles.
+    UiElement("hud_controller_tooltips", "Controller tooltips"),
 )
 
 /**
@@ -92,6 +93,11 @@ object UiPreferences {
     private const val CONVERSATION_LOCATION = "conversation_location"
     private const val HUD_ON_PREFIX = "hud_on_"
     private const val ALPHA3_OVERLAY = "alpha3_overlay"
+
+    // The controller button-hint bar is a native (Vanilla HUD) element, but it only makes sense
+    // alongside native menus, so it follows the DS/Vanilla quick-set: All DS hides it, All Vanilla
+    // shows it. See [setAllGameUi].
+    private const val CONTROLLER_TOOLTIPS_KEY = "hud_controller_tooltips"
 
     private var prefs: SharedPreferences? = null
 
@@ -155,9 +161,13 @@ object UiPreferences {
     }
 
     /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Vanilla" quick-set
-     *  buttons). Pending elements stay locked to VANILLA; Vanilla HUD toggles are NOT affected. */
+     *  buttons). Pending elements stay locked to VANILLA. The only Vanilla HUD toggle it also flips
+     *  is the controller button-hint bar ([CONTROLLER_TOOLTIPS_KEY]): DS -> Off, Vanilla -> On, since
+     *  that bar is only useful when navigating native menus. All other Vanilla HUD toggles are left
+     *  untouched. Individual rows can still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
         GAME_UI_ELEMENTS.filter { !it.pending }.forEach { setGameUiMode(context, it.key, mode) }
+        setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
     }
 
     fun hudOnFlow(key: String): StateFlow<Boolean> = hudFlows.getValue(key).asStateFlow()

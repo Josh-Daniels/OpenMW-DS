@@ -13,6 +13,16 @@ also skips the coupled mWeaponSpellBox -20px shift) plus an onFrame re-apply tha
 hides a still-visible bar and restores the +20px shift (mirroring the vanilla timeout hide)
 for instant live toggling. All #ifdef __ANDROID__ so desktop is unchanged.
 
+Also gates the controller button-hint bar (the "Controller tooltips" toggle) in
+windowmanagerimp.cpp. That bar is ControllerButtonsOverlay - its own MyGUI window on the
+ControllerButtons layer, NOT part of HUD - so the hud.cpp setters above do not reach it. Its
+sole visibility chokepoint is WindowManager::updateControllerButtonsOverlay(), so the gate
+(hide + early-return on !companionHudControllerTooltips()) lives there, beside the existing
+Settings::gui().mControllerMenus master-switch check (which is deliberately left untouched -
+disabling it would break controller menu navigation, not just the hint bar). The function is
+event-driven (mode/active-window changes), not per-frame, so the toggle takes effect on the
+next such change - notably the pause-menu pop when the companion options menu closes.
+
 diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 --- a/apps/openmw/mwgui/hud.cpp
 +++ b/apps/openmw/mwgui/hud.cpp
@@ -151,3 +161,32 @@ diff --git a/apps/openmw/mwgui/hud.cpp b/apps/openmw/mwgui/hud.cpp
 +#endif
          mEnemyActor = enemy.getCellRef().getRefNum();
          mEnemyHealthTimer = MWBase::Environment::get()
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -2701,8 +2701,25 @@
+         if (mControllerTooltipEnabled && !mControllerTooltipVisible)
+             setControllerTooltipVisible(true);
+     }
+
++#ifdef __ANDROID__
++    // COMPANION: gate for the controller button-hint bar (defined in androidmain.cpp).
++    extern "C" bool companionHudControllerTooltips();
++#endif
++
+     void WindowManager::updateControllerButtonsOverlay()
+     {
++#ifdef __ANDROID__
++        // COMPANION: gate the controller button-hint bar ("Controller tooltips" HUD toggle) at its
++        // sole visibility chokepoint. This bar is ControllerButtonsOverlay (its own MyGUI window),
++        // NOT part of HUD, so the hud.cpp companionHud*() gates do not cover it. Independent of
++        // Settings::gui().mControllerMenus (the master controller-menu switch, left untouched).
++        if (!companionHudControllerTooltips())
++        {
++            if (mControllerButtonsOverlay)
++                mControllerButtonsOverlay->setVisible(false);
++            return;
++        }
++#endif
+         if (!Settings::gui().mControllerMenus || !mControllerButtonsOverlay)
+             return;

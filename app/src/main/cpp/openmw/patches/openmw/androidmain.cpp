@@ -80,6 +80,7 @@ static std::atomic<bool> g_companionHudEffects{ true };
 static std::atomic<bool> g_companionHudSneak{ true };
 static std::atomic<bool> g_companionHudCrosshair{ true };
 static std::atomic<bool> g_companionHudEnemy{ true }; // target/enemy health bar
+static std::atomic<bool> g_companionHudControllerTooltips{ true }; // controller button-hint bar
 
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
@@ -426,6 +427,7 @@ extern "C" bool companionHudEffects() { return g_companionHudEffects.load(); }
 extern "C" bool companionHudSneak() { return g_companionHudSneak.load(); }
 extern "C" bool companionHudCrosshair() { return g_companionHudCrosshair.load(); }
 extern "C" bool companionHudEnemy() { return g_companionHudEnemy.load(); }
+extern "C" bool companionHudControllerTooltips() { return g_companionHudControllerTooltips.load(); }
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionHudHms(JNIEnv*, jclass, jboolean on)
@@ -461,6 +463,11 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionHudEnemy(JNIEnv*, jclass, jboolean on)
 {
     g_companionHudEnemy.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionHudControllerTooltips(JNIEnv*, jclass, jboolean on)
+{
+    g_companionHudControllerTooltips.store(on == JNI_TRUE);
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.

@@ -5462,15 +5462,16 @@ fun OptionsMenuOverlay() {
     }
 }
 
-/** The quick-set row: [All DS] [All Vanilla]. Bulk-sets every non-pending Game UI element; leaves
- *  the Vanilla HUD toggles untouched. Individual rows can be overridden afterwards. */
+/** The quick-set row: [All DS] [All Vanilla]. Bulk-sets every non-pending Game UI element and the
+ *  controller-tooltips HUD toggle (DS -> Off, Vanilla -> On); other Vanilla HUD toggles are left
+ *  untouched. Individual rows can be overridden afterwards. */
 @Composable
 private fun QuickSetRow() {
     val context = LocalContext.current
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
         Text("Quick set", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Set every Game UI row at once (does not affect Vanilla HUD)",
+            "Set every Game UI row at once (also toggles the controller hint bar)",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
