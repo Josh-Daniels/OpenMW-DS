@@ -91,6 +91,26 @@ object CompanionActions {
     private val BarterSide.wire: String
         get() = if (this == BarterSide.VENDOR) "vendor" else "player"
 
+    // Merchant repair (CMP:repair_*) — handled natively in drainCompanionCommands (repair
+    // prices via getBarterOffer and the NPC gold pool live in the C++ MerchantRepair window).
+    // [sid] is the item's ordinal index in the exported damaged list; the engine re-exports
+    // COMPANION_REPAIR_* after each repair.
+    fun repairItem(sid: String) = runCommand("CMP:repair_item $sid")
+
+    fun repairAll() = runCommand("CMP:repair_all")
+
+    // Cancel repair (closes the native window + emits COMPANION_REPAIR_CLOSED).
+    fun repairCancel() = runCommand("CMP:repair_cancel")
+
+    // Rest/wait (CMP:sleep*) — handled natively in drainCompanionCommands (the canRest flags,
+    // the fade + progress time advance, sleep interruption and level-up all live in the C++
+    // WaitDialog; world.advanceTime from Lua would skip healing/level-up). The mode (rest vs
+    // wait) is already known engine-side from the open; [hours] is the slider value (1..24).
+    fun sleep(hours: Int) = runCommand("CMP:sleep $hours")
+
+    // Cancel rest/wait (closes the native window + emits COMPANION_SLEEP_CLOSED).
+    fun sleepCancel() = runCommand("CMP:sleep_cancel")
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

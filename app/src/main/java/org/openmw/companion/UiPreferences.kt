@@ -47,18 +47,19 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     GameUiElement("game_ui_looting", "Looting"),
     GameUiElement("game_ui_bartering", "Bartering"),
     GameUiElement("game_ui_persuasion", "Persuasion"),
-    // Repair..Rest/Wait: native suppression is wired (companionDs*), but there is no companion (DS)
-    // overlay for these yet, so they are pending -> locked to VANILLA and the suppression stays
-    // dormant (companionDs*() always false) until an overlay lands and pending is removed. Repair
-    // was previously non-pending (defaulted DS); it is pending now so adding native suppression
-    // doesn't hide the merchant-repair window with nothing to replace it. See companion-hide-
-    // gamewindows-on-dsmode.patch.
-    GameUiElement("game_ui_repair", "Repair", pending = true),
+    // Repair + Rest/Wait have companion (DS) overlays (RepairOverlay / RestWaitOverlay +
+    // companion-repair-export / companion-restwait-export patches), so they are non-pending
+    // (default DS): the native GM_MerchantRepair / GM_Rest windows are suppressed and the bottom
+    // screen is the sole surface. Level up..Alchemy: native suppression is wired (companionDs*)
+    // but no companion overlay exists yet, so they stay pending -> locked to VANILLA and the
+    // suppression stays dormant (companionDs*() always false) until an overlay lands. See
+    // companion-hide-gamewindows-on-dsmode.patch.
+    GameUiElement("game_ui_repair", "Repair"),
     GameUiElement("game_ui_levelup", "Level up", pending = true),
     GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
     GameUiElement("game_ui_enchanting", "Enchanting", pending = true),
     GameUiElement("game_ui_alchemy", "Alchemy", pending = true),
-    GameUiElement("game_ui_restwait", "Rest / Wait", pending = true),
+    GameUiElement("game_ui_restwait", "Rest / Wait"),
 )
 
 /**

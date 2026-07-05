@@ -206,6 +206,22 @@ object GameStateRepository {
     private val _barterResult = MutableStateFlow<BarterResult?>(null)
     val barterResult: StateFlow<BarterResult?> = _barterResult.asStateFlow()
 
+    // --- Merchant repair session (COMPANION_REPAIR_*) ---
+    // null = not repairing. OPEN sets the NPC name + starts the item buffer; PLAYER_GOLD sets
+    // the gold; ITEM appends; END commits the session; CLOSED clears it. Re-exported (fresh
+    // OPEN..END) after each repair, so END just replaces the whole session.
+    private val _repairSession = MutableStateFlow<RepairSession?>(null)
+    val repairSession: StateFlow<RepairSession?> = _repairSession.asStateFlow()
+    private var repairItemBuffer: MutableList<RepairItem>? = null
+    private var repairNpcName: String = ""
+    private var repairPlayerGold: Int = 0
+
+    // --- Rest/wait session (COMPANION_SLEEP_*) ---
+    // null = not resting/waiting. OPEN sets it (single line — mode + date + warning); CLOSED
+    // clears it (confirming a rest/wait also closes it — the engine runs the advance on top).
+    private val _sleepSession = MutableStateFlow<SleepSession?>(null)
+    val sleepSession: StateFlow<SleepSession?> = _sleepSession.asStateFlow()
+
     // Accumulates dialogue topics across DIALOGUE_START / DIALOGUE_TOPIC / DIALOGUE_END.
     private var dialogueBuffer: MutableList<String>? = null
 
@@ -599,6 +615,46 @@ object GameStateRepository {
                 barterPlayerGold = 0
                 _barterSession.value = null
                 _barterResult.value = null
+            }
+            // Merchant repair. ITEM first (most frequent). PLAYER_GOLD checked before the
+            // REPAIR_ prefixes — its token is distinct and it's emitted inside a repair export.
+            trimmed.contains(LogParser.P_REPAIR_ITEM) -> {
+                val idx = trimmed.indexOf(LogParser.P_REPAIR_ITEM) + LogParser.P_REPAIR_ITEM.length
+                LogParser.parseRepairItem(trimmed.substring(idx).trim())?.let { item ->
+                    (repairItemBuffer ?: mutableListOf<RepairItem>().also { repairItemBuffer = it }).add(item)
+                }
+            }
+            trimmed.contains(LogParser.P_REPAIR_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_REPAIR_OPEN) + LogParser.P_REPAIR_OPEN.length
+                repairNpcName = trimmed.substring(idx).trim()
+                repairItemBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_PLAYER_GOLD) -> {
+                val idx = trimmed.indexOf(LogParser.P_PLAYER_GOLD) + LogParser.P_PLAYER_GOLD.length
+                trimmed.substring(idx).trim().toIntOrNull()?.let { repairPlayerGold = it }
+            }
+            trimmed.contains(LogParser.P_REPAIR_END) -> {
+                _repairSession.value = RepairSession(
+                    npcName = repairNpcName,
+                    playerGold = repairPlayerGold,
+                    items = repairItemBuffer?.toList() ?: emptyList(),
+                    isVisible = true
+                )
+                repairItemBuffer = null
+            }
+            trimmed.contains(LogParser.P_REPAIR_CLOSED) -> {
+                repairItemBuffer = null
+                repairNpcName = ""
+                repairPlayerGold = 0
+                _repairSession.value = null
+            }
+            // Rest/wait. Single-line OPEN (mode|date|warning); CLOSED clears.
+            trimmed.contains(LogParser.P_SLEEP_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_SLEEP_OPEN) + LogParser.P_SLEEP_OPEN.length
+                LogParser.parseSleepOpen(trimmed.substring(idx))?.let { _sleepSession.value = it }
+            }
+            trimmed.contains(LogParser.P_SLEEP_CLOSED) -> {
+                _sleepSession.value = null
             }
             // Dialogue topic list. Streamed START/TOPIC/END while a conversation is
             // open (re-sent on every topic-list change); CLOSED clears it. TOPIC

@@ -1,0 +1,228 @@
+Companion (bottom-screen rest/wait) — export + control bridge for the native WaitDialog
+(GM_Rest). Mirrors companion-repair-export.patch. The native WaitDialog is hidden while
+GM_Rest is in DS mode (companion-hide-gamewindows-on-dsmode.patch); the picker (mode, date,
+hour selection) moves to the bottom screen, but the ENGINE still runs the actual fade +
+progress-bar time advance (and sleep interruption / level-up) on the top screen once a
+rest/wait is confirmed — that logic is not reimplemented.
+
+Outbound, emitted from WaitDialog::setPtr → companionExportOpen() (onOpen, which builds the
+date caption, runs BEFORE setPtr, and setCanRest() in setPtr has just set mSleeping + the
+rest-text caption, so both are current):
+  COMPANION_SLEEP_OPEN:<mode>|<dateString>|<warning>
+    mode       = "rest" (mSleeping) or "wait"
+    dateString = the resolved mDateTimeText caption, e.g. "24 Last Seed (Day 9) 10 a.m."
+    warning    = the mRestText caption in WAIT mode (illegal-rest / werewolf message), else ""
+  COMPANION_SLEEP_CLOSED on close.
+Guarded by getRestEnabled() (matches onOpen's own gate). The hard-reject cases (enemies
+nearby / underwater / in air without a bed) pop the mode in setPtr before this point, so no
+OPEN is emitted and no overlay shows — native's own messageBox handles those.
+
+Inbound: a file-static gCompanionWaitDialog (set in the ctor) plus two extern "C" bridges —
+companionSleep(hours) / companionSleepCancel — let drainCompanionCommands drive the picker
+from CMP:sleep / CMP:sleep_cancel. companionStartWait(hours) calls the native startWaiting()
+(the whole fade/advance/interrupt/level-up path); companionCancelWait() routes through
+onCancelButtonClicked (removeGuiMode(GM_Rest)). Both no-op while a time-advance is running.
+Each bridge no-ops unless containsMode(GM_Rest) (stale-window guard).
+
+Close signal: the native window is HIDDEN the moment the mode opens in DS mode, so the usual
+visible->hidden onClose() never fires. COMPANION_SLEEP_CLOSED is emitted explicitly, once-
+guarded (gCompanionSleepSessionOpen), from every end path: companionStartWait (confirm — the
+picker's job is done, the top screen takes over the advance), onCancelButtonClicked (Cancel,
+native or companion), and exit() (B/Escape).
+diff --git a/apps/openmw/mwgui/waitdialog.cpp b/apps/openmw/mwgui/waitdialog.cpp
+index 3f41a78d38..fe95c54ee4 100644
+--- a/apps/openmw/mwgui/waitdialog.cpp
++++ b/apps/openmw/mwgui/waitdialog.cpp
+@@ -1,9 +1,13 @@
+ #include "waitdialog.hpp"
+ 
++#include <string>
++#include <string_view>
++
+ #include <MyGUI_InputManager.h>
+ #include <MyGUI_ProgressBar.h>
+ #include <MyGUI_ScrollBar.h>
+ 
++#include <components/debug/debuglog.hpp>
+ #include <components/misc/rng.hpp>
+ 
+ #include <components/esm3/loadregn.hpp>
+@@ -26,6 +30,44 @@
+ #include "../mwmechanics/creaturestats.hpp"
+ #include "../mwmechanics/npcstats.hpp"
+ 
++namespace
++{
++    // ================= Companion (bottom-screen rest/wait) =================
++    // Mirrors the companion repair bridge (companion-repair-export.patch): the native
++    // WaitDialog is hidden while GM_Rest is in DS mode (companion-hide-gamewindows-on-dsmode
++    // .patch), and the whole rest/wait flow is driven from the bottom screen via the
++    // extern "C" bridges at the end of this file. The native engine still runs the actual
++    // fade + progress-bar time advance (and any sleep interruption / level-up) on the top
++    // screen once a rest/wait is confirmed — only the picker moves to the bottom screen.
++
++    // The single live WaitDialog, set in its constructor, so the bridges can reach it.
++    MWGui::WaitDialog* gCompanionWaitDialog = nullptr;
++
++    // True between COMPANION_SLEEP_OPEN and COMPANION_SLEEP_CLOSED so the close signal is
++    // emitted exactly once, whichever path ends the picker (confirm Rest/Wait, Cancel bridge,
++    // or B/Escape via exit()). The native window is HIDDEN the moment the mode opens in DS
++    // mode, so the usual visible->hidden onClose() transition never fires — close is explicit.
++    bool gCompanionSleepSessionOpen = false;
++
++    void companionEmitSleepClosed()
++    {
++        if (!gCompanionSleepSessionOpen)
++            return;
++        gCompanionSleepSessionOpen = false;
++        Log(Debug::Info) << "COMPANION_SLEEP_CLOSED";
++    }
++
++    // Keep a field safe inside the pipe-delimited COMPANION_SLEEP_OPEN line.
++    std::string companionSleepSanitize(std::string_view s)
++    {
++        std::string out(s);
++        for (char& c : out)
++            if (c == '|' || c == '\n' || c == '\r')
++                c = ' ';
++        return out;
++    }
++}
++
+ namespace MWGui
+ {
+ 
+@@ -82,6 +124,8 @@ namespace MWGui
+ 
+         mControllerButtons.mB = "#{Interface:Cancel}";
+         mDisableGamepadCursor = Settings::gui().mControllerMenus;
++
++        gCompanionWaitDialog = this;
+     }
+ 
+     void WaitDialog::setPtr(const MWWorld::Ptr& ptr)
+@@ -113,6 +157,14 @@ namespace MWGui
+             MWBase::Environment::get().getWindowManager()->setKeyFocusWidget(mUntilHealedButton);
+         else
+             MWBase::Environment::get().getWindowManager()->setKeyFocusWidget(mWaitButton);
++
++        // Companion: export the rest/wait session to the bottom screen. onOpen() (which builds
++        // the date caption) runs BEFORE setPtr, and setPtr's setCanRest() above has just set
++        // mSleeping + the rest-text caption, so both are current here. Guarded by getRestEnabled()
++        // to match onOpen's own gate (onOpen pops the mode when rest is scripted off). Emitted
++        // regardless of DS/Vanilla; the Kotlin side only SHOWS the overlay when Rest/Wait is DS.
++        if (MWBase::Environment::get().getWindowManager()->getRestEnabled())
++            companionExportOpen();
+     }
+ 
+     bool WaitDialog::exit()
+@@ -120,6 +172,8 @@ namespace MWGui
+         bool canExit = !mTimeAdvancer.isRunning(); // Only exit if not currently waiting
+         if (canExit)
+         {
++            // B / Escape (exitCurrentGuiMode -> exit()). Signal the companion (once-guarded).
++            companionEmitSleepClosed();
+             clear();
+             stopWaiting();
+         }
+@@ -233,9 +287,56 @@ namespace MWGui
+ 
+     void WaitDialog::onCancelButtonClicked(MyGUI::Widget* /*sender*/)
+     {
++        // Native Cancel (Vanilla) AND the companion Cancel path (companionCancelWait routes
++        // here). Signal the companion first (once-guarded, harmless in Vanilla where the
++        // overlay isn't shown).
++        companionEmitSleepClosed();
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Rest);
+     }
+ 
++    // ================= Companion (bottom-screen rest/wait) =================
++
++    void WaitDialog::companionExportOpen()
++    {
++        // The date caption was resolved (#{Calendar:*} tags replaced) by onOpen's
++        // setCaptionWithReplacing, so getCaption() returns the final display string,
++        // e.g. "24 Last Seed (Day 9) 10 a.m.". mSleeping distinguishes Rest vs Wait.
++        const std::string dateStr = mDateTimeText->getCaption().asUTF8();
++        const char* mode = mSleeping ? "rest" : "wait";
++        // Warning only in WAIT mode — the illegal-rest / werewolf message that setCanRest put
++        // on mRestText. In REST mode the bottom screen shows "REST" instead, so no warning.
++        std::string warning;
++        if (!mSleeping)
++            warning = mRestText->getCaption().asUTF8();
++
++        Log(Debug::Info) << "COMPANION_SLEEP_OPEN:" << mode << "|" << companionSleepSanitize(dateStr) << "|"
++                         << companionSleepSanitize(warning);
++        gCompanionSleepSessionOpen = true;
++    }
++
++    void WaitDialog::companionStartWait(int hours)
++    {
++        if (mTimeAdvancer.isRunning())
++            return; // already advancing — ignore
++        if (hours < 1)
++            hours = 1;
++
++        // startWaiting drives the native fade + progress bar + time advance (and the sleep
++        // interruption / level-up handling) on the TOP screen; the mode stays GM_Rest until it
++        // finishes. Dismiss the bottom overlay now — the picker's job is done. Once-guarded.
++        companionEmitSleepClosed();
++        startWaiting(hours);
++    }
++
++    void WaitDialog::companionCancelWait()
++    {
++        // Routes through onCancelButtonClicked (removeGuiMode(GM_Rest)) which emits the close
++        // signal. Guarded against cancelling mid-advance (the native Cancel is inert then too).
++        if (mTimeAdvancer.isRunning())
++            return;
++        onCancelButtonClicked(mCancelButton);
++    }
++
+     void WaitDialog::onHourSliderChangedPosition(MyGUI::ScrollBar* sender, size_t position)
+     {
+         mHourText->setCaptionWithReplacing(MyGUI::utility::toString(position + 1) + " #{sRestMenu2}");
+@@ -394,3 +495,24 @@ namespace MWGui
+     }
+ 
+ }
++
++// Companion (bottom-screen rest/wait): extern "C" bridges driven from drainCompanionCommands
++// (androidmain.cpp, engine main thread). Mirror the repair bridges. Each no-ops unless a
++// rest/wait picker is actually live (containsMode guard, stale-window safe).
++extern "C" void companionSleep(int hours)
++{
++    if (!gCompanionWaitDialog)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Rest))
++        return;
++    gCompanionWaitDialog->companionStartWait(hours);
++}
++
++extern "C" void companionSleepCancel()
++{
++    if (!gCompanionWaitDialog)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Rest))
++        return;
++    gCompanionWaitDialog->companionCancelWait();
++}
+diff --git a/apps/openmw/mwgui/waitdialog.hpp b/apps/openmw/mwgui/waitdialog.hpp
+index fb25ddc1fa..cff30f9176 100644
+--- a/apps/openmw/mwgui/waitdialog.hpp
++++ b/apps/openmw/mwgui/waitdialog.hpp
+@@ -48,6 +48,14 @@ namespace MWGui
+ 
+         ControllerButtons* getControllerButtons() override;
+ 
++        // Companion (bottom-screen rest/wait): export the session + programmatic Rest/Wait/
++        // Cancel driven from drainCompanionCommands (androidmain.cpp), so the whole picker can
++        // be mirrored onto the bottom screen without showing the native WaitDialog. The native
++        // engine still runs the actual fade + time advance once a rest/wait is confirmed.
++        void companionExportOpen();
++        void companionStartWait(int hours);
++        void companionCancelWait();
++
+     protected:
+         MyGUI::TextBox* mDateTimeText;
+         MyGUI::TextBox* mRestText;

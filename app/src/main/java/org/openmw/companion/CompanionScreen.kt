@@ -47,6 +47,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MenuDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.layout.heightIn
@@ -116,6 +118,7 @@ import androidx.compose.ui.unit.IntSize
 import kotlin.math.sin
 import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.roundToInt
 
 
 /**
@@ -444,6 +447,8 @@ fun CompanionScreen() {
         val conversationDs by UiPreferences.gameUiModeFlow("game_ui_conversation").collectAsState()
         val barteringDs by UiPreferences.gameUiModeFlow("game_ui_bartering").collectAsState()
         val persuasionDs by UiPreferences.gameUiModeFlow("game_ui_persuasion").collectAsState()
+        val repairDs by UiPreferences.gameUiModeFlow("game_ui_repair").collectAsState()
+        val restwaitDs by UiPreferences.gameUiModeFlow("game_ui_restwait").collectAsState()
 
         // Looting / pickpocketing overlay. Driven by COMPANION_CONTAINER_* from the
         // engine (via Lua). Shown whenever a container session is active, regardless
@@ -520,6 +525,29 @@ fun CompanionScreen() {
                 (barterResult as? BarterResult.Rejected)?.let { rej ->
                     BarterRejectedAlert(rej.reason) { GameStateRepository.dismissBarterResult() }
                 }
+            }
+        }
+
+        // Merchant-repair overlay. Driven by COMPANION_REPAIR_* from the engine (native
+        // MerchantRepair window). Shown over whatever tab/dialogue is active whenever a repair
+        // session exists AND Repair is in DS mode (Vanilla → native OpenMW handles it). A
+        // centred popup (zIndex 17f, above barter's 16f — repair is a dialogue service pushed
+        // like barter); the shared QuantitySelector (20f) still stacks above.
+        val repairSession by GameStateRepository.repairSession.collectAsState()
+        if (repairDs == GameUiMode.DS) {
+            repairSession?.let { session ->
+                RepairOverlay(session = session)
+            }
+        }
+
+        // Rest/wait overlay. Driven by COMPANION_SLEEP_* from the engine (native WaitDialog).
+        // Shown whenever a rest/wait picker is open AND Rest/Wait is DS. Confirming dismisses it
+        // (the engine runs the fade + time advance on the top screen). zIndex 17f (same tier as
+        // repair — they're never open simultaneously).
+        val sleepSession by GameStateRepository.sleepSession.collectAsState()
+        if (restwaitDs == GameUiMode.DS) {
+            sleepSession?.let { session ->
+                RestWaitOverlay(session = session)
             }
         }
     }
@@ -1948,6 +1976,306 @@ private fun QtyActionButton(
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp
         )
+    }
+}
+
+/* ---- Merchant-repair overlay (bottom screen) ---- */
+
+// Condition-bar thresholds (spec): red ≤40%, amber 41–70%, green 71–99% (and 100%).
+private val RepairCondRed = Color(0xFFE87070)
+private val RepairCondAmber = Color(0xFFC8A040)
+private val RepairCondGreen = Color(0xFF6AAA6A)
+
+private fun repairCondColor(ratio: Float): Color = when {
+    ratio <= 0.40f -> RepairCondRed
+    ratio <= 0.70f -> RepairCondAmber
+    else -> RepairCondGreen
+}
+
+/**
+ * Bottom-screen merchant-repair overlay. Driven by COMPANION_REPAIR_* (native MerchantRepair
+ * window), shown whenever [GameStateRepository.repairSession] is non-null and Repair is DS.
+ * NOT a Compose Dialog (crashes on the Presentation display — see ItemInfoOverlay); an
+ * in-window centred Box at zIndex 17f. No tap-outside dismiss — only the Cancel button
+ * closes it (→ CMP:repair_cancel → the engine pops GM_MerchantRepair and emits
+ * COMPANION_REPAIR_CLOSED). Each row taps to repair that item immediately; the engine
+ * re-exports the (shorter) list + updated gold after every repair, so [session] just
+ * refreshes in place (no optimistic local state needed — repair is one authoritative call).
+ */
+@Composable
+private fun RepairOverlay(session: RepairSession) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(17f)
+            .background(Color(0xCC0F0C08))
+            // Swallow taps so nothing falls through to the tab underneath. NO dismiss.
+            .pointerInput(Unit) { detectTapGestures {} },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.7f)
+                .fillMaxHeight(0.86f)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- Title bar ----
+            Text(
+                "Repair — ${session.npcName.ifBlank { "Merchant" }}",
+                color = BronzeLight, fontSize = 15.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            // ---- Item list ----
+            if (session.items.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        "Nothing needs repair", color = BoneDim,
+                        fontSize = 13.sp, fontFamily = MwBody
+                    )
+                }
+            } else {
+                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                    items(session.items, key = { it.sid }) { item ->
+                        RepairRow(
+                            item = item,
+                            affordable = item.cost <= session.playerGold,
+                            onRepair = { CompanionActions.repairItem(item.sid) }
+                        )
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+                    }
+                }
+            }
+
+            // ---- Divider + bottom row ----
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Gold: ${session.playerGold}", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwData, modifier = Modifier.weight(1f)
+                )
+                // Repair All shows the total cost of ALL listed items; the engine repairs as
+                // many as the player can afford (cheapest-affordable first). Disabled only
+                // when there's nothing at all to repair.
+                RepairButton(
+                    label = "Repair All (${session.totalCost}g)",
+                    color = BarterGreen,
+                    enabled = session.items.isNotEmpty()
+                ) { CompanionActions.repairAll() }
+                RepairButton(label = "Cancel", color = BarterBlue, enabled = true) {
+                    CompanionActions.repairCancel()
+                }
+            }
+        }
+    }
+}
+
+/** One repair row: name (flex) + condition bar with "X/Y" + cost, tap to repair. Unaffordable
+ *  rows are dimmed with a red cost and are not tappable (the engine ignores them anyway). */
+@Composable
+private fun RepairRow(item: RepairItem, affordable: Boolean, onRepair: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (affordable) Modifier.clickable { onRepair() } else Modifier)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            item.name,
+            color = if (affordable) Bone else BoneDim,
+            fontSize = 14.sp, fontFamily = MwBody,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        // Condition column: a thin bar + "X/Y" text.
+        Column(
+            modifier = Modifier.width(96.dp).padding(horizontal = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color(0xFF0E0B07))
+                    .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(item.ratio)
+                        .fillMaxHeight()
+                        .background(repairCondColor(item.ratio))
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "${item.condition}/${item.maxCondition}",
+                color = BoneDim, fontSize = 9.sp, fontFamily = MwData
+            )
+        }
+        Text(
+            "${item.cost}g",
+            color = if (affordable) BronzeLight else RepairCondRed,
+            fontSize = 13.sp, fontFamily = MwData,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(54.dp)
+        )
+    }
+}
+
+/** A repair action button (Repair All / Cancel), styled like [BarterButton]. */
+@Composable
+private fun RepairButton(
+    label: String,
+    color: Color,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (enabled) color.copy(alpha = 0.20f) else SlotBg)
+            .border(1.dp, if (enabled) color else BronzeDark, RoundedCornerShape(3.dp))
+            .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
+            .padding(horizontal = 14.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (enabled) color else BoneDim,
+            fontSize = 12.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/* ---- Rest/Wait overlay (bottom screen) ---- */
+
+/**
+ * Bottom-screen rest/wait picker. Driven by COMPANION_SLEEP_* (native WaitDialog), shown
+ * whenever [GameStateRepository.sleepSession] is non-null and Rest/Wait is DS. NOT a Compose
+ * Dialog (crashes on the Presentation display); an in-window centred Box at zIndex 17f, no
+ * tap-outside dismiss. Confirming "Rest"/"Wait" sends CMP:sleep <hours> — the engine then runs
+ * the fade + time advance (+ sleep interruption / level-up) on the TOP screen and emits
+ * COMPANION_SLEEP_CLOSED, which dismisses this overlay. Cancel sends CMP:sleep_cancel.
+ */
+@Composable
+private fun RestWaitOverlay(session: SleepSession) {
+    val isRest = session.mode == SleepMode.REST
+    var hours by remember { mutableStateOf(1) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(17f)
+            .background(Color(0xCC0F0C08))
+            .pointerInput(Unit) { detectTapGestures {} },   // swallow taps, NO dismiss
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.7f)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- Title ----
+            Text(
+                if (isRest) "Rest" else "Wait",
+                color = BronzeLight, fontSize = 15.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // ---- Date / time ----
+                Text(
+                    session.dateString, color = Bone, fontSize = 15.sp,
+                    fontFamily = MwBody, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(14.dp))
+
+                // ---- Middle line: illegal-rest warning (WAIT) or "REST" banner ----
+                if (!isRest && session.warning.isNotBlank()) {
+                    Text(
+                        session.warning, color = RepairCondRed, fontSize = 13.sp,
+                        fontFamily = MwBody, textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(14.dp))
+                } else if (isRest) {
+                    Text(
+                        "REST", color = BronzeLight, fontSize = 22.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 3.sp,
+                        textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(14.dp))
+                }
+
+                // ---- Hours label ----
+                Text(
+                    "$hours ${if (hours == 1) "hour" else "hours"}",
+                    color = Bone, fontSize = 16.sp, fontFamily = MwData,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+
+                // ---- Slider (1..24, no track numbers, 1h / 24h end labels) ----
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("1h", color = BoneDim, fontSize = 11.sp, fontFamily = MwData)
+                    Slider(
+                        value = hours.toFloat(),
+                        onValueChange = { hours = it.roundToInt().coerceIn(1, 24) },
+                        valueRange = 1f..24f,
+                        steps = 22,   // 24 discrete stops (1..24)
+                        colors = SliderDefaults.colors(
+                            thumbColor = BronzeLight,
+                            activeTrackColor = BronzeLight,
+                            inactiveTrackColor = BronzeDark,
+                            activeTickColor = Color.Transparent,
+                            inactiveTickColor = Color.Transparent
+                        ),
+                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+                    )
+                    Text("24h", color = BoneDim, fontSize = 11.sp, fontFamily = MwData)
+                }
+            }
+
+            // ---- Buttons ----
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                RepairButton(
+                    label = if (isRest) "Rest" else "Wait",
+                    color = BarterGreen, enabled = true,
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.sleep(hours) }
+                RepairButton(
+                    label = "Cancel", color = BarterBlue, enabled = true,
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.sleepCancel() }
+            }
+        }
     }
 }
 

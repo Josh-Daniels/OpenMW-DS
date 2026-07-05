@@ -122,6 +122,13 @@ extern "C" void companionBarterReturn(const char* side, const char* refId, int c
 extern "C" void companionBarterSetGold(int extra);
 extern "C" void companionBarterOffer();
 extern "C" void companionBarterCancel();
+// Bottom-screen merchant repair (merchantrepair.cpp). Items addressed by ordinal index.
+extern "C" void companionRepairItem(int index);
+extern "C" void companionRepairAll();
+extern "C" void companionRepairCancel();
+// Bottom-screen rest/wait (waitdialog.cpp). hours from the bottom-screen slider.
+extern "C" void companionSleep(int hours);
+extern "C" void companionSleepCancel();
 
 // Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
 // Quest completion status is NOT exposed to Lua in this build (types.Player.journal
@@ -308,6 +315,40 @@ void drainCompanionCommands()
         {
             Log(Debug::Info) << "companion: barter cancel";
             companionBarterCancel();
+        }
+        // Merchant repair (CMP:repair_*) is driven natively — repair prices come from
+        // MechanicsManager::getBarterOffer and the NPC gold pool lives in the C++
+        // MerchantRepair window, neither of which Lua can reach. See companion-repair-export.patch.
+        else if (cmd.rfind("CMP:repair_item ", 0) == 0)
+        {
+            const int index = std::atoi(cmd.c_str() + (sizeof("CMP:repair_item ") - 1));
+            Log(Debug::Info) << "companion: repair item " << index;
+            companionRepairItem(index);
+        }
+        else if (cmd.rfind("CMP:repair_all", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: repair all";
+            companionRepairAll();
+        }
+        else if (cmd.rfind("CMP:repair_cancel", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: repair cancel";
+            companionRepairCancel();
+        }
+        // Rest/wait (CMP:sleep*) is driven natively — the canRest flags, the fade + progress
+        // time advance, sleep interruption and level-up all live in the C++ WaitDialog, none of
+        // which Lua can reach (world.advanceTime does no healing/level-up). See
+        // companion-restwait-export.patch. Check _cancel before the space-arg form.
+        else if (cmd.rfind("CMP:sleep_cancel", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: sleep cancel";
+            companionSleepCancel();
+        }
+        else if (cmd.rfind("CMP:sleep ", 0) == 0)
+        {
+            const int hours = std::atoi(cmd.c_str() + (sizeof("CMP:sleep ") - 1));
+            Log(Debug::Info) << "companion: sleep " << hours;
+            companionSleep(hours);
         }
         else
         {

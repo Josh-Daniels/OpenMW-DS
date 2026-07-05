@@ -1,0 +1,349 @@
+Companion (bottom-screen merchant repair) — export + control bridge for the native
+MerchantRepair window (GM_MerchantRepair). Mirrors companion-barter-export.patch, but
+much simpler (a static damaged-item list + one-shot repair actions, no offer/balance
+state).
+
+Outbound (COMPANION_REPAIR_*, streamed one small line each for 4096-byte flush safety),
+emitted from MerchantRepair::setPtr → companionExportOpen(): OPEN:<npcName> →
+COMPANION_PLAYER_GOLD:<amount> → ITEM:<name>|<sid>|<condition>|<maxCondition>|<repairCost>*
+→ END. sid is the item's ordinal index in the exported (alphabetically sorted) damaged
+list — a stable handle because GM_MerchantRepair pauses the sim, so the set only changes
+on a repair (which re-exports fresh indices). CLOSED on close.
+
+Inbound: a file-static gCompanionMerchantRepair (set in the ctor) plus three extern "C"
+bridges — companionRepairItem/companionRepairAll/companionRepairCancel — let
+drainCompanionCommands drive repair from CMP:repair_* commands. companionRepairByIndex and
+companionRepairAll mirror the native onRepairButtonClick (full setCharge restore, restack,
+deduct player gold, credit the NPC gold pool, play the Repair sound) and re-export after
+each repair. Prices come from MechanicsManager::getBarterOffer (native-only — the reason
+this must be a native bridge, same as barter). Each bridge no-ops unless
+containsMode(GM_MerchantRepair) (stale-window guard).
+
+Close signal: the native window is HIDDEN the moment the mode opens in DS mode
+(companion-hide-gamewindows-on-dsmode.patch), so the usual visible->hidden onClose()
+transition never fires. COMPANION_REPAIR_CLOSED is therefore emitted explicitly, once-
+guarded (gCompanionRepairSessionOpen), from every close path: the companionRepairCancel
+bridge (bottom-screen Cancel), exit() (B/Escape), and onOkButtonClick (native OK, Vanilla).
+diff --git a/apps/openmw/mwgui/merchantrepair.cpp b/apps/openmw/mwgui/merchantrepair.cpp
+index dcd9b6b615..70c5154ca8 100644
+--- a/apps/openmw/mwgui/merchantrepair.cpp
++++ b/apps/openmw/mwgui/merchantrepair.cpp
+@@ -1,6 +1,13 @@
+ #include "merchantrepair.hpp"
+ 
++#include <algorithm>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include <components/debug/debuglog.hpp>
+ #include <components/esm3/loadgmst.hpp>
++#include <components/misc/strings/algorithm.hpp>
+ #include <components/settings/values.hpp>
+ 
+ #include <MyGUI_Button.h>
+@@ -18,6 +25,100 @@
+ #include "../mwworld/containerstore.hpp"
+ #include "../mwworld/esmstore.hpp"
+ 
++namespace
++{
++    // ================= Companion (bottom-screen merchant repair) =================
++    // Mirrors the companion barter bridge (companion-barter-export.patch): the native
++    // MerchantRepair window is hidden while GM_MerchantRepair is in DS mode
++    // (companion-hide-gamewindows-on-dsmode.patch), and the whole repair flow is driven
++    // from the bottom screen via the extern "C" bridges at the end of this file.
++
++    // The single live MerchantRepair window, set in its constructor, so the bridges can
++    // reach it without touching WindowManager's private members. Mirrors gCompanionTradeWindow.
++    MWGui::MerchantRepair* gCompanionMerchantRepair = nullptr;
++
++    // True between COMPANION_REPAIR_OPEN and COMPANION_REPAIR_CLOSED so the close signal is
++    // emitted exactly once, whichever path ends the session (bottom-screen Cancel bridge, or
++    // B/Escape via exit()). The native window is HIDDEN the moment the mode opens in DS mode,
++    // so the usual visible->hidden onClose() transition never fires — the close must be explicit.
++    bool gCompanionRepairSessionOpen = false;
++
++    void companionEmitRepairClosed()
++    {
++        if (!gCompanionRepairSessionOpen)
++            return;
++        gCompanionRepairSessionOpen = false;
++        Log(Debug::Info) << "COMPANION_REPAIR_CLOSED";
++    }
++
++    // Keep a name safe inside the pipe-delimited COMPANION_REPAIR_ITEM line.
++    std::string companionRepairSanitize(std::string_view s)
++    {
++        std::string out(s);
++        for (char& c : out)
++            if (c == '|' || c == '\n' || c == '\r')
++                c = ' ';
++        return out;
++    }
++
++    // One damaged, repairable item + its merchant repair price. Built exactly like the native
++    // MerchantRepair::setPtr list (same category filter, same price formula, same alphabetical
++    // sort) so an ordinal index into this vector is a stable handle shared by the export and
++    // the repair bridges. GM_MerchantRepair pauses the sim, so the set can't change between an
++    // export and the tap that follows it (only a repair mutates it, and that re-exports).
++    struct CompanionRepairEntry
++    {
++        std::string name;
++        MWWorld::Ptr item;
++        int condition;
++        int maxCondition;
++        int price;
++    };
++
++    std::vector<CompanionRepairEntry> companionCollectDamaged(const MWWorld::Ptr& actor)
++    {
++        std::vector<CompanionRepairEntry> out;
++        if (actor.isEmpty())
++            return out;
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        MWWorld::ContainerStore& store = player.getClass().getContainerStore(player);
++        const int categories = MWWorld::ContainerStore::Type_Weapon | MWWorld::ContainerStore::Type_Armor;
++        const float fRepairMult = MWBase::Environment::get()
++                                      .getESMStore()
++                                      ->get<ESM::GameSetting>()
++                                      .find("fRepairMult")
++                                      ->mValue.getFloat();
++
++        for (MWWorld::ContainerStoreIterator iter(store.begin(categories)); iter != store.end(); ++iter)
++        {
++            if (!iter->getClass().hasItemHealth(*iter))
++                continue;
++            const int maxDurability = iter->getClass().getItemMaxHealth(*iter);
++            const int durability = iter->getClass().getItemHealth(*iter);
++            if (maxDurability <= durability || maxDurability == 0)
++                continue;
++
++            const int basePrice = iter->getClass().getValue(*iter);
++            const float p = static_cast<float>(std::max(1, basePrice));
++            const float r = static_cast<float>(std::max(1, static_cast<int>(maxDurability / p)));
++            int x = static_cast<int>((maxDurability - durability) / r);
++            x = static_cast<int>(fRepairMult * x);
++            x = std::max(1, x);
++            const int price = MWBase::Environment::get().getMechanicsManager()->getBarterOffer(actor, x, true);
++
++            out.push_back(
++                { std::string{ iter->getClass().getName(*iter) }, *iter, durability, maxDurability, price });
++        }
++
++        std::stable_sort(out.begin(), out.end(),
++            [](const CompanionRepairEntry& a, const CompanionRepairEntry& b) {
++                return Misc::StringUtils::ciLess(a.name, b.name);
++            });
++        return out;
++    }
++}
++
+ namespace MWGui
+ {
+     MerchantRepair::MerchantRepair()
+@@ -35,6 +136,8 @@ namespace MWGui
+             mControllerButtons.mA = "#{Interface:Repair}";
+             mControllerButtons.mB = "#{Interface:Cancel}";
+         }
++
++        gCompanionMerchantRepair = this;
+     }
+ 
+     void MerchantRepair::setPtr(const MWWorld::Ptr& actor)
+@@ -127,6 +230,11 @@ namespace MWGui
+         mList->setVisibleVScroll(true);
+ 
+         mGoldLabel->setCaptionWithReplacing("#{sGold}: " + MyGUI::utility::toString(playerGold));
++
++        // Companion: mirror the whole repair session (NPC name, gold, damaged item list) to
++        // the bottom screen. Emitted regardless of DS/Vanilla (the Kotlin side only SHOWS the
++        // overlay when Repair is DS); the native window is separately hidden in DS mode.
++        companionExportOpen();
+     }
+ 
+     void MerchantRepair::onMouseWheel(MyGUI::Widget* /*sender*/, int rel)
+@@ -171,9 +279,120 @@ namespace MWGui
+ 
+     void MerchantRepair::onOkButtonClick(MyGUI::Widget* /*sender*/)
+     {
++        // Native OK (Vanilla mode). Signal the companion too (once-guarded, harmless in DS
++        // mode where OK is unreachable because the window is hidden).
++        companionEmitRepairClosed();
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_MerchantRepair);
+     }
+ 
++    bool MerchantRepair::exit()
++    {
++        // Covers B / Escape (exitCurrentGuiMode -> exit()). The bottom-screen Cancel button
++        // routes through the companionRepairCancel bridge instead, which emits the close
++        // signal itself; the once-guard prevents a double emit.
++        companionEmitRepairClosed();
++        return true;
++    }
++
++    // ================= Companion (bottom-screen merchant repair) =================
++
++    void MerchantRepair::companionExportOpen()
++    {
++        if (mActor.isEmpty())
++            return;
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int playerGold
++            = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++
++        Log(Debug::Info) << "COMPANION_REPAIR_OPEN:" << companionRepairSanitize(mActor.getClass().getName(mActor));
++        Log(Debug::Info) << "COMPANION_PLAYER_GOLD:" << playerGold;
++
++        // Streamed one small line each (START/ITEM*/END) to stay clear of the 4096-byte
++        // stdout-flush truncation that bites single long COMPANION_ lines.
++        const std::vector<CompanionRepairEntry> damaged = companionCollectDamaged(mActor);
++        for (std::size_t i = 0; i < damaged.size(); ++i)
++        {
++            const CompanionRepairEntry& e = damaged[i];
++            // name|sid|condition|maxCondition|repairCost   (sid = ordinal index)
++            Log(Debug::Info) << "COMPANION_REPAIR_ITEM:" << companionRepairSanitize(e.name) << "|" << i << "|"
++                             << e.condition << "|" << e.maxCondition << "|" << e.price;
++        }
++        Log(Debug::Info) << "COMPANION_REPAIR_END";
++
++        gCompanionRepairSessionOpen = true;
++    }
++
++    void MerchantRepair::companionRepairByIndex(int index)
++    {
++        if (mActor.isEmpty())
++            return;
++
++        const std::vector<CompanionRepairEntry> damaged = companionCollectDamaged(mActor);
++        if (index < 0 || index >= static_cast<int>(damaged.size()))
++            return;
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int price = damaged[index].price;
++        if (price > player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId))
++            return; // can't afford — ignore (the bottom screen also gates this)
++
++        // Mirror onRepairButtonClick: fully restore condition, restack, pay, credit the NPC.
++        MWWorld::Ptr item = damaged[index].item;
++        item.getCellRef().setCharge(item.getClass().getItemMaxHealth(item));
++        player.getClass().getContainerStore(player).restack(item);
++        MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Repair"));
++        player.getClass().getContainerStore(player).remove(MWWorld::ContainerStore::sGoldId, price);
++
++        MWMechanics::CreatureStats& actorStats = mActor.getClass().getCreatureStats(mActor);
++        actorStats.setGoldPool(actorStats.getGoldPool() + price);
++
++        companionExportOpen(); // re-export the now-shorter list + updated gold
++    }
++
++    void MerchantRepair::companionRepairAll()
++    {
++        if (mActor.isEmpty())
++            return;
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        bool repairedAny = false;
++
++        // Repair one affordable item per pass, then recollect: setCharge + restack can
++        // merge/invalidate stacks, and each repair lowers the player's gold, so the affordable
++        // set must be recomputed rather than iterated over a stale snapshot.
++        for (;;)
++        {
++            const std::vector<CompanionRepairEntry> damaged = companionCollectDamaged(mActor);
++            const int gold
++                = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++            MWWorld::Ptr item;
++            int price = 0;
++            for (const CompanionRepairEntry& e : damaged)
++            {
++                if (e.price <= gold)
++                {
++                    item = e.item;
++                    price = e.price;
++                    break;
++                }
++            }
++            if (item.isEmpty())
++                break; // nothing else affordable
++
++            item.getCellRef().setCharge(item.getClass().getItemMaxHealth(item));
++            player.getClass().getContainerStore(player).restack(item);
++            player.getClass().getContainerStore(player).remove(MWWorld::ContainerStore::sGoldId, price);
++            MWMechanics::CreatureStats& actorStats = mActor.getClass().getCreatureStats(mActor);
++            actorStats.setGoldPool(actorStats.getGoldPool() + price);
++            repairedAny = true;
++        }
++
++        if (repairedAny)
++            MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Repair"));
++        companionExportOpen();
++    }
++
+     bool MerchantRepair::onControllerButtonEvent(const SDL_ControllerButtonEvent& arg)
+     {
+         if (arg.button == SDL_CONTROLLER_BUTTON_A)
+@@ -220,3 +439,36 @@ namespace MWGui
+         return true;
+     }
+ }
++
++// Companion (bottom-screen repair): extern "C" bridges driven from drainCompanionCommands
++// (androidmain.cpp, engine main thread). Mirror the barter bridges. Each no-ops unless a
++// merchant-repair session is actually live (containsMode guard, stale-window safe).
++extern "C" void companionRepairItem(int index)
++{
++    if (!gCompanionMerchantRepair)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_MerchantRepair))
++        return;
++    gCompanionMerchantRepair->companionRepairByIndex(index);
++}
++
++extern "C" void companionRepairAll()
++{
++    if (!gCompanionMerchantRepair)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_MerchantRepair))
++        return;
++    gCompanionMerchantRepair->companionRepairAll();
++}
++
++extern "C" void companionRepairCancel()
++{
++    if (!gCompanionMerchantRepair)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_MerchantRepair))
++        return;
++    // Pop the mode. In DS mode the window is already hidden, so the mode-pop's setVisible(false)
++    // is a no-op that never fires onClose(); emit the close signal explicitly (once-guarded).
++    MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_MerchantRepair);
++    companionEmitRepairClosed();
++}
+diff --git a/apps/openmw/mwgui/merchantrepair.hpp b/apps/openmw/mwgui/merchantrepair.hpp
+index 88fd19d7ff..3fd3879cff 100644
+--- a/apps/openmw/mwgui/merchantrepair.hpp
++++ b/apps/openmw/mwgui/merchantrepair.hpp
+@@ -16,8 +16,20 @@ namespace MWGui
+ 
+         void setPtr(const MWWorld::Ptr& actor) override;
+ 
++        bool exit() override;
++
+         std::string_view getWindowIdForLua() const override { return "MerchantRepair"; }
+ 
++        // Companion (bottom-screen repair): programmatic equivalents of the repair
++        // interactions, driven from drainCompanionCommands (androidmain.cpp) so the whole
++        // merchant-repair flow can be mirrored onto the bottom screen without ever showing
++        // the native MerchantRepair window. Damaged items are addressed by their ordinal
++        // index in the exported (alphabetically sorted) damaged list — stable between an
++        // export and the immediately-following tap because GM_MerchantRepair pauses the sim.
++        void companionExportOpen();
++        void companionRepairByIndex(int index);
++        void companionRepairAll();
++
+     private:
+         MyGUI::ScrollView* mList;
+         MyGUI::Button* mOkButton;

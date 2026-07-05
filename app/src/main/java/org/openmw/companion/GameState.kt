@@ -171,6 +171,57 @@ sealed interface BarterResult {
     data object Accepted : BarterResult
 }
 
+/**
+ * One damaged, repairable item in the merchant-repair overlay (COMPANION_REPAIR_ITEM).
+ * [sid] is the item's ordinal index in the engine's exported damaged list — the handle
+ * passed back to [CompanionActions.repairItem] (stable because GM_MerchantRepair pauses the
+ * sim; the list is re-exported with fresh indices after each repair). [condition] /
+ * [maxCondition] are the item's current / max durability; [cost] is the merchant's price.
+ */
+data class RepairItem(
+    val name: String,
+    val sid: String,
+    val condition: Int,
+    val maxCondition: Int,
+    val cost: Int
+) {
+    /** 0..1 durability ratio for the condition bar. */
+    val ratio: Float get() = if (maxCondition > 0) (condition.toFloat() / maxCondition).coerceIn(0f, 1f) else 0f
+}
+
+/**
+ * An open merchant-repair session (the native GM_MerchantRepair window, mirrored to the
+ * bottom screen). Transient — its own StateFlow, not part of GameState; null = not repairing.
+ * Driven entirely by COMPANION_REPAIR_* + COMPANION_PLAYER_GOLD from the engine.
+ */
+data class RepairSession(
+    val npcName: String,
+    val playerGold: Int,
+    val items: List<RepairItem> = emptyList(),
+    val isVisible: Boolean = true
+) {
+    /** Total cost to repair every listed item (the "Repair All (Xg)" figure). */
+    val totalCost: Int get() = items.sumOf { it.cost }
+}
+
+/** REST = sleeping is allowed here (heals, can level up); WAIT = time-pass only. */
+enum class SleepMode { REST, WAIT }
+
+/**
+ * An open rest/wait session (the native GM_Rest WaitDialog, mirrored to the bottom screen).
+ * Transient — its own StateFlow, not part of GameState; null = not resting/waiting. Driven by
+ * COMPANION_SLEEP_* from the engine. [dateString] is the already-resolved in-game date/time
+ * (e.g. "24 Last Seed (Day 9) 10 a.m."); [warning] is the illegal-rest message shown only in
+ * WAIT mode ("" otherwise). Confirming a rest/wait dismisses this overlay — the engine runs
+ * the actual fade + time advance on the top screen.
+ */
+data class SleepSession(
+    val mode: SleepMode,
+    val dateString: String,
+    val warning: String = "",
+    val isVisible: Boolean = true
+)
+
 data class AttributeStat(
     val id: String, val name: String, val current: Float, val base: Float,
     /** In-game description (from the streamed CHARDETAIL batch); "" until it lands. */

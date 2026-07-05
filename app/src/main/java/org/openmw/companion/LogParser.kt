@@ -41,6 +41,18 @@ object LogParser {
     const val P_BARTER_OFFER_ACCEPTED = "COMPANION_BARTER_OFFER_ACCEPTED"
     const val P_BARTER_OFFER_REJECTED = "COMPANION_BARTER_OFFER_REJECTED:"
     const val P_BARTER_CLOSED = "COMPANION_BARTER_CLOSED"
+    // Merchant repair (GM_MerchantRepair). OPEN:<npcName> → PLAYER_GOLD:<n> → ITEM:
+    // <name>|<sid>|<condition>|<maxCondition>|<cost>* → END, then CLOSED. None of these
+    // tokens is a contains()-substring of another. PLAYER_GOLD is emitted within a repair
+    // export (right after OPEN and again on each re-export after a repair).
+    const val P_REPAIR_OPEN = "COMPANION_REPAIR_OPEN:"
+    const val P_REPAIR_ITEM = "COMPANION_REPAIR_ITEM:"
+    const val P_REPAIR_END = "COMPANION_REPAIR_END"
+    const val P_REPAIR_CLOSED = "COMPANION_REPAIR_CLOSED"
+    const val P_PLAYER_GOLD = "COMPANION_PLAYER_GOLD:"
+    // Rest/wait (GM_Rest). OPEN:<mode>|<dateString>|<warning> then CLOSED. Distinct tokens.
+    const val P_SLEEP_OPEN = "COMPANION_SLEEP_OPEN:"
+    const val P_SLEEP_CLOSED = "COMPANION_SLEEP_CLOSED"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
@@ -272,6 +284,41 @@ object LogParser {
             icon = o.optString("icon", ""),
             side = side,
             worn = o.optBoolean("worn", false)
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * A single COMPANION_REPAIR_ITEM payload: name|sid|condition|maxCondition|cost.
+     * Pipe-delimited (not JSON) — the engine sanitizes '|' out of the name, so a plain split
+     * yields exactly 5 fields.
+     */
+    fun parseRepairItem(payload: String): RepairItem? = try {
+        val parts = payload.split('|')
+        if (parts.size < 5) null
+        else RepairItem(
+            name = parts[0],
+            sid = parts[1],
+            condition = parts[2].trim().toInt(),
+            maxCondition = parts[3].trim().toInt(),
+            cost = parts[4].trim().toInt()
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * A COMPANION_SLEEP_OPEN payload: <mode>|<dateString>|<warning>. Pipe-delimited (the engine
+     * sanitizes '|' out of each field), always 3 fields (warning may be empty).
+     */
+    fun parseSleepOpen(payload: String): SleepSession? = try {
+        val parts = payload.split('|')
+        if (parts.isEmpty()) null
+        else SleepSession(
+            mode = if (parts[0].trim() == "rest") SleepMode.REST else SleepMode.WAIT,
+            dateString = parts.getOrElse(1) { "" }.trim(),
+            warning = parts.getOrElse(2) { "" }.trim()
         )
     } catch (e: Exception) {
         null
