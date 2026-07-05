@@ -1,0 +1,75 @@
+Suppress the native single-mode "Game UI" windows — merchant repair, level up,
+spellmaking, enchanting, alchemy, and rest/wait — when the matching element is in DS
+mode, so the companion (bottom-screen) UI is the sole surface. Show the native window
+when the element is Vanilla.
+
+Unlike dialogue/container/barter (which updateVisible() already re-asserts by member
+pointer), these six windows are NOT members of WindowManager — they live only in
+mGuiModeStates[mode].mWindows (constructed as local unique_ptrs and moved into the
+GuiModeState). So this suppression is generic: switch on getMode(), read the matching
+companionDs*() flag, and if set, hide every window in that mode's GuiModeState. Placed
+in updateVisible() (run at the tail of pushGuiMode/popGuiMode), so the gate is applied
+the moment the mode is entered. Guarded by !mGuiModes.empty() because it runs before
+the later empty-stack early-return and getMode() reads mGuiModes.back().
+
+Safety: none of these six windows override WindowBase::onClose() — they commit their
+action on explicit buttons (OK / Create / Wait / ...) and only cancel/discard via
+exit()/onCancelButtonClicked. WindowBase::setVisible(false) fires the base onClose()
+(a no-op) on the visible->hidden transition, so hiding them mid-mode has no side
+effect (no time advance, no attribute commit, no reference reset). This mirrors how
+the dialogue/container/barter patches rely on guarded/no-op onClose().
+
+Status: all six elements are "pending" on the Kotlin side (GameUiElement.pending =
+locked to VANILLA) because no companion overlay exists for them yet, so companionDs*()
+always returns false and this block is INERT today. It is wired now so that removing
+`pending` (once an overlay lands) activates suppression with no further native change.
+Repair suppresses GM_MerchantRepair only; GM_Repair (self-repair with hammers) is left
+untouched by design.
+
+This patch is applied after companion-hide-barter-on-hideui.patch (it appends its six
+extern "C" decls to the block that patch chain declared before updateVisible()).
+
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -647,4 +647,10 @@
+     extern "C" bool companionDsConversation();
+     extern "C" bool companionDsLooting();
+     extern "C" bool companionDsBarter();
++    extern "C" bool companionDsRepair();
++    extern "C" bool companionDsLevelUp();
++    extern "C" bool companionDsSpellmaking();
++    extern "C" bool companionDsEnchanting();
++    extern "C" bool companionDsAlchemy();
++    extern "C" bool companionDsRestWait();
+ #endif
+@@ -694,4 +700,30 @@
+         if (mTradeWindow)
+             mTradeWindow->setVisible(!companionDsBarter() && containsMode(GM_Barter));
+
++        // COMPANION: per-element DS suppression for the single-mode "Game UI" windows not
++        // otherwise managed in updateVisible (repair/levelup/spellmaking/enchanting/alchemy/
++        // rest-wait). Each mode owns its window(s) via mGuiModeStates; when the matching element
++        // is in DS mode, hide them all so the companion bottom screen is the sole surface. These
++        // windows commit on explicit buttons (never onClose()), so hiding on the visible->hidden
++        // transition is side-effect-free. All six are pending today (companionDs*() == false), so
++        // this is inert until a companion overlay lands and the element is un-pended.
++        if (!mGuiModes.empty())
++        {
++            bool suppressModeWindows = false;
++            switch (getMode())
++            {
++                case GM_MerchantRepair: suppressModeWindows = companionDsRepair(); break;
++                case GM_Levelup: suppressModeWindows = companionDsLevelUp(); break;
++                case GM_SpellCreation: suppressModeWindows = companionDsSpellmaking(); break;
++                case GM_Enchanting: suppressModeWindows = companionDsEnchanting(); break;
++                case GM_Alchemy: suppressModeWindows = companionDsAlchemy(); break;
++                case GM_Rest: suppressModeWindows = companionDsRestWait(); break;
++                default: break;
++            }
++            if (suppressModeWindows)
++                for (WindowBase* modeWindow : mGuiModeStates[getMode()].mWindows)
++                    if (modeWindow)
++                        modeWindow->setVisible(false);
++        }
++
+         bool gameMode = !isGuiMode();

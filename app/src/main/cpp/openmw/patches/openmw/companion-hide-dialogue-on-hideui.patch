@@ -1,19 +1,23 @@
-Hide the in-game dialogue window when the HUD is hidden via "Hide UI", so the
-companion (bottom-screen) dialogue UI is the sole conversation surface while
-Hide UI is active; restore it when Hide UI is toggled back on.
+Hide the in-game dialogue window when Conversation is in DS mode, so the companion
+(bottom-screen) dialogue UI is the sole conversation surface; show the native window
+when Conversation is Vanilla.
+
+Re-gated July 2026 from the global Hide UI flag (mHudEnabled) onto the per-element DS
+flag companionDsConversation() (androidmain.cpp, pushed from Kotlin's
+"game_ui_conversation" GameUiMode). DS -> suppress the native window; Vanilla -> show it.
+updateVisible() runs at the end of pushGuiMode/popGuiMode, so the gate is applied the
+moment the dialogue mode is entered — not only on a Hide UI toggle.
 
 Unlike the HUD (mHud) and the tooltip layer (mToolTips), the dialogue window's
 visibility is NOT driven by updateVisible() at all in vanilla — it is toggled by
-GuiModeState::update(visible) on GM_Dialogue push/pop, so Hide UI currently has
-no effect on it. We add the gate here, in updateVisible() (which setHudVisibility
-calls right after flipping mHudEnabled), because this is the single place the
-Hide UI state is applied to windows.
+GuiModeState::update(visible) on GM_Dialogue push/pop. We add the gate here, in
+updateVisible() (called at the tail of pushGuiMode/popGuiMode), because this is the
+single place window visibility overrides are applied.
 
 Gate choice — getMode() == GM_Dialogue, NOT containsMode() and NOT isVisible():
   * isVisible() cannot restore the window: once we hide it, isVisible() is stuck
-    false, so (mHudEnabled && isVisible()) can never become true again when Hide
-    UI is toggled back on — the window would stay gone for the rest of the
-    conversation.
+    false, so it could never become visible again when Conversation is set back to
+    Vanilla — the window would stay gone for the rest of the conversation.
   * containsMode(GM_Dialogue) is too broad: GM_Dialogue stays on the mode stack
     while a service window (Barter/Spells/Travel/...) is pushed on top. Vanilla
     hides the dialogue window during barter (the pushed mode calls the previous
@@ -28,25 +32,45 @@ Hiding mid-conversation is safe: WindowBase::setVisible(false) calls onClose(),
 but DialogueWindow::onClose() early-returns while containsMode(GM_Dialogue) is
 true (see companion-dialogue-export.patch), so it neither clears mHistoryContents
 nor emits COMPANION_DIALOGUE_CLOSED. setVisible(true) re-shows it (onOpen is a
-base no-op for DialogueWindow), so toggling Hide UI off restores the exact same
-open conversation.
+base no-op for DialogueWindow), so switching Conversation back to Vanilla restores
+the exact same open conversation.
+
+This patch also declares the three Phase-1 companionDs*() bridges (used here and by
+companion-hide-container-on-hideui.patch / companion-hide-barter-on-hideui.patch,
+which are applied after this one in the chain and share this translation unit).
 
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
-@@ -648,6 +648,16 @@
+@@ -640,6 +640,15 @@
+         mConsole->updateSelectedObjectPtr(currentPtr, newPtr);
+     }
+
++#ifdef __ANDROID__
++    // COMPANION: defined in androidmain.cpp. Each returns true when the matching Game UI element
++    // is in DS mode, so the native top-screen window is suppressed (the companion draws it on the
++    // bottom screen). Replaces the old mHudEnabled (Hide UI) gate on these windows.
++    extern "C" bool companionDsConversation();
++    extern "C" bool companionDsLooting();
++    extern "C" bool companionDsBarter();
++#endif
++
+     void WindowManager::updateVisible()
+     {
+         bool loading = (getMode() == GM_Loading || getMode() == GM_LoadingWallpaper);
+@@ -648,6 +657,16 @@
          mHud->setVisible(mHudEnabled && !loading);
          // COMPANION: keep floating actor-name tooltips visible even when the HUD is
          // hidden via the Hide UI toggle. update() only shows the focus-object name.
          mToolTips->setVisible(!loading);
 
-+        // COMPANION: hide the dialogue window with Hide UI so the companion (bottom)
-+        // screen handles all dialogue interaction; restore it when Hide UI is toggled
-+        // off (mHudEnabled true). Gated on getMode()==GM_Dialogue — the exact condition
-+        // under which vanilla shows the window (a pushed service window makes it no
-+        // longer the top mode, so this leaves it alone during barter/spells/travel).
-+        // onClose() is a no-op while GM_Dialogue is still on the stack, so hiding it
-+        // mid-conversation does not end the dialogue or clear its history.
++        // COMPANION: hide the dialogue window when Conversation is in DS mode so the
++        // companion (bottom) screen is the sole conversation surface; show the native
++        // window when Conversation is Vanilla (companionDsConversation() false). Gated on
++        // getMode()==GM_Dialogue — the exact condition under which vanilla shows the window
++        // (a pushed service window makes it no longer the top mode, so this leaves it alone
++        // during barter/spells/travel). onClose() is a no-op while GM_Dialogue is still on
++        // the stack, so hiding it mid-conversation does not end the dialogue or clear history.
 +        if (mDialogueWindow && getMode() == GM_Dialogue)
-+            mDialogueWindow->setVisible(mHudEnabled && !loading);
++            mDialogueWindow->setVisible(!companionDsConversation() && !loading);
 +
          bool gameMode = !isGuiMode();

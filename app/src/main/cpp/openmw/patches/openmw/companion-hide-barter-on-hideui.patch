@@ -1,17 +1,22 @@
 Hide the native barter (trade) window AND the player inventory window (scoped to
-GM_Barter) when the HUD is hidden via "Hide UI", so the companion (bottom-screen)
-barter UI is the sole barter surface while Hide UI is active; restore both when
-Hide UI is toggled back on. Same pattern as companion-hide-container-on-hideui.patch.
+GM_Barter) when Bartering is in DS mode, so the companion (bottom-screen) barter UI
+is the sole barter surface; show both native windows when Bartering is Vanilla.
+Same pattern as companion-hide-container-on-hideui.patch.
 
-Hunk 1 — trade window. Gate = mHudEnabled && containsMode(GM_Barter). containsMode
-(not getMode()==GM_Barter) is correct: nothing is pushed on top of the trade window
-during barter, and it matches TradeWindow::onClose()'s containsMode(GM_Barter)
-early-return (tradewindow.cpp), which is why hiding mid-barter neither resets the
-reference nor ends the session.
+Re-gated July 2026 from the global Hide UI flag (mHudEnabled) onto the per-element
+DS flag companionDsBarter() (androidmain.cpp, pushed from Kotlin's
+"game_ui_bartering" GameUiMode). DS -> suppress the native windows; Vanilla -> show
+them.
+
+Hunk 1 — trade window. Gate = !companionDsBarter() && containsMode(GM_Barter).
+containsMode (not getMode()==GM_Barter) is correct: nothing is pushed on top of the
+trade window during barter, and it matches TradeWindow::onClose()'s
+containsMode(GM_Barter) early-return (tradewindow.cpp), which is why hiding
+mid-barter neither resets the reference nor ends the session.
 
 Hunk 2 — player inventory window. GM_Barter's GuiModeState shows BOTH the trade
 window and the inventory window, so hunk 1 alone leaves the inventory window on the
-top screen. Hidden only during barter under Hide UI (scoped to GM_Barter), placed
+top screen. Hidden only during barter in DS mode (scoped to GM_Barter), placed
 AFTER the vanilla line that unconditionally re-shows the inventory window for
 GM_Barter (same override trap the container patch documents).
 
@@ -29,40 +34,40 @@ pickpocket-finish-on-pop fix exactly.
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
 @@ -679,6 +679,15 @@
          if (mContainerWindow)
-             mContainerWindow->setVisible(mHudEnabled && containsMode(GM_Container));
- 
-+        // COMPANION: hide the barter (trade) window with Hide UI so the companion bottom
-+        // screen is the sole barter surface; restore it when Hide UI toggles back on.
-+        // TradeWindow::onClose() early-returns while containsMode(GM_Barter) (tradewindow.cpp),
-+        // so hiding it mid-barter neither resets the reference nor ends the session — that only
-+        // happens when GM_Barter is actually removed. The player inventory window (also part of
-+        // GM_Barter's GuiModeState) is hidden a few lines below, next to the GM_Container case.
+             mContainerWindow->setVisible(!companionDsLooting() && containsMode(GM_Container));
+
++        // COMPANION: hide the barter (trade) window when Bartering is in DS mode so the
++        // companion bottom screen is the sole barter surface; show the native window when
++        // Bartering is Vanilla. TradeWindow::onClose() early-returns while containsMode(GM_Barter)
++        // (tradewindow.cpp), so hiding it mid-barter neither resets the reference nor ends the
++        // session — that only happens when GM_Barter is actually removed. The player inventory
++        // window (also part of GM_Barter's GuiModeState) is hidden a few lines below.
 +        if (mTradeWindow)
-+            mTradeWindow->setVisible(mHudEnabled && containsMode(GM_Barter));
++            mTradeWindow->setVisible(!companionDsBarter() && containsMode(GM_Barter));
 +
          bool gameMode = !isGuiMode();
- 
+
          MWBase::Environment::get().getInputManager()->changeInputMode(!gameMode);
 @@ -740,6 +749,13 @@
-             // ItemTransfer target when Hide UI is toggled back on, so nothing breaks.
-             if (mInventoryWindow && !mHudEnabled && getMode() == GM_Container)
+             // back to Vanilla, so nothing breaks.
+             if (mInventoryWindow && companionDsLooting() && getMode() == GM_Container)
                  mInventoryWindow->setVisible(false);
 +            // COMPANION: same for barter — GM_Barter's GuiModeState shows BOTH the trade
 +            // window and the inventory window, so the inventory window must be hidden too
-+            // under Hide UI (scoped to GM_Barter). Same override caveat as the GM_Container
++            // in DS mode (scoped to GM_Barter). Same override caveat as the GM_Container
 +            // line above: it must come after the vanilla setVisible line, which unconditionally
 +            // re-shows the inventory window for GM_Barter.
-+            if (mInventoryWindow && !mHudEnabled && getMode() == GM_Barter)
++            if (mInventoryWindow && companionDsBarter() && getMode() == GM_Barter)
 +                mInventoryWindow->setVisible(false);
          }
- 
+
          GuiMode mode = mGuiModes.back();
 @@ -1541,10 +1557,21 @@
                  // so we must not double-run — hence the !isVisible() gate.
                  const bool containerHiddenOnPop
                      = (mode == GM_Container && mContainerWindow && !mContainerWindow->isVisible());
 +                // COMPANION: same for barter — if the trade window was already hidden by the
-+                // Hide UI gate above, the update(false) below is a no-op setVisible(false) that
++                // DS-barter gate above, the update(false) below is a no-op setVisible(false) that
 +                // will NOT fire TradeWindow::onClose(), so COMPANION_BARTER_CLOSED (emitted
 +                // there) never reaches the bottom screen and the overlay sticks open. Capture
 +                // it here and call onClose() explicitly after the pop (containsMode(GM_Barter)

@@ -626,6 +626,25 @@ class EngineActivity : SDLActivity() {
         @JvmStatic external fun setCompanionHudControllerTooltips(on: Boolean)
 
         /**
+         * Per-element DS-mode suppression (companion "Game UI" options). true = the element is in
+         * DS mode, so the native top-screen window is suppressed (the companion draws it on the
+         * bottom screen); false = VANILLA, native window shown. Read natively by companionDs*()
+         * (companion-hide-*-on-hideui.patch). Pushed on change + at startup with the persisted mode.
+         */
+        @JvmStatic external fun setCompanionDsConversation(on: Boolean)
+        @JvmStatic external fun setCompanionDsLooting(on: Boolean)
+        @JvmStatic external fun setCompanionDsBarter(on: Boolean)
+        // Phase 2 elements — pending (locked VANILLA) until each gets a companion overlay, so these
+        // always push false today and the native suppression stays dormant. Wired now so it "just
+        // works" once the element is un-pended.
+        @JvmStatic external fun setCompanionDsRepair(on: Boolean)
+        @JvmStatic external fun setCompanionDsLevelUp(on: Boolean)
+        @JvmStatic external fun setCompanionDsSpellmaking(on: Boolean)
+        @JvmStatic external fun setCompanionDsEnchanting(on: Boolean)
+        @JvmStatic external fun setCompanionDsAlchemy(on: Boolean)
+        @JvmStatic external fun setCompanionDsRestWait(on: Boolean)
+
+        /**
          * Decodes an item icon from the VFS (BSA/loose files) and writes it as PNG.
          * [iconPath] is the VFS-normalized path from rec.icon (e.g. "icons/m/misc_shirt_01.dds").
          * [outputPath] is the absolute filesystem path for the output PNG.
@@ -770,6 +789,29 @@ class EngineActivity : SDLActivity() {
             lifecycleScope.launch {
                 UiPreferences.hudOnFlow(key).collect { on ->
                     runCatching { push(on) }.onFailure { Log.e(TAG, "setCompanionHud[$key] failed", it) }
+                }
+            }
+        }
+
+        // Push each "Game UI" element's DS/Vanilla mode to native (companionDs*), so the engine
+        // suppresses the corresponding native top-screen window when DS is selected. Fires once
+        // with the persisted mode, then on every change. DS -> suppress native; VANILLA -> show it.
+        val dsPushes: List<Pair<String, (Boolean) -> Unit>> = listOf(
+            "game_ui_conversation" to { on: Boolean -> setCompanionDsConversation(on) },
+            "game_ui_looting" to { on: Boolean -> setCompanionDsLooting(on) },
+            "game_ui_bartering" to { on: Boolean -> setCompanionDsBarter(on) },
+            "game_ui_repair" to { on: Boolean -> setCompanionDsRepair(on) },
+            "game_ui_levelup" to { on: Boolean -> setCompanionDsLevelUp(on) },
+            "game_ui_spellmaking" to { on: Boolean -> setCompanionDsSpellmaking(on) },
+            "game_ui_enchanting" to { on: Boolean -> setCompanionDsEnchanting(on) },
+            "game_ui_alchemy" to { on: Boolean -> setCompanionDsAlchemy(on) },
+            "game_ui_restwait" to { on: Boolean -> setCompanionDsRestWait(on) },
+        )
+        dsPushes.forEach { (key, push) ->
+            lifecycleScope.launch {
+                UiPreferences.gameUiModeFlow(key).collect { mode ->
+                    runCatching { push(mode == GameUiMode.DS) }
+                        .onFailure { Log.e(TAG, "setCompanionDs[$key] failed", it) }
                 }
             }
         }

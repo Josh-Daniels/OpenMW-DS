@@ -1,13 +1,15 @@
 Hide the in-game container/loot/pickpocket window AND the player inventory
-window when the HUD is hidden via "Hide UI", so the companion (bottom-screen)
-looting UI is the sole looting surface while Hide UI is active; restore both
-when Hide UI is toggled back on. Same pattern as
-companion-hide-dialogue-on-hideui.patch.
+window when Looting is in DS mode, so the companion (bottom-screen) looting UI is
+the sole looting surface; show both native windows when Looting is Vanilla. Same
+pattern as companion-hide-dialogue-on-hideui.patch.
 
-Both gates live in updateVisible() (which setHudVisibility calls right after
-flipping mHudEnabled) — the single place Hide UI state is applied to windows.
+Re-gated July 2026 from the global Hide UI flag (mHudEnabled) onto the per-element
+DS flag companionDsLooting() (androidmain.cpp, pushed from Kotlin's
+"game_ui_looting" GameUiMode). DS -> suppress the native windows; Vanilla -> show
+them. Both gates live in updateVisible(), which runs at the tail of pushGuiMode/
+popGuiMode, so the gate is applied the moment the container mode is entered.
 
-Hunk 1 — container window. Gate = mHudEnabled && containsMode(GM_Container):
+Hunk 1 — container window. Gate = !companionDsLooting() && containsMode(GM_Container):
   * containsMode(GM_Container) is correct here (unlike the dialogue window's
     getMode()==GM_Dialogue, which dodges a pushed Barter/Spells/Travel service
     window): nothing is pushed on top of the container window during looting, and
@@ -21,8 +23,8 @@ Hunk 1 — container window. Gate = mHudEnabled && containsMode(GM_Container):
 
 Hunk 2 — player inventory window. GM_Container's GuiModeState shows BOTH the
 container window and the inventory window, so hunk 1 alone leaves the inventory
-window on the top screen. It must be hidden too, but ONLY during looting under
-Hide UI (never during normal inventory use, and not during Barter/Companion).
+window on the top screen. It must be hidden too, but ONLY during looting in DS
+mode (never during normal inventory use, and not during Barter/Companion).
 
   Placement matters: a few lines below hunk 1, updateVisible() has
     mInventoryWindow->setVisible(getMode()==GM_Container || GM_Barter || GM_Companion);
@@ -30,22 +32,22 @@ Hide UI (never during normal inventory use, and not during Barter/Companion).
   the gate up next to the mContainerWindow line (as first drafted) is silently
   overridden by that later line. So the hide is applied immediately AFTER it,
   scoped to GM_Container:
-    if (mInventoryWindow && !mHudEnabled && getMode() == GM_Container)
+    if (mInventoryWindow && companionDsLooting() && getMode() == GM_Container)
         mInventoryWindow->setVisible(false);
   Truth table: normal inventory (GM_Inventory, this else-if not entered) → shown;
-  looting + HUD on (!mHudEnabled false) → shown; looting + Hide UI
-  (!mHudEnabled true && GM_Container) → hidden. InventoryWindow::onOpen()
-  re-adds the ItemTransfer target that onClose() removes, so toggling Hide UI
-  back on during a loot restores native shift-click transfer — nothing breaks.
+  looting + Vanilla (companionDsLooting() false) → shown; looting + DS
+  (companionDsLooting() true && GM_Container) → hidden. InventoryWindow::onOpen()
+  re-adds the ItemTransfer target that onClose() removes, so switching Looting
+  back to Vanilla during a loot restores native shift-click transfer — nothing breaks.
 
-Hunk 3 — restore pickpocket detection under Hide UI (popGuiMode). Getting caught
+Hunk 3 — restore pickpocket detection while hidden (popGuiMode). Getting caught
 pickpocketing is rolled in ContainerWindow::onClose() -> PickpocketItemModel::
 onClose() (pickpocket.finish()). That runs via the mode-pop's
 GuiModeState::update(false) -> WindowBase::setVisible(false), which fires onClose()
 ONLY on a visible->hidden transition. Once hunk 1 has hidden the container window
-(Hide UI active), the mode-pop's setVisible(false) is a no-op, so onClose() never
-fires and pickpocketing is never detected under Hide UI (it works with the native
-window visible, because then the pop is the visible->hidden transition).
+(DS looting), the mode-pop's setVisible(false) is a no-op, so onClose() never
+fires and pickpocketing is never detected (it works with the native window
+visible, because then the pop is the visible->hidden transition).
 
 This is the same class of bug as the COMPANION_DIALOGUE_CLOSED-when-hidden gotcha,
 but it CANNOT be fixed in ContainerWindow::exit() the way the dialogue signal was:
@@ -67,47 +69,47 @@ takes move items via Lua moveInto rather than the native item model.
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
 @@ -659,6 +659,15 @@
-         // mid-conversation does not end the dialogue or clear its history.
+         // the stack, so hiding it mid-conversation does not end the dialogue or clear history.
          if (mDialogueWindow && getMode() == GM_Dialogue)
-             mDialogueWindow->setVisible(mHudEnabled && !loading);
+             mDialogueWindow->setVisible(!companionDsConversation() && !loading);
 +
-+        // COMPANION: hide the container/loot/pickpocket window with Hide UI so the
-+        // companion (bottom) screen is the sole looting surface; restore it when Hide
-+        // UI is toggled back on (mHudEnabled true). ContainerWindow::onClose() early-
-+        // returns while containsMode(GM_Container) is true (see container.cpp), so
-+        // hiding it mid-loot neither resolves the pickpocket nor drops items — the
-+        // session ends normally only when the container mode is actually removed.
++        // COMPANION: hide the container/loot/pickpocket window when Looting is in DS mode so
++        // the companion (bottom) screen is the sole looting surface; show the native window
++        // when Looting is Vanilla (companionDsLooting() false). ContainerWindow::onClose()
++        // early-returns while containsMode(GM_Container) is true (see container.cpp), so
++        // hiding it mid-loot neither resolves the pickpocket nor drops items — the session
++        // ends normally only when the container mode is actually removed.
 +        if (mContainerWindow)
-+            mContainerWindow->setVisible(mHudEnabled && containsMode(GM_Container));
- 
++            mContainerWindow->setVisible(!companionDsLooting() && containsMode(GM_Container));
+
          bool gameMode = !isGuiMode();
- 
+
 @@ -711,6 +720,16 @@
              mHud->setDrowningBarVisible(false);
              mInventoryWindow->setVisible(
                  getMode() == GM_Container || getMode() == GM_Barter || getMode() == GM_Companion);
-+            // COMPANION: also hide the player inventory window while looting under
-+            // Hide UI, so the top screen is fully clear (the companion bottom screen
-+            // is the sole looting surface). This MUST come after the vanilla line
-+            // above — that line unconditionally re-shows the inventory window for
-+            // GM_Container, so gating it up by the mContainerWindow line would be
-+            // overridden here. Scoped to GM_Container so normal inventory use and
-+            // Barter/Companion are untouched; InventoryWindow::onOpen() re-adds the
-+            // ItemTransfer target when Hide UI is toggled back on, so nothing breaks.
-+            if (mInventoryWindow && !mHudEnabled && getMode() == GM_Container)
++            // COMPANION: also hide the player inventory window while looting in DS mode,
++            // so the top screen is fully clear (the companion bottom screen is the sole
++            // looting surface). This MUST come after the vanilla line above — that line
++            // unconditionally re-shows the inventory window for GM_Container, so gating it
++            // up by the mContainerWindow line would be overridden here. Scoped to
++            // GM_Container so normal inventory use and Barter/Companion are untouched;
++            // InventoryWindow::onOpen() re-adds the ItemTransfer target when Looting is set
++            // back to Vanilla, so nothing breaks.
++            if (mInventoryWindow && companionDsLooting() && getMode() == GM_Container)
 +                mInventoryWindow->setVisible(false);
          }
- 
+
          GuiMode mode = mGuiModes.back();
 @@ -1501,8 +1520,21 @@
              mKeyboardNavigation->saveFocus(mode);
              if (containsMode(mode))
              {
-+                // COMPANION: if the container window was already hidden by the Hide UI
-+                // patch, the update(false) below hides it via a no-op setVisible(false)
++                // COMPANION: if the container window was already hidden by the DS-looting
++                // gate above, the update(false) below hides it via a no-op setVisible(false)
 +                // that will NOT fire onClose() — so the pickpocket finish roll
 +                // (ContainerWindow::onClose -> PickpocketItemModel::onClose) is skipped,
-+                // and pickpocketing under Hide UI is never detected. Capture that here
++                // and pickpocketing while hidden is never detected. Capture that here
 +                // and run onClose() explicitly AFTER the pop, when containsMode(GM_Container)
 +                // is false so the onClose guards pass. When the window was visible,
 +                // update(false) fires onClose() itself (and resetReference() nulls mModel),

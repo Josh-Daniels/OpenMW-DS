@@ -82,6 +82,25 @@ static std::atomic<bool> g_companionHudCrosshair{ true };
 static std::atomic<bool> g_companionHudEnemy{ true }; // target/enemy health bar
 static std::atomic<bool> g_companionHudControllerTooltips{ true }; // controller button-hint bar
 
+// Per-element DS-mode suppression flags (companion "Game UI" options), pushed from Kotlin.
+// true = the element is in DS mode -> the companion draws it on the bottom screen and the
+// native top-screen window is SUPPRESSED; false = VANILLA -> the native window shows as normal.
+// Read by the engine (companion-hide-*-on-hideui.patch and the Phase-2 suppression patches) via
+// the companionDs*() bridges below. Default false = show native (safe until Kotlin pushes the
+// persisted value at startup). std::atomic: written on a JNI thread, read on the GUI/engine thread.
+static std::atomic<bool> g_companionDsConversation{ false };
+static std::atomic<bool> g_companionDsLooting{ false };
+static std::atomic<bool> g_companionDsBarter{ false };
+// Phase 2 elements. These currently have no companion (DS) overlay yet — their Kotlin GameUiElement
+// is "pending" (locked to VANILLA), so Kotlin always pushes false and the native suppression stays
+// dormant until an overlay lands and the element is un-pended. Default false = show native.
+static std::atomic<bool> g_companionDsRepair{ false };      // GM_MerchantRepair
+static std::atomic<bool> g_companionDsLevelUp{ false };     // GM_Levelup
+static std::atomic<bool> g_companionDsSpellmaking{ false }; // GM_SpellCreation
+static std::atomic<bool> g_companionDsEnchanting{ false };  // GM_Enchanting
+static std::atomic<bool> g_companionDsAlchemy{ false };     // GM_Alchemy
+static std::atomic<bool> g_companionDsRestWait{ false };    // GM_Rest
+
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
 // g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
@@ -468,6 +487,65 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionHudControllerTooltips(JNIEnv*, jclass, jboolean on)
 {
     g_companionHudControllerTooltips.store(on == JNI_TRUE);
+}
+// Per-element DS-mode suppression bridges. Each returns true when the element is in DS mode and
+// the native top-screen window should therefore be suppressed. Read by the engine suppression
+// patches (windowmanagerimp.cpp) via extern "C" declarations. Pushed from Kotlin (EngineActivity)
+// on change + once at startup with the persisted GameUiMode.
+extern "C" bool companionDsConversation() { return g_companionDsConversation.load(); }
+extern "C" bool companionDsLooting() { return g_companionDsLooting.load(); }
+extern "C" bool companionDsBarter() { return g_companionDsBarter.load(); }
+extern "C" bool companionDsRepair() { return g_companionDsRepair.load(); }
+extern "C" bool companionDsLevelUp() { return g_companionDsLevelUp.load(); }
+extern "C" bool companionDsSpellmaking() { return g_companionDsSpellmaking.load(); }
+extern "C" bool companionDsEnchanting() { return g_companionDsEnchanting.load(); }
+extern "C" bool companionDsAlchemy() { return g_companionDsAlchemy.load(); }
+extern "C" bool companionDsRestWait() { return g_companionDsRestWait.load(); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsConversation(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsConversation.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsLooting(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsLooting.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsBarter(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsBarter.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsRepair(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsRepair.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsLevelUp(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsLevelUp.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsSpellmaking(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsSpellmaking.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsEnchanting(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsEnchanting.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsAlchemy(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsAlchemy.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsRestWait(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsRestWait.store(on == JNI_TRUE);
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.
