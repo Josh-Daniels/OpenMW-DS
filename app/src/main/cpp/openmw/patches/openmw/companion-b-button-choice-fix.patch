@@ -1,0 +1,79 @@
+Gate the "give access to main menu" escape hatch in exitCurrentGuiMode() so it is
+skipped while the companion owns the conversation on the bottom screen - i.e. when
+EITHER OpenMW's in-game Hide UI is active (companionHudEnabled() == false) OR the
+Conversation Game UI element is in DS mode (companionDsConversation() == true).
+
+When a forced dialogue choice is pending (e.g. a guard's Pay Fine / Go to Jail /
+Resist Arrest confrontation), DialogueWindow::exit() returns false because
+DialogueManager::isInChoice() is true. Pressing B on the controller routes
+(ControllerManager::gamepadToGuiControl, B case) to WindowManager::exitCurrentGuiMode(),
+whose vanilla fallback pushes GM_MainMenu when a window refuses to exit. When the native
+dialogue window is hidden and the companion (bottom) screen is the conversation surface,
+this "escape hatch" surfaces as the pause menu opening instead of the player answering
+the choice on the companion.
+
+The previous version of this patch gated only on companionHudEnabled(). That was
+insufficient: DS conversation mode hides the native dialogue window via
+companionDsConversation() (a per-element DS flag pushed from Kotlin's
+"game_ui_conversation"), independently of mHudEnabled - so with Hide UI off but
+Conversation in DS mode, companionHudEnabled() returned true and the fallback still
+fired. The condition now checks both: fire the fallback only when the window is really
+the top-screen surface (Hide UI off AND Conversation Vanilla).
+
+companionDsConversation() is already declared inside namespace MWGui by
+companion-hide-dialogue-on-hideui.patch (applied earlier in the chain); it is
+re-declared here at file scope alongside companionHudEnabled so both have matching
+extern "C" declarations and non-Android fallbacks (companionHudEnabled -> true,
+companionDsConversation -> false) that reproduce vanilla behaviour on desktop.
+
+diff --git a/apps/openmw/mwgui/windowmanagerimp.cpp b/apps/openmw/mwgui/windowmanagerimp.cpp
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -130,6 +130,29 @@
+ // cursor" option is off; used to keep the menu-cursor path from re-enabling the
+ // top-screen cursor in GUI modes (including GM_Dialogue).
+ extern "C" bool companionCursorEnabled();
++#endif
++
++#ifdef __ANDROID__
++// COMPANION: both defined in androidmain.cpp. companionHudEnabled() returns false
++// while OpenMW's in-game Hide UI is active; companionDsConversation() returns true
++// while the Conversation Game UI element is in DS mode (the native dialogue window is
++// suppressed so the companion bottom screen is the sole conversation surface). Used in
++// exitCurrentGuiMode() to suppress the vanilla "give access to main menu" escape hatch
++// when a forced dialogue choice refuses to exit, so pressing B on the companion dialogue
++// no longer pops the pause menu; the player must answer the choice on the companion. The
++// hatch is skipped when EITHER Hide UI is active OR DS conversation mode is active, since
++// DS mode hides the window independently of Hide UI (companionDsConversation, not mHudEnabled).
++extern "C" bool companionHudEnabled();
++extern "C" bool companionDsConversation();
++#else
++static inline bool companionHudEnabled()
++{
++    return true;
++}
++static inline bool companionDsConversation()
++{
++    return false;
++}
+ #endif
+ 
+ namespace MWGui
+@@ -1314,7 +1337,16 @@
+             if (!window->exit())
+             {
+                 // unable to exit window, but give access to main menu
+-                if (!MyGUI::InputManager::getInstance().isModalAny() && getMode() != GM_MainMenu)
++                // COMPANION: skip this vanilla escape hatch when EITHER Hide UI is active
++                // OR Conversation is in DS mode. In both cases the native dialogue window
++                // is hidden and the companion bottom screen owns the conversation, so a B
++                // press on a forced choice (exit() refuses mid-choice) must NOT pop the
++                // pause menu; instead B is a no-op and the choice is answered on the
++                // companion. DS mode suppresses the window via companionDsConversation()
++                // independently of mHudEnabled, so both flags must be checked. Start still
++                // opens the pause menu (separate input path).
++                if (!MyGUI::InputManager::getInstance().isModalAny() && getMode() != GM_MainMenu
++                    && companionHudEnabled() && !companionDsConversation())
+                     pushGuiMode(GM_MainMenu);
+                 return;
+             }
