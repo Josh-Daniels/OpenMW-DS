@@ -55,6 +55,10 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // suppression stays dormant (companionDs*() always false) until an overlay lands. See
     // companion-hide-gamewindows-on-dsmode.patch.
     GameUiElement("game_ui_repair", "Repair"),
+    // Travel has a companion (DS) overlay (TravelOverlay + companion-travel-export /
+    // companion-hide-travel-on-dsmode patches), so it is non-pending (default DS): the native
+    // GM_Travel window is suppressed and the bottom screen is the sole surface.
+    GameUiElement("game_ui_travel", "Travel"),
     GameUiElement("game_ui_levelup", "Level up", pending = true),
     GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
     GameUiElement("game_ui_enchanting", "Enchanting", pending = true),

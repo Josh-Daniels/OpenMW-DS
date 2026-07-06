@@ -50,6 +50,12 @@ object LogParser {
     const val P_REPAIR_END = "COMPANION_REPAIR_END"
     const val P_REPAIR_CLOSED = "COMPANION_REPAIR_CLOSED"
     const val P_PLAYER_GOLD = "COMPANION_PLAYER_GOLD:"
+    // Travel (native TravelWindow → bottom-screen overlay). OPEN{npcName} → PLAYER_GOLD →
+    // DEST{index|name|cost|interior}* → END; CLOSED on close. None is a substring of another.
+    const val P_TRAVEL_OPEN = "COMPANION_TRAVEL_OPEN:"
+    const val P_TRAVEL_DEST = "COMPANION_TRAVEL_DEST:"
+    const val P_TRAVEL_END = "COMPANION_TRAVEL_END"
+    const val P_TRAVEL_CLOSED = "COMPANION_TRAVEL_CLOSED"
     // Rest/wait (GM_Rest). OPEN:<mode>|<dateString>|<warning> then CLOSED. Distinct tokens.
     const val P_SLEEP_OPEN = "COMPANION_SLEEP_OPEN:"
     const val P_SLEEP_CLOSED = "COMPANION_SLEEP_CLOSED"
@@ -303,6 +309,24 @@ object LogParser {
             condition = parts[2].trim().toInt(),
             maxCondition = parts[3].trim().toInt(),
             cost = parts[4].trim().toInt()
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * A single COMPANION_TRAVEL_DEST payload: index|name|cost|interior(1/0).
+     * Pipe-delimited (not JSON) — the engine sanitizes '|' out of the name, so a plain split
+     * yields exactly 4 fields.
+     */
+    fun parseTravelDest(payload: String): TravelDest? = try {
+        val parts = payload.split('|')
+        if (parts.size < 4) null
+        else TravelDest(
+            index = parts[0].trim().toInt(),
+            name = parts[1],
+            cost = parts[2].trim().toInt(),
+            interior = parts[3].trim() == "1"
         )
     } catch (e: Exception) {
         null

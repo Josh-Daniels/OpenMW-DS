@@ -204,6 +204,31 @@ data class RepairSession(
     val totalCost: Int get() = items.sumOf { it.cost }
 }
 
+/**
+ * One travel destination in a travel session. [index] is the destination's ordinal position in the
+ * native TravelWindow (a stable handle used by CMP:travel_go — GM_Travel pauses the sim). [cost] is
+ * the merchant-adjusted, follower-inclusive price the engine computed. [interior] flags a
+ * Mages-Guild (interior) destination vs. a silt-strider/boat (exterior) one.
+ */
+data class TravelDest(
+    val index: Int,
+    val name: String,
+    val cost: Int,
+    val interior: Boolean
+)
+
+/**
+ * An open travel session (the native GM_Travel window, mirrored to the bottom screen). Transient —
+ * its own StateFlow, not part of GameState; null = not travelling. Driven entirely by
+ * COMPANION_TRAVEL_* + COMPANION_PLAYER_GOLD from the engine.
+ */
+data class TravelSession(
+    val npcName: String,
+    val playerGold: Int,
+    val destinations: List<TravelDest> = emptyList(),
+    val isVisible: Boolean = true
+)
+
 /** REST = sleeping is allowed here (heals, can level up); WAIT = time-pass only. */
 enum class SleepMode { REST, WAIT }
 

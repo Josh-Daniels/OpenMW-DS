@@ -100,6 +100,10 @@ static std::atomic<bool> g_companionDsSpellmaking{ false }; // GM_SpellCreation
 static std::atomic<bool> g_companionDsEnchanting{ false };  // GM_Enchanting
 static std::atomic<bool> g_companionDsAlchemy{ false };     // GM_Alchemy
 static std::atomic<bool> g_companionDsRestWait{ false };    // GM_Rest
+// Travel HAS a companion (DS) overlay (TravelOverlay + companion-travel-export /
+// companion-hide-travel-on-dsmode patches), so its Kotlin GameUiElement is non-pending (default DS):
+// the native GM_Travel window is suppressed and the bottom screen is the sole surface.
+static std::atomic<bool> g_companionDsTravel{ false };      // GM_Travel
 
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
@@ -129,6 +133,9 @@ extern "C" void companionRepairCancel();
 // Bottom-screen rest/wait (waitdialog.cpp). hours from the bottom-screen slider.
 extern "C" void companionSleep(int hours);
 extern "C" void companionSleepCancel();
+// Bottom-screen travel (travelwindow.cpp). Destinations addressed by ordinal index.
+extern "C" void companionTravelGo(int index);
+extern "C" void companionTravelCancel();
 
 // Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
 // Quest completion status is NOT exposed to Lua in this build (types.Player.journal
@@ -334,6 +341,21 @@ void drainCompanionCommands()
         {
             Log(Debug::Info) << "companion: repair cancel";
             companionRepairCancel();
+        }
+        // Travel (CMP:travel_*) is driven natively — the merchant-adjusted price
+        // (MechanicsManager::getBarterOffer), the follower-aware teleport (ActionTeleport), the gold
+        // transfer and the time advance all live in the C++ TravelWindow, none of which Lua can
+        // reach. See companion-travel-export.patch. Check _cancel before the space-arg _go form.
+        else if (cmd.rfind("CMP:travel_cancel", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: travel cancel";
+            companionTravelCancel();
+        }
+        else if (cmd.rfind("CMP:travel_go ", 0) == 0)
+        {
+            const int index = std::atoi(cmd.c_str() + (sizeof("CMP:travel_go ") - 1));
+            Log(Debug::Info) << "companion: travel go " << index;
+            companionTravelGo(index);
         }
         // Rest/wait (CMP:sleep*) is driven natively — the canRest flags, the fade + progress
         // time advance, sleep interruption and level-up all live in the C++ WaitDialog, none of
@@ -542,6 +564,7 @@ extern "C" bool companionDsSpellmaking() { return g_companionDsSpellmaking.load(
 extern "C" bool companionDsEnchanting() { return g_companionDsEnchanting.load(); }
 extern "C" bool companionDsAlchemy() { return g_companionDsAlchemy.load(); }
 extern "C" bool companionDsRestWait() { return g_companionDsRestWait.load(); }
+extern "C" bool companionDsTravel() { return g_companionDsTravel.load(); }
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionDsConversation(JNIEnv*, jclass, jboolean on)
@@ -587,6 +610,11 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionDsRestWait(JNIEnv*, jclass, jboolean on)
 {
     g_companionDsRestWait.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsTravel(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsTravel.store(on == JNI_TRUE);
 }
 // Decodes an item icon from the VFS (BSA/loose files) and writes it as a PNG.
 // Called from Kotlin on any thread when a new icon path is encountered.

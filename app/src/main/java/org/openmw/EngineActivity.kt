@@ -643,6 +643,10 @@ class EngineActivity : SDLActivity() {
         @JvmStatic external fun setCompanionDsEnchanting(on: Boolean)
         @JvmStatic external fun setCompanionDsAlchemy(on: Boolean)
         @JvmStatic external fun setCompanionDsRestWait(on: Boolean)
+        // Travel has a companion overlay (non-pending, default DS): DS suppresses the native
+        // GM_Travel window (companion-hide-travel-on-dsmode.patch) and the bottom-screen TravelOverlay
+        // is the sole surface; Vanilla shows the native window.
+        @JvmStatic external fun setCompanionDsTravel(on: Boolean)
 
         /**
          * Decodes an item icon from the VFS (BSA/loose files) and writes it as PNG.
@@ -801,6 +805,7 @@ class EngineActivity : SDLActivity() {
             "game_ui_looting" to { on: Boolean -> setCompanionDsLooting(on) },
             "game_ui_bartering" to { on: Boolean -> setCompanionDsBarter(on) },
             "game_ui_repair" to { on: Boolean -> setCompanionDsRepair(on) },
+            "game_ui_travel" to { on: Boolean -> setCompanionDsTravel(on) },
             "game_ui_levelup" to { on: Boolean -> setCompanionDsLevelUp(on) },
             "game_ui_spellmaking" to { on: Boolean -> setCompanionDsSpellmaking(on) },
             "game_ui_enchanting" to { on: Boolean -> setCompanionDsEnchanting(on) },
@@ -817,7 +822,9 @@ class EngineActivity : SDLActivity() {
         }
 
         lifecycleScope.launch {
-            combine(
+            // Whether the top-screen conversation history overlay WANTS to show: a conversation is
+            // active, drawn on the top screen (SPLIT/TOP location), and Conversation is DS.
+            val wantConversationTop = combine(
                 GameStateRepository.dialogueNpcName,
                 GameStateRepository.dialogueHistory,
                 GameStateRepository.dialogueTopics,
@@ -831,6 +838,35 @@ class EngineActivity : SDLActivity() {
             }.combine(UiPreferences.gameUiModeFlow("game_ui_conversation")) { show, mode ->
                 // Suppress the top-screen conversation overlay entirely when conversation is Vanilla.
                 show && mode == GameUiMode.DS
+            }
+
+            // BUGFIX: the top-screen conversation overlay is a panel sub-window on Display 0 that
+            // layers ABOVE the OpenMW MyGUI surface, so it covers ANY native service window (barter,
+            // repair, travel) pushed over the conversation while that element is Vanilla — the native
+            // window isn't suppressed in Vanilla mode. Track whether any such native window is open so
+            // the conversation overlay can step aside; it reappears when the window closes (its session
+            // clears via the matching COMPANION_*_CLOSED) if the conversation is still active. In DS
+            // mode each native window IS suppressed and the companion draws it on the bottom, so
+            // there's nothing to hide. (Sessions are emitted regardless of DS/Vanilla; the mode gate
+            // is what distinguishes "native window on top" from "companion overlay on the bottom".)
+            val nativeServiceVanillaUp = combine(
+                GameStateRepository.barterSession,
+                GameStateRepository.repairSession,
+                GameStateRepository.travelSession,
+                UiPreferences.gameUiModeFlow("game_ui_bartering"),
+                UiPreferences.gameUiModeFlow("game_ui_repair"),
+            ) { barter, repair, travel, barterMode, repairMode ->
+                Triple(
+                    barter != null && barterMode == GameUiMode.VANILLA,
+                    repair != null && repairMode == GameUiMode.VANILLA,
+                    travel != null,
+                )
+            }.combine(UiPreferences.gameUiModeFlow("game_ui_travel")) { (barterUp, repairUp, travelPresent), travelMode ->
+                barterUp || repairUp || (travelPresent && travelMode == GameUiMode.VANILLA)
+            }
+
+            wantConversationTop.combine(nativeServiceVanillaUp) { show, serviceUp ->
+                show && !serviceUp
             }.distinctUntilChanged().collect { show ->
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()
             }

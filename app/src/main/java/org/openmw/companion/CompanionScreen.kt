@@ -469,6 +469,7 @@ fun CompanionScreen() {
         val persuasionDs by UiPreferences.gameUiModeFlow("game_ui_persuasion").collectAsState()
         val repairDs by UiPreferences.gameUiModeFlow("game_ui_repair").collectAsState()
         val restwaitDs by UiPreferences.gameUiModeFlow("game_ui_restwait").collectAsState()
+        val travelDs by UiPreferences.gameUiModeFlow("game_ui_travel").collectAsState()
 
         // Looting / pickpocketing overlay. Driven by COMPANION_CONTAINER_* from the
         // engine (via Lua). Shown whenever a container session is active, regardless
@@ -557,6 +558,17 @@ fun CompanionScreen() {
         if (repairDs == GameUiMode.DS) {
             repairSession?.let { session ->
                 RepairOverlay(session = session)
+            }
+        }
+
+        // Travel overlay. Driven by COMPANION_TRAVEL_* from the engine (native TravelWindow). Shown
+        // over whatever tab/dialogue is active whenever a travel session exists AND Travel is DS
+        // (Vanilla → native OpenMW handles it). Centred popup (zIndex 17f, same tier as repair —
+        // travel is a dialogue service pushed like barter/repair, never open simultaneously with them).
+        val travelSession by GameStateRepository.travelSession.collectAsState()
+        if (travelDs == GameUiMode.DS) {
+            travelSession?.let { session ->
+                TravelOverlay(session = session)
             }
         }
 
@@ -915,12 +927,13 @@ private fun DialogueRightColumn(
     onPersuadeTapped: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Barter and Repair are pulled out of the services list so they can sit above the divider
-    // (matched by their display strings — the sBarter/sRepair GMST values the engine exports).
-    // EVERY other service drops into the scrollable list with the topics.
+    // Barter, Repair and Travel are pulled out of the services list so they can sit above the
+    // divider (matched by their display strings — the sBarter/sRepair/sTravel GMST values the engine
+    // exports). EVERY other service drops into the scrollable list with the topics.
     val barterService = services.firstOrNull { it.equals("Barter", ignoreCase = true) }
     val repairService = services.firstOrNull { it.equals("Repair", ignoreCase = true) }
-    val otherServices = services.filter { it != barterService && it != repairService }
+    val travelService = services.firstOrNull { it.equals("Travel", ignoreCase = true) }
+    val otherServices = services.filter { it != barterService && it != repairService && it != travelService }
 
     Column(modifier) {
         // 1. Disposition bar (fixed at the top). Hidden when unknown (< 0, e.g. a creature).
@@ -960,11 +973,21 @@ private fun DialogueRightColumn(
                     }
                 }
             }
-            // Divider between the Barter/Persuade/Repair block and the topics (only if
+            // Travel (if the NPC offers it) — SAME styling, in the services block above the divider.
+            // Tapping opens GM_Travel natively; in DS mode that window is suppressed and the
+            // TravelOverlay (driven by COMPANION_TRAVEL_*) takes over on the bottom screen.
+            if (travelService != null) {
+                item {
+                    DialogueOptionRow(travelService, dimmed = choicesActive) {
+                        if (interactive) CompanionActions.activateDialogueService(travelService)
+                    }
+                }
+            }
+            // Divider between the Barter/Persuade/Repair/Travel block and the topics (only if
             // something's above it). No leading gap: the last action row already draws its own
             // faint under-divider, so the bold divider sits flush against it and reads as a
             // single section divider rather than a second line floating below the faint one.
-            if (barterService != null || persuadeAvailable || repairService != null) {
+            if (barterService != null || persuadeAvailable || repairService != null || travelService != null) {
                 item {
                     Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
                     Spacer(Modifier.height(4.dp))
@@ -2176,6 +2199,114 @@ private fun RepairButton(
             color = if (enabled) color else BoneDim,
             fontSize = 12.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
             maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/* ---- Travel overlay (bottom screen) ---- */
+
+/**
+ * Bottom-screen travel overlay. Driven by COMPANION_TRAVEL_* (native TravelWindow), shown whenever
+ * [GameStateRepository.travelSession] is non-null and Travel is DS. NOT a Compose Dialog (crashes on
+ * the Presentation display — see ItemInfoOverlay); an in-window centred Box at zIndex 17f. No
+ * tap-outside dismiss — only Cancel closes it (→ CMP:travel_cancel → the engine pops GM_Travel and
+ * emits COMPANION_TRAVEL_CLOSED). Each row taps to travel to that destination immediately
+ * (→ CMP:travel_go <index> → the native onTravelButtonClick path: gold, time advance, follower
+ * teleport). Travelling also ends the conversation, so the dialogue overlay dismisses alongside.
+ */
+@Composable
+private fun TravelOverlay(session: TravelSession) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(17f)
+            .background(Color(0xCC0F0C08))
+            // Swallow taps so nothing falls through to the tab underneath. NO dismiss.
+            .pointerInput(Unit) { detectTapGestures {} },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.7f)
+                .fillMaxHeight(0.86f)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- Title bar ----
+            Text(
+                "Travel — ${session.npcName.ifBlank { "Caravaner" }}",
+                color = BronzeLight, fontSize = 15.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            // ---- Destination list ----
+            if (session.destinations.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        "No destinations", color = BoneDim,
+                        fontSize = 13.sp, fontFamily = MwBody
+                    )
+                }
+            } else {
+                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                    items(session.destinations, key = { it.index }) { dest ->
+                        TravelRow(
+                            dest = dest,
+                            affordable = dest.cost <= session.playerGold,
+                            onTravel = { CompanionActions.travelGo(dest.index) }
+                        )
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+                    }
+                }
+            }
+
+            // ---- Divider + bottom row (player gold + Cancel; no "Travel All") ----
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Gold: ${session.playerGold}", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwData, modifier = Modifier.weight(1f)
+                )
+                RepairButton(label = "Cancel", color = BarterBlue, enabled = true) {
+                    CompanionActions.travelCancel()
+                }
+            }
+        }
+    }
+}
+
+/** One travel row: destination name (flex) + cost, tap to travel immediately. Unaffordable rows are
+ *  dimmed with a red cost and are not tappable (the engine ignores them anyway). */
+@Composable
+private fun TravelRow(dest: TravelDest, affordable: Boolean, onTravel: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (affordable) Modifier.clickable { onTravel() } else Modifier)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            dest.name,
+            color = if (affordable) Bone else BoneDim,
+            fontSize = 14.sp, fontFamily = MwBody,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            "${dest.cost}g",
+            color = if (affordable) BronzeLight else RepairCondRed,
+            fontSize = 13.sp, fontFamily = MwData,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(60.dp)
         )
     }
 }

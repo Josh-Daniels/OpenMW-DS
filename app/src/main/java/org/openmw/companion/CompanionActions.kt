@@ -109,6 +109,14 @@ object CompanionActions {
     // Cancel repair (closes the native window + emits COMPANION_REPAIR_CLOSED).
     fun repairCancel() = runCommand("CMP:repair_cancel")
 
+    // Travel (CMP:travel_*) — handled natively in drainCompanionCommands (the merchant-adjusted
+    // price, follower-aware teleport, gold transfer and time advance all live in the C++
+    // TravelWindow). [index] is the destination's ordinal in the exported list; travelGo reuses the
+    // native onTravelButtonClick path. The engine emits COMPANION_TRAVEL_CLOSED on completion/cancel.
+    fun travelGo(index: Int) = runCommand("CMP:travel_go $index")
+
+    fun travelCancel() = runCommand("CMP:travel_cancel")
+
     // Rest/wait (CMP:sleep*) — handled natively in drainCompanionCommands (the canRest flags,
     // the fade + progress time advance, sleep interruption and level-up all live in the C++
     // WaitDialog; world.advanceTime from Lua would skip healing/level-up). The mode (rest vs

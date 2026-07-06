@@ -1,0 +1,58 @@
+Suppress the native travel destination window (GM_Travel) when Travel is in DS mode, so the
+companion (bottom-screen) travel overlay is the sole surface; show the native window when Travel is
+Vanilla. Companion to companion-travel-export.patch, and the same mechanism as the six
+mGuiModeStates windows in companion-hide-gamewindows-on-dsmode.patch.
+
+TravelWindow is NOT a WindowManager member (there is no mTravelWindow) — it lives only in
+mGuiModeStates[GM_Travel].mWindows — so it can't use the member-setVisible form the barter/dialogue
+patches use; iterate the mode's windows exactly like that switch. Kept as its own patch (not a case
+in that switch) so it applies independently: hunk 1 adds a namespace-scope `extern "C" bool
+companionDsTravel();` (guarded by __ANDROID__, mirroring the shared companionDs*() decl block — a
+block-scope extern "C" is ill-formed, so it can't be function-local); hunk 2 adds the suppression in
+updateVisible(), anchored on the unique `bool gameMode = !isGuiMode();` line (updateVisible runs at
+the tail of push/popGuiMode, so the gate applies the moment GM_Travel is entered). Guarded by
+!mGuiModes.empty() because getMode() reads mGuiModes.back().
+
+Safety: TravelWindow commits travel only on an explicit destination tap (onTravelButtonClick) and
+cancels via exit()/onCancelButtonClicked, never in onClose(), so hiding it on the visible->hidden
+transition has no side effect. COMPANION_TRAVEL_CLOSED is emitted explicitly from every close path
+(companion-travel-export.patch), covering the case where the window was already hidden so the
+mode-pop's setVisible(false) is a no-op that never fires onClose().
+
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -683,6 +683,14 @@
+     extern "C" bool companionDsEnchanting();
+     extern "C" bool companionDsAlchemy();
+     extern "C" bool companionDsRestWait();
++#endif
++
++#ifdef __ANDROID__
++    // COMPANION: defined in androidmain.cpp (companion-travel-export.patch). True when Travel is in
++    // DS mode → the native GM_Travel window is suppressed in updateVisible() below. Declared in its
++    // own block (not the shared companionDs*() block above) so this travel patch stays self-contained.
++    // A block-scope extern "C" is ill-formed, so the declaration must live here at namespace scope.
++    extern "C" bool companionDsTravel();
+ #endif
+ 
+     void WindowManager::updateVisible()
+@@ -864,6 +872,19 @@
+                         modeWindow->setVisible(false);
+         }
+ 
++        // COMPANION: hide the native travel destination window (GM_Travel) when Travel is in DS mode
++        // so the companion bottom screen is the sole travel surface; show it when Travel is Vanilla.
++        // TravelWindow is NOT a WindowManager member (there is no mTravelWindow) — like the six
++        // windows in the switch above it lives only in mGuiModeStates[GM_Travel].mWindows, so iterate
++        // those rather than a member setVisible(). It commits on an explicit tap (onTravelButtonClick)
++        // and only cancels via exit()/onCancel, so hiding on the visible->hidden transition is
++        // side-effect-free (COMPANION_TRAVEL_CLOSED is emitted explicitly from every close path in
++        // companion-travel-export.patch). companionDsTravel() is declared just above updateVisible().
++        if (!mGuiModes.empty() && getMode() == GM_Travel && companionDsTravel())
++            for (WindowBase* modeWindow : mGuiModeStates[GM_Travel].mWindows)
++                if (modeWindow)
++                    modeWindow->setVisible(false);
++
+         bool gameMode = !isGuiMode();
+ 
+         MWBase::Environment::get().getInputManager()->changeInputMode(!gameMode);

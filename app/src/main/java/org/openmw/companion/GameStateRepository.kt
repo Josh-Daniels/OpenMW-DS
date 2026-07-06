@@ -216,6 +216,16 @@ object GameStateRepository {
     private var repairNpcName: String = ""
     private var repairPlayerGold: Int = 0
 
+    // --- Travel session (COMPANION_TRAVEL_*) ---
+    // null = not travelling. OPEN sets the NPC name + starts the dest buffer; PLAYER_GOLD sets the
+    // gold; DEST appends; END commits; CLOSED clears. Same shape as merchant repair. PLAYER_GOLD is
+    // shared with repair, so it routes to whichever export is in progress (see onRawLine).
+    private val _travelSession = MutableStateFlow<TravelSession?>(null)
+    val travelSession: StateFlow<TravelSession?> = _travelSession.asStateFlow()
+    private var travelDestBuffer: MutableList<TravelDest>? = null
+    private var travelNpcName: String = ""
+    private var travelPlayerGold: Int = 0
+
     // --- Rest/wait session (COMPANION_SLEEP_*) ---
     // null = not resting/waiting. OPEN sets it (single line — mode + date + warning); CLOSED
     // clears it (confirming a rest/wait also closes it — the engine runs the advance on top).
@@ -631,7 +641,11 @@ object GameStateRepository {
             }
             trimmed.contains(LogParser.P_PLAYER_GOLD) -> {
                 val idx = trimmed.indexOf(LogParser.P_PLAYER_GOLD) + LogParser.P_PLAYER_GOLD.length
-                trimmed.substring(idx).trim().toIntOrNull()?.let { repairPlayerGold = it }
+                // Shared by repair and travel (mutually exclusive GM modes). Route to whichever
+                // export is currently being assembled — its OPEN ran just before this gold line.
+                trimmed.substring(idx).trim().toIntOrNull()?.let { gold ->
+                    if (travelDestBuffer != null) travelPlayerGold = gold else repairPlayerGold = gold
+                }
             }
             trimmed.contains(LogParser.P_REPAIR_END) -> {
                 _repairSession.value = RepairSession(
@@ -647,6 +661,34 @@ object GameStateRepository {
                 repairNpcName = ""
                 repairPlayerGold = 0
                 _repairSession.value = null
+            }
+            // Travel. DEST first (most frequent). Same buffer pattern as repair; PLAYER_GOLD is
+            // routed above. None of the P_TRAVEL_* tokens is a substring of another.
+            trimmed.contains(LogParser.P_TRAVEL_DEST) -> {
+                val idx = trimmed.indexOf(LogParser.P_TRAVEL_DEST) + LogParser.P_TRAVEL_DEST.length
+                LogParser.parseTravelDest(trimmed.substring(idx).trim())?.let { dest ->
+                    (travelDestBuffer ?: mutableListOf<TravelDest>().also { travelDestBuffer = it }).add(dest)
+                }
+            }
+            trimmed.contains(LogParser.P_TRAVEL_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_TRAVEL_OPEN) + LogParser.P_TRAVEL_OPEN.length
+                travelNpcName = trimmed.substring(idx).trim()
+                travelDestBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_TRAVEL_END) -> {
+                _travelSession.value = TravelSession(
+                    npcName = travelNpcName,
+                    playerGold = travelPlayerGold,
+                    destinations = travelDestBuffer?.toList() ?: emptyList(),
+                    isVisible = true
+                )
+                travelDestBuffer = null
+            }
+            trimmed.contains(LogParser.P_TRAVEL_CLOSED) -> {
+                travelDestBuffer = null
+                travelNpcName = ""
+                travelPlayerGold = 0
+                _travelSession.value = null
             }
             // Rest/wait. Single-line OPEN (mode|date|warning); CLOSED clears.
             trimmed.contains(LogParser.P_SLEEP_OPEN) -> {
