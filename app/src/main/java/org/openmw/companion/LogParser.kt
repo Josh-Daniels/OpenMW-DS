@@ -289,7 +289,9 @@ object LogParser {
             category = o.optString("cat", "misc"),
             icon = o.optString("icon", ""),
             side = side,
-            worn = o.optBoolean("worn", false)
+            worn = o.optBoolean("worn", false),
+            // Absent (older engine) → default true (unrestricted).
+            sellable = o.optBoolean("sellable", true)
         )
     } catch (e: Exception) {
         null

@@ -123,6 +123,9 @@ data class BarterItem(
     val side: BarterSide = BarterSide.VENDOR,
     /** Currently equipped (player side only); vendor items are always false. */
     val worn: Boolean = false,
+    /** Whether the merchant will buy this item (player side: canSell vs. the merchant's services;
+     *  vendor items are always true). Player items with sellable=false can't be offered. */
+    val sellable: Boolean = true,
     val isSelected: Boolean = false,
     val selectedCount: Int = 0
 )

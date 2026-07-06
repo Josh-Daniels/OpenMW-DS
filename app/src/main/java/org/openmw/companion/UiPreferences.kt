@@ -19,6 +19,18 @@ import kotlinx.coroutines.flow.asStateFlow
 enum class ConversationLocation { BOTTOM, SPLIT, TOP }
 
 /**
+ * Where a service UI (looting, bartering) is drawn.
+ * - [BOTTOM]: original layout entirely on the bottom screen (default).
+ * - [SPLIT]: an icon grid on the top screen, controls only on the bottom.
+ * - [TOP]: the whole thing on the top screen (not yet implemented — the Top pill is
+ *   greyed/pending in the menu; treated as [BOTTOM] until implemented).
+ *
+ * NOTE: distinct from [GameUiMode]. This only chooses which screen the (DS) service is
+ * drawn on; whether the companion draws it at all is the element's [GameUiMode].
+ */
+enum class ScreenLocation { BOTTOM, SPLIT, TOP }
+
+/**
  * Where the combat target's health bar is drawn.
  * - [BOTTOM]: original behaviour — the bottom-screen HUD combat-target overlay.
  * - [TOP]: an additional top-centre overlay window on the top screen, shown while a combat
@@ -112,6 +124,8 @@ object UiPreferences {
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
     private const val GAME_CURSOR = "game_cursor"
     private const val CONVERSATION_LOCATION = "conversation_location"
+    private const val LOOTING_LOCATION = "layout_looting"
+    private const val BARTER_LOCATION = "layout_bartering"
     private const val TARGET_HEALTH_LOCATION = "layout_target_health"
     private const val PLAYER_COMBAT = "layout_player_combat"
     private const val HUD_ON_PREFIX = "hud_on_"
@@ -131,6 +145,11 @@ object UiPreferences {
 
     // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default SPLIT.
     private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT)
+
+    // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default BOTTOM
+    // (the classic bottom-screen overlay). TOP is pending — the menu greys that pill.
+    private val lootingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val barterLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
 
     // Where the combat target's health bar is drawn (BOTTOM / TOP). Default BOTTOM.
     private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.BOTTOM)
@@ -173,6 +192,12 @@ object UiPreferences {
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
             ?.let { conversationLocationFlow.value = it }
+        p.getString(LOOTING_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.let { lootingLocationFlow.value = it }
+        p.getString(BARTER_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.let { barterLocationFlow.value = it }
         p.getString(TARGET_HEALTH_LOCATION, null)
             ?.let { runCatching { TargetHealthLocation.valueOf(it) }.getOrNull() }
             ?.let { targetHealthLocationFlow.value = it }
@@ -232,6 +257,24 @@ object UiPreferences {
     fun setConversationLocation(context: Context, loc: ConversationLocation) {
         conversationLocationFlow.value = loc
         editor(context).putString(CONVERSATION_LOCATION, loc.name).apply()
+    }
+
+    /** Where the looting UI is drawn (BOTTOM / SPLIT / TOP). */
+    fun lootingLocationFlow(): StateFlow<ScreenLocation> = lootingLocationFlow.asStateFlow()
+
+    /** Set the looting location and persist. */
+    fun setLootingLocation(context: Context, loc: ScreenLocation) {
+        lootingLocationFlow.value = loc
+        editor(context).putString(LOOTING_LOCATION, loc.name).apply()
+    }
+
+    /** Where the bartering UI is drawn (BOTTOM / SPLIT / TOP). */
+    fun barterLocationFlow(): StateFlow<ScreenLocation> = barterLocationFlow.asStateFlow()
+
+    /** Set the bartering location and persist. */
+    fun setBarterLocation(context: Context, loc: ScreenLocation) {
+        barterLocationFlow.value = loc
+        editor(context).putString(BARTER_LOCATION, loc.name).apply()
     }
 
     /** Where the combat target's health bar is drawn (BOTTOM / TOP). */

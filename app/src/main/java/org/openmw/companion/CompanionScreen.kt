@@ -117,6 +117,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.sin
 import kotlin.math.cos
+import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -480,12 +481,14 @@ fun CompanionScreen() {
         // tappable; it hosts its own local dismiss-scrim) and below QuantitySelector
         // (20f) so take/put quantity prompts stack above it.
         val containerSession by GameStateRepository.containerSession.collectAsState()
+        val lootingLocation by UiPreferences.lootingLocationFlow().collectAsState()
         if (lootingDs == GameUiMode.DS) {
             containerSession?.let { session ->
                 LootingOverlay(
                     session = session,
                     playerInventory = state.inventory,
-                    playerEquipment = state.equipment
+                    playerEquipment = state.equipment,
+                    location = lootingLocation
                 )
             }
         }
@@ -538,9 +541,10 @@ fun CompanionScreen() {
         // COMPANION_DIALOGUE_DISPOSITION during barter — DialogueWindow::onFrame is dormant then).
         val barterSession by GameStateRepository.barterSession.collectAsState()
         val barterResult by GameStateRepository.barterResult.collectAsState()
+        val barterLocation by UiPreferences.barterLocationFlow().collectAsState()
         if (barteringDs == GameUiMode.DS) {
             barterSession?.let { session ->
-                BarterOverlay(session = session, disposition = dialogueDisposition)
+                BarterOverlay(session = session, disposition = dialogueDisposition, location = barterLocation)
             }
             if (barterSession != null) {
                 (barterResult as? BarterResult.Rejected)?.let { rej ->
@@ -1520,8 +1524,18 @@ private fun ItemInfoOverlay(info: ItemInfo, onDismiss: () -> Unit) {
 private fun LootingOverlay(
     session: ContainerSession,
     playerInventory: List<InventoryItem>,
-    playerEquipment: Map<String, String>
+    playerEquipment: Map<String, String>,
+    location: ScreenLocation
 ) {
+    // SPLIT: the item grids live on the TOP screen (LootingTopOverlay, hosted by
+    // EngineActivity); the bottom screen shows ONLY the terminal controls. Take All /
+    // Dispose / Close all END the session, so the bottom controls never need the
+    // optimistic item lists — all per-item take/put taps happen on the top grid.
+    if (location == ScreenLocation.SPLIT) {
+        LootingControlsOnly(session)
+        return
+    }
+
     // Optimistic local copies of both item lists. GM_Container pauses the sim, which
     // freezes the Lua slow tick AND starves the companion UI of background frames, so
     // engine re-exports can't refresh the display mid-session. Instead we mutate these
@@ -1923,6 +1937,354 @@ private fun moveOptimistic(
 }
 
 /** Sub-line under a loot item name: capitalized category + count + condition %. */
+/* ---- Looting SPLIT mode (top-screen grids + bottom-screen controls) ---- */
+
+// Gap between the two separate column boxes on the top screen. Single tweakable constant.
+private val LOOT_SPLIT_COLUMN_GAP = 8.dp
+
+// Each split-overlay column is its own boxed panel (dark fill, subtle border, rounded, padded);
+// the gap between the two boxes provides the visual separation (no divider line).
+private val SplitBoxBg = Color(0xFF1A1410)
+private fun Modifier.splitColumnBox(): Modifier = this
+    .clip(RoundedCornerShape(6.dp))
+    .background(SplitBoxBg)
+    .border(1.dp, BronzeDark, RoundedCornerShape(6.dp))
+    .padding(8.dp)
+
+/**
+ * SPLIT-mode bottom-screen looting controls: just the terminal action buttons (Take All /
+ * Dispose / Close), centred vertically in a narrow panel. The item grids live on the top
+ * screen ([LootingTopOverlay]). All three actions END the session, so no optimistic item
+ * state is needed here. Full-screen scrim (covers the tab bar — looting is modal); NO
+ * tap-away dismiss.
+ */
+@Composable
+private fun LootingControlsOnly(session: ContainerSession) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(15f)
+            .background(Color(0xCC0F0C08))
+            .pointerInput(Unit) { detectTapGestures {} },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.5f)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                session.containerName.ifBlank { "Container" },
+                color = BronzeLight, fontSize = 14.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            LootButton(
+                label = "Take All", hint = "X", enabled = true,
+                modifier = Modifier.fillMaxWidth()
+            ) { CompanionActions.containerTakeAll() }
+            if (session.isCorpse) {
+                LootButton(
+                    label = "Dispose of Corpse", hint = "R1", enabled = true,
+                    modifier = Modifier.fillMaxWidth()
+                ) { CompanionActions.containerDispose() }
+            }
+            LootButton(
+                label = "Close", hint = "B", enabled = true,
+                modifier = Modifier.fillMaxWidth()
+            ) { CompanionActions.containerClose() }
+        }
+    }
+}
+
+/**
+ * TOP-screen looting grids (Display 0). Hosted by [org.openmw.EngineActivity] in an
+ * interactive WindowManager panel window while a container session is active AND Looting is
+ * routed to SPLIT. Container items LEFT, player inventory RIGHT — both 3-row horizontally
+ * scrolling icon grids. Tapping a cell takes/puts (a QuantitySelector prompt appears first
+ * for stacks > 1); long-press opens the fuller menu.
+ *
+ * Reads its state straight from [GameStateRepository] (no params, like the conversation top
+ * overlay). Optimistic local copies of both lists are mutated on each tap — the sim is paused
+ * so engine re-exports can't refresh mid-session; the true GameState reconciles on close.
+ */
+@Composable
+fun LootingTopOverlay() {
+    val sessionState by GameStateRepository.containerSession.collectAsState()
+    val state by GameStateRepository.state.collectAsState()
+    val session = sessionState ?: return
+
+    // Optimistic lists — remember WITHOUT a key so they init once on enter and are NOT
+    // re-synced from later (frame-starved) session emissions, matching the bottom overlay.
+    // The window is removed on session-null (EngineActivity), so close→reopen re-inits.
+    var containerItems by remember { mutableStateOf(session.items) }
+    var playerItems by remember { mutableStateOf(state.inventory) }
+
+    val wornIds = remember(state.equipment) { state.equipment.values.toSet() }
+    fun isWorn(item: InventoryItem): Boolean =
+        if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId) else wornIds.contains(item.id)
+
+    // Local quantity picker (kept on the TOP screen, not the global bottom-screen holder).
+    var qtyReq by remember { mutableStateOf<QuantityRequest?>(null) }
+    val requestQty: (String, Int, String, (Int) -> Unit) -> Unit = { name, count, label, action ->
+        if (count > 1) qtyReq = QuantityRequest(name, count, label) { n -> qtyReq = null; action(n) }
+        else action(1)
+    }
+
+    fun take(item: InventoryItem, n: Int) {
+        val (c, p) = moveOptimistic(containerItems, playerItems, item, n)
+        containerItems = c; playerItems = p
+        CompanionActions.containerTake(item.stackId.ifEmpty { item.id }, n)
+    }
+    fun put(item: InventoryItem, n: Int) {
+        val (p, c) = moveOptimistic(playerItems, containerItems, item, n)
+        playerItems = p; containerItems = c
+        CompanionActions.containerPut(item.stackId.ifEmpty { item.id }, n)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) { detectTapGestures {} }
+            // Anchor the panel to the BOTTOM of the top screen, 12dp up.
+            .padding(bottom = 12.dp),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        // Two separate boxed columns (player | container) with an 8dp gap — no outer panel,
+        // no divider line. 75% of the previous 0.9 height.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth(0.96f)
+                .fillMaxHeight(0.675f)
+        ) {
+            // LEFT: player.
+            LootGridColumn(
+                header = "You",
+                items = playerItems,
+                isPlayerSide = true,
+                isWorn = { isWorn(it) },
+                emptyText = "Empty",
+                onTransfer = { it, n -> put(it, n) },
+                onRequestQty = requestQty,
+                modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
+            )
+            Spacer(Modifier.width(LOOT_SPLIT_COLUMN_GAP))
+            // RIGHT: container.
+            LootGridColumn(
+                header = session.containerName.ifBlank { "Container" },
+                items = containerItems,
+                isPlayerSide = false,
+                isWorn = { false },
+                emptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
+                onTransfer = { it, n -> take(it, n) },
+                onRequestQty = requestQty,
+                modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
+            )
+        }
+
+        // Local dropdown-dismiss scrim (this window has its own composition — can't lean on
+        // the bottom-screen global scrim). Below the DropdownMenu popup, above the grids.
+        if (DropdownState.anyOpen) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures { DropdownState.closeAll() } }
+            )
+        }
+
+        // Local quantity picker (fills the window at zIndex 20f with its own scrim).
+        qtyReq?.let { req ->
+            QuantitySelector(
+                name = req.name,
+                max = req.max,
+                confirmLabel = req.confirmLabel,
+                onConfirm = req.onConfirm,
+                onCancel = { qtyReq = null }
+            )
+        }
+    }
+}
+
+/** One side of the SPLIT looting grids — header + a 3-row horizontally-scrolling icon grid. */
+@Composable
+private fun LootGridColumn(
+    header: String,
+    items: List<InventoryItem>,
+    isPlayerSide: Boolean,
+    isWorn: (InventoryItem) -> Boolean,
+    emptyText: String,
+    onTransfer: (InventoryItem, Int) -> Unit,
+    onRequestQty: (String, Int, String, (Int) -> Unit) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier) {
+        Text(
+            header,
+            color = BronzeLight, fontSize = 14.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+        Spacer(Modifier.height(6.dp))
+        if (items.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+            }
+        } else {
+            // Worn-first (player side) then alphabetical, mirroring the inventory tab.
+            val sorted = remember(items, isPlayerSide) {
+                items.sortedWith(
+                    compareByDescending<InventoryItem> { isPlayerSide && isWorn(it) }
+                        .thenBy { it.displayName().lowercase() }
+                )
+            }
+            LazyHorizontalGrid(
+                // 4 rows now that the icons are smaller; tighter spacing fits more.
+                rows = GridCells.Fixed(4),
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                gridItems(sorted) { item ->
+                    LootGridCell(
+                        item = item,
+                        isPlayerSide = isPlayerSide,
+                        worn = isPlayerSide && isWorn(item),
+                        iconBitmap = rememberItemIcon(item.icon),
+                        onTransfer = onTransfer,
+                        onRequestQty = onRequestQty
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One icon cell in the SPLIT looting grids. Tap = transfer (take/put); long-press = the fuller
+ * menu (Take/Put, Info, and Favourite on the player side). A worn item gets a bright bronze
+ * border highlight. Stacks > 1 route the transfer through the quantity picker first.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LootGridCell(
+    item: InventoryItem,
+    isPlayerSide: Boolean,
+    worn: Boolean,
+    iconBitmap: ImageBitmap? = null,
+    onTransfer: (InventoryItem, Int) -> Unit,
+    onRequestQty: (String, Int, String, (Int) -> Unit) -> Unit
+) {
+    val context = LocalContext.current
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+    val label = item.displayName()
+    val confirmLabel = if (isPlayerSide) "Put" else "Take"
+    fun transfer() { onRequestQty(label, item.count, confirmLabel) { n -> onTransfer(item, n) } }
+
+    Box {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .width(54.dp)
+                .combinedClickable(
+                    onClick = { transfer() },
+                    onLongClick = { menuOpen = true; DropdownState.open() }
+                )
+                .padding(2.dp)
+        ) {
+            // Icon box — bronze highlight border when worn.
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(SlotBg)
+                    .border(
+                        BorderStroke(if (worn) 2.dp else 1.dp, if (worn) BronzeLight else BronzeDark),
+                        RoundedCornerShape(3.dp)
+                    )
+            ) {
+                if (iconBitmap != null) {
+                    Image(
+                        bitmap = iconBitmap,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(3.dp)
+                    )
+                }
+                // Count badge (bottom-right).
+                if (item.count > 1) {
+                    Text(
+                        "×${item.count}",
+                        color = BoneBright, fontSize = 9.sp,
+                        fontFamily = MwData, fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .background(Color(0xCC0E0B07))
+                            .padding(horizontal = 2.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                label,
+                color = if (worn) BoneBright else BoneMuted,
+                fontSize = 8.sp, fontFamily = MwBody,
+                textAlign = TextAlign.Center,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                lineHeight = 9.sp,
+                modifier = Modifier.width(54.dp)
+            )
+        }
+
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+            containerColor = StonePanel,
+            shadowElevation = 0.dp,
+            border = BorderStroke(1.dp, Bronze),
+            shape = RoundedCornerShape(3.dp)
+        ) {
+            Text(
+                label,
+                color = BronzeLight, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
+            DropdownMenuItem(
+                text = { Text(if (isPlayerSide) "Put" else "Take", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); transfer() },
+                colors = menuItemColors
+            )
+            DropdownMenuItem(
+                text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                colors = menuItemColors
+            )
+            if (isPlayerSide) {
+                FavouriteMenuItems(
+                    context = context,
+                    isGear = true,
+                    itemId = item.id,
+                    makeSlot = { FavSlot(item.id, label) },
+                    onDone = { menuOpen = false; DropdownState.closeAll() }
+                )
+            }
+        }
+    }
+}
+
 private fun lootSubline(item: InventoryItem): String {
     val parts = mutableListOf<String>()
     if (item.category.isNotBlank()) {
@@ -2554,7 +2916,17 @@ private val BarterBlue = Color(0xFF6E93C9)    // Cancel
  * `session` emissions; on close→reopen the overlay re-enters composition and re-inits.
  */
 @Composable
-private fun BarterOverlay(session: BarterSession, disposition: Int) {
+private fun BarterOverlay(session: BarterSession, disposition: Int, location: ScreenLocation) {
+    // SPLIT: the item grids live on the TOP screen (BarterTopOverlay, hosted by EngineActivity);
+    // the bottom screen shows ONLY the gold bar + Offer/Cancel. Item selection (borrow/return) is
+    // sent to the engine from the top grid; the bottom controls read the engine's authoritative
+    // merchantOffer + a local gold offset, so they need no shared item-selection state. The
+    // disposition bar is omitted here (no natural place in the controls-only panel).
+    if (location == ScreenLocation.SPLIT) {
+        BarterControlsOnly(session)
+        return
+    }
+
     var vendorItems by remember { mutableStateOf(session.vendorItems) }
     var playerItems by remember { mutableStateOf(session.playerItems) }
     var extraGold by remember { mutableStateOf(session.extraGoldOffer) }
@@ -2711,6 +3083,541 @@ private fun BarterOverlay(session: BarterSession, disposition: Int) {
                 Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) { detectTapGestures { DropdownState.closeAll() } }
+            )
+        }
+    }
+}
+
+/* ---- Barter SPLIT mode (top-screen grids + bottom-screen controls) ---- */
+
+// Gap between the two separate column boxes on the top screen. Single tweakable constant.
+private val BARTER_SPLIT_COLUMN_GAP = 8.dp
+
+/**
+ * SPLIT-mode bottom-screen barter controls: gold totals + the [−100..+100] gold offset bar +
+ * Offer / Cancel, centred vertically. Item selection happens on the top grid ([BarterTopOverlay])
+ * and is tracked engine-side (barter_borrow/return), so these controls read only the engine's
+ * authoritative [BarterSession.merchantOffer] plus a LOCAL gold offset — no shared item state.
+ * The disposition bar is intentionally omitted (decision: no natural place here).
+ */
+@Composable
+private fun BarterControlsOnly(session: BarterSession) {
+    // Local gold offset (the +/- row), initialised once from the session; NOT re-synced from
+    // later emissions (matches the full overlay). Persisted engine-side via barter_gold.
+    var extraGold by remember { mutableStateOf(session.extraGoldOffer) }
+
+    // Balance actually changing hands = engine fair price for staged items + the manual offset.
+    // Positive = the player receives gold, negative = the player pays. Affordability is derived
+    // from this authoritative balance (no optimistic item net needed on the bottom screen).
+    val offerBalance = session.merchantOffer + extraGold
+    val playerCantAfford = offerBalance < 0 && -offerBalance > session.playerGold
+    val vendorCantAfford = offerBalance > 0 && offerBalance > session.vendorGold
+    val offerEnabled = !playerCantAfford && !vendorCantAfford
+    val offerLabel = when {
+        playerCantAfford -> "Insufficient gold"
+        vendorCantAfford -> "Vendor lacks gold"
+        else -> "Offer"
+    }
+
+    // Set the gold changing hands to an absolute signed balance (positive = player receives),
+    // clamped to what each side can pay; derive the manual offset from it.
+    fun setBalance(target: Int) {
+        val clamped = target.coerceIn(-session.playerGold, session.vendorGold)
+        extraGold = clamped - session.merchantOffer
+        CompanionActions.barterSetExtraGold(extraGold)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(16f)
+            .background(Color(0xCC0F0C08))
+            .pointerInput(Unit) { detectTapGestures {} },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.6f)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                "${session.vendorName.ifBlank { "Merchant" }} — Barter",
+                color = BronzeLight, fontSize = 14.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            // Gold totals: your gold | their gold.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("You: ${session.playerGold}g", color = Bone, fontSize = 12.sp, fontFamily = MwData)
+                Text("${session.vendorName.ifBlank { "Merchant" }}: ${session.vendorGold}g",
+                    color = Bone, fontSize = 12.sp, fontFamily = MwData,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            BarterGoldSlider(
+                merchantOffer = session.merchantOffer,
+                playerGold = session.playerGold,
+                vendorGold = session.vendorGold,
+                offerBalance = offerBalance,
+                onSetBalance = ::setBalance
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                BarterButton(
+                    label = offerLabel, color = BarterGreen, enabled = offerEnabled,
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.barterOffer() }
+                BarterButton(
+                    label = "Cancel", hint = "B", color = BarterBlue, enabled = true,
+                    modifier = Modifier.weight(1f)
+                ) { CompanionActions.barterCancel() }
+            }
+        }
+    }
+}
+
+/**
+ * Trade-amount slider for the SPLIT barter controls. The slider sets the gold changing hands; its
+ * range depends on the current direction of the deal (the sign of the engine's fair price for the
+ * staged items, [merchantOffer]):
+ *  - player RECEIVES (merchantOffer >= 0): 0 .. vendorGold (how much the vendor pays).
+ *  - player PAYS (merchantOffer < 0): 0 .. min(item value, playerGold) — can't pay more than the
+ *    goods are worth (nor more than you hold).
+ * The signed gold amount is shown as a coloured label above the slider (green = you receive, red =
+ * you pay).
+ *
+ * NOTE: the "0" end is neutral/no-gold, not the mathematically "fair" balance — see the brief; the
+ * exact semantics are easy to retune here.
+ */
+@Composable
+private fun BarterGoldSlider(
+    merchantOffer: Int,
+    playerGold: Int,
+    vendorGold: Int,
+    offerBalance: Int,
+    onSetBalance: (Int) -> Unit
+) {
+    val receiving = merchantOffer >= 0
+    val sliderMax = (if (receiving) vendorGold else minOf(abs(merchantOffer), playerGold))
+        .coerceAtLeast(0)
+    // Slider magnitude in the active direction (gold received when selling, paid when buying).
+    val magnitude = (if (receiving) offerBalance else -offerBalance).coerceIn(0, sliderMax)
+
+    val labelColor = when {
+        offerBalance > 0 -> BarterGreen
+        offerBalance < 0 -> BarterRed
+        else -> Bone
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            if (offerBalance > 0) "+${offerBalance}g" else "${offerBalance}g",
+            color = labelColor, fontSize = 20.sp, fontFamily = MwData, fontWeight = FontWeight.Bold
+        )
+        Slider(
+            value = magnitude.toFloat(),
+            onValueChange = { v ->
+                val mag = v.roundToInt().coerceIn(0, sliderMax)
+                onSetBalance(if (receiving) mag else -mag)
+            },
+            valueRange = 0f..sliderMax.coerceAtLeast(1).toFloat(),
+            enabled = sliderMax > 0,
+            colors = SliderDefaults.colors(
+                thumbColor = BronzeLight,
+                activeTrackColor = Bronze,
+                inactiveTrackColor = BronzeDark
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+/**
+ * TOP-screen barter grids (Display 0). Hosted by [org.openmw.EngineActivity] in an interactive
+ * WindowManager panel window while a barter session is active AND Bartering is routed to SPLIT.
+ * Player inventory LEFT, vendor inventory RIGHT — both 3-row horizontally-scrolling icon grids
+ * with per-side category tabs. Tapping a cell selects/deselects it (adds to / removes from the
+ * offer, sending barter_borrow / barter_return); a stack > 1 prompts for a quantity first.
+ * Selected cells get a bronze border highlight. Reads its state from [GameStateRepository].
+ */
+@Composable
+fun BarterTopOverlay() {
+    val sessionState by GameStateRepository.barterSession.collectAsState()
+    val session = sessionState ?: return
+
+    // Optimistic COLUMN contents — remember WITHOUT a key so they init once on enter and are NOT
+    // re-synced from later (frame-starved) emissions. The window is removed on session-null.
+    // Items MOVE between columns on tap (like looting): a bought vendor item leaves the vendor
+    // column and appears (highlighted) in the player column, and a sold player item vice versa.
+    // An item's `side` is its HOME; `isSelected` = staged (currently shown in the OPPOSITE column).
+    var playerCol by remember { mutableStateOf(session.playerItems) }
+    var vendorCol by remember { mutableStateOf(session.vendorItems) }
+    var playerCat by remember { mutableStateOf<String?>(null) }
+    var vendorCat by remember { mutableStateOf<String?>(null) }
+
+    // Local quantity picker (kept on the TOP screen).
+    var qtyReq by remember { mutableStateOf<QuantityRequest?>(null) }
+    val requestQty: (String, Int, String, (Int) -> Unit) -> Unit = { name, count, label, action ->
+        if (count > 1) qtyReq = QuantityRequest(name, count, label) { n -> qtyReq = null; action(n) }
+        else action(1)
+    }
+
+    // Brief auto-dismissing inline banner (e.g. the merchant won't buy a restricted item). The
+    // nonce re-arms the auto-dismiss timer even when the same message is tapped again.
+    var restrictionBanner by remember { mutableStateOf<String?>(null) }
+    var bannerNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(bannerNonce) {
+        if (restrictionBanner != null) {
+            delay(2200)
+            restrictionBanner = null
+        }
+    }
+
+    // Move `n` of `item` from `source` column to `dest` column, setting the destination copy's
+    // staged flag. Reduces/removes the matched entry in source (matched by id+side+isSelected) and
+    // merges into (or appends) a same-(id, side, selected) entry in dest — so moving 1 of a stack
+    // of 5 leaves a ×4 remainder behind. Mirrors looting's moveOptimistic for BarterItem. Returns
+    // (newSource, newDest).
+    fun moveBarter(
+        source: List<BarterItem>, dest: List<BarterItem>, item: BarterItem, n: Int, selected: Boolean
+    ): Pair<List<BarterItem>, List<BarterItem>> {
+        val moved = n.coerceIn(1, item.count)
+        val newSource = source.mapNotNull { e ->
+            if (e.id == item.id && e.side == item.side && e.isSelected == item.isSelected) {
+                if (e.count > moved) e.copy(count = e.count - moved) else null
+            } else e
+        }
+        val idx = dest.indexOfFirst { it.id == item.id && it.side == item.side && it.isSelected == selected }
+        val newDest = if (idx >= 0) {
+            dest.mapIndexed { i, e ->
+                if (i == idx) e.copy(count = e.count + moved, selectedCount = if (selected) e.count + moved else 0) else e
+            }
+        } else {
+            dest + item.copy(count = moved, isSelected = selected, selectedCount = if (selected) moved else 0)
+        }
+        return newSource to newDest
+    }
+
+    // Buy/sell: move `n` from the item's HOME column to the opposite column, mark it staged, and
+    // tell the engine (barter_borrow). PLAYER items go player→vendor (sell); VENDOR items go
+    // vendor→player (buy).
+    fun borrow(item: BarterItem, n: Int) {
+        if (item.side == BarterSide.PLAYER) {
+            val (s, d) = moveBarter(playerCol, vendorCol, item, n, selected = true)
+            playerCol = s; vendorCol = d
+        } else {
+            val (s, d) = moveBarter(vendorCol, playerCol, item, n, selected = true)
+            vendorCol = s; playerCol = d
+        }
+        CompanionActions.barterBorrow(item.side, item.id, n.coerceIn(1, item.count))
+    }
+
+    // Un-stage: move a staged item back to its HOME column (whole amount) and return it to the
+    // engine (barter_return). A staged PLAYER item currently sits in the vendor column; a staged
+    // VENDOR item in the player column.
+    fun returnHome(item: BarterItem) {
+        val amount = item.count
+        if (item.side == BarterSide.PLAYER) {
+            val (s, d) = moveBarter(vendorCol, playerCol, item, amount, selected = false)
+            vendorCol = s; playerCol = d
+        } else {
+            val (s, d) = moveBarter(playerCol, vendorCol, item, amount, selected = false)
+            playerCol = s; vendorCol = d
+        }
+        CompanionActions.barterReturn(item.side, item.id, amount)
+    }
+
+    fun toggle(item: BarterItem) {
+        if (item.isSelected) { returnHome(item); return }
+        // Pre-tap restriction gate: the merchant won't buy this player item — flash a banner and
+        // skip (no move to undo). Vendor items are always sellable=true.
+        if (item.side == BarterSide.PLAYER && !item.sellable) {
+            restrictionBanner = "This vendor doesn't buy that"
+            bannerNonce++
+            return
+        }
+        requestQty(item.displayName(), item.count, "Select") { n -> borrow(item, n) }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) { detectTapGestures {} }
+            // Bottom-anchored, 12dp up — matching the looting overlay.
+            .padding(bottom = 12.dp),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        // Two separate boxed columns (player | vendor) with an 8dp gap — no outer panel, no
+        // divider. Same height as the looting overlay (0.675). Items MOVE across on tap.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth(0.96f)
+                .fillMaxHeight(0.675f)
+        ) {
+            // LEFT: player column (own inventory + bought vendor items, highlighted).
+            BarterGridColumn(
+                header = "You",
+                items = playerCol,
+                isPlayerSide = true,
+                selectedCategory = playerCat,
+                onSelectCategory = { playerCat = it },
+                onToggle = ::toggle,
+                modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
+            )
+            Spacer(Modifier.width(BARTER_SPLIT_COLUMN_GAP))
+            // RIGHT: vendor column (own stock + sold player items, highlighted).
+            BarterGridColumn(
+                header = session.vendorName.ifBlank { "Merchant" },
+                items = vendorCol,
+                isPlayerSide = false,
+                selectedCategory = vendorCat,
+                onSelectCategory = { vendorCat = it },
+                onToggle = ::toggle,
+                modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
+            )
+        }
+
+        if (DropdownState.anyOpen) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures { DropdownState.closeAll() } }
+            )
+        }
+        qtyReq?.let { req ->
+            QuantitySelector(
+                name = req.name,
+                max = req.max,
+                confirmLabel = req.confirmLabel,
+                onConfirm = req.onConfirm,
+                onCancel = { qtyReq = null }
+            )
+        }
+
+        // Brief auto-dismissing restriction banner, top-centre (non-blocking, not a popup).
+        restrictionBanner?.let { msg ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 24.dp),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                Text(
+                    msg,
+                    color = BoneBright, fontSize = 13.sp, fontFamily = MwBody,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xF01A1206))
+                        .border(1.dp, BarterRed, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+        }
+    }
+}
+
+/** One side of the SPLIT barter grids — header, per-side category tabs, 3-row icon grid. */
+@Composable
+private fun BarterGridColumn(
+    header: String,
+    items: List<BarterItem>,
+    isPlayerSide: Boolean,
+    selectedCategory: String?,
+    onSelectCategory: (String?) -> Unit,
+    onToggle: (BarterItem) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier) {
+        Text(
+            header,
+            color = BronzeLight, fontSize = 14.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(4.dp))
+        val presentCats = remember(items) { items.map { it.category }.toSet() }
+        val tabs = remember(presentCats) { BARTER_CATEGORIES.filter { it.cat in presentCats } }
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CategoryTab("All", active = selectedCategory == null) { onSelectCategory(null) }
+            tabs.forEach { c ->
+                CategoryTab(c.label, active = selectedCategory == c.cat) { onSelectCategory(c.cat) }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+        Spacer(Modifier.height(6.dp))
+
+        val visible = remember(items, selectedCategory, isPlayerSide) {
+            items.filter { selectedCategory == null || it.category == selectedCategory }
+                .sortedWith(
+                    compareByDescending<BarterItem> { it.isSelected }
+                        .thenByDescending { isPlayerSide && it.worn }
+                        .thenBy { it.displayName().lowercase() }
+                )
+        }
+        if (visible.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Nothing to trade", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+            }
+        } else {
+            LazyHorizontalGrid(
+                // 4 rows / tight spacing — matching the looting overlay.
+                rows = GridCells.Fixed(4),
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                gridItems(visible) { item ->
+                    BarterGridCell(
+                        item = item,
+                        isPlayerSide = isPlayerSide,
+                        iconBitmap = rememberItemIcon(item.icon),
+                        onToggle = onToggle
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One icon cell in the SPLIT barter grids. Tap = select/deselect (add to / remove from the
+ * offer); long-press = Info + Buy/Sell. A selected cell gets a bright bronze border highlight
+ * (mirroring the current barter overlay's selected state). Stacks > 1 prompt for a quantity.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BarterGridCell(
+    item: BarterItem,
+    isPlayerSide: Boolean,
+    iconBitmap: ImageBitmap? = null,
+    onToggle: (BarterItem) -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+    val selected = item.isSelected
+    val label = item.displayName()
+
+    Box {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .width(54.dp)
+                .combinedClickable(
+                    onClick = { onToggle(item) },
+                    onLongClick = { menuOpen = true; DropdownState.open() }
+                )
+                .padding(2.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(if (selected) SlotWorn else SlotBg)
+                    .border(
+                        BorderStroke(if (selected) 2.dp else 1.dp, if (selected) BronzeLight else BronzeDark),
+                        RoundedCornerShape(3.dp)
+                    )
+            ) {
+                if (iconBitmap != null) {
+                    Image(
+                        bitmap = iconBitmap,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(3.dp)
+                    )
+                }
+                // Selected-count badge (bottom-right) when > 1.
+                if (selected && item.selectedCount > 1) {
+                    Text(
+                        "×${item.selectedCount}",
+                        color = BarterGreen, fontSize = 9.sp,
+                        fontFamily = MwData, fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .background(Color(0xCC0E0B07))
+                            .padding(horizontal = 2.dp)
+                    )
+                } else if (!selected && item.count > 1) {
+                    Text(
+                        "×${item.count}",
+                        color = BoneBright, fontSize = 9.sp,
+                        fontFamily = MwData, fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .background(Color(0xCC0E0B07))
+                            .padding(horizontal = 2.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                label,
+                color = if (selected) BoneBright else Bone,
+                fontSize = 8.sp, fontFamily = MwBody,
+                textAlign = TextAlign.Center,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                lineHeight = 9.sp,
+                modifier = Modifier.width(54.dp)
+            )
+            // Per-unit barter price.
+            Text(
+                "${item.value}g",
+                color = BoneDim, fontSize = 8.sp, fontFamily = MwData,
+                maxLines = 1
+            )
+        }
+
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
+            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+            containerColor = StonePanel,
+            shadowElevation = 0.dp,
+            border = BorderStroke(1.dp, Bronze),
+            shape = RoundedCornerShape(3.dp)
+        ) {
+            Text(
+                label,
+                color = BronzeLight, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (selected) "Remove from offer"
+                        else if (isPlayerSide) "Sell" else "Buy",
+                        fontFamily = MwBody, fontSize = 13.sp
+                    )
+                },
+                onClick = { menuOpen = false; DropdownState.closeAll(); onToggle(item) },
+                colors = menuItemColors
+            )
+            DropdownMenuItem(
+                text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                colors = menuItemColors
             )
         }
     }
@@ -6038,14 +6945,21 @@ fun OptionsMenuOverlay() {
             item { OptionsSectionHeader("Game UI") }
             items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
 
-            // SCREEN LAYOUT: which screen each element is drawn on. Only Conversation
-            // (Bottom/Split/Top) is implemented; the rest are pending and locked to Bottom.
+            // SCREEN LAYOUT: which screen each element is drawn on. Conversation, Looting
+            // and Bartering support Bottom/Split (Top pending); the rest are fully pending
+            // and locked to Bottom.
             item { OptionsSectionHeader("Screen Layout") }
             item { ConversationLocationRow() }
+            item { LootingLocationRow() }
+            item { BarteringLocationRow() }
             item { TargetHealthLocationRow() }
             item { PlayerCombatRow() }
             items(
-                GAME_UI_ELEMENTS.filter { it.key != "game_ui_conversation" },
+                GAME_UI_ELEMENTS.filter {
+                    it.key != "game_ui_conversation" &&
+                        it.key != "game_ui_looting" &&
+                        it.key != "game_ui_bartering"
+                },
                 key = { "layout_" + it.key }
             ) { ScreenLayoutPendingRow(it) }
 
@@ -6180,6 +7094,71 @@ private fun ConversationLocationRow() {
                 enabled = true
             ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.TOP) }
         }
+    }
+}
+
+/** A service (Looting / Bartering) location row: a three-option [Bottom][Split][Top] pill
+ *  selector. BOTTOM = classic bottom-screen overlay; SPLIT = icon grid on top, controls on the
+ *  bottom; TOP = pending (greyed, not selectable). Writes a [ScreenLocation] on every tap.
+ *  Dimmed and inert when the element's Game UI mode is Vanilla (native handles it, so there's no
+ *  layout to pick). */
+@Composable
+private fun ServiceLocationRow(
+    label: String,
+    gameUiKey: String,
+    loc: ScreenLocation,
+    onSelect: (ScreenLocation) -> Unit
+) {
+    val mode by UiPreferences.gameUiModeFlow(gameUiKey).collectAsState()
+    val enabled = mode == GameUiMode.DS
+
+    // Dim the whole row and swallow taps (onClick guarded on `enabled`) when the element is
+    // Vanilla; the Bottom/Split pills stay enabled=true so they don't double-dim under the
+    // column alpha. The Top pill is always enabled=false (pending → greyed).
+    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
+        Text(label, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Bottom",
+                active = loc == ScreenLocation.BOTTOM,
+                enabled = true
+            ) { if (enabled) onSelect(ScreenLocation.BOTTOM) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Split",
+                active = loc == ScreenLocation.SPLIT,
+                enabled = true
+            ) { if (enabled) onSelect(ScreenLocation.SPLIT) }
+            // TOP is not implemented yet — greyed and inert.
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Top",
+                active = loc == ScreenLocation.TOP,
+                enabled = false
+            ) {}
+        }
+    }
+}
+
+/** The Looting location row (Bottom/Split, Top pending). Gated on the Looting Game UI element. */
+@Composable
+private fun LootingLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.lootingLocationFlow().collectAsState()
+    ServiceLocationRow("Looting", "game_ui_looting", loc) {
+        UiPreferences.setLootingLocation(context, it)
+    }
+}
+
+/** The Bartering location row (Bottom/Split, Top pending). Gated on the Bartering Game UI element. */
+@Composable
+private fun BarteringLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.barterLocationFlow().collectAsState()
+    ServiceLocationRow("Bartering", "game_ui_bartering", loc) {
+        UiPreferences.setBarterLocation(context, it)
     }
 }
 

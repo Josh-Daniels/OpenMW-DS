@@ -158,7 +158,7 @@ index 93d5abb29f..4cce58ef68 100644
      }
  
      void TradeWindow::onNameFilterChanged(MyGUI::EditBox* sender)
-@@ -658,6 +754,319 @@ namespace MWGui
+@@ -658,6 +754,324 @@ namespace MWGui
          return merchantGold;
      }
  
@@ -196,6 +196,10 @@ index 93d5abb29f..4cce58ef68 100644
 +            if (!rawIcon.empty() && vfs)
 +                icon = Misc::ResourceHelpers::correctIconPath(VFS::Path::toNormalized(rawIcon), *vfs);
 +            const bool worn = (item.mType == ItemStack::Type_Equipped);
++            // Player-side items are gated by the merchant's services (canSell); vendor
++            // items are already service-filtered, so they are always buyable.
++            const bool sellable
++                = buying ? true : base.getClass().canSell(base, getMerchantServices());
 +
 +            std::ostringstream out;
 +            out << "COMPANION_BARTER_ITEM:{\"side\":\"" << side << "\""
@@ -206,6 +210,7 @@ index 93d5abb29f..4cce58ef68 100644
 +                << ",\"value\":" << unitValue
 +                << ",\"cat\":\"" << companionBarterCategory(base) << "\""
 +                << ",\"icon\":\"" << companionJsonEscape(icon) << "\""
++                << ",\"sellable\":" << (sellable ? "true" : "false")
 +                << ",\"worn\":" << (worn ? "true" : "false") << "}";
 +            Log(Debug::Info) << out.str();
 +        }
@@ -478,7 +483,7 @@ index 93d5abb29f..4cce58ef68 100644
      void TradeWindow::resetReference()
      {
          ReferenceInterface::resetReference();
-@@ -672,6 +1081,14 @@ namespace MWGui
+@@ -672,6 +1086,14 @@ namespace MWGui
          if (MWBase::Environment::get().getWindowManager()->containsMode(GM_Barter))
              return;
          resetReference();
@@ -493,7 +498,7 @@ index 93d5abb29f..4cce58ef68 100644
      }
  
      void TradeWindow::onDeleteCustomData(const MWWorld::Ptr& ptr)
-@@ -776,3 +1193,51 @@ namespace MWGui
+@@ -776,3 +1198,51 @@ namespace MWGui
              mUpdateNextFrame = true;
      }
  }

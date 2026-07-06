@@ -8,6 +8,7 @@ import android.hardware.display.DisplayManager
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import org.openmw.companion.BarterTopOverlay
 import org.openmw.companion.CombatTargetTopOverlay
 import org.openmw.companion.CompanionScreen
 import org.openmw.companion.ConversationHistoryOverlay
@@ -15,7 +16,9 @@ import org.openmw.companion.GameStateRepository
 import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
+import org.openmw.companion.LootingTopOverlay
 import org.openmw.companion.PlayerCombatTopOverlay
+import org.openmw.companion.ScreenLocation
 import org.openmw.companion.TargetHealthLocation
 import org.openmw.companion.UiPreferences
 
@@ -149,6 +152,14 @@ class EngineActivity : SDLActivity() {
     private var combatTargetTopView: View? = null
     private var playerCombatTopView: View? = null
 
+    // INTERACTIVE looting grids on the TOP screen (this activity's own window / Display 0), shown
+    // while a container session is active AND Looting is routed to SPLIT (game_ui_looting == DS).
+    private var lootingTopView: View? = null
+
+    // INTERACTIVE barter grids on the TOP screen, shown while a barter session is active AND
+    // Bartering is routed to SPLIT (game_ui_bartering == DS).
+    private var barterTopView: View? = null
+
     external fun getLastResourceName(): String
     external fun initAlpha3()
     private external fun installCompanionSink()
@@ -196,6 +207,8 @@ class EngineActivity : SDLActivity() {
         hideConversationTopOverlay()
         hideCombatTargetTopOverlay()
         hidePlayerCombatTopOverlay()
+        hideLootingTopOverlay()
+        hideBarterTopOverlay()
 
         // MorrowindDS
         companionPresentation?.dismiss()
@@ -914,6 +927,36 @@ class EngineActivity : SDLActivity() {
                     if (show) showPlayerCombatTopOverlay() else hidePlayerCombatTopOverlay()
                 }
         }
+
+        // Top-screen INTERACTIVE looting grids: shown while a container session is active AND
+        // Looting is routed to SPLIT AND the Looting element is DS (companion draws it). The
+        // bottom screen shows only the terminal controls (LootingControlsOnly).
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.containerSession,
+                UiPreferences.lootingLocationFlow(),
+                UiPreferences.gameUiModeFlow("game_ui_looting"),
+            ) { session, loc, mode ->
+                session != null && loc == ScreenLocation.SPLIT && mode == GameUiMode.DS
+            }.distinctUntilChanged().collect { show ->
+                if (show) showLootingTopOverlay() else hideLootingTopOverlay()
+            }
+        }
+
+        // Top-screen INTERACTIVE barter grids: shown while a barter session is active AND Bartering
+        // is routed to SPLIT AND the Bartering element is DS. The bottom screen shows only the gold
+        // bar + Offer/Cancel (BarterControlsOnly).
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.barterSession,
+                UiPreferences.barterLocationFlow(),
+                UiPreferences.gameUiModeFlow("game_ui_bartering"),
+            ) { session, loc, mode ->
+                session != null && loc == ScreenLocation.SPLIT && mode == GameUiMode.DS
+            }.distinctUntilChanged().collect { show ->
+                if (show) showBarterTopOverlay() else hideBarterTopOverlay()
+            }
+        }
     }
 
     private fun showConversationTopOverlay() {
@@ -1013,6 +1056,65 @@ class EngineActivity : SDLActivity() {
         val overlay = playerCombatTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         playerCombatTopView = null
+    }
+
+    /**
+     * Adds an INTERACTIVE Compose overlay to THIS activity's own window (Display 0 / top screen)
+     * as a TYPE_APPLICATION_PANEL sub-window layered above the OpenMW GL surface. Same as
+     * [showTopScreenOverlay] but FLAG_NOT_TOUCHABLE is OMITTED so touch reaches the Compose UI
+     * (icon taps, long-press, horizontal scroll) — matching [showConversationTopOverlay]. Used by
+     * the SPLIT looting/bartering grids. Token is null until the decor attaches — defer via post.
+     */
+    private fun showInteractiveTopScreenOverlay(
+        alreadyShown: () -> Boolean,
+        onAdded: (View) -> Unit,
+        content: @Composable () -> Unit,
+    ) {
+        if (alreadyShown()) return
+        val decor = window.decorView
+        decor.post {
+            if (alreadyShown()) return@post
+            val token = decor.windowToken ?: return@post
+            val overlay = ComposeView(this).apply {
+                setViewTreeLifecycleOwner(this@EngineActivity)
+                setViewTreeViewModelStoreOwner(this@EngineActivity)
+                setViewTreeSavedStateRegistryOwner(this@EngineActivity)
+                setContent { content() }
+            }
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply { this.token = token }
+            runCatching { windowManager.addView(overlay, lp) }
+                .onSuccess { onAdded(overlay) }
+                .onFailure { Log.e(TAG, "INTERACTIVE TOP OVERLAY: addView failed", it) }
+        }
+    }
+
+    private fun showLootingTopOverlay() = showInteractiveTopScreenOverlay(
+        alreadyShown = { lootingTopView != null },
+        onAdded = { lootingTopView = it },
+    ) { LootingTopOverlay() }
+
+    private fun hideLootingTopOverlay() {
+        val overlay = lootingTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        lootingTopView = null
+    }
+
+    private fun showBarterTopOverlay() = showInteractiveTopScreenOverlay(
+        alreadyShown = { barterTopView != null },
+        onAdded = { barterTopView = it },
+    ) { BarterTopOverlay() }
+
+    private fun hideBarterTopOverlay() {
+        val overlay = barterTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        barterTopView = null
     }
 
     private fun showPauseOverlay() {
