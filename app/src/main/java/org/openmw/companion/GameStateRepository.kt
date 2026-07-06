@@ -232,6 +232,20 @@ object GameStateRepository {
     private val _sleepSession = MutableStateFlow<SleepSession?>(null)
     val sleepSession: StateFlow<SleepSession?> = _sleepSession.asStateFlow()
 
+    // --- Dialogue-service window OPEN/CLOSED flags (COMPANION_{SPELLBUYING,TRAINING,SPELLMAKING,
+    // ENCHANTING}_{OPEN,CLOSED}) ---
+    // Bare booleans (no payload yet — no companion overlay for these). true while the native window
+    // is up; consumed by EngineActivity.nativeServiceVanillaUp so the top-screen conversation overlay
+    // steps aside when one opens over a Vanilla conversation.
+    private val _spellBuyingWindowOpen = MutableStateFlow(false)
+    val spellBuyingWindowOpen: StateFlow<Boolean> = _spellBuyingWindowOpen.asStateFlow()
+    private val _trainingWindowOpen = MutableStateFlow(false)
+    val trainingWindowOpen: StateFlow<Boolean> = _trainingWindowOpen.asStateFlow()
+    private val _spellmakingWindowOpen = MutableStateFlow(false)
+    val spellmakingWindowOpen: StateFlow<Boolean> = _spellmakingWindowOpen.asStateFlow()
+    private val _enchantingWindowOpen = MutableStateFlow(false)
+    val enchantingWindowOpen: StateFlow<Boolean> = _enchantingWindowOpen.asStateFlow()
+
     // Accumulates dialogue topics across DIALOGUE_START / DIALOGUE_TOPIC / DIALOGUE_END.
     private var dialogueBuffer: MutableList<String>? = null
 
@@ -698,6 +712,16 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_SLEEP_CLOSED) -> {
                 _sleepSession.value = null
             }
+            // Dialogue-service window open/closed flags. Bare tokens (no payload); OPEN before
+            // CLOSED so neither is a substring of the other. Each just flips a boolean session.
+            trimmed.contains(LogParser.P_SPELLBUYING_CLOSED) -> { _spellBuyingWindowOpen.value = false }
+            trimmed.contains(LogParser.P_SPELLBUYING_OPEN) -> { _spellBuyingWindowOpen.value = true }
+            trimmed.contains(LogParser.P_TRAINING_CLOSED) -> { _trainingWindowOpen.value = false }
+            trimmed.contains(LogParser.P_TRAINING_OPEN) -> { _trainingWindowOpen.value = true }
+            trimmed.contains(LogParser.P_SPELLMAKING_CLOSED) -> { _spellmakingWindowOpen.value = false }
+            trimmed.contains(LogParser.P_SPELLMAKING_OPEN) -> { _spellmakingWindowOpen.value = true }
+            trimmed.contains(LogParser.P_ENCHANTING_CLOSED) -> { _enchantingWindowOpen.value = false }
+            trimmed.contains(LogParser.P_ENCHANTING_OPEN) -> { _enchantingWindowOpen.value = true }
             // Dialogue topic list. Streamed START/TOPIC/END while a conversation is
             // open (re-sent on every topic-list change); CLOSED clears it. TOPIC
             // payloads are plain strings. Buffer until END so the UI swaps atomically.

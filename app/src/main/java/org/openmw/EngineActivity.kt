@@ -668,6 +668,10 @@ class EngineActivity : SDLActivity() {
         @JvmStatic external fun setCompanionDsEnchanting(on: Boolean)
         @JvmStatic external fun setCompanionDsAlchemy(on: Boolean)
         @JvmStatic external fun setCompanionDsRestWait(on: Boolean)
+        // Dialogue-service windows (GM_SpellBuying / GM_Training) that push over GM_Dialogue.
+        // Pending (locked VANILLA) until each gets a companion overlay, so these push false today.
+        @JvmStatic external fun setCompanionDsSpellBuying(on: Boolean)
+        @JvmStatic external fun setCompanionDsTraining(on: Boolean)
         // Travel has a companion overlay (non-pending, default DS): DS suppresses the native
         // GM_Travel window (companion-hide-travel-on-dsmode.patch) and the bottom-screen TravelOverlay
         // is the sole surface; Vanilla shows the native window.
@@ -836,6 +840,8 @@ class EngineActivity : SDLActivity() {
             "game_ui_enchanting" to { on: Boolean -> setCompanionDsEnchanting(on) },
             "game_ui_alchemy" to { on: Boolean -> setCompanionDsAlchemy(on) },
             "game_ui_restwait" to { on: Boolean -> setCompanionDsRestWait(on) },
+            "game_ui_spellbuying" to { on: Boolean -> setCompanionDsSpellBuying(on) },
+            "game_ui_training" to { on: Boolean -> setCompanionDsTraining(on) },
         )
         dsPushes.forEach { (key, push) ->
             lifecycleScope.launch {
@@ -890,7 +896,26 @@ class EngineActivity : SDLActivity() {
                 barterUp || repairUp || (travelPresent && travelMode == GameUiMode.VANILLA)
             }
 
-            wantConversationTop.combine(nativeServiceVanillaUp) { show, serviceUp ->
+            // Same idea for the four dialogue-service windows that only emit a bare open/closed flag
+            // (spell buying, training, spellmaking, enchanting). Each is "up" while its native window
+            // is open AND the element is Vanilla. They're pending (always Vanilla) today, so this is
+            // effectively "window open" — but gating on the mode keeps it correct once un-pended.
+            fun serviceOpenVanilla(open: kotlinx.coroutines.flow.StateFlow<Boolean>, key: String) =
+                open.combine(UiPreferences.gameUiModeFlow(key)) { isOpen, mode ->
+                    isOpen && mode == GameUiMode.VANILLA
+                }
+            val extraServiceVanillaUp = combine(
+                serviceOpenVanilla(GameStateRepository.spellBuyingWindowOpen, "game_ui_spellbuying"),
+                serviceOpenVanilla(GameStateRepository.trainingWindowOpen, "game_ui_training"),
+                serviceOpenVanilla(GameStateRepository.spellmakingWindowOpen, "game_ui_spellmaking"),
+                serviceOpenVanilla(GameStateRepository.enchantingWindowOpen, "game_ui_enchanting"),
+            ) { spellBuy, train, spellMake, enchant -> spellBuy || train || spellMake || enchant }
+
+            val anyServiceVanillaUp = nativeServiceVanillaUp.combine(extraServiceVanillaUp) { base, extra ->
+                base || extra
+            }
+
+            wantConversationTop.combine(anyServiceVanillaUp) { show, serviceUp ->
                 show && !serviceUp
             }.distinctUntilChanged().collect { show ->
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()

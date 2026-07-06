@@ -100,6 +100,8 @@ static std::atomic<bool> g_companionDsSpellmaking{ false }; // GM_SpellCreation
 static std::atomic<bool> g_companionDsEnchanting{ false };  // GM_Enchanting
 static std::atomic<bool> g_companionDsAlchemy{ false };     // GM_Alchemy
 static std::atomic<bool> g_companionDsRestWait{ false };    // GM_Rest
+static std::atomic<bool> g_companionDsSpellBuying{ false }; // GM_SpellBuying
+static std::atomic<bool> g_companionDsTraining{ false };    // GM_Training
 // Travel HAS a companion (DS) overlay (TravelOverlay + companion-travel-export /
 // companion-hide-travel-on-dsmode patches), so its Kotlin GameUiElement is non-pending (default DS):
 // the native GM_Travel window is suppressed and the bottom screen is the sole surface.
@@ -564,6 +566,8 @@ extern "C" bool companionDsSpellmaking() { return g_companionDsSpellmaking.load(
 extern "C" bool companionDsEnchanting() { return g_companionDsEnchanting.load(); }
 extern "C" bool companionDsAlchemy() { return g_companionDsAlchemy.load(); }
 extern "C" bool companionDsRestWait() { return g_companionDsRestWait.load(); }
+extern "C" bool companionDsSpellBuying() { return g_companionDsSpellBuying.load(); }
+extern "C" bool companionDsTraining() { return g_companionDsTraining.load(); }
 extern "C" bool companionDsTravel() { return g_companionDsTravel.load(); }
 
 extern "C" JNIEXPORT void JNICALL
@@ -610,6 +614,16 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionDsRestWait(JNIEnv*, jclass, jboolean on)
 {
     g_companionDsRestWait.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsSpellBuying(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsSpellBuying.store(on == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsTraining(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsTraining.store(on == JNI_TRUE);
 }
 extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionDsTravel(JNIEnv*, jclass, jboolean on)

@@ -1,0 +1,65 @@
+Emit COMPANION_SPELLBUYING_OPEN/_CLOSED around the native SpellBuyingWindow
+so the bottom-screen conversation overlay (a top-screen Android panel that layers above the
+OpenMW MyGUI surface) can step aside while this dialogue-service window is open in Vanilla
+mode. OPEN is emitted from setPtr (window opened for an actor); CLOSED from an onClose()
+override, guarded by a file-static bool + !containsMode(GM_...) so it fires exactly once on
+the real mode-pop, not on a transient hide (e.g. TrainingWindow hides itself during its
+time-advance animation). These windows are Vanilla-only today, so the normal visible->hidden
+onClose() transition always fires — no explicit hidden-window emit is needed (unlike barter).
+Kotlin side: LogParser prefixes -> a boolean session StateFlow in GameStateRepository ->
+nativeServiceVanillaUp in EngineActivity. Added July 2026.
+
+--- a/apps/openmw/mwgui/spellbuyingwindow.cpp
++++ b/apps/openmw/mwgui/spellbuyingwindow.cpp
+@@ -7,6 +7,8 @@
+ #include <components/esm3/loadgmst.hpp>
+ #include <components/esm3/loadrace.hpp>
+ #include <components/settings/values.hpp>
++
++#include <components/debug/debuglog.hpp>
+ 
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/inputmanager.hpp"
+@@ -95,10 +97,31 @@
+         mSpellButtons.clear();
+     }
+ 
++    // COMPANION: true between COMPANION_SPELLBUYING_OPEN and _CLOSED (Vanilla-only window;
++    // drives the conversation overlay stepping aside). File-static: one window instance.
++    static bool sSpellBuyingWindowCompanionOpen = false;
++
+     void SpellBuyingWindow::setPtr(const MWWorld::Ptr& actor)
+     {
++        sSpellBuyingWindowCompanionOpen = true;
++        Log(Debug::Info) << "COMPANION_SPELLBUYING_OPEN";
+         setPtr(actor, 0);
+     }
++
++    void SpellBuyingWindow::onClose()
++    {
++        WindowBase::onClose();
++        // COMPANION: emit the close signal only on the real mode-pop (containsMode false),
++        // not on a transient hide, matching TradeWindow::onClose. Lets the bottom-screen
++        // conversation overlay come back once this native window is gone (Vanilla mode).
++        if (sSpellBuyingWindowCompanionOpen
++            && !MWBase::Environment::get().getWindowManager()->containsMode(GM_SpellBuying))
++        {
++            sSpellBuyingWindowCompanionOpen = false;
++            Log(Debug::Info) << "COMPANION_SPELLBUYING_CLOSED";
++        }
++    }
++
+ 
+     void SpellBuyingWindow::setPtr(const MWWorld::Ptr& actor, int startOffset)
+     {
+--- a/apps/openmw/mwgui/spellbuyingwindow.hpp
++++ b/apps/openmw/mwgui/spellbuyingwindow.hpp
+@@ -51,6 +51,8 @@
+ 
+         void updateLabels();
+ 
++        void onClose() override;
++
+         void onReferenceUnavailable() override;
+ 
+         bool playerHasSpell(const ESM::RefId& id);

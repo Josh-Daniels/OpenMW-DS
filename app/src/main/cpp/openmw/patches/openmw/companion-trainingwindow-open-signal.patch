@@ -1,0 +1,73 @@
+Emit COMPANION_TRAINING_OPEN/_CLOSED around the native TrainingWindow
+so the bottom-screen conversation overlay (a top-screen Android panel that layers above the
+OpenMW MyGUI surface) can step aside while this dialogue-service window is open in Vanilla
+mode. OPEN is emitted from setPtr (window opened for an actor); CLOSED from an onClose()
+override, guarded by a file-static bool + !containsMode(GM_...) so it fires exactly once on
+the real mode-pop, not on a transient hide (e.g. TrainingWindow hides itself during its
+time-advance animation). These windows are Vanilla-only today, so the normal visible->hidden
+onClose() transition always fires — no explicit hidden-window emit is needed (unlike barter).
+Kotlin side: LogParser prefixes -> a boolean session StateFlow in GameStateRepository ->
+nativeServiceVanillaUp in EngineActivity. Added July 2026.
+
+--- a/apps/openmw/mwgui/trainingwindow.cpp
++++ b/apps/openmw/mwgui/trainingwindow.cpp
+@@ -3,6 +3,8 @@
+ #include <MyGUI_Button.h>
+ #include <MyGUI_Gui.h>
+ #include <MyGUI_TextIterator.h>
++
++#include <components/debug/debuglog.hpp>
+ 
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/luamanager.hpp"
+@@ -58,11 +60,17 @@
+         center();
+     }
+ 
++    // COMPANION: true between COMPANION_TRAINING_OPEN and _CLOSED (Vanilla-only window).
++    static bool sTrainingWindowCompanionOpen = false;
++
+     void TrainingWindow::setPtr(const MWWorld::Ptr& actor)
+     {
+         if (actor.isEmpty() || !actor.getClass().isActor())
+             throw std::runtime_error("Invalid argument in TrainingWindow::setPtr");
+         mPtr = actor;
++
++        sTrainingWindowCompanionOpen = true;
++        Log(Debug::Info) << "COMPANION_TRAINING_OPEN";
+ 
+         MWWorld::Ptr player = MWMechanics::getPlayer();
+         int playerGold = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
+@@ -160,6 +168,21 @@
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Training);
+     }
+ 
++    void TrainingWindow::onClose()
++    {
++        WindowBase::onClose();
++        // COMPANION: emit the close signal only on the real mode-pop (containsMode false),
++        // not on a transient hide, matching TradeWindow::onClose. Lets the bottom-screen
++        // conversation overlay come back once this native window is gone (Vanilla mode).
++        if (sTrainingWindowCompanionOpen
++            && !MWBase::Environment::get().getWindowManager()->containsMode(GM_Training))
++        {
++            sTrainingWindowCompanionOpen = false;
++            Log(Debug::Info) << "COMPANION_TRAINING_CLOSED";
++        }
++    }
++
++
+     void TrainingWindow::onTrainingSelected(MyGUI::Widget* sender)
+     {
+         const ESM::Skill* skill = *sender->getUserData<const ESM::Skill*>();
+--- a/apps/openmw/mwgui/trainingwindow.hpp
++++ b/apps/openmw/mwgui/trainingwindow.hpp
+@@ -34,6 +34,8 @@
+         std::string_view getWindowIdForLua() const override { return "Training"; }
+ 
+     protected:
++        void onClose() override;
++
+         void onReferenceUnavailable() override;
+ 
+         void onCancelButtonClicked(MyGUI::Widget* sender);

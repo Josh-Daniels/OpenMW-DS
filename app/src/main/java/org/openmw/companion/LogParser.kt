@@ -59,6 +59,17 @@ object LogParser {
     // Rest/wait (GM_Rest). OPEN:<mode>|<dateString>|<warning> then CLOSED. Distinct tokens.
     const val P_SLEEP_OPEN = "COMPANION_SLEEP_OPEN:"
     const val P_SLEEP_CLOSED = "COMPANION_SLEEP_CLOSED"
+    // Bare open/closed signals (no payload) for the four dialogue-service windows that push over
+    // GM_Dialogue. Drive a boolean session in GameStateRepository so the conversation overlay steps
+    // aside while the native window is up in Vanilla mode. Emitted from each window's setPtr/onClose.
+    const val P_SPELLBUYING_OPEN = "COMPANION_SPELLBUYING_OPEN"
+    const val P_SPELLBUYING_CLOSED = "COMPANION_SPELLBUYING_CLOSED"
+    const val P_TRAINING_OPEN = "COMPANION_TRAINING_OPEN"
+    const val P_TRAINING_CLOSED = "COMPANION_TRAINING_CLOSED"
+    const val P_SPELLMAKING_OPEN = "COMPANION_SPELLMAKING_OPEN"
+    const val P_SPELLMAKING_CLOSED = "COMPANION_SPELLMAKING_CLOSED"
+    const val P_ENCHANTING_OPEN = "COMPANION_ENCHANTING_OPEN"
+    const val P_ENCHANTING_CLOSED = "COMPANION_ENCHANTING_CLOSED"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"

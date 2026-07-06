@@ -1,0 +1,72 @@
+Emit COMPANION_SPELLMAKING_OPEN/_CLOSED around the native SpellCreationDialog
+so the bottom-screen conversation overlay (a top-screen Android panel that layers above the
+OpenMW MyGUI surface) can step aside while this dialogue-service window is open in Vanilla
+mode. OPEN is emitted from setPtr (window opened for an actor); CLOSED from an onClose()
+override, guarded by a file-static bool + !containsMode(GM_...) so it fires exactly once on
+the real mode-pop, not on a transient hide (e.g. TrainingWindow hides itself during its
+time-advance animation). These windows are Vanilla-only today, so the normal visible->hidden
+onClose() transition always fires — no explicit hidden-window emit is needed (unlike barter).
+Kotlin side: LogParser prefixes -> a boolean session StateFlow in GameStateRepository ->
+nativeServiceVanillaUp in EngineActivity. Added July 2026.
+
+--- a/apps/openmw/mwgui/spellcreationdialog.cpp
++++ b/apps/openmw/mwgui/spellcreationdialog.cpp
+@@ -13,6 +13,8 @@
+ #include <components/widgets/list.hpp>
+ 
+ #include <components/esm3/loadgmst.hpp>
++
++#include <components/debug/debuglog.hpp>
+ 
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/inputmanager.hpp"
+@@ -602,10 +604,16 @@
+         }
+     }
+ 
++    // COMPANION: true between COMPANION_SPELLMAKING_OPEN and _CLOSED (Vanilla-only window).
++    static bool sSpellCreationDialogCompanionOpen = false;
++
+     void SpellCreationDialog::setPtr(const MWWorld::Ptr& actor)
+     {
+         if (actor.isEmpty() || !actor.getClass().isActor())
+             throw std::runtime_error("Invalid argument in SpellCreationDialog::setPtr");
++
++        sSpellCreationDialogCompanionOpen = true;
++        Log(Debug::Info) << "COMPANION_SPELLMAKING_OPEN";
+ 
+         mPtr = actor;
+         mNameEdit->setCaption({});
+@@ -621,6 +629,21 @@
+     {
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_SpellCreation);
+     }
++
++    void SpellCreationDialog::onClose()
++    {
++        WindowBase::onClose();
++        // COMPANION: emit the close signal only on the real mode-pop (containsMode false),
++        // not on a transient hide, matching TradeWindow::onClose. Lets the bottom-screen
++        // conversation overlay come back once this native window is gone (Vanilla mode).
++        if (sSpellCreationDialogCompanionOpen
++            && !MWBase::Environment::get().getWindowManager()->containsMode(GM_SpellCreation))
++        {
++            sSpellCreationDialogCompanionOpen = false;
++            Log(Debug::Info) << "COMPANION_SPELLMAKING_CLOSED";
++        }
++    }
++
+ 
+     void SpellCreationDialog::onBuyButtonClicked(MyGUI::Widget* /*sender*/)
+     {
+--- a/apps/openmw/mwgui/spellcreationdialog.hpp
++++ b/apps/openmw/mwgui/spellcreationdialog.hpp
+@@ -172,6 +172,8 @@
+ 
+         void setPtr(const MWWorld::Ptr& actor) override;
+ 
++        void onClose() override;
++
+         std::string_view getWindowIdForLua() const override { return "SpellCreationDialog"; }
+ 
+     protected:

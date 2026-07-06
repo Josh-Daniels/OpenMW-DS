@@ -80,6 +80,11 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // GM_Travel window is suppressed and the bottom screen is the sole surface.
     GameUiElement("game_ui_travel", "Travel"),
     GameUiElement("game_ui_levelup", "Level up", pending = true),
+    // Dialogue-service windows (GM_SpellBuying / GM_Training) — pending until a companion overlay
+    // lands. Their native suppression is wired (companion-hide-gamewindows-on-dsmode.patch), inert
+    // while pending; the menu shows them locked VANILLA / Bottom, same as the other pending rows.
+    GameUiElement("game_ui_spellbuying", "Spell buying", pending = true),
+    GameUiElement("game_ui_training", "Training", pending = true),
     GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
     GameUiElement("game_ui_enchanting", "Enchanting", pending = true),
     GameUiElement("game_ui_alchemy", "Alchemy", pending = true),

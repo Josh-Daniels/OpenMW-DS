@@ -1,0 +1,72 @@
+Emit COMPANION_ENCHANTING_OPEN/_CLOSED around the native EnchantingDialog
+so the bottom-screen conversation overlay (a top-screen Android panel that layers above the
+OpenMW MyGUI surface) can step aside while this dialogue-service window is open in Vanilla
+mode. OPEN is emitted from setPtr (window opened for an actor); CLOSED from an onClose()
+override, guarded by a file-static bool + !containsMode(GM_...) so it fires exactly once on
+the real mode-pop, not on a transient hide (e.g. TrainingWindow hides itself during its
+time-advance animation). These windows are Vanilla-only today, so the normal visible->hidden
+onClose() transition always fires — no explicit hidden-window emit is needed (unlike barter).
+Kotlin side: LogParser prefixes -> a boolean session StateFlow in GameStateRepository ->
+nativeServiceVanillaUp in EngineActivity. Added July 2026.
+
+--- a/apps/openmw/mwgui/enchantingdialog.cpp
++++ b/apps/openmw/mwgui/enchantingdialog.cpp
+@@ -12,6 +12,8 @@
+ #include <components/widgets/list.hpp>
+ 
+ #include <components/esm3/loadgmst.hpp>
++
++#include <components/debug/debuglog.hpp>
+ 
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/mechanicsmanager.hpp"
+@@ -146,10 +148,16 @@
+         }
+     }
+ 
++    // COMPANION: true between COMPANION_ENCHANTING_OPEN and _CLOSED (Vanilla-only window).
++    static bool sEnchantingDialogCompanionOpen = false;
++
+     void EnchantingDialog::setPtr(const MWWorld::Ptr& ptr)
+     {
+         if (ptr.isEmpty() || (ptr.getType() != ESM::REC_MISC && !ptr.getClass().isActor()))
+             throw std::runtime_error("Invalid argument in EnchantingDialog::setPtr");
++
++        sEnchantingDialogCompanionOpen = true;
++        Log(Debug::Info) << "COMPANION_ENCHANTING_OPEN";
+ 
+         mName->setCaption({});
+ 
+@@ -202,6 +210,21 @@
+     {
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Enchanting);
+     }
++
++    void EnchantingDialog::onClose()
++    {
++        WindowBase::onClose();
++        // COMPANION: emit the close signal only on the real mode-pop (containsMode false),
++        // not on a transient hide, matching TradeWindow::onClose. Lets the bottom-screen
++        // conversation overlay come back once this native window is gone (Vanilla mode).
++        if (sEnchantingDialogCompanionOpen
++            && !MWBase::Environment::get().getWindowManager()->containsMode(GM_Enchanting))
++        {
++            sEnchantingDialogCompanionOpen = false;
++            Log(Debug::Info) << "COMPANION_ENCHANTING_CLOSED";
++        }
++    }
++
+ 
+     void EnchantingDialog::onSelectItem(MyGUI::Widget* /*sender*/)
+     {
+--- a/apps/openmw/mwgui/enchantingdialog.hpp
++++ b/apps/openmw/mwgui/enchantingdialog.hpp
+@@ -30,6 +30,8 @@
+         /// Actor Ptr: buy enchantment from this actor
+         /// Soulgem Ptr: player self-enchant
+         void setPtr(const MWWorld::Ptr& ptr) override;
++
++        void onClose() override;
+ 
+         void resetReference() override;
+ 
