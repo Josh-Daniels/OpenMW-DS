@@ -18,6 +18,13 @@ object CompanionActions {
 
     fun readItem(id: String) = runCommand("CMP:read $id")
 
+    // "Use" an item the way the native inventory does (double-click / drag onto the
+    // paper doll): potion → drink, ingredient → eat, apparatus → alchemy menu,
+    // repair tool → repair menu. Lua fires the stock ItemUsage `UseItem` global
+    // event, which dispatches per item type. Distinct from equip (worn gear) and
+    // from the merchant repairItem() above.
+    fun useItem(id: String) = runCommand("CMP:use $id")
+
     fun refreshJournal() = runCommand("CMP:journal")
 
     // Opens the in-game world map (Lua handles CMP:openmap via AddUiMode).

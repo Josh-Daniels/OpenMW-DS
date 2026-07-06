@@ -176,6 +176,12 @@ local function itemCategory(item)
                 return "book"
     elseif types.Potion.objectIsInstance(item) then return "potion"
     elseif types.Ingredient.objectIsInstance(item) then return "ingredient"
+    -- Apparatus (mortar/retort/…) and Repair tools (hammers/prongs) are NOT worn —
+    -- their native use() opens the Alchemy / Repair menu (ActionAlchemy/ActionRepair),
+    -- so the UI routes a tap on them to CMP:use, not CMP:equip. Give them distinct
+    -- categories so they're separable from generic misc.
+    elseif types.Apparatus.objectIsInstance(item) then return "apparatus"
+    elseif types.Repair.objectIsInstance(item) then return "repair"
     else return "misc" end
 end
 
@@ -1100,7 +1106,10 @@ local function slotForItem(item, currentEquip)
     elseif types.Probe.objectIsInstance(item) then
         return 16  -- carried_right, used with attack button
     elseif types.Light.objectIsInstance(item) then
-        return 19  -- carried_left (torches, lanterns)
+        return 17  -- Slot_CarriedLeft (torches, lanterns). NOTE: must be 17, not 19 —
+                   -- setEquipment's loop only iterates slots 0..(Slots-1)=0..18 and
+                   -- looks up equipment[slot], so a key of 19 is silently dropped and
+                   -- the torch never equips. 17 = InventoryStore::Slot_CarriedLeft.
     elseif types.Armor.objectIsInstance(item) then
         local t = types.Armor.record(item).type
         local AT = types.Armor.TYPE
@@ -1173,6 +1182,28 @@ local function unequipItem(arg)
     else
         print("COMPANION_DEBUG: unequip - not worn: " .. arg)
     end
+end
+
+-- "Use" an item exactly like the native inventory (double-click / drag onto the
+-- paper doll): potion → drink, ingredient → eat, apparatus → alchemy menu, repair
+-- tool → repair menu. There is NO local :use() binding — the only way to trigger
+-- the per-type MWWorld::Action is the stock ItemUsage `UseItem` GLOBAL event
+-- (omw/usehandlers.lua → world._runStandardUseAction → WindowManager::useItem →
+-- item.class.use()). Its doc explicitly supports "any script": sendGlobalEvent(
+-- 'UseItem', {object = item, actor = player}). arg is a per-stack instance id
+-- (preferred) or a recordId (fallback), same as equipItem.
+local function useItem(arg)
+    local found = nil
+    for _, item in ipairs(types.Actor.inventory(self):getAll()) do
+        if stackId(item) == arg then found = item; break end
+    end
+    if not found then found = types.Actor.inventory(self):find(arg) end
+    if not found then
+        print("COMPANION_DEBUG: use - not found: " .. arg)
+        return
+    end
+    core.sendGlobalEvent('UseItem', { object = found, actor = self.object })
+    print("COMPANION_DEBUG: use " .. arg)
 end
 
 -- ===== On-demand item / spell info (CMP:info) =====
@@ -1482,6 +1513,12 @@ local function dispatchCommand(command)
     elseif action == "unequip" then
         unequipItem(arg)
         exportEquipment()
+        exportInventory()
+    elseif action == "use" then
+        -- potion/ingredient/apparatus/repair — consume or open the alchemy/repair
+        -- menu via the native use() action (see useItem). Re-export so a consumed
+        -- potion/ingredient drops out of the list promptly (the slow tick would too).
+        useItem(arg)
         exportInventory()
     elseif action == "drop" then
         local id, countStr = string.match(arg, "^(.+)|(%d+)$")

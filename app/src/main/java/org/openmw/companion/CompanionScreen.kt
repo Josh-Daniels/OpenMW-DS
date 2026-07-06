@@ -247,11 +247,31 @@ private val INV_CATEGORIES = listOf(
                                   "shield", "armor")),
     InvCategory("Apparel", setOf("amulet", "left_ring", "shirt", "pants", "skirt",
                                   "robe", "clothing")),
-    InvCategory("Tools",   setOf("lockpick", "probe")),
+    InvCategory("Tools",   setOf("lockpick", "probe", "apparatus", "repair")),
     InvCategory("Books",       setOf("book", "scroll")),
     InvCategory("Consumables", setOf("potion", "ingredient")),
     InvCategory("Misc",        setOf("misc", "carried_left")),
 )
+
+// How a tap / long-press acts on an inventory item. Mutually exclusive, keyed off
+// the coarse category from Lua's itemCategory(). Kept in one place so the two
+// inventory list call sites (grouped + single-category) stay in agreement.
+//   readable   → open the book/scroll reader (CMP:read)
+//   usable     → native use() action (CMP:use): potion=drink, ingredient=eat,
+//                apparatus=alchemy menu, repair=repair menu — NONE are worn
+//   equippable → worn gear toggled via CMP:equip / CMP:unequip (weapons, armor,
+//                clothing, lockpick/probe, and lights/torches → carried_left)
+private fun InventoryItem.isReadable() = category == "book" || category == "scroll"
+private fun InventoryItem.isUsable() =
+    category == "potion" || category == "ingredient" || category == "apparatus" || category == "repair"
+private fun InventoryItem.isEquippable() = !isUsable() && !isReadable() && category != "misc"
+
+// Long-press / tap verb for a usable item: potion→Drink, food→Eat, tool→Use.
+private fun InventoryItem.useVerb() = when (category) {
+    "potion" -> "Drink"
+    "ingredient" -> "Eat"
+    else -> "Use"
+}
 
 // Barter overlay category tabs — one bucket per tab, matching the coarse `cat` the
 // engine emits on COMPANION_BARTER_ITEM (weapon/armor/apparel/tools/consumable/misc).
@@ -3892,8 +3912,9 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                     item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
                     items(groupItems) { item ->
                         val worn = isWorn(item)
-                        val readable = item.category == "book" || item.category == "scroll"
-                        ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable, iconBitmap = rememberItemIcon(item.icon))
+                        ItemRow(item, worn, equippable = item.isEquippable(),
+                            usable = item.isUsable(), readable = item.isReadable(),
+                            iconBitmap = rememberItemIcon(item.icon))
                     }
                 }
             }
@@ -3905,8 +3926,9 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                     .thenBy { it.displayName().lowercase() })
             items(groupItems) { item ->
                 val worn = isWorn(item)
-                val readable = item.category == "book" || item.category == "scroll"
-                ItemRow(item, worn, equippable = item.category !in setOf("misc", "potion", "ingredient") && !readable, readable, iconBitmap = rememberItemIcon(item.icon))
+                ItemRow(item, worn, equippable = item.isEquippable(),
+                    usable = item.isUsable(), readable = item.isReadable(),
+                    iconBitmap = rememberItemIcon(item.icon))
             }
         }
         item { Spacer(Modifier.height(4.dp)) }
@@ -3959,6 +3981,7 @@ private fun ItemRow(
     item: InventoryItem,
     worn: Boolean,
     equippable: Boolean,
+    usable: Boolean = false,
     readable: Boolean,
     iconBitmap: ImageBitmap? = null
 ) {
@@ -3981,6 +4004,7 @@ private fun ItemRow(
                             val target = item.stackId.ifEmpty { item.id }
                             when {
                                 readable -> CompanionActions.readItem(item.id)
+                                usable -> CompanionActions.useItem(item.id)
                                 equippable && worn -> CompanionActions.unequipItem(target)
                                 equippable -> CompanionActions.equipItem(target)
                             }
@@ -4153,6 +4177,13 @@ private fun ItemRow(
                 DropdownMenuItem(
                     text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
                     onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.readItem(item.id) },
+                    colors = menuItemColors
+                )
+            }
+            if (usable) {
+                DropdownMenuItem(
+                    text = { Text(item.useVerb(), fontFamily = MwBody, fontSize = 13.sp) },
+                    onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.useItem(item.id) },
                     colors = menuItemColors
                 )
             }
