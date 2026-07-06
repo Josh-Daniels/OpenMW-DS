@@ -86,6 +86,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 
 // Splash image
 import androidx.compose.ui.res.painterResource
@@ -95,6 +96,7 @@ import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.time.Duration.Companion.milliseconds
 import android.content.Context
@@ -198,6 +200,20 @@ private val MwData    = FontFamily.Monospace
 
 private const val TOP_BAR_SPACE = 76
 private const val BOTTOM_BAR_SPACE = 76
+// Unified row font size for the SPLIT-conversation bottom-screen surfaces: the dialogue
+// topics/services list plus the persuade / repair / travel popups. BOTTOM/TOP modes keep their
+// own smaller defaults.
+private val SPLIT_ROW_FONT_SIZE = 16.sp
+// Unified panel size for those same SPLIT surfaces: width matches the topics popup and height
+// spans the HUD map box's vertical band (TOP_BAR_SPACE..BOTTOM_BAR_SPACE), so topics, persuade,
+// repair and travel are all identically sized and line up with the map on the HUD page. Applied
+// via [splitDialoguePanel]; the outer scrim supplies the band padding.
+private const val SPLIT_PANEL_WIDTH = 0.65f
+
+/** Sizes a SPLIT-view dialogue panel (topics/persuade/repair/travel) uniformly: [SPLIT_PANEL_WIDTH]
+ *  of the screen width, full height of the band its parent Box pads to. */
+private fun Modifier.splitDialoguePanel(): Modifier =
+    this.fillMaxWidth(SPLIT_PANEL_WIDTH).fillMaxHeight()
 // Shared height for the "top box" on Inventory (EQUIPPED strip) and Spells
 // (Active Spell) so the two panels line up. Content is vertically centered.
 private val TOP_BOX_HEIGHT = 54.dp
@@ -346,10 +362,6 @@ fun CompanionScreen() {
             .imePadding()
             .background(StoneDark)
     ) {
-        // STATS no longer shows the TopStatBar — its Vitals section covers
-        // Health/Magicka/Fatigue, so the bar would be redundant and just eats space.
-        val showStatBar = tab == Tab.HUD
-
         // Tapped stat row on the Stats screen. Rendered as a root-level overlay
         // (below) so its scrim covers the tab bars, exactly like ItemInfoOverlay.
         var selectedStat by remember { mutableStateOf<StatInfo?>(null) }
@@ -365,16 +377,6 @@ fun CompanionScreen() {
             Tab.HUD -> MapPanel(state, splashVisible = splashVisible)
             Tab.STATS -> StatsPanel(state, onSelectStat = { selectedStat = it })
             Tab.JOURNAL -> JournalPanel()
-        }
-
-        if (showStatBar) {
-            TopStatBar(
-                state = state,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .padding(12.dp)
-            )
         }
 
         BottomTabBar(
@@ -632,15 +634,14 @@ private fun DialogueTopicsOverlay(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        // Match the HUD map window's vertical band (top/bottom bar spacing) so
-                        // this panel is the same height as the map on the HUD page.
+                        // Same vertical band as the HUD map box (TOP_BAR_SPACE..BOTTOM_BAR_SPACE)
+                        // so the topics panel lines up with the map on the HUD page.
                         .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp),
                     contentAlignment = Alignment.TopCenter
                 ) {
                     Column(
                         modifier = Modifier
-                            .fillMaxWidth(0.65f)
-                            .fillMaxHeight()
+                            .splitDialoguePanel()
                             .mwPanel()
                             .pointerInput(Unit) { detectTapGestures {} }
                     ) {
@@ -653,6 +654,10 @@ private fun DialogueTopicsOverlay(
                             choicesActive = choices.isNotEmpty(),
                             interactive = choices.isEmpty(),
                             onPersuadeTapped = { showPersuasion = true },
+                            // SPLIT mode uses a larger, unified row font (topics/services on the
+                            // bottom screen — matches the persuade/repair/travel popups).
+                            // BOTTOM/TOP keep the default 13sp.
+                            rowFontSize = SPLIT_ROW_FONT_SIZE,
                             modifier = Modifier.fillMaxSize().padding(8.dp)
                         )
                     }
@@ -1033,6 +1038,7 @@ private fun DialogueRightColumn(
     choicesActive: Boolean,
     interactive: Boolean,
     onPersuadeTapped: () -> Unit,
+    rowFontSize: TextUnit = 13.sp,
     modifier: Modifier = Modifier
 ) {
     // Barter, Repair and Travel are pulled out of the services list so they can sit above the
@@ -1041,7 +1047,17 @@ private fun DialogueRightColumn(
     val barterService = services.firstOrNull { it.equals("Barter", ignoreCase = true) }
     val repairService = services.firstOrNull { it.equals("Repair", ignoreCase = true) }
     val travelService = services.firstOrNull { it.equals("Travel", ignoreCase = true) }
-    val otherServices = services.filter { it != barterService && it != repairService && it != travelService }
+    // "Beds" (renting a room) is a dialogue TOPIC in Morrowind, not a service window — it's exported
+    // among the topics and (when tapped) fires a yes/no choice. Pull it out of whichever list it
+    // arrives in so it can sit in the services block above the divider; dispatch it as a service or
+    // a topic depending on where it came from.
+    val bedsFromService = services.firstOrNull { it.equals("Beds", ignoreCase = true) }
+    val bedsFromTopic = topics.firstOrNull { it.equals("Beds", ignoreCase = true) }
+    val bedsService = bedsFromService ?: bedsFromTopic
+    val otherServices = services.filter {
+        it != barterService && it != repairService && it != travelService && it != bedsService
+    }
+    val topicRows = topics.filter { it != bedsService }
 
     Column(modifier) {
         // 1. Disposition bar (fixed at the top). Hidden when unknown (< 0, e.g. a creature).
@@ -1059,15 +1075,27 @@ private fun DialogueRightColumn(
             // Barter (if the NPC offers it) — a plain row, identical to the topic rows.
             if (barterService != null) {
                 item {
-                    DialogueOptionRow(barterService, dimmed = choicesActive) {
+                    DialogueOptionRow(barterService, dimmed = choicesActive, fontSize = rowFontSize) {
                         if (interactive) CompanionActions.activateDialogueService(barterService)
+                    }
+                }
+            }
+            // Beds (if the NPC offers rent) — SAME styling, above Persuade in the services block.
+            // Dispatched as a service when it arrived as one, otherwise as the "Beds" topic.
+            if (bedsService != null) {
+                item {
+                    DialogueOptionRow(bedsService, dimmed = choicesActive, fontSize = rowFontSize) {
+                        if (interactive) {
+                            if (bedsFromService != null) CompanionActions.activateDialogueService(bedsService)
+                            else CompanionActions.selectDialogueTopic(bedsService)
+                        }
                     }
                 }
             }
             // Persuade (if available) — SAME styling as Barter.
             if (persuadeAvailable) {
                 item {
-                    DialogueOptionRow("Persuade", dimmed = choicesActive) {
+                    DialogueOptionRow("Persuade", dimmed = choicesActive, fontSize = rowFontSize) {
                         if (interactive) onPersuadeTapped()
                     }
                 }
@@ -1076,7 +1104,7 @@ private fun DialogueRightColumn(
             // services block above the divider.
             if (repairService != null) {
                 item {
-                    DialogueOptionRow(repairService, dimmed = choicesActive) {
+                    DialogueOptionRow(repairService, dimmed = choicesActive, fontSize = rowFontSize) {
                         if (interactive) CompanionActions.activateDialogueService(repairService)
                     }
                 }
@@ -1086,16 +1114,17 @@ private fun DialogueRightColumn(
             // TravelOverlay (driven by COMPANION_TRAVEL_*) takes over on the bottom screen.
             if (travelService != null) {
                 item {
-                    DialogueOptionRow(travelService, dimmed = choicesActive) {
+                    DialogueOptionRow(travelService, dimmed = choicesActive, fontSize = rowFontSize) {
                         if (interactive) CompanionActions.activateDialogueService(travelService)
                     }
                 }
             }
-            // Divider between the Barter/Persuade/Repair/Travel block and the topics (only if
+            // Divider between the Barter/Persuade/Repair/Travel/Beds block and the topics (only if
             // something's above it). No leading gap: the last action row already draws its own
             // faint under-divider, so the bold divider sits flush against it and reads as a
             // single section divider rather than a second line floating below the faint one.
-            if (barterService != null || persuadeAvailable || repairService != null || travelService != null) {
+            if (barterService != null || persuadeAvailable || repairService != null ||
+                travelService != null || bedsService != null) {
                 item {
                     Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
                     Spacer(Modifier.height(4.dp))
@@ -1103,12 +1132,12 @@ private fun DialogueRightColumn(
             }
             // Any other services first, then the dialogue topics.
             items(otherServices) { service ->
-                DialogueOptionRow(service, dimmed = choicesActive) {
+                DialogueOptionRow(service, dimmed = choicesActive, fontSize = rowFontSize) {
                     if (interactive) CompanionActions.activateDialogueService(service)
                 }
             }
-            items(topics) { topic ->
-                DialogueOptionRow(topic, dimmed = choicesActive) {
+            items(topicRows) { topic ->
+                DialogueOptionRow(topic, dimmed = choicesActive, fontSize = rowFontSize) {
                     if (interactive) CompanionActions.selectDialogueTopic(topic)
                 }
             }
@@ -1137,7 +1166,12 @@ private fun DialogueRightColumn(
 /** One tappable row in the right column — shared by topics, services and choices so
  *  they look identical (only the section header distinguishes them). */
 @Composable
-private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: () -> Unit) {
+private fun DialogueOptionRow(
+    label: String,
+    dimmed: Boolean = false,
+    fontSize: TextUnit = 13.sp,
+    onClick: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1145,7 +1179,7 @@ private fun DialogueOptionRow(label: String, dimmed: Boolean = false, onClick: (
     ) {
         Text(
             label,
-            color = if (dimmed) BoneDim else Bone, fontSize = 13.sp, fontFamily = MwBody,
+            color = if (dimmed) BoneDim else Bone, fontSize = fontSize, fontFamily = MwBody,
             modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 4.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
@@ -1170,17 +1204,28 @@ private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -
         Triple("Bribe 100 Gold", 4, 100),
         Triple("Bribe 1000 Gold", 5, 1000)
     )
+    // In SPLIT conversation mode the bottom-screen popups use a larger row font (matches the
+    // topics/services increase); BOTTOM/TOP keep the default size.
+    val splitMode = UiPreferences.conversationLocationFlow().collectAsState().value ==
+        ConversationLocation.SPLIT
+    val optionFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
     Box(
         modifier = Modifier
             .fillMaxSize()
             .zIndex(30f)
             .background(Color(0x99000000))
+            // In SPLIT view this popup matches the unified topics-panel band; otherwise it stays
+            // a centred, content-sized card.
+            .then(
+                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
+                else Modifier
+            )
             .pointerInput(Unit) { detectTapGestures { onCancel() } },
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .width(360.dp)
+                .then(if (splitMode) Modifier.splitDialoguePanel() else Modifier.width(360.dp))
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
@@ -1205,12 +1250,14 @@ private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -
                     Text(
                         label,
                         color = if (enabled) Bone else BoneDim,
-                        fontSize = 14.sp, fontFamily = MwBody
+                        fontSize = optionFontSize, fontFamily = MwBody
                     )
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
             }
 
+            // In SPLIT view the panel fills the band, so push the gold/cancel row to the bottom.
+            if (splitMode) Spacer(Modifier.weight(1f))
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
@@ -2513,19 +2560,27 @@ private fun repairCondColor(ratio: Float): Color = when {
  */
 @Composable
 private fun RepairOverlay(session: RepairSession) {
+    // Larger, unified row font in SPLIT conversation mode (matches the topics/services increase).
+    val splitMode = UiPreferences.conversationLocationFlow().collectAsState().value ==
+        ConversationLocation.SPLIT
+    val rowFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
     Box(
         modifier = Modifier
             .fillMaxSize()
             .zIndex(17f)
             .background(Color(0xCC0F0C08))
+            // In SPLIT view match the unified topics-panel band; otherwise centre a 0.7×0.86 card.
+            .then(
+                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
+                else Modifier
+            )
             // Swallow taps so nothing falls through to the tab underneath. NO dismiss.
             .pointerInput(Unit) { detectTapGestures {} },
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.7f)
-                .fillMaxHeight(0.86f)
+                .then(if (splitMode) Modifier.splitDialoguePanel() else Modifier.fillMaxWidth(0.7f).fillMaxHeight(0.86f))
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
@@ -2553,6 +2608,7 @@ private fun RepairOverlay(session: RepairSession) {
                         RepairRow(
                             item = item,
                             affordable = item.cost <= session.playerGold,
+                            nameFontSize = rowFontSize,
                             onRepair = { CompanionActions.repairItem(item.sid) }
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
@@ -2590,7 +2646,12 @@ private fun RepairOverlay(session: RepairSession) {
 /** One repair row: name (flex) + condition bar with "X/Y" + cost, tap to repair. Unaffordable
  *  rows are dimmed with a red cost and are not tappable (the engine ignores them anyway). */
 @Composable
-private fun RepairRow(item: RepairItem, affordable: Boolean, onRepair: () -> Unit) {
+private fun RepairRow(
+    item: RepairItem,
+    affordable: Boolean,
+    nameFontSize: TextUnit = 14.sp,
+    onRepair: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2601,7 +2662,7 @@ private fun RepairRow(item: RepairItem, affordable: Boolean, onRepair: () -> Uni
         Text(
             item.name,
             color = if (affordable) Bone else BoneDim,
-            fontSize = 14.sp, fontFamily = MwBody,
+            fontSize = nameFontSize, fontFamily = MwBody,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
@@ -2682,19 +2743,27 @@ private fun RepairButton(
  */
 @Composable
 private fun TravelOverlay(session: TravelSession) {
+    // Larger, unified row font in SPLIT conversation mode (matches the topics/services increase).
+    val splitMode = UiPreferences.conversationLocationFlow().collectAsState().value ==
+        ConversationLocation.SPLIT
+    val rowFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
     Box(
         modifier = Modifier
             .fillMaxSize()
             .zIndex(17f)
             .background(Color(0xCC0F0C08))
+            // In SPLIT view match the unified topics-panel band; otherwise centre a 0.7×0.86 card.
+            .then(
+                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
+                else Modifier
+            )
             // Swallow taps so nothing falls through to the tab underneath. NO dismiss.
             .pointerInput(Unit) { detectTapGestures {} },
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.7f)
-                .fillMaxHeight(0.86f)
+                .then(if (splitMode) Modifier.splitDialoguePanel() else Modifier.fillMaxWidth(0.7f).fillMaxHeight(0.86f))
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
@@ -2722,6 +2791,7 @@ private fun TravelOverlay(session: TravelSession) {
                         TravelRow(
                             dest = dest,
                             affordable = dest.cost <= session.playerGold,
+                            nameFontSize = rowFontSize,
                             onTravel = { CompanionActions.travelGo(dest.index) }
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
@@ -2751,7 +2821,12 @@ private fun TravelOverlay(session: TravelSession) {
 /** One travel row: destination name (flex) + cost, tap to travel immediately. Unaffordable rows are
  *  dimmed with a red cost and are not tappable (the engine ignores them anyway). */
 @Composable
-private fun TravelRow(dest: TravelDest, affordable: Boolean, onTravel: () -> Unit) {
+private fun TravelRow(
+    dest: TravelDest,
+    affordable: Boolean,
+    nameFontSize: TextUnit = 14.sp,
+    onTravel: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2762,7 +2837,7 @@ private fun TravelRow(dest: TravelDest, affordable: Boolean, onTravel: () -> Uni
         Text(
             dest.name,
             color = if (affordable) Bone else BoneDim,
-            fontSize = 14.sp, fontFamily = MwBody,
+            fontSize = nameFontSize, fontFamily = MwBody,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
@@ -4145,12 +4220,22 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     var showWeaponName by remember { mutableStateOf(false) }
     var showSpellName by remember { mutableStateOf(false) }
 
-    Box(
-        Modifier
+    // Laid out like Inventory/Spells: a fixed-height top box (the vitals bar) at 12dp from the
+    // top, a 6dp gap, then the map box filling the rest to the tab bar — so all three tabs' boxes
+    // line up. The map still fills its own box, so the crop math and overlays are unaffected.
+    Column(
+        modifier = Modifier
             .fillMaxSize()
-            .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
-            .mwPanel()
+            .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
+        TopStatBar(state, Modifier.fillMaxWidth().height(TOP_BOX_HEIGHT))
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .mwPanel()
+        ) {
         // Canvas fills the whole panel; labels float over it. Tapping the map
         // (anywhere not covered by an overlay declared later in this Box — those
         // consume the tap first via Compose z-order) opens the in-game world map.
@@ -4446,6 +4531,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 )
             }
         }
+        }  // end map Box
     }
 }
 
@@ -4939,6 +5025,14 @@ private fun EquippedStrip(state: GameState) {
             .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // Gold + carried weight, before the EQUIPPED strip. From COMPANION_STATS.
+        StripStat("GOLD", state.gold.toString())
+        StripDivider()
+        StripStat(
+            "WEIGHT",
+            "${state.encumbrance.current.toInt()}/${state.encumbrance.max.toInt()}"
+        )
+        StripDivider()
         Text(
             "EQUIPPED",
             color = BronzeLight,
@@ -4968,6 +5062,41 @@ private fun EquippedStrip(state: GameState) {
             }
         }
     }
+}
+
+/** A compact label-over-value readout for the equipped strip (Gold / Weight). */
+@Composable
+private fun StripStat(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            label,
+            color = BoneDim,
+            fontSize = 8.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+        Text(
+            value,
+            color = BronzeLight,
+            fontSize = 12.sp,
+            fontFamily = MwData,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+    }
+}
+
+/** The 1dp vertical divider used between segments of the equipped strip. */
+@Composable
+private fun StripDivider() {
+    Box(
+        Modifier
+            .padding(horizontal = 10.dp)
+            .width(1.dp)
+            .height(28.dp)
+            .background(BronzeDark)
+    )
 }
 
 @Composable
@@ -6894,11 +7023,19 @@ private val OptionsBg = Color(0xFF1A1410)
 /** Fill of the "active" pill in the two-option selectors. */
 private val PillActiveBg = Color(0xFF3A2A10)
 
+/** Remembers the options-menu scroll position across pause open/close cycles. The menu's host
+ *  window is added/removed each time the pause menu opens, destroying any compose-scoped state, so
+ *  this plain object (like [UiPreferences]/[GameStateRepository]) survives to restore the position. */
+private object OptionsMenuScrollState {
+    var index: Int = 0
+    var offset: Int = 0
+}
+
 /**
  * The display-settings menu. A quick-set row ([All DS]/[All Vanilla]), then three sections:
- * GAME UI (per-element DS/Vanilla), VANILLA HUD (native top-screen HUD element On/Off toggles),
- * and INPUT. Full-screen, scrollable, BronzeLight-themed. Writes to [UiPreferences] live on every
- * tap (no save/cancel).
+ * SCREEN LAYOUT, GAME UI (per-element DS/Vanilla), VANILLA HUD (native top-screen HUD element
+ * On/Off toggles), and INPUT. Full-screen, scrollable, BronzeLight-themed. Writes to
+ * [UiPreferences] live on every tap (no save/cancel).
  *
  * Public because [org.openmw.EngineActivity] hosts it in a WindowManager panel window on
  * the companion Presentation when the pause/options menu opens.
@@ -6907,6 +7044,20 @@ private val PillActiveBg = Color(0xFF3A2A10)
 fun OptionsMenuOverlay() {
     val context = LocalContext.current
     remember(context) { UiPreferences.init(context); true }
+
+    // Restore the scroll position from the last time the menu was open. The overlay window is
+    // added/removed each time the pause menu opens, so a plain rememberLazyListState would reset
+    // to the top; OptionsMenuScrollState survives across those open/close cycles.
+    val listState = rememberLazyListState(
+        OptionsMenuScrollState.index, OptionsMenuScrollState.offset
+    )
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                OptionsMenuScrollState.index = index
+                OptionsMenuScrollState.offset = offset
+            }
+    }
 
     Column(
         modifier = Modifier
@@ -6932,6 +7083,7 @@ fun OptionsMenuOverlay() {
         Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
@@ -6939,11 +7091,6 @@ fun OptionsMenuOverlay() {
         ) {
             // Quick-set row: bulk-set every (non-pending) Game UI element. Never touches HUD.
             item { QuickSetRow() }
-
-            // GAME UI: per-element DS/Vanilla. DS = companion draws it (native suppressed);
-            // Vanilla = native OpenMW shows on the top screen. Pending elements are locked Vanilla.
-            item { OptionsSectionHeader("Game UI") }
-            items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
 
             // SCREEN LAYOUT: which screen each element is drawn on. Conversation, Looting
             // and Bartering support Bottom/Split (Top pending); the rest are fully pending
@@ -6962,6 +7109,11 @@ fun OptionsMenuOverlay() {
                 },
                 key = { "layout_" + it.key }
             ) { ScreenLayoutPendingRow(it) }
+
+            // GAME UI: per-element DS/Vanilla. DS = companion draws it (native suppressed);
+            // Vanilla = native OpenMW shows on the top screen. Pending elements are locked Vanilla.
+            item { OptionsSectionHeader("Game UI") }
+            items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
 
             // VANILLA HUD: whether each native top-screen HUD element is shown (On) or hidden (Off).
             // Always manual — the Quick set buttons never touch these.
@@ -7171,6 +7323,13 @@ private fun TargetHealthLocationRow() {
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Target health", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Shows enemy health bar on the top screen during combat",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(

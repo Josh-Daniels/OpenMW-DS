@@ -362,6 +362,10 @@ data class GameState(
     val cellGridY: Int = 0,
     /** Player yaw in radians (Z-axis Euler angle from self.rotation.z). */
     val rotZ: Float = 0f,
+    /** Player gold (count of Gold_001), from COMPANION_STATS. */
+    val gold: Int = 0,
+    /** Player encumbrance: current = carried weight, max = carry capacity. */
+    val encumbrance: Dynamic = Dynamic(0f, 0f),
     val spells: List<SpellEntry> = emptyList(),
     val inventory: List<InventoryItem> = emptyList(),
     val equipment: Map<String, String> = emptyMap(),

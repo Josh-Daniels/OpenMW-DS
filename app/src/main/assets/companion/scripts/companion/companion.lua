@@ -76,8 +76,15 @@ local function exportStats()
     local rotZ = 0
     pcall(function() rotZ = self.rotation:getYaw() end)
 
+    -- Gold (count of the Gold_001 record) + encumbrance/capacity for the inventory header.
+    local gold = 0
+    pcall(function() gold = types.Actor.inventory(self):countOf("gold_001") end)
+    local encumbrance, capacity = 0, 0
+    pcall(function() encumbrance = types.Actor.getEncumbrance(self) end)
+    pcall(function() capacity = types.Actor.getCapacity(self) end)
+
     print(string.format(
-        'COMPANION_STATS:{"health":{"current":%.1f,"max":%.1f},"magicka":{"current":%.1f,"max":%.1f},"fatigue":{"current":%.1f,"max":%.1f},"cell":"%s","pos":{"x":%.1f,"y":%.1f,"z":%.1f},"cellExt":%s,"cellGX":%d,"cellGY":%d,"rotZ":%.5f}',
+        'COMPANION_STATS:{"health":{"current":%.1f,"max":%.1f},"magicka":{"current":%.1f,"max":%.1f},"fatigue":{"current":%.1f,"max":%.1f},"cell":"%s","pos":{"x":%.1f,"y":%.1f,"z":%.1f},"cellExt":%s,"cellGX":%d,"cellGY":%d,"rotZ":%.5f,"gold":%d,"encumbrance":%.1f,"capacity":%.1f}',
         health.current, health.base,
         magicka.current, magicka.base,
         fatigue.current, fatigue.base,
@@ -85,7 +92,8 @@ local function exportStats()
         pos.x, pos.y, pos.z,
         isExt and "true" or "false",
         gx, gy,
-        rotZ
+        rotZ,
+        gold, encumbrance, capacity
     ))
 end
 

@@ -203,6 +203,11 @@ object LogParser {
             cellGridX = o.optInt("cellGX", 0),
             cellGridY = o.optInt("cellGY", 0),
             rotZ = o.optDouble("rotZ", 0.0).toFloat(),
+            // gold + encumbrance are optional so pre-update Lua (no fields) keeps working.
+            gold = o.optInt("gold", current.gold),
+            encumbrance = if (o.has("encumbrance"))
+                Dynamic(o.optDouble("encumbrance", 0.0).toFloat(), o.optDouble("capacity", 0.0).toFloat())
+            else current.encumbrance,
             lastUpdateMs = System.currentTimeMillis()
         )
     }

@@ -146,32 +146,37 @@ object UiPreferences {
     // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default SPLIT.
     private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT)
 
-    // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default BOTTOM
-    // (the classic bottom-screen overlay). TOP is pending — the menu greys that pill.
-    private val lootingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
-    private val barterLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default SPLIT
+    // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
+    private val lootingLocationFlow = MutableStateFlow(ScreenLocation.SPLIT)
+    private val barterLocationFlow = MutableStateFlow(ScreenLocation.SPLIT)
 
-    // Where the combat target's health bar is drawn (BOTTOM / TOP). Default BOTTOM.
-    private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.BOTTOM)
+    // Where the combat target's health bar is drawn (BOTTOM / TOP). Default TOP.
+    private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.TOP)
 
     // Whether the player's vitals (health/magicka/fatigue) ALSO show on the top screen during
-    // combat. Default false (bottom-screen HUD only).
-    private val playerCombatFlow = MutableStateFlow(false)
+    // combat. Default true (also shown on the top screen).
+    private val playerCombatFlow = MutableStateFlow(true)
 
     // HUD elements are always drawn on the bottom screen by the companion; this Boolean toggles
     // whether the NATIVE top-screen version is visible (true = On/visible, false = Off/hidden).
-    // Keyed by HUD element key, default true (On). Actual native hiding is implemented separately.
+    // Keyed by HUD element key. Default Off for every element EXCEPT the crosshair (On) — the
+    // companion draws the rest on the bottom screen. Actual native hiding is implemented separately.
     private val hudFlows: Map<String, MutableStateFlow<Boolean>> =
-        HUD_ELEMENTS.associate { it.key to MutableStateFlow(true) }
+        HUD_ELEMENTS.associate { it.key to MutableStateFlow(hudDefaultOn(it.key)) }
 
     // Input section: whether touch / thumbsticks drive the top-screen game cursor.
     // Default false (off). The actual cursor suppression lives in a native patch;
     // this only stores the preference.
     private val gameCursorFlow = MutableStateFlow(false)
 
-    // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default true.
+    // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default false.
     // Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
-    private val alpha3OverlayFlow = MutableStateFlow(true)
+    private val alpha3OverlayFlow = MutableStateFlow(false)
+
+    /** Default On/Off for a Vanilla HUD element: only the crosshair defaults On; the companion
+     *  draws every other HUD element on the bottom screen, so their native versions default Off. */
+    private fun hudDefaultOn(key: String): Boolean = key == "hud_crosshair"
 
     /** Load persisted values into the flows. Idempotent — safe to call on every compose. */
     fun init(context: Context) {
@@ -201,11 +206,11 @@ object UiPreferences {
         p.getString(TARGET_HEALTH_LOCATION, null)
             ?.let { runCatching { TargetHealthLocation.valueOf(it) }.getOrNull() }
             ?.let { targetHealthLocationFlow.value = it }
-        playerCombatFlow.value = p.getBoolean(PLAYER_COMBAT, false)
+        playerCombatFlow.value = p.getBoolean(PLAYER_COMBAT, true)
         HUD_ELEMENTS.forEach { el ->
-            hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, true)
+            hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, hudDefaultOn(el.key))
         }
-        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, true)
+        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, false)
     }
 
     /** The DS/Vanilla mode for a Game UI element (e.g. "game_ui_looting"). */
