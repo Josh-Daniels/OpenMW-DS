@@ -19,6 +19,14 @@ import kotlinx.coroutines.flow.asStateFlow
 enum class ConversationLocation { BOTTOM, SPLIT, TOP }
 
 /**
+ * Where the combat target's health bar is drawn.
+ * - [BOTTOM]: original behaviour — the bottom-screen HUD combat-target overlay.
+ * - [TOP]: an additional top-centre overlay window on the top screen, shown while a combat
+ *   target exists. The bottom-screen version is not drawn in this mode.
+ */
+enum class TargetHealthLocation { BOTTOM, TOP }
+
+/**
  * Per-element rendering mode for a "Game UI" element (a menu/overlay the companion can take
  * over from native OpenMW).
  * - [DS]: the companion draws it on the bottom screen; the native top-screen version is suppressed.
@@ -104,6 +112,8 @@ object UiPreferences {
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
     private const val GAME_CURSOR = "game_cursor"
     private const val CONVERSATION_LOCATION = "conversation_location"
+    private const val TARGET_HEALTH_LOCATION = "layout_target_health"
+    private const val PLAYER_COMBAT = "layout_player_combat"
     private const val HUD_ON_PREFIX = "hud_on_"
     private const val ALPHA3_OVERLAY = "alpha3_overlay"
 
@@ -121,6 +131,13 @@ object UiPreferences {
 
     // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default SPLIT.
     private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT)
+
+    // Where the combat target's health bar is drawn (BOTTOM / TOP). Default BOTTOM.
+    private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.BOTTOM)
+
+    // Whether the player's vitals (health/magicka/fatigue) ALSO show on the top screen during
+    // combat. Default false (bottom-screen HUD only).
+    private val playerCombatFlow = MutableStateFlow(false)
 
     // HUD elements are always drawn on the bottom screen by the companion; this Boolean toggles
     // whether the NATIVE top-screen version is visible (true = On/visible, false = Off/hidden).
@@ -156,6 +173,10 @@ object UiPreferences {
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
             ?.let { conversationLocationFlow.value = it }
+        p.getString(TARGET_HEALTH_LOCATION, null)
+            ?.let { runCatching { TargetHealthLocation.valueOf(it) }.getOrNull() }
+            ?.let { targetHealthLocationFlow.value = it }
+        playerCombatFlow.value = p.getBoolean(PLAYER_COMBAT, false)
         HUD_ELEMENTS.forEach { el ->
             hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, true)
         }
@@ -211,6 +232,24 @@ object UiPreferences {
     fun setConversationLocation(context: Context, loc: ConversationLocation) {
         conversationLocationFlow.value = loc
         editor(context).putString(CONVERSATION_LOCATION, loc.name).apply()
+    }
+
+    /** Where the combat target's health bar is drawn (BOTTOM / TOP). */
+    fun targetHealthLocationFlow(): StateFlow<TargetHealthLocation> = targetHealthLocationFlow.asStateFlow()
+
+    /** Set the target-health location and persist. */
+    fun setTargetHealthLocation(context: Context, loc: TargetHealthLocation) {
+        targetHealthLocationFlow.value = loc
+        editor(context).putString(TARGET_HEALTH_LOCATION, loc.name).apply()
+    }
+
+    /** Whether player vitals also show on the top screen during combat. */
+    fun playerCombatFlow(): StateFlow<Boolean> = playerCombatFlow.asStateFlow()
+
+    /** Enable/disable the top-screen player-combat vitals overlay and persist. */
+    fun setPlayerCombat(context: Context, enabled: Boolean) {
+        playerCombatFlow.value = enabled
+        editor(context).putBoolean(PLAYER_COMBAT, enabled).apply()
     }
 
     /** Enable/disable the top-screen game cursor and persist. */

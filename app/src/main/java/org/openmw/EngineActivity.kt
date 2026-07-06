@@ -8,12 +8,15 @@ import android.hardware.display.DisplayManager
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import org.openmw.companion.CombatTargetTopOverlay
 import org.openmw.companion.CompanionScreen
 import org.openmw.companion.ConversationHistoryOverlay
 import org.openmw.companion.GameStateRepository
 import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
+import org.openmw.companion.PlayerCombatTopOverlay
+import org.openmw.companion.TargetHealthLocation
 import org.openmw.companion.UiPreferences
 
 import android.annotation.SuppressLint
@@ -76,6 +79,7 @@ import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.libsdl.app.SDLActivity
@@ -139,6 +143,12 @@ class EngineActivity : SDLActivity() {
     // element is routed to the top screen (the split-conversation mode).
     private var conversationTopView: View? = null
 
+    // Read-only combat overlays on the TOP screen (this activity's own window / Display 0), shown
+    // while a combat target exists. Target health (top-centre) is gated on the "Target health"
+    // Screen Layout option == TOP; player vitals (top-left) on the "Player status in combat" == On.
+    private var combatTargetTopView: View? = null
+    private var playerCombatTopView: View? = null
+
     external fun getLastResourceName(): String
     external fun initAlpha3()
     private external fun installCompanionSink()
@@ -184,6 +194,8 @@ class EngineActivity : SDLActivity() {
 
         hidePauseOverlay()
         hideConversationTopOverlay()
+        hideCombatTargetTopOverlay()
+        hidePlayerCombatTopOverlay()
 
         // MorrowindDS
         companionPresentation?.dismiss()
@@ -871,6 +883,37 @@ class EngineActivity : SDLActivity() {
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()
             }
         }
+
+        // Top-screen combat-target health overlay: shown while a combat target exists AND the
+        // "Target health" Screen Layout option routes it to the TOP screen. Reuses state.target as
+        // the show/hide trigger (it naturally goes null on combat end / pause / conversation).
+        lifecycleScope.launch {
+            GameStateRepository.state
+                .map { it.target != null }
+                .distinctUntilChanged()
+                .combine(UiPreferences.targetHealthLocationFlow()) { hasTarget, loc ->
+                    hasTarget && loc == TargetHealthLocation.TOP
+                }
+                .distinctUntilChanged()
+                .collect { show ->
+                    if (show) showCombatTargetTopOverlay() else hideCombatTargetTopOverlay()
+                }
+        }
+
+        // Top-screen player-status-in-combat overlay: shown while a combat target exists AND the
+        // "Player status in combat" option is On. Independent of the target-health overlay above.
+        lifecycleScope.launch {
+            GameStateRepository.state
+                .map { it.target != null }
+                .distinctUntilChanged()
+                .combine(UiPreferences.playerCombatFlow()) { hasTarget, on ->
+                    hasTarget && on
+                }
+                .distinctUntilChanged()
+                .collect { show ->
+                    if (show) showPlayerCombatTopOverlay() else hidePlayerCombatTopOverlay()
+                }
+        }
     }
 
     private fun showConversationTopOverlay() {
@@ -909,6 +952,67 @@ class EngineActivity : SDLActivity() {
         val overlay = conversationTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         conversationTopView = null
+    }
+
+    /**
+     * Adds a NON-INTERACTIVE Compose overlay to THIS activity's own window (Display 0 / top screen)
+     * as a TYPE_APPLICATION_PANEL sub-window layered above the OpenMW GL surface. Same technique as
+     * [showConversationTopOverlay] but with FLAG_NOT_TOUCHABLE so all touch passes through to the
+     * game (the combat overlays are read-only). The window token is null until the decor attaches —
+     * defer via post. [alreadyShown] short-circuits if the overlay is already up; on success the new
+     * view is handed back via [onAdded] so the caller can store it.
+     */
+    private fun showTopScreenOverlay(
+        alreadyShown: () -> Boolean,
+        onAdded: (View) -> Unit,
+        content: @Composable () -> Unit,
+    ) {
+        if (alreadyShown()) return
+        val decor = window.decorView
+        decor.post {
+            if (alreadyShown()) return@post
+            val token = decor.windowToken ?: return@post
+            val overlay = ComposeView(this).apply {
+                setViewTreeLifecycleOwner(this@EngineActivity)
+                setViewTreeViewModelStoreOwner(this@EngineActivity)
+                setViewTreeSavedStateRegistryOwner(this@EngineActivity)
+                setContent { content() }
+            }
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply { this.token = token }
+            runCatching { windowManager.addView(overlay, lp) }
+                .onSuccess { onAdded(overlay) }
+                .onFailure { Log.e(TAG, "TOP OVERLAY: addView failed", it) }
+        }
+    }
+
+    private fun showCombatTargetTopOverlay() = showTopScreenOverlay(
+        alreadyShown = { combatTargetTopView != null },
+        onAdded = { combatTargetTopView = it },
+    ) { CombatTargetTopOverlay() }
+
+    private fun hideCombatTargetTopOverlay() {
+        val overlay = combatTargetTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        combatTargetTopView = null
+    }
+
+    private fun showPlayerCombatTopOverlay() = showTopScreenOverlay(
+        alreadyShown = { playerCombatTopView != null },
+        onAdded = { playerCombatTopView = it },
+    ) { PlayerCombatTopOverlay() }
+
+    private fun hidePlayerCombatTopOverlay() {
+        val overlay = playerCombatTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        playerCombatTopView = null
     }
 
     private fun showPauseOverlay() {

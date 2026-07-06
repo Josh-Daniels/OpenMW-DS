@@ -1,0 +1,244 @@
+Companion (bottom-screen travel) — export + control bridge for the native TravelWindow
+(GM_Travel). Mirrors companion-repair-export.patch (a mGuiModeStates single-mode window, not a
+WindowManager member).
+
+Outbound (COMPANION_TRAVEL_*, streamed one small line each for 4096-byte flush safety), emitted
+from TravelWindow::setPtr -> companionExportOpen(): OPEN:<npcName> -> COMPANION_PLAYER_GOLD:<amount>
+-> DEST:<index>|<destinationName>|<cost>|<interior 1/0>* -> END. index is the destination's ordinal
+position among mDestinationsView's children (== transport order). No separate cache: addDestination
+already stores each destination's name/price/interior as widget UserStrings (price is the
+merchant-adjusted cost it computed), which companionExportOpen reads back and companionTravelByIndex
+reuses. Stable handle because GM_Travel pauses the sim (only a travel mutates the set, which ends it).
+
+Inbound: a file-static gCompanionTravelWindow (set in the ctor) plus two extern "C" bridges —
+companionTravelGo / companionTravelCancel — let drainCompanionCommands drive travel from CMP:travel_*
+commands. companionTravelByIndex calls the native onTravelButtonClick(child) UNCHANGED (full
+affordability/gold/time/follower-teleport path — not reimplemented). Each bridge no-ops unless
+containsMode(GM_Travel) (stale-window guard). Prices come from MechanicsManager::getBarterOffer and
+the teleport moves followers (ActionTeleport) — native-only, the reason this must be a native bridge.
+
+Close signal: the native window is HIDDEN the moment the mode opens in DS mode
+(companion-hide-travel-on-dsmode.patch), so the usual visible->hidden onClose() transition never
+fires. COMPANION_TRAVEL_CLOSED is emitted explicitly, once-guarded (gCompanionTravelSessionOpen),
+from every close path: travel success (onTravelButtonClick), the companionTravelCancel bridge
+(bottom-screen Cancel), exit() (B/Escape), onCancelButtonClicked (native Cancel, Vanilla), and
+onReferenceUnavailable (NPC despawn/death).
+diff --git a/apps/openmw/mwgui/travelwindow.cpp b/apps/openmw/mwgui/travelwindow.cpp
+index c97d392ff6..3b040cf6b9 100644
+--- a/apps/openmw/mwgui/travelwindow.cpp
++++ b/apps/openmw/mwgui/travelwindow.cpp
+@@ -1,5 +1,9 @@
+ #include "travelwindow.hpp"
+ 
++#include <cstdlib>
++#include <string>
++#include <string_view>
++
+ #include <MyGUI_Button.h>
+ #include <MyGUI_Gui.h>
+ #include <MyGUI_ScrollView.h>
+@@ -26,6 +30,47 @@
+ #include "../mwmechanics/actorutil.hpp"
+ #include "../mwmechanics/creaturestats.hpp"
+ 
++namespace
++{
++    // ================= Companion (bottom-screen travel) =================
++    // Mirrors companion-repair-export.patch. The native TravelWindow is hidden while GM_Travel is
++    // in DS mode (companion-hide-travel-on-dsmode.patch), and the whole travel flow is driven from
++    // the bottom screen via the extern "C" bridges at the end of this file. Destinations are
++    // addressed by their ordinal index among mDestinationsView's children (insertion order ==
++    // transport order) — a stable handle because GM_Travel pauses the sim, so the set can't change
++    // between an export and the tap that follows it. No separate cache is needed: addDestination
++    // already stores each destination's name / price / interior flag as widget UserStrings, which
++    // companionExportOpen reads back and companionTravelByIndex reuses via the native click handler.
++
++    // The single live TravelWindow, set in its constructor, so the bridges can reach it without
++    // touching WindowManager's private members. Mirrors gCompanionMerchantRepair.
++    MWGui::TravelWindow* gCompanionTravelWindow = nullptr;
++
++    // True between COMPANION_TRAVEL_OPEN and COMPANION_TRAVEL_CLOSED so the close signal is emitted
++    // exactly once, whichever path ends the session (travel tap, bottom-screen Cancel, B/Escape,
++    // native Cancel, lost reference). The native window is HIDDEN the moment the mode opens in DS
++    // mode, so the usual visible->hidden onClose() transition never fires — the close is explicit.
++    bool gCompanionTravelSessionOpen = false;
++
++    void companionEmitTravelClosed()
++    {
++        if (!gCompanionTravelSessionOpen)
++            return;
++        gCompanionTravelSessionOpen = false;
++        Log(Debug::Info) << "COMPANION_TRAVEL_CLOSED";
++    }
++
++    // Keep a name safe inside the pipe-delimited COMPANION_TRAVEL_DEST line.
++    std::string companionTravelSanitize(std::string_view s)
++    {
++        std::string out(s);
++        for (char& c : out)
++            if (c == '|' || c == '\n' || c == '\r')
++                c = ' ';
++        return out;
++    }
++}
++
+ namespace MWGui
+ {
+     TravelWindow::TravelWindow()
+@@ -44,6 +89,8 @@ namespace MWGui
+             mControllerButtons.mA = "#{Interface:Travel}";
+             mControllerButtons.mB = "#{Interface:Cancel}";
+         }
++
++        gCompanionTravelWindow = this;
+     }
+ 
+     void TravelWindow::addDestination(const ESM::RefId& name, const ESM::Position& pos, bool interior)
+@@ -170,6 +217,11 @@ namespace MWGui
+         mDestinationsView->setCanvasSize(
+             MyGUI::IntSize(mDestinationsView->getWidth(), std::max(mDestinationsView->getHeight(), mCurrentY)));
+         mDestinationsView->setVisibleVScroll(true);
++
++        // Companion: mirror the whole travel session (NPC name, gold, destination list) to the
++        // bottom screen. Emitted regardless of DS/Vanilla (Kotlin only SHOWS the overlay when Travel
++        // is DS); the native window is separately hidden in DS mode.
++        companionExportOpen();
+     }
+ 
+     void TravelWindow::onTravelButtonClick(MyGUI::Widget* sender)
+@@ -182,6 +234,11 @@ namespace MWGui
+         if (playerGold < price)
+             return;
+ 
++        // Companion: travel is going ahead (this covers BOTH a native click in Vanilla mode and a
++        // bottom-screen tap in DS mode, which routes here via companionTravelByIndex). The window
++        // and GM_Travel are torn down below, so signal the overlay to dismiss (once-guarded).
++        companionEmitTravelClosed();
++
+         // Set "traveling" flag, so GetPCTraveling can detect teleportation.
+         // We will reset this flag during next world update.
+         MWBase::Environment::get().getWorld()->setPlayerTraveling(true);
+@@ -231,9 +288,63 @@ namespace MWGui
+ 
+     void TravelWindow::onCancelButtonClicked(MyGUI::Widget* /*sender*/)
+     {
++        // Native Cancel button (Vanilla mode). Signal the companion too (once-guarded).
++        companionEmitTravelClosed();
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Travel);
+     }
+ 
++    bool TravelWindow::exit()
++    {
++        // Covers B / Escape (exitCurrentGuiMode -> exit()). The bottom-screen Cancel button routes
++        // through the companionTravelCancel bridge instead, which emits the close itself; the
++        // once-guard prevents a double emit.
++        companionEmitTravelClosed();
++        return true;
++    }
++
++    // ================= Companion (bottom-screen travel) =================
++
++    void TravelWindow::companionExportOpen()
++    {
++        if (mPtr.isEmpty())
++            return;
++
++        MWWorld::Ptr player = MWBase::Environment::get().getWorld()->getPlayerPtr();
++        const int playerGold
++            = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++
++        Log(Debug::Info) << "COMPANION_TRAVEL_OPEN:" << companionTravelSanitize(mPtr.getClass().getName(mPtr));
++        Log(Debug::Info) << "COMPANION_PLAYER_GOLD:" << playerGold;
++
++        // Every child of mDestinationsView is a destination button (clearDestinations destroys them
++        // all, addDestination adds only these), in transport order. Read back the UserStrings
++        // addDestination already set — including the merchant-adjusted price — so nothing is
++        // recomputed. Streamed one small line each (OPEN/DEST*/END) for 4096-byte flush safety.
++        const std::size_t n = mDestinationsView->getChildCount();
++        for (std::size_t i = 0; i < n; ++i)
++        {
++            MyGUI::Widget* dest = mDestinationsView->getChildAt(i);
++            const std::string_view name = dest->getUserString("Destination");
++            const int price = Misc::StringUtils::toNumeric<int>(dest->getUserString("price"), 0);
++            const bool interior = dest->getUserString("interior") == "y";
++            // index|destinationName|cost|interior(1/0)
++            Log(Debug::Info) << "COMPANION_TRAVEL_DEST:" << i << "|" << companionTravelSanitize(name) << "|"
++                             << price << "|" << (interior ? 1 : 0);
++        }
++        Log(Debug::Info) << "COMPANION_TRAVEL_END";
++
++        gCompanionTravelSessionOpen = true;
++    }
++
++    void TravelWindow::companionTravelByIndex(int index)
++    {
++        if (index < 0 || index >= static_cast<int>(mDestinationsView->getChildCount()))
++            return;
++        // Reuse the native click handler UNCHANGED (full affordability/gold/time/teleport path). It
++        // self-guards affordability and emits COMPANION_TRAVEL_CLOSED on success.
++        onTravelButtonClick(mDestinationsView->getChildAt(index));
++    }
++
+     void TravelWindow::updateLabels()
+     {
+         MWWorld::Ptr player = MWBase::Environment::get().getWorld()->getPlayerPtr();
+@@ -245,6 +356,8 @@ namespace MWGui
+ 
+     void TravelWindow::onReferenceUnavailable()
+     {
++        // The travel NPC/creature went away (unloaded / died). Signal the companion (once-guarded).
++        companionEmitTravelClosed();
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Travel);
+         MWBase::Environment::get().getWindowManager()->exitCurrentGuiMode();
+     }
+@@ -303,3 +416,27 @@ namespace MWGui
+         return true;
+     }
+ }
++
++// Companion (bottom-screen travel): extern "C" bridges driven from drainCompanionCommands
++// (androidmain.cpp, engine main thread). Mirror the merchant-repair bridges. Each no-ops unless a
++// travel session is actually live (containsMode guard, stale-window safe).
++extern "C" void companionTravelGo(int index)
++{
++    if (!gCompanionTravelWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Travel))
++        return;
++    gCompanionTravelWindow->companionTravelByIndex(index);
++}
++
++extern "C" void companionTravelCancel()
++{
++    if (!gCompanionTravelWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Travel))
++        return;
++    // Pop the mode. In DS mode the window is already hidden, so the mode-pop's setVisible(false) is
++    // a no-op that never fires onClose(); emit the close signal explicitly (once-guarded).
++    MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_Travel);
++    companionEmitTravelClosed();
++}
+diff --git a/apps/openmw/mwgui/travelwindow.hpp b/apps/openmw/mwgui/travelwindow.hpp
+index f917b25834..21a5f059b1 100644
+--- a/apps/openmw/mwgui/travelwindow.hpp
++++ b/apps/openmw/mwgui/travelwindow.hpp
+@@ -19,8 +19,18 @@ namespace MWGui
+ 
+         void setPtr(const MWWorld::Ptr& actor) override;
+ 
++        bool exit() override;
++
+         std::string_view getWindowIdForLua() const override { return "Travel"; }
+ 
++        // Companion (bottom-screen travel): export the destination list and drive travel-by-index
++        // from drainCompanionCommands (androidmain.cpp), so the whole flow mirrors onto the bottom
++        // screen without ever showing the native TravelWindow. Destinations are addressed by their
++        // ordinal index among mDestinationsView's children (== transport order) — stable between an
++        // export and the immediately-following tap because GM_Travel pauses the sim.
++        void companionExportOpen();
++        void companionTravelByIndex(int index);
++
+     protected:
+         MyGUI::Button* mCancelButton;
+         MyGUI::TextBox* mPlayerGold;

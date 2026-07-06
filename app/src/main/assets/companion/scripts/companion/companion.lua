@@ -1662,6 +1662,18 @@ end
 local function onActive()
     ui.setConsoleMode("Companion")
     exportJournal()
+    -- Force-dismiss the bottom-screen options overlay after a game LOAD.
+    -- Loading from the pause menu tears down GM_MainMenu, but the resulting
+    -- UiModeChanged Lua event is queued via sendEvent and then wiped by the
+    -- same-frame loadGame -> LuaManager::clear() (mLuaEvents.clear()), so our
+    -- UiModeChanged handler never fires COMPANION_PAUSE_MENU_CLOSED and the
+    -- overlay sticks. onActive fires on the freshly re-created player script
+    -- after load (objectAddedToScene -> OnActive), which is exactly the moment
+    -- to clear stale pause-menu state. Unconditional emit is safe: onActive
+    -- can't fire while idle in the pause menu, and CLOSED-when-already-closed
+    -- is a no-op on the Kotlin side. (A tracking boolean would not survive the
+    -- load — clear() destroys this script instance, so locals reset.)
+    print('COMPANION_PAUSE_MENU_CLOSED:')
 end
 
 return {

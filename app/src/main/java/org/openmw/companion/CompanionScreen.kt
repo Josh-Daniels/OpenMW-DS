@@ -912,6 +912,110 @@ fun ConversationHistoryOverlay() {
     }
 }
 
+/**
+ * Top-screen combat-target health overlay (a panel-window ComposeView added by EngineActivity on
+ * Display 0 when [TargetHealthLocation.TOP] is selected AND a combat target exists). Top-centre,
+ * 8dp from top, 30% of screen width: target name, a full-width red health bar, and a percentage.
+ * Renders nothing when there is no target (EngineActivity also removes the window then).
+ */
+@Composable
+fun CombatTargetTopOverlay() {
+    val state by GameStateRepository.state.collectAsState()
+    val target = state.target ?: return
+
+    Box(
+        modifier = Modifier.fillMaxSize().padding(top = 8.dp),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.30f)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Health bar first so it sits at the same vertical offset as the player's health bar
+            // (the top bar of PlayerCombatTopOverlay) — both columns are 8dp from top with the same
+            // 6dp padding. The NPC name goes UNDER the bar to keep them horizontally aligned.
+            CombatBar(
+                ratio = target.health.ratio,
+                color = HealthCol,
+                centerText = "${(target.health.ratio * 100).roundToInt()}%"
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                target.name,
+                color = BronzeLight, fontSize = 10.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * Top-screen player-status-in-combat overlay (a panel-window ComposeView added by EngineActivity on
+ * Display 0 when the "Player status in combat" option is On AND a combat target exists). Top-left,
+ * 8dp from top / 12dp from left, 20% of screen width: three stacked labelled bars for
+ * Health / Magicka / Fatigue with "current/max" values. Renders nothing when there is no target.
+ */
+@Composable
+fun PlayerCombatTopOverlay() {
+    val state by GameStateRepository.state.collectAsState()
+    if (state.target == null) return
+
+    Box(
+        modifier = Modifier.fillMaxSize().padding(top = 8.dp, start = 12.dp),
+        contentAlignment = Alignment.TopStart
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.20f)
+                .padding(horizontal = 8.dp, vertical = 6.dp)
+        ) {
+            // No labels — the bar colours communicate which vital is which. The "cur/max" value
+            // rides INSIDE each bar.
+            CombatBar(ratio = state.health.ratio, color = HealthCol, centerText = dynValue(state.health))
+            Spacer(Modifier.height(4.dp))
+            CombatBar(ratio = state.magicka.ratio, color = MagickaCol, centerText = dynValue(state.magicka))
+            Spacer(Modifier.height(4.dp))
+            CombatBar(ratio = state.fatigue.ratio, color = FatigueCol, centerText = dynValue(state.fatigue))
+        }
+    }
+}
+
+/** "cur/max" for a [Dynamic], rounded — the value shown inside a player combat bar. */
+private fun dynValue(dyn: Dynamic): String = "${dyn.current.roundToInt()}/${dyn.max.roundToInt()}"
+
+/** A full-width 18dp stat bar (dark track, bronze border, [color] fill) for the combat overlays,
+ *  with an optional [centerText] drawn centred INSIDE the bar (light, small, over the fill). */
+@Composable
+private fun CombatBar(ratio: Float, color: Color, centerText: String? = null) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(18.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(Color(0xFF0E0B07))
+            .border(1.dp, BronzeDark, RoundedCornerShape(2.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(ratio.coerceIn(0f, 1f))
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(2.dp))
+                .background(color)
+                .align(Alignment.CenterStart)
+        )
+        if (centerText != null) {
+            Text(
+                centerText,
+                color = Color.White, fontSize = 8.sp, fontFamily = MwData,
+                fontWeight = FontWeight.Bold, maxLines = 1
+            )
+        }
+    }
+}
+
 /** The dialogue right column — services, disposition bar, the Persuade trigger, the
  *  scrolling topics list and the Goodbye button. [choicesActive] greys the rows (a
  *  mid-dialogue question is showing its answers in the left column); [interactive] gates
@@ -3422,14 +3526,18 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         }
 
         // Combat target — top-centre, in the gap between the WEAPON and SPELL
-        // pills. Only present while a target exists (during combat).
-        state.target?.let { target ->
-            TargetHealthOverlay(
-                target = target,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 6.dp)
-            )
+        // pills. Only present while a target exists (during combat), and only when the
+        // target-health bar is routed to the bottom screen (TOP moves it to a top-screen overlay).
+        val targetHealthLocation by UiPreferences.targetHealthLocationFlow().collectAsState()
+        if (targetHealthLocation == TargetHealthLocation.BOTTOM) {
+            state.target?.let { target ->
+                TargetHealthOverlay(
+                    target = target,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 6.dp)
+                )
+            }
         }
     }
 }
@@ -5934,6 +6042,8 @@ fun OptionsMenuOverlay() {
             // (Bottom/Split/Top) is implemented; the rest are pending and locked to Bottom.
             item { OptionsSectionHeader("Screen Layout") }
             item { ConversationLocationRow() }
+            item { TargetHealthLocationRow() }
+            item { PlayerCombatRow() }
             items(
                 GAME_UI_ELEMENTS.filter { it.key != "game_ui_conversation" },
                 key = { "layout_" + it.key }
@@ -6069,6 +6179,67 @@ private fun ConversationLocationRow() {
                 active = loc == ConversationLocation.TOP,
                 enabled = true
             ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.TOP) }
+        }
+    }
+}
+
+/** The Target-health location row: a [Bottom][Top] pill selector. BOTTOM (default) = the
+ *  bottom-screen HUD combat-target bar; TOP = an additional top-screen overlay (top-centre). */
+@Composable
+private fun TargetHealthLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.targetHealthLocationFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Target health", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Bottom",
+                active = loc == TargetHealthLocation.BOTTOM,
+                enabled = true
+            ) { UiPreferences.setTargetHealthLocation(context, TargetHealthLocation.BOTTOM) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Top",
+                active = loc == TargetHealthLocation.TOP,
+                enabled = true
+            ) { UiPreferences.setTargetHealthLocation(context, TargetHealthLocation.TOP) }
+        }
+    }
+}
+
+/** The Player-status-in-combat row: an [Off][On] pill selector (default Off). On additionally
+ *  shows the player's vitals on the top screen (top-left) while a combat target exists. */
+@Composable
+private fun PlayerCombatRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.playerCombatFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Player status in combat", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Also show your health / magicka / fatigue on the top screen during combat",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setPlayerCombat(context, false) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setPlayerCombat(context, true) }
         }
     }
 }
