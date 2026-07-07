@@ -636,6 +636,14 @@ class EngineActivity : SDLActivity() {
         external fun setCompanionCursorEnabled(enabled: Boolean)
 
         /**
+         * Push the companion "Touch input" option to native, where companionTouchClick() reads it:
+         * when on AND a menu is open, the SDL event pump turns a finger tap into a direct mouse
+         * click at the tap point. Called on change and once at startup.
+         */
+        @JvmStatic
+        external fun setCompanionTouchClick(enabled: Boolean)
+
+        /**
          * Per-element native HUD visibility (companion "Vanilla HUD Elements" options).
          * true = native top-screen element shown; false = hidden. Read natively by
          * companionHud*() (companion-hud-elements.patch). Pushed on change + at startup.
@@ -807,6 +815,16 @@ class EngineActivity : SDLActivity() {
             UiPreferences.gameCursorFlow().collect { enabled ->
                 runCatching { setCompanionCursorEnabled(enabled) }
                     .onFailure { Log.e(TAG, "setCompanionCursorEnabled failed", it) }
+            }
+        }
+
+        // Push the "Touch input" option to native (companionTouchClick) so the SDL event pump
+        // turns finger taps into direct clicks in menus. Runtime toggle — gates the injection
+        // path, no restart needed. Fires once with the persisted value, then on every toggle.
+        lifecycleScope.launch {
+            UiPreferences.touchInputFlow().collect { enabled ->
+                runCatching { setCompanionTouchClick(enabled) }
+                    .onFailure { Log.e(TAG, "setCompanionTouchClick failed", it) }
             }
         }
 

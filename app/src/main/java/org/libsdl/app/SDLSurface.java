@@ -260,10 +260,19 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
             touchDevId -= 1;
         }
 
-        // Access the Kotlin object property in Java
+        // Access the Kotlin object property in Java.
+        // COMPANION: this gate normally drops touch-downs while the right thumbstick is enabled and
+        // the cursor is hidden, so touch can't fight the right-stick camera in gameplay. But in the
+        // Xbox UI the cursor is hidden in MENUS too (isMouseShown()==0), so it was dropping every
+        // menu tap before it could become a click. Skip the drop when direct touch-to-click is
+        // active (the "Touch input" option is on AND a menu / GUI mode is open): the tap then flows
+        // through the normal path below and SDL synthesizes an absolute mouse click at the tap
+        // point. In gameplay (not GUI mode) companionTouchClickActive() is false, so the gate still
+        // drops touches and the right-stick camera is unaffected.
         if (UIStateManager.INSTANCE.getEnableRightThumb() &&
                 (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) &&
-                SDLActivity.isMouseShown() == 0) {
+                SDLActivity.isMouseShown() == 0 &&
+                !SDLActivity.companionTouchClickActive()) {
             return false;
         }
 

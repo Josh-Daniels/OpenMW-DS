@@ -950,6 +950,9 @@ public class SDLActivity extends AppCompatActivity implements View.OnSystemUiVis
     public static native int getMouseX();
     public static native int getMouseY();
     public static native int isMouseShown();
+    // COMPANION: true when direct touch-to-click applies — the "Touch input" option is on AND a
+    // menu (GUI mode) is open. Read by SDLSurface.onTouch to skip the right-thumbstick drop-gate.
+    public static native boolean companionTouchClickActive();
 
     public static native void omwSurfaceDestroyed();
     public static native void omwSurfaceRecreated();

@@ -7290,6 +7290,7 @@ fun OptionsMenuOverlay() {
             item { Alpha3OverlayRow() }
 
             item { OptionsSectionHeader("Input") }
+            item { TouchInputRow() }
             item { GameCursorRow() }
         }
     }
@@ -7301,10 +7302,19 @@ fun OptionsMenuOverlay() {
 @Composable
 private fun QuickSetRow() {
     val context = LocalContext.current
+    // Aggregate state of every non-pending Game UI element, so the pills reflect the current mode:
+    // all DS -> [All DS], all Vanilla -> [All Vanilla], mixed -> [Custom]. (Pending elements are
+    // locked to Vanilla and excluded so they never force a permanent "mixed" reading.)
+    val nonPending = remember { GAME_UI_ELEMENTS.filter { !it.pending } }
+    val modes = nonPending.map { UiPreferences.gameUiModeFlow(it.key).collectAsState().value }
+    val allDs = modes.isNotEmpty() && modes.all { it == GameUiMode.DS }
+    val allVanilla = modes.isNotEmpty() && modes.all { it == GameUiMode.VANILLA }
+    val mixed = !allDs && !allVanilla
+
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
         Text("Quick set", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Set every Game UI row at once (also toggles the controller hint bar)",
+            "Set every Game UI row at once (also sets input mode + the controller hint bar)",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -7312,10 +7322,13 @@ private fun QuickSetRow() {
         )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(Modifier.weight(1f), label = "All DS", active = false, enabled = true) {
+            OptionPill(Modifier.weight(1f), label = "All DS", active = allDs, enabled = true) {
                 UiPreferences.setAllGameUi(context, GameUiMode.DS)
             }
-            OptionPill(Modifier.weight(1f), label = "All Vanilla", active = false, enabled = true) {
+            // "Custom" is a status indicator only — it lights up when the rows are a mix of DS and
+            // Vanilla. There is no custom preset to apply, so tapping it does nothing.
+            OptionPill(Modifier.weight(1f), label = "Custom", active = mixed, enabled = true) { }
+            OptionPill(Modifier.weight(1f), label = "All Vanilla", active = allVanilla, enabled = true) {
                 UiPreferences.setAllGameUi(context, GameUiMode.VANILLA)
             }
         }
@@ -7581,6 +7594,40 @@ private fun ScreenLayoutPendingRow(el: GameUiElement) {
 
 /** Input row: toggle whether touch / thumbsticks drive the top-screen game cursor.
  *  [Off][On] pill selector (default Off), writing to UiPreferences on every tap. */
+/** Input: direct touch-to-click on the top screen while a menu is open. [Off][On] pill selector
+ *  (default On), writing to UiPreferences on every tap. */
+@Composable
+private fun TouchInputRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.touchInputFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Touch input", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Tap the top screen to click there directly in menus, like a touchscreen",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setTouchInput(context, false) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setTouchInput(context, true) }
+        }
+    }
+}
+
 @Composable
 private fun GameCursorRow() {
     val context = LocalContext.current

@@ -128,6 +128,7 @@ object UiPreferences {
     private const val PREFS = "companion_ui_settings"
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
     private const val GAME_CURSOR = "game_cursor"
+    private const val TOUCH_INPUT = "touch_input"
     private const val CONVERSATION_LOCATION = "conversation_location"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
@@ -175,6 +176,11 @@ object UiPreferences {
     // this only stores the preference.
     private val gameCursorFlow = MutableStateFlow(false)
 
+    // Input section: direct touch-to-click on the top screen while a menu (GUI mode) is open —
+    // tap a spot = a mouse click there, no cursor movement. Default true (on). This only stores the
+    // preference; the touch handler reads it to decide whether to inject the direct click.
+    private val touchInputFlow = MutableStateFlow(true)
+
     // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default false.
     // Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
     private val alpha3OverlayFlow = MutableStateFlow(false)
@@ -199,6 +205,13 @@ object UiPreferences {
             }
         }
         gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
+        touchInputFlow.value = p.getBoolean(TOUCH_INPUT, true)
+        // Game cursor and touch input are mutually exclusive. If a pre-existing config has both on,
+        // reconcile once here (touch input wins — it's the default), so the UI never shows both On.
+        if (gameCursorFlow.value && touchInputFlow.value) {
+            gameCursorFlow.value = false
+            p.edit().putBoolean(GAME_CURSOR, false).apply()
+        }
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
             ?.let { conversationLocationFlow.value = it }
@@ -230,13 +243,18 @@ object UiPreferences {
     }
 
     /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Vanilla" quick-set
-     *  buttons). Pending elements stay locked to VANILLA. The only Vanilla HUD toggle it also flips
-     *  is the controller button-hint bar ([CONTROLLER_TOOLTIPS_KEY]): DS -> Off, Vanilla -> On, since
-     *  that bar is only useful when navigating native menus. All other Vanilla HUD toggles are left
-     *  untouched. Individual rows can still be overridden afterwards. */
+     *  buttons). Pending elements stay locked to VANILLA. Also flips the controller button-hint bar
+     *  ([CONTROLLER_TOOLTIPS_KEY]): DS -> Off, Vanilla -> On (only useful when navigating native
+     *  menus), and the input mode: DS -> Touch input on (Game cursor off via mutual exclusion),
+     *  Vanilla -> Game cursor on (Touch input off). All other Vanilla HUD toggles are left untouched;
+     *  individual rows can still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
         GAME_UI_ELEMENTS.filter { !it.pending }.forEach { setGameUiMode(context, it.key, mode) }
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
+        when (mode) {
+            GameUiMode.DS -> setTouchInput(context, true)       // mutual exclusion turns Game cursor off
+            GameUiMode.VANILLA -> setGameCursor(context, true)  // mutual exclusion turns Touch input off
+        }
     }
 
     fun hudOnFlow(key: String): StateFlow<Boolean> = hudFlows.getValue(key).asStateFlow()
@@ -250,6 +268,17 @@ object UiPreferences {
 
     /** Input: whether touch / thumbsticks control the top-screen game cursor. */
     fun gameCursorFlow(): StateFlow<Boolean> = gameCursorFlow.asStateFlow()
+
+    /** Input: whether a tap on the top screen directly clicks there while a menu is open. */
+    fun touchInputFlow(): StateFlow<Boolean> = touchInputFlow.asStateFlow()
+
+    /** Enable/disable direct touch-to-click and persist. Mutually exclusive with the game cursor:
+     *  turning this ON turns Game cursor OFF (both may be off, but not both on). */
+    fun setTouchInput(context: Context, enabled: Boolean) {
+        touchInputFlow.value = enabled
+        editor(context).putBoolean(TOUCH_INPUT, enabled).apply()
+        if (enabled) setGameCursor(context, false)
+    }
 
     /** Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. */
     fun alpha3OverlayFlow(): StateFlow<Boolean> = alpha3OverlayFlow.asStateFlow()
@@ -305,10 +334,12 @@ object UiPreferences {
         editor(context).putBoolean(PLAYER_COMBAT, enabled).apply()
     }
 
-    /** Enable/disable the top-screen game cursor and persist. */
+    /** Enable/disable the top-screen game cursor and persist. Mutually exclusive with touch input:
+     *  turning this ON turns Touch input OFF (both may be off, but not both on). */
     fun setGameCursor(context: Context, enabled: Boolean) {
         gameCursorFlow.value = enabled
         editor(context).putBoolean(GAME_CURSOR, enabled).apply()
+        if (enabled) setTouchInput(context, false)
     }
 
     private fun editor(context: Context): SharedPreferences.Editor {

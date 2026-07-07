@@ -68,6 +68,13 @@ static std::atomic<bool> g_companionHudEnabled{ true };
 // companion-gamecursor-suppress.patch.
 static std::atomic<bool> g_companionCursorEnabled{ false };
 
+// Mirrors the companion "Touch input" option (UiPreferences "touch_input"), pushed from Kotlin via
+// setCompanionTouchClick(). Read by the SDL event pump (companion-touch-click.patch) through the
+// companionTouchClick() bridge: when on AND a menu is open, a finger tap becomes an absolute mouse
+// click at the tap point (touchscreen-style). Default true = on. std::atomic: written on a JNI
+// thread, read on the input thread.
+static std::atomic<bool> g_companionTouchClick{ true };
+
 // Per-element native HUD visibility (companion "Vanilla HUD Elements" options), pushed from
 // Kotlin. true = the native top-screen element is shown; false = hidden (companion bottom-screen
 // version is the sole display). Default true. Read by the engine (companion-hud-elements.patch)
@@ -522,6 +529,35 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionCursorEnabled(JNIEnv* /*env*/, jclass /*cls*/, jboolean enabled)
 {
     g_companionCursorEnabled.store(enabled == JNI_TRUE);
+}
+// Read by the SDL event pump (companion-touch-click.patch): true while the "Touch input" option is
+// on, so a finger tap in a menu becomes a direct absolute mouse click at the tap point.
+extern "C" bool companionTouchClick()
+{
+    return g_companionTouchClick.load();
+}
+// Also read by that patch to gate on GUI mode (a menu being open). The pump lives in components/
+// and cannot include apps/ headers to call isGuiMode() itself, so this bridge answers it. Null-
+// guarded for early startup / teardown when the WindowManager doesn't exist yet.
+extern "C" bool companionIsGuiMode()
+{
+    MWBase::WindowManager* wm = MWBase::Environment::get().getWindowManager();
+    return wm && wm->isGuiMode();
+}
+// Pushed from Kotlin (EngineActivity) whenever the "Touch input" option changes, and once at
+// startup with the persisted value. Caches into g_companionTouchClick for companionTouchClick().
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionTouchClick(JNIEnv* /*env*/, jclass /*cls*/, jboolean enabled)
+{
+    g_companionTouchClick.store(enabled == JNI_TRUE);
+}
+// Read by SDLSurface.onTouch (Java): true when direct touch-to-click should apply — the "Touch
+// input" option is on AND a menu (GUI mode) is open. When true, onTouch skips the right-thumbstick
+// drop-gate so the tap flows to SDL and becomes an absolute mouse click at the tap point.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_libsdl_app_SDLActivity_companionTouchClickActive(JNIEnv* /*env*/, jclass /*cls*/)
+{
+    return (companionTouchClick() && companionIsGuiMode()) ? JNI_TRUE : JNI_FALSE;
 }
 // Per-element native HUD visibility bridges (companion-hud-elements.patch reads these in
 // hud.cpp to gate each element's setVisible). Each returns true when the native element
