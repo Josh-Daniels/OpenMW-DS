@@ -354,6 +354,40 @@ data class JournalEntry(
     val dayOfMonth: Int
 )
 
+/**
+ * A one-shot controller-navigation signal for the DS overlays, produced natively
+ * (companion-controller-nav.patch → COMPANION_NAV_* log lines) while a DS overlay owns input
+ * (companionNavActive()). Exposed as GameStateRepository.navEvent: StateFlow<NavEvent?>.
+ *
+ * [seq] is a monotonic counter stamped by the repo so two identical presses in a row (e.g. Down
+ * then Down) are DISTINCT StateFlow values and both re-emit — otherwise StateFlow would dedupe the
+ * second equal value and the consumer would miss it. Consumers react to every change; there is no
+ * need to clear the flow between presses.
+ *
+ * Semantic mapping (see the controller scheme): Confirm = A, Action1 = X, R1/L2/R2 the shoulders/
+ * triggers, SliderLeft/SliderRight the left-stick nudges. B is deliberately absent — it is handled
+ * by companion-b-button-choice-fix.patch, never intercepted here.
+ */
+sealed class NavEvent {
+    abstract val seq: Long
+    data class Up(override val seq: Long) : NavEvent()
+    data class Down(override val seq: Long) : NavEvent()
+    data class Left(override val seq: Long) : NavEvent()
+    data class Right(override val seq: Long) : NavEvent()
+    data class Confirm(override val seq: Long) : NavEvent()      // A button
+    data class Action1(override val seq: Long) : NavEvent()      // X button
+    data class R1(override val seq: Long) : NavEvent()
+    data class L2(override val seq: Long) : NavEvent()
+    data class R2(override val seq: Long) : NavEvent()
+    data class SliderLeft(override val seq: Long) : NavEvent()
+    data class SliderRight(override val seq: Long) : NavEvent()
+    data class ScrollUp(override val seq: Long) : NavEvent()      // right stick up (vertical lists)
+    data class ScrollDown(override val seq: Long) : NavEvent()    // right stick down (vertical lists)
+    data class ScrollLeft(override val seq: Long) : NavEvent()    // right stick left (horizontal grids)
+    data class ScrollRight(override val seq: Long) : NavEvent()   // right stick right (horizontal grids)
+    data class Cancel(override val seq: Long) : NavEvent()        // B while a quantity selector is open
+}
+
 data class GameState(
     val health: Dynamic = Dynamic(0f, 0f),
     val magicka: Dynamic = Dynamic(0f, 0f),

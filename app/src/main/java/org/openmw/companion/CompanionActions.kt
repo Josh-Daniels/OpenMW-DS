@@ -135,6 +135,17 @@ object CompanionActions {
 
     fun cancelTextInput() = runCommand("CMPTEXT:cancel")
 
+    /** Tell native whether a cancelable bottom-screen modal (quantity selector / persuasion popup)
+     *  is open, so the controller B button cancels just that modal (COMPANION_NAV_CANCEL) instead of
+     *  closing the whole overlay/conversation. (Native symbol kept as setCompanionQtySelectorOpen.) */
+    fun setModalCancelOpen(open: Boolean) {
+        try {
+            EngineActivity.setCompanionQtySelectorOpen(open)
+        } catch (t: Throwable) {
+            Log.e(TAG, "setCompanionQtySelectorOpen failed", t)
+        }
+    }
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

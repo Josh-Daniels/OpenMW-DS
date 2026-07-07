@@ -153,6 +153,54 @@ object LogParser {
     const val P_CHARDETAIL_LEVEL = "COMPANION_CHARDETAIL_LEVEL:"
     const val P_CHARDETAIL_END = "COMPANION_CHARDETAIL_END"
 
+    // Controller-navigation signals for the DS overlays (companion-controller-nav.patch). Emitted
+    // natively while a DS overlay owns input (companionNavActive()); each is a payload-less line
+    // (the trailing colon is just the log convention). P_NAV is the shared discriminator used by
+    // GameStateRepository.onRawLine to route to parseNav(). None is a contains() substring of any
+    // other (SLIDER_LEFT/RIGHT don't collide with LEFT/RIGHT since "SLIDER_" breaks the match).
+    const val P_NAV = "COMPANION_NAV_"
+    const val P_NAV_LEFT = "COMPANION_NAV_LEFT:"
+    const val P_NAV_RIGHT = "COMPANION_NAV_RIGHT:"
+    const val P_NAV_UP = "COMPANION_NAV_UP:"
+    const val P_NAV_DOWN = "COMPANION_NAV_DOWN:"
+    const val P_NAV_CONFIRM = "COMPANION_NAV_CONFIRM:"   // A button
+    const val P_NAV_ACTION1 = "COMPANION_NAV_ACTION1:"   // X button
+    const val P_NAV_R1 = "COMPANION_NAV_R1:"
+    const val P_NAV_L2 = "COMPANION_NAV_L2:"
+    const val P_NAV_R2 = "COMPANION_NAV_R2:"
+    const val P_NAV_SLIDER_LEFT = "COMPANION_NAV_SLIDER_LEFT:"
+    const val P_NAV_SLIDER_RIGHT = "COMPANION_NAV_SLIDER_RIGHT:"
+    const val P_NAV_SCROLL_UP = "COMPANION_NAV_SCROLL_UP:"       // right stick up (vertical lists)
+    const val P_NAV_SCROLL_DOWN = "COMPANION_NAV_SCROLL_DOWN:"   // right stick down (vertical lists)
+    const val P_NAV_SCROLL_LEFT = "COMPANION_NAV_SCROLL_LEFT:"   // right stick left (horizontal grids)
+    const val P_NAV_SCROLL_RIGHT = "COMPANION_NAV_SCROLL_RIGHT:" // right stick right (horizontal grids)
+    const val P_NAV_CANCEL = "COMPANION_NAV_CANCEL:"             // B while a quantity selector is open
+
+    /**
+     * Maps a COMPANION_NAV_* line to a factory that builds the [NavEvent] once the repo stamps it
+     * with a sequence number. Returns null if the line is not a recognised nav signal. SLIDER_* are
+     * matched before LEFT/RIGHT purely defensively (they cannot actually collide under contains()).
+     */
+    fun parseNav(line: String): ((Long) -> NavEvent)? = when {
+        line.contains(P_NAV_SCROLL_UP) -> { seq -> NavEvent.ScrollUp(seq) }
+        line.contains(P_NAV_SCROLL_DOWN) -> { seq -> NavEvent.ScrollDown(seq) }
+        line.contains(P_NAV_SCROLL_LEFT) -> { seq -> NavEvent.ScrollLeft(seq) }
+        line.contains(P_NAV_SCROLL_RIGHT) -> { seq -> NavEvent.ScrollRight(seq) }
+        line.contains(P_NAV_CANCEL) -> { seq -> NavEvent.Cancel(seq) }
+        line.contains(P_NAV_SLIDER_LEFT) -> { seq -> NavEvent.SliderLeft(seq) }
+        line.contains(P_NAV_SLIDER_RIGHT) -> { seq -> NavEvent.SliderRight(seq) }
+        line.contains(P_NAV_LEFT) -> { seq -> NavEvent.Left(seq) }
+        line.contains(P_NAV_RIGHT) -> { seq -> NavEvent.Right(seq) }
+        line.contains(P_NAV_UP) -> { seq -> NavEvent.Up(seq) }
+        line.contains(P_NAV_DOWN) -> { seq -> NavEvent.Down(seq) }
+        line.contains(P_NAV_CONFIRM) -> { seq -> NavEvent.Confirm(seq) }
+        line.contains(P_NAV_ACTION1) -> { seq -> NavEvent.Action1(seq) }
+        line.contains(P_NAV_R1) -> { seq -> NavEvent.R1(seq) }
+        line.contains(P_NAV_L2) -> { seq -> NavEvent.L2(seq) }
+        line.contains(P_NAV_R2) -> { seq -> NavEvent.R2(seq) }
+        else -> null
+    }
+
     /** Returns an updated state, or null if this line isn't ours / was malformed. */
     fun parseLine(line: String, current: GameState): GameState? {
         return try {

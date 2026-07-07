@@ -38,6 +38,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
@@ -55,6 +56,10 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.ScrollableState
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.zIndex
@@ -63,6 +68,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -178,6 +184,19 @@ private data class QuantityRequest(
     val confirmLabel: String,
     val onConfirm: (Int) -> Unit,
 )
+
+/**
+ * Tracks whether a cancelable bottom-screen MODAL is on screen — the QuantitySelector or the
+ * PersuasionPopup. While [open]: (a) the barter/loot grid + slider and the dialogue-topic nav
+ * collectors YIELD so controller input drives the modal, not the surface underneath; and (b) the
+ * modal pushes the native "B = cancel" flag (companionQtySelectorOpen) so the controller B button
+ * closes just the modal (COMPANION_NAV_CANCEL) instead of the whole overlay/conversation. A counter
+ * (not a bool) is robust to any brief enter/exit overlap.
+ */
+private object ModalNav {
+    var count by mutableStateOf(0)
+    val open: Boolean get() = count > 0
+}
 
 private object QuantityRequestState {
     var request by mutableStateOf<QuantityRequest?>(null)
@@ -694,15 +713,16 @@ private fun DialogueTopicsOverlay(
                 }
             }
 
-            // BOTTOM: the classic full two-column conversation on the bottom screen (choices
-            // render inline in the history). Fills the screen (12dp insets, covering the tab
-            // bar — dialogue is a modal interaction left via Goodbye). Popups managed inside.
+            // BOTTOM: the classic full two-column conversation on the bottom screen. Choices render
+            // as the centred DialogueChoicesPopup (choicesInline = false), same as SPLIT/TOP — a real
+            // popup rather than inline in the history, and controller-navigable (Phase 5). Fills the
+            // screen (12dp insets, covering the tab bar — dialogue is a modal left via Goodbye).
             ConversationLocation.BOTTOM -> {
                 DialogueConversationOverlay(
                     npcName = npcName, history = history, topics = topics, services = services,
                     choices = choices, disposition = disposition,
                     persuadeAvailable = persuadeAvailable, playerGold = playerGold,
-                    choicesInline = true,
+                    choicesInline = false,
                     panelAlignment = Alignment.Center,
                     panelWidthFraction = null, panelHeightFraction = null,
                     panelPadding = PaddingValues(12.dp)
@@ -807,6 +827,15 @@ private fun DialogueConversationOverlay(
  *  but never dismisses; the popup leaves when a choice is tapped or the dialogue closes. */
 @Composable
 private fun DialogueChoicesPopup(choices: List<DialogueChoice>) {
+    // D-pad up/down navigate the choices, A selects the focused one (id -1 = forced-goodbye prompt).
+    val focusIndex = rememberListNavFocus(
+        itemCount = choices.size,
+        onConfirm = { i ->
+            val c = choices[i]
+            if (c.id == -1) CompanionActions.dialogueGoodbye()
+            else CompanionActions.activateDialogueChoice(c.id)
+        },
+    )
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -837,12 +866,19 @@ private fun DialogueChoicesPopup(choices: List<DialogueChoice>) {
             ) {
                 choices.forEachIndexed { i, choice ->
                     if (i > 0) Spacer(Modifier.height(8.dp))
+                    val choiceFocused = i == focusIndex
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(2.dp))
-                            .background(BronzeLight.copy(alpha = 0.12f))
-                            .border(1.dp, BronzeLight, RoundedCornerShape(2.dp))
+                            // Focused choice: brighter fill + thicker bronze border; others dimmed so
+                            // the controller focus stands out (all rows used to share one bronze border).
+                            .background(BronzeLight.copy(alpha = if (choiceFocused) 0.22f else 0.06f))
+                            .border(
+                                if (choiceFocused) 2.dp else 1.dp,
+                                if (choiceFocused) BronzeLight else BronzeDark,
+                                RoundedCornerShape(2.dp)
+                            )
                             .clickable {
                                 // id -1 = the synthetic forced-goodbye prompt (NPC taunted
                                 // into combat, etc.) — route it to goodbye, not a real answer.
@@ -851,7 +887,11 @@ private fun DialogueChoicesPopup(choices: List<DialogueChoice>) {
                             }
                             .padding(horizontal = 14.dp, vertical = 12.dp)
                     ) {
-                        Text(choice.text, color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody)
+                        Text(
+                            choice.text,
+                            color = if (choiceFocused) BoneBright else BronzeLight,
+                            fontSize = 14.sp, fontFamily = MwBody
+                        )
                     }
                 }
             }
@@ -1049,10 +1089,18 @@ private fun CombatBar(ratio: Float, color: Color, centerText: String? = null) {
     }
 }
 
+/** One navigable row in the dialogue right column: its [label] and what activating it does.
+ *  Built in render order so the controller focus index maps 1:1 to a visible row. */
+private class DialogueNavItem(val label: String, val onActivate: () -> Unit)
+
 /** The dialogue right column — services, disposition bar, the Persuade trigger, the
  *  scrolling topics list and the Goodbye button. [choicesActive] greys the rows (a
  *  mid-dialogue question is showing its answers in the left column); [interactive] gates
- *  every tap — off while a choice is active OR while the persuasion column owns input. */
+ *  every tap — off while a choice is active OR while the persuasion column owns input.
+ *  Owns controller navigation (Phase 2): D-pad up/down move focus through the services+topics
+ *  list, A activates the focused row (B closes via the existing patch). This is the single
+ *  composable rendering that list in every conversation location (BOTTOM/SPLIT/TOP), and only
+ *  one instance is ever composed, so the nav collector below is unambiguous. */
 @Composable
 private fun DialogueRightColumn(
     topics: List<String>,
@@ -1083,6 +1131,79 @@ private fun DialogueRightColumn(
     }
     val topicRows = topics.filter { it != bedsService }
 
+    // Flattened, ordered navigable rows: the services block (Barter/Beds/Persuade/Repair/Travel),
+    // then any OTHER services, then the dialogue topics — the SAME order they render, so the D-pad
+    // focus index maps 1:1 to a visible row. Goodbye is deliberately excluded (controller B closes
+    // the conversation via companion-b-button-choice-fix.patch).
+    val serviceBlock = buildList {
+        barterService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        bedsService?.let { s ->
+            add(DialogueNavItem(s) {
+                if (bedsFromService != null) CompanionActions.activateDialogueService(s)
+                else CompanionActions.selectDialogueTopic(s)
+            })
+        }
+        if (persuadeAvailable) add(DialogueNavItem("Persuade") { onPersuadeTapped() })
+        repairService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        travelService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+    }
+    val listRows = buildList {
+        otherServices.forEach { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        topicRows.forEach { t -> add(DialogueNavItem(t) { CompanionActions.selectDialogueTopic(t) }) }
+    }
+    val navItems = serviceBlock + listRows
+    // Index of the first non-block row (where the bold services/topics divider is drawn). Prefixing
+    // the divider onto that row keeps one lazy item per navItem, so focusIndex == lazy index.
+    val dividerAt = serviceBlock.size
+
+    // ---- Controller focus (Phase 2) --------------------------------------------------------------
+    // Focus starts at the first row when the conversation opens (this composable enters composition),
+    // persists across topic selections within a conversation, and is clamped as the topic list grows/
+    // shrinks. Only ONE DialogueRightColumn is ever composed (BOTTOM/SPLIT/TOP), so this collector
+    // uniquely owns dialogue navigation.
+    var focusIndex by remember { mutableStateOf(0) }
+    LaunchedEffect(navItems.size) {
+        if (navItems.isEmpty()) focusIndex = 0
+        else if (focusIndex > navItems.lastIndex) focusIndex = navItems.lastIndex
+    }
+    val listState = rememberLazyListState()
+    LaunchedEffect(focusIndex) {
+        if (focusIndex in navItems.indices) listState.animateScrollToItem(focusIndex)
+    }
+    val itemsState = rememberUpdatedState(navItems)
+    val interactiveState = rememberUpdatedState(interactive)
+    val choicesActiveState = rememberUpdatedState(choicesActive)
+    LaunchedEffect(Unit) {
+        // Skip the StateFlow's replayed latest value / any event that predates this overlay.
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            // Yield to a choice question (the choices popup owns nav), a cancelable modal on top
+            // (persuasion popup) OR any higher overlay pushed OVER the conversation (barter/repair/
+            // travel/rest): its own collector owns nav while it's up, so the dialogue list doesn't
+            // move — and A can't select a topic behind it. Barter is Phase-4; the rest are Phase-5.
+            if (choicesActiveState.value ||
+                ModalNav.open ||
+                GameStateRepository.barterSession.value != null ||
+                GameStateRepository.repairSession.value != null ||
+                GameStateRepository.travelSession.value != null ||
+                GameStateRepository.sleepSession.value != null
+            ) return@collect
+            val items = itemsState.value
+            if (items.isEmpty()) return@collect
+            when (ev) {
+                is NavEvent.Down -> focusIndex = (focusIndex + 1) % items.size            // wraps
+                is NavEvent.Up -> focusIndex = (focusIndex - 1 + items.size) % items.size  // wraps
+                // A activates the focused row; only when the list is interactive (not while a choice
+                // question is up — choices are navigated separately in Phase 5).
+                is NavEvent.Confirm ->
+                    if (interactiveState.value) items.getOrNull(focusIndex)?.onActivate?.invoke()
+                else -> Unit // Left/Right/Action1/L2/R2/R1/slider are unused in the topic list
+            }
+        }
+    }
+
     Column(modifier) {
         // 1. Disposition bar (fixed at the top). Hidden when unknown (< 0, e.g. a creature).
         //    A small divider below it stays put (outside the LazyColumn) while topics scroll.
@@ -1093,76 +1214,22 @@ private fun DialogueRightColumn(
             Spacer(Modifier.height(4.dp))
         }
 
-        // 2-5. Barter, Persuade, the divider, any OTHER services, and the dialogue topics all
-        //      live in ONE LazyColumn so they scroll together. No "Services"/"Topics" headings.
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            // Barter (if the NPC offers it) — a plain row, identical to the topic rows.
-            if (barterService != null) {
-                item {
-                    DialogueOptionRow(barterService, dimmed = choicesActive, fontSize = rowFontSize) {
-                        if (interactive) CompanionActions.activateDialogueService(barterService)
-                    }
-                }
-            }
-            // Beds (if the NPC offers rent) — SAME styling, above Persuade in the services block.
-            // Dispatched as a service when it arrived as one, otherwise as the "Beds" topic.
-            if (bedsService != null) {
-                item {
-                    DialogueOptionRow(bedsService, dimmed = choicesActive, fontSize = rowFontSize) {
-                        if (interactive) {
-                            if (bedsFromService != null) CompanionActions.activateDialogueService(bedsService)
-                            else CompanionActions.selectDialogueTopic(bedsService)
-                        }
-                    }
-                }
-            }
-            // Persuade (if available) — SAME styling as Barter.
-            if (persuadeAvailable) {
-                item {
-                    DialogueOptionRow("Persuade", dimmed = choicesActive, fontSize = rowFontSize) {
-                        if (interactive) onPersuadeTapped()
-                    }
-                }
-            }
-            // Repair (if the NPC offers it) — SAME styling as Barter/Persuade, in the
-            // services block above the divider.
-            if (repairService != null) {
-                item {
-                    DialogueOptionRow(repairService, dimmed = choicesActive, fontSize = rowFontSize) {
-                        if (interactive) CompanionActions.activateDialogueService(repairService)
-                    }
-                }
-            }
-            // Travel (if the NPC offers it) — SAME styling, in the services block above the divider.
-            // Tapping opens GM_Travel natively; in DS mode that window is suppressed and the
-            // TravelOverlay (driven by COMPANION_TRAVEL_*) takes over on the bottom screen.
-            if (travelService != null) {
-                item {
-                    DialogueOptionRow(travelService, dimmed = choicesActive, fontSize = rowFontSize) {
-                        if (interactive) CompanionActions.activateDialogueService(travelService)
-                    }
-                }
-            }
-            // Divider between the Barter/Persuade/Repair/Travel/Beds block and the topics (only if
-            // something's above it). No leading gap: the last action row already draws its own
-            // faint under-divider, so the bold divider sits flush against it and reads as a
-            // single section divider rather than a second line floating below the faint one.
-            if (barterService != null || persuadeAvailable || repairService != null ||
-                travelService != null || bedsService != null) {
-                item {
+        // 2. Services block + divider + other services + topics — one lazy item per navItem so the
+        //    D-pad focus index maps directly to a lazy item. The divider is prefixed onto the
+        //    boundary row (index == dividerAt), so it doesn't shift indices.
+        LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+            itemsIndexed(navItems) { index, navItem ->
+                if (index == dividerAt && dividerAt > 0) {
                     Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
                     Spacer(Modifier.height(4.dp))
                 }
-            }
-            // Any other services first, then the dialogue topics.
-            items(otherServices) { service ->
-                DialogueOptionRow(service, dimmed = choicesActive, fontSize = rowFontSize) {
-                    if (interactive) CompanionActions.activateDialogueService(service)
-                }
-            }
-            items(topicRows) { topic ->
-                DialogueOptionRow(topic, dimmed = choicesActive, fontSize = rowFontSize) {
-                    if (interactive) CompanionActions.selectDialogueTopic(topic)
+                DialogueOptionRow(
+                    navItem.label,
+                    dimmed = choicesActive,
+                    fontSize = rowFontSize,
+                    focused = index == focusIndex
+                ) {
+                    if (interactive) navItem.onActivate()
                 }
             }
         }
@@ -1188,22 +1255,37 @@ private fun DialogueRightColumn(
 }
 
 /** One tappable row in the right column — shared by topics, services and choices so
- *  they look identical (only the section header distinguishes them). */
+ *  they look identical (only the section header distinguishes them). [focused] draws the
+ *  controller focus highlight (a 2dp BronzeLight border + faint fill) — deliberately a
+ *  BORDER, distinct from any selection/worn styling elsewhere; dialogue rows are actions
+ *  with no persistent "selected" state, so the border reads unambiguously as "cursor here". */
 @Composable
 private fun DialogueOptionRow(
     label: String,
     dimmed: Boolean = false,
     fontSize: TextUnit = 13.sp,
+    focused: Boolean = false,
     onClick: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (focused) Modifier
+                    .background(BronzeLight.copy(alpha = 0.12f))
+                    .border(2.dp, BronzeLight)
+                else Modifier
+            )
             .clickable(onClick = onClick)
     ) {
         Text(
             label,
-            color = if (dimmed) BoneDim else Bone, fontSize = fontSize, fontFamily = MwBody,
+            color = when {
+                dimmed -> BoneDim
+                focused -> BoneBright
+                else -> Bone
+            },
+            fontSize = fontSize, fontFamily = MwBody,
             modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 4.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
@@ -1233,6 +1315,30 @@ private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -
     val splitMode = UiPreferences.conversationLocationFlow().collectAsState().value ==
         ConversationLocation.SPLIT
     val optionFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
+
+    // Controller: this popup is a cancelable modal. Mark it open so the dialogue-topic nav collector
+    // yields underneath (no accidental topic select behind it) and native routes B to cancel JUST the
+    // popup (COMPANION_NAV_CANCEL) — returning to the conversation instead of closing it. Selecting an
+    // option with the D-pad/A is Phase 5; for now B cancels and touch picks an option.
+    DisposableEffect(Unit) {
+        ModalNav.count++
+        CompanionActions.setModalCancelOpen(true)
+        onDispose {
+            ModalNav.count--
+            if (ModalNav.count == 0) CompanionActions.setModalCancelOpen(false)
+        }
+    }
+    // D-pad up/down navigates the options, A selects the focused one (respecting affordability),
+    // B cancels the popup (native → COMPANION_NAV_CANCEL while this modal is open).
+    val focusIndex = rememberListNavFocus(
+        itemCount = options.size,
+        onConfirm = { i ->
+            val (_, type, cost) = options[i]
+            if (gold >= cost) onPersuade(type)
+        },
+        onCancel = onCancel,
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1260,28 +1366,42 @@ private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -
             )
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
-            options.forEachIndexed { i, (label, type, cost) ->
-                val enabled = gold >= cost
-                // Alternating row backgrounds for readability.
-                val rowBg = if (i % 2 == 0) Color(0x22000000) else Color(0x11000000)
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(rowBg)
-                        .then(if (enabled) Modifier.clickable { onPersuade(type) } else Modifier)
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
-                ) {
-                    Text(
-                        label,
-                        color = if (enabled) Bone else BoneDim,
-                        fontSize = optionFontSize, fontFamily = MwBody
-                    )
+            // Options. In SPLIT the panel is height-bounded (fills the topics band), so the options
+            // take weight(1f) and SCROLL — otherwise 6 rows at the larger split font overflow and push
+            // the gold/Cancel row past the clipped panel edge (bug). In BOTTOM/TOP the panel wraps its
+            // content, so the options render plain and the whole box grows to fit.
+            Column(
+                modifier = if (splitMode)
+                    Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                else Modifier.fillMaxWidth()
+            ) {
+                options.forEachIndexed { i, (label, type, cost) ->
+                    val enabled = gold >= cost
+                    // Alternating row backgrounds for readability.
+                    val rowBg = if (i % 2 == 0) Color(0x22000000) else Color(0x11000000)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(if (i == focusIndex) BronzeLight.copy(alpha = 0.15f) else rowBg)
+                            .then(if (i == focusIndex) Modifier.border(2.dp, BronzeLight) else Modifier)
+                            .then(if (enabled) Modifier.clickable { onPersuade(type) } else Modifier)
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        Text(
+                            label,
+                            color = when {
+                                !enabled -> BoneDim
+                                i == focusIndex -> BoneBright
+                                else -> Bone
+                            },
+                            fontSize = optionFontSize, fontFamily = MwBody
+                        )
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
                 }
-                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
             }
 
-            // In SPLIT view the panel fills the band, so push the gold/cancel row to the bottom.
-            if (splitMode) Spacer(Modifier.weight(1f))
+            // Gold + Cancel — pinned below the (scrollable in SPLIT) options, always visible.
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
@@ -1348,6 +1468,94 @@ private fun DispositionBar(value: Int) {
     }
 }
 
+/**
+ * Controller focus for a simple vertical single-column list overlay (Phase 5: persuasion, travel,
+ * repair, choices). Owns a focus [index] into a list of [itemCount] items and consumes NavEvents:
+ * D-pad Up/Down move focus (wrapping), A confirms the focused item ([onConfirm]), optional X
+ * ([onAction1], e.g. Repair All) and B ([onCancel], for Compose-only modals — native B closes the
+ * GM-mode overlays). [enabled] gates the whole collector so the overlay yields to a higher-priority
+ * one on top (same pattern as Phase 4). Focus starts at 0 when the overlay opens and is clamped as
+ * the list changes; returns the live focus index (-1 when empty). Only the topmost enabled collector
+ * should act, so callers pass enabled = "no higher overlay is up".
+ */
+@Composable
+private fun rememberListNavFocus(
+    itemCount: Int,
+    enabled: Boolean = true,
+    onConfirm: (Int) -> Unit,
+    onAction1: (() -> Unit)? = null,
+    onCancel: (() -> Unit)? = null,
+): Int {
+    var index by remember { mutableStateOf(0) }
+    LaunchedEffect(itemCount) {
+        index = if (itemCount <= 0) 0 else index.coerceIn(0, itemCount - 1)
+    }
+    val enabledState = rememberUpdatedState(enabled)
+    val countState = rememberUpdatedState(itemCount)
+    val confirmState = rememberUpdatedState(onConfirm)
+    val action1State = rememberUpdatedState(onAction1)
+    val cancelState = rememberUpdatedState(onCancel)
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (!enabledState.value) return@collect
+            val n = countState.value
+            when (ev) {
+                is NavEvent.Down -> if (n > 0) index = (index + 1) % n
+                is NavEvent.Up -> if (n > 0) index = (index - 1 + n) % n
+                is NavEvent.Confirm -> if (n > 0) confirmState.value(index)
+                is NavEvent.Action1 -> action1State.value?.invoke()
+                is NavEvent.Cancel -> cancelState.value?.invoke()
+                else -> Unit
+            }
+        }
+    }
+    return if (itemCount > 0) index.coerceIn(0, itemCount - 1) else -1
+}
+
+/**
+ * Right-stick scroll: nudges [state] by [step] pixels per tick, driven by the native per-frame
+ * right-stick poll (companion-controller-nav.patch). The stick's axis is matched to the content's
+ * axis: a VERTICAL list ([horizontal] = false) scrolls on right-stick up/down (ScrollUp/ScrollDown);
+ * a HORIZONTAL grid ([horizontal] = true) scrolls on right-stick left/right (ScrollLeft/ScrollRight)
+ * — so a physical left push scrolls left, right scrolls right. Each scrollable consumes only its own
+ * axis's events, so the two never interfere.
+ *
+ * Each tick is a SHORT linear [animateScrollBy] (not an instant scrollBy) so that even when ticks
+ * arrive at slightly irregular intervals (log-sink latency), each animation eases into the next and
+ * the motion stays fluid; LinearEasing keeps constant velocity across ticks; the ~70ms tween ≈ the
+ * native ~60ms cadence so animations chain back-to-back. [active] gates it so only the focused
+ * scrollable reacts; it also yields while the quantity selector owns input.
+ */
+@Composable
+private fun ScrollByNav(
+    state: ScrollableState,
+    active: Boolean = true,
+    step: Float = 72f,
+    horizontal: Boolean = false
+) {
+    val activeState = rememberUpdatedState(active)
+    val spec = remember { tween<Float>(durationMillis = 70, easing = LinearEasing) }
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (!activeState.value || ModalNav.open) return@collect
+            // − = toward start (up / left), + = toward end (down / right).
+            when {
+                !horizontal && ev is NavEvent.ScrollUp -> state.animateScrollBy(-step, spec)
+                !horizontal && ev is NavEvent.ScrollDown -> state.animateScrollBy(step, spec)
+                horizontal && ev is NavEvent.ScrollLeft -> state.animateScrollBy(-step, spec)
+                horizontal && ev is NavEvent.ScrollRight -> state.animateScrollBy(step, spec)
+                else -> Unit
+            }
+        }
+    }
+}
+
 /** Left column: the running NPC-response history, auto-scrolled to the newest line.
  *  When [choices] is non-empty (a mid-dialogue question) the choice buttons render
  *  inline as the LAST item of the list, directly below the most recent response. */
@@ -1373,6 +1581,8 @@ private fun DialogueHistoryColumn(
         val itemCount = history.size + if (choices.isNotEmpty()) 1 else 0
         if (itemCount > 0) listState.animateScrollToItem(itemCount - 1)
     }
+    // Right stick scrolls the conversation history.
+    ScrollByNav(listState)
     LazyColumn(state = listState, modifier = modifier) {
         itemsIndexed(history) { i, say ->
             if (i > 0) {
@@ -1593,6 +1803,90 @@ private fun ItemInfoOverlay(info: ItemInfo, onDismiss: () -> Unit) {
 
 /* ---- Looting / pickpocketing overlay ---- */
 
+/** Current controller focus in the looting overlay: which [side] (0 = player/left,
+ *  1 = container/right) and which [index] into that side's sorted list. */
+private data class LootFocus(val side: Int, val index: Int)
+
+/**
+ * Controller focus + navigation for the looting overlay (Phase 3), shared by the BOTTOM list
+ * layout ([rows] = 1) and the SPLIT grid layout ([rows] = 4). Owns focus (side + index into that
+ * side's pre-sorted list) and consumes NavEvents while the overlay is up:
+ *  - D-pad moves focus. In grid mode (rows = 4) the list is column-major so Up/Down step ±1 within
+ *    a grid column and Left/Right jump ±rows to the adjacent column (clamped). In list mode
+ *    (rows = 1) Up/Down step ±1 and Left/Right switch side (the two lists sit side by side).
+ *  - L2 / R2 switch to the player / container side (in both layouts).
+ *  - A activates the focused item via [requestQty] → [onPut]/[onTake] (stacks > 1 prompt first).
+ *  - X = [onTakeAll]; R1 = [onDispose] (corpse only, [isCorpse]).
+ * Focus starts on the container side when it has items (the point of looting), else the player
+ * side, and is clamped as items move between sides. Returns the live focus so the columns can
+ * highlight the focused cell. Only ONE looting layout is composed at a time, so this collector is
+ * unambiguous. B (Close) is handled by the existing patch, not here.
+ */
+@Composable
+private fun rememberLootNavFocus(
+    playerSorted: List<InventoryItem>,
+    containerSorted: List<InventoryItem>,
+    rows: Int,
+    isCorpse: Boolean,
+    requestQty: (String, Int, String, (Int) -> Unit) -> Unit,
+    onPut: (InventoryItem, Int) -> Unit,
+    onTake: (InventoryItem, Int) -> Unit,
+    onTakeAll: () -> Unit,
+    onDispose: () -> Unit,
+): LootFocus {
+    var side by remember { mutableStateOf(if (containerSorted.isNotEmpty()) 1 else 0) }
+    var index by remember { mutableStateOf(0) }
+
+    // Keep focus in range as the two lists change size (items taken/put) or the side switches.
+    LaunchedEffect(playerSorted.size, containerSorted.size, side) {
+        val n = if (side == 0) playerSorted.size else containerSorted.size
+        index = index.coerceIn(0, (n - 1).coerceAtLeast(0))
+    }
+
+    val snapshot = rememberUpdatedState(Triple(playerSorted, containerSorted, isCorpse))
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (ModalNav.open) return@collect // the quantity selector owns nav while up
+            val (pSorted, cSorted, corpse) = snapshot.value
+            fun sizeOf(s: Int) = if (s == 0) pSorted.size else cSorted.size
+            fun clampTo(s: Int) { index = index.coerceIn(0, (sizeOf(s) - 1).coerceAtLeast(0)) }
+            val size = sizeOf(side)
+            when (ev) {
+                is NavEvent.Down ->
+                    if (rows <= 1) { if (index + 1 < size) index++ }
+                    else if (index % rows < rows - 1 && index + 1 < size) index++
+                is NavEvent.Up ->
+                    if (rows <= 1) { if (index > 0) index-- }
+                    else if (index % rows > 0) index--
+                is NavEvent.Right ->
+                    if (rows <= 1) { side = 1; clampTo(1) }
+                    else if (index + rows < size) index += rows
+                is NavEvent.Left ->
+                    if (rows <= 1) { side = 0; clampTo(0) }
+                    else if (index - rows >= 0) index -= rows
+                is NavEvent.L2 -> { side = 0; clampTo(0) }
+                is NavEvent.R2 -> { side = 1; clampTo(1) }
+                is NavEvent.Confirm -> {
+                    val item = (if (side == 0) pSorted else cSorted).getOrNull(index)
+                    if (item != null) {
+                        val isPlayer = side == 0
+                        requestQty(item.displayName(), item.count, if (isPlayer) "Put" else "Take") { n ->
+                            if (isPlayer) onPut(item, n) else onTake(item, n)
+                        }
+                    }
+                }
+                is NavEvent.Action1 -> onTakeAll()
+                is NavEvent.R1 -> if (corpse) onDispose()
+                else -> Unit // Slider* / R2 handled above; nothing else used here
+            }
+        }
+    }
+    return LootFocus(side, index)
+}
+
 /**
  * Two-panel looting/pickpocketing overlay: the player's inventory on the left,
  * the container/corpse/NPC's contents on the right. Tapping a player item puts
@@ -1649,6 +1943,40 @@ private fun LootingOverlay(
         playerItems = p; containerItems = c
         CompanionActions.containerPut(item.stackId.ifEmpty { item.id }, n)
     }
+    // Take All: optimistically empty the container into the player list, then fire the command
+    // (Lua takes all AND closes the overlay). Shared by the button and the controller X action.
+    fun takeAll() {
+        playerItems = containerItems.fold(playerItems) { acc, it ->
+            moveOptimistic(listOf(it), acc, it, it.count).second
+        }
+        containerItems = emptyList()
+        CompanionActions.containerTakeAll()
+    }
+
+    // Pre-sort both sides ONCE at the parent (worn-first player, alphabetical) — the single source
+    // of order shared by the columns' display and the controller focus index.
+    val playerSorted = remember(playerItems, wornIds) {
+        playerItems.sortedWith(
+            compareByDescending<InventoryItem> { isWorn(it) }.thenBy { it.displayName().lowercase() }
+        )
+    }
+    val containerSorted = remember(containerItems) {
+        containerItems.sortedWith(compareBy { it.displayName().lowercase() })
+    }
+    // Controller focus (BOTTOM = two side-by-side lists → rows = 1).
+    val focus = rememberLootNavFocus(
+        playerSorted = playerSorted,
+        containerSorted = containerSorted,
+        rows = 1,
+        isCorpse = session.isCorpse,
+        requestQty = { name, count, label, action ->
+            QuantityRequestState.requestOrRun(name, count, label, action)
+        },
+        onPut = { it, n -> put(it, n) },
+        onTake = { it, n -> take(it, n) },
+        onTakeAll = { takeAll() },
+        onDispose = { CompanionActions.containerDispose() },
+    )
 
     Box(
         modifier = Modifier
@@ -1690,10 +2018,11 @@ private fun LootingOverlay(
                 LootColumn(
                     header = "Player (${playerGold}g)",
                     legend = "tap to put · long press for more",
-                    items = playerItems,
+                    items = playerSorted,
                     isPlayerSide = true,
                     isWorn = { isWorn(it) },
                     onTransfer = { it, n -> put(it, n) },
+                    focusedIndex = if (focus.side == 0) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
                 // Dashed vertical divider between the two columns.
@@ -1709,13 +2038,14 @@ private fun LootingOverlay(
                 LootColumn(
                     header = session.containerName.ifBlank { "Container" },
                     legend = "tap to take · long press for more",
-                    items = containerItems,
+                    items = containerSorted,
                     isPlayerSide = false,
                     isWorn = { false },
                     onTransfer = { it, n -> take(it, n) },
                     // Pickpocket: an empty visible list usually means your Sneak hid the
                     // items (not that the NPC is broke) — say so. Corpses/chests: "Empty".
                     emptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
+                    focusedIndex = if (focus.side == 1) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -1736,15 +2066,7 @@ private fun LootingOverlay(
                     label = "Take All", hint = "X",
                     enabled = true,
                     modifier = Modifier.weight(1f)
-                ) {
-                    // Optimistically empty the container; the Lua handler takes all AND
-                    // closes the overlay (removeMode → COMPANION_CONTAINER_CLOSED).
-                    playerItems = containerItems.fold(playerItems) { acc, it ->
-                        moveOptimistic(listOf(it), acc, it, it.count).second
-                    }
-                    containerItems = emptyList()
-                    CompanionActions.containerTakeAll()
-                }
+                ) { takeAll() }
                 if (session.isCorpse) {
                     LootButton(
                         label = "Dispose of Corpse", hint = "R1",
@@ -1776,7 +2098,9 @@ private fun LootingOverlay(
     }
 }
 
-/** One side of the looting overlay — header, legend, and a scrolling item list. */
+/** One side of the looting overlay — header, legend, and a scrolling item list. [items] arrives
+ *  pre-sorted from the parent (single source of order shared with the controller focus index).
+ *  [focusedIndex] highlights that row (-1 = this side isn't focused) and keeps it on-screen. */
 @Composable
 private fun LootColumn(
     header: String,
@@ -1786,6 +2110,7 @@ private fun LootColumn(
     isWorn: (InventoryItem) -> Boolean,
     onTransfer: (InventoryItem, Int) -> Unit,
     emptyText: String = "Empty",
+    focusedIndex: Int = -1,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
@@ -1807,20 +2132,20 @@ private fun LootColumn(
                 Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
             }
         } else {
-            // Sort worn-first (player side) then alphabetical, mirroring the inventory tab.
-            val sorted = remember(items, isPlayerSide) {
-                items.sortedWith(
-                    compareByDescending<InventoryItem> { isPlayerSide && isWorn(it) }
-                        .thenBy { it.displayName().lowercase() }
-                )
+            val listState = rememberLazyListState()
+            LaunchedEffect(focusedIndex) {
+                if (focusedIndex in items.indices) listState.animateScrollToItem(focusedIndex)
             }
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(sorted) { item ->
+            // Right stick scrolls this list while it's the focused side.
+            ScrollByNav(listState, active = focusedIndex >= 0)
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                itemsIndexed(items) { i, item ->
                     LootRow(
                         item = item,
                         isPlayerSide = isPlayerSide,
                         worn = isPlayerSide && isWorn(item),
                         iconBitmap = rememberItemIcon(item.icon),
+                        focused = i == focusedIndex,
                         onTransfer = onTransfer
                     )
                 }
@@ -1841,6 +2166,7 @@ private fun LootRow(
     isPlayerSide: Boolean,
     worn: Boolean,
     iconBitmap: ImageBitmap? = null,
+    focused: Boolean = false,
     onTransfer: (InventoryItem, Int) -> Unit
 ) {
     val context = LocalContext.current
@@ -1867,6 +2193,15 @@ private fun LootRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // Controller focus: a bronze border + faint fill on the whole row. Worn is shown
+                    // by the brighter name + "WORN" tag (text only, no border), so this reads as a
+                    // distinct "cursor here" marker.
+                    .then(
+                        if (focused) Modifier
+                            .background(BronzeLight.copy(alpha = 0.12f))
+                            .border(2.dp, BronzeLight)
+                        else Modifier
+                    )
                     .combinedClickable(
                         onClick = { transfer() },
                         onLongClick = { menuOpen = true; DropdownState.open() }
@@ -2131,6 +2466,36 @@ fun LootingTopOverlay() {
         playerItems = p; containerItems = c
         CompanionActions.containerPut(item.stackId.ifEmpty { item.id }, n)
     }
+    fun takeAll() {
+        playerItems = containerItems.fold(playerItems) { acc, it ->
+            moveOptimistic(listOf(it), acc, it, it.count).second
+        }
+        containerItems = emptyList()
+        CompanionActions.containerTakeAll()
+    }
+
+    // Pre-sort both sides ONCE (shared by the grids' display and the controller focus index).
+    val playerSorted = remember(playerItems, wornIds) {
+        playerItems.sortedWith(
+            compareByDescending<InventoryItem> { isWorn(it) }.thenBy { it.displayName().lowercase() }
+        )
+    }
+    val containerSorted = remember(containerItems) {
+        containerItems.sortedWith(compareBy { it.displayName().lowercase() })
+    }
+    // Controller focus (SPLIT = two 4-row icon grids → rows = 4). X/R1 fire here too even though
+    // the Take All / Dispose buttons live on the bottom controls window — they're plain commands.
+    val focus = rememberLootNavFocus(
+        playerSorted = playerSorted,
+        containerSorted = containerSorted,
+        rows = 4,
+        isCorpse = session.isCorpse,
+        requestQty = requestQty,
+        onPut = { it, n -> put(it, n) },
+        onTake = { it, n -> take(it, n) },
+        onTakeAll = { takeAll() },
+        onDispose = { CompanionActions.containerDispose() },
+    )
 
     Box(
         modifier = Modifier
@@ -2150,24 +2515,26 @@ fun LootingTopOverlay() {
             // LEFT: player.
             LootGridColumn(
                 header = "You",
-                items = playerItems,
+                items = playerSorted,
                 isPlayerSide = true,
                 isWorn = { isWorn(it) },
                 emptyText = "Empty",
                 onTransfer = { it, n -> put(it, n) },
                 onRequestQty = requestQty,
+                focusedIndex = if (focus.side == 0) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
             Spacer(Modifier.width(LOOT_SPLIT_COLUMN_GAP))
             // RIGHT: container.
             LootGridColumn(
                 header = session.containerName.ifBlank { "Container" },
-                items = containerItems,
+                items = containerSorted,
                 isPlayerSide = false,
                 isWorn = { false },
                 emptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
                 onTransfer = { it, n -> take(it, n) },
                 onRequestQty = requestQty,
+                focusedIndex = if (focus.side == 1) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
         }
@@ -2195,7 +2562,9 @@ fun LootingTopOverlay() {
     }
 }
 
-/** One side of the SPLIT looting grids — header + a 3-row horizontally-scrolling icon grid. */
+/** One side of the SPLIT looting grids — header + a 4-row horizontally-scrolling icon grid.
+ *  [items] arrives pre-sorted from the parent (shared with the controller focus index);
+ *  [focusedIndex] highlights that cell (-1 = this side isn't focused) and keeps it on-screen. */
 @Composable
 private fun LootGridColumn(
     header: String,
@@ -2205,6 +2574,7 @@ private fun LootGridColumn(
     emptyText: String,
     onTransfer: (InventoryItem, Int) -> Unit,
     onRequestQty: (String, Int, String, (Int) -> Unit) -> Unit,
+    focusedIndex: Int = -1,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
@@ -2222,26 +2592,29 @@ private fun LootGridColumn(
                 Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
             }
         } else {
-            // Worn-first (player side) then alphabetical, mirroring the inventory tab.
-            val sorted = remember(items, isPlayerSide) {
-                items.sortedWith(
-                    compareByDescending<InventoryItem> { isPlayerSide && isWorn(it) }
-                        .thenBy { it.displayName().lowercase() }
-                )
+            val gridState = rememberLazyGridState()
+            LaunchedEffect(focusedIndex) {
+                if (focusedIndex in items.indices) gridState.animateScrollToItem(focusedIndex)
             }
+            // Right stick left/right scrolls this horizontal grid while it's the focused side.
+            ScrollByNav(gridState, active = focusedIndex >= 0, horizontal = true)
             LazyHorizontalGrid(
-                // 4 rows now that the icons are smaller; tighter spacing fits more.
+                // 4 rows now that the icons are smaller; tighter spacing fits more. Column-major fill,
+                // so item index i sits at grid row i%4, grid column i/4 — matches the focus math in
+                // rememberLootNavFocus (rows = 4).
+                state = gridState,
                 rows = GridCells.Fixed(4),
                 modifier = Modifier.fillMaxSize(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                gridItems(sorted) { item ->
+                gridItemsIndexed(items) { i, item ->
                     LootGridCell(
                         item = item,
                         isPlayerSide = isPlayerSide,
                         worn = isPlayerSide && isWorn(item),
                         iconBitmap = rememberItemIcon(item.icon),
+                        focused = i == focusedIndex,
                         onTransfer = onTransfer,
                         onRequestQty = onRequestQty
                     )
@@ -2263,6 +2636,7 @@ private fun LootGridCell(
     isPlayerSide: Boolean,
     worn: Boolean,
     iconBitmap: ImageBitmap? = null,
+    focused: Boolean = false,
     onTransfer: (InventoryItem, Int) -> Unit,
     onRequestQty: (String, Int, String, (Int) -> Unit) -> Unit
 ) {
@@ -2280,6 +2654,15 @@ private fun LootGridCell(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
                 .width(54.dp)
+                // Controller focus: a bronze ring + faint fill around the WHOLE cell (icon + label).
+                // Worn is an inner-icon BronzeLight border, so this outer ring + fill is distinct.
+                .then(
+                    if (focused) Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(BronzeLight.copy(alpha = 0.15f))
+                        .border(2.dp, BronzeLight, RoundedCornerShape(4.dp))
+                    else Modifier
+                )
                 .combinedClickable(
                     onClick = { transfer() },
                     onLongClick = { menuOpen = true; DropdownState.open() }
@@ -2442,6 +2825,34 @@ private fun QuantitySelector(
     var qty by remember(name, safeMax) { mutableStateOf(1) }
     fun set(v: Int) { qty = v.coerceIn(1, safeMax) }
     val showTens = safeMax > 10
+
+    // Controller: while this selector is up it OWNS nav — mark it open so the grid/slider collectors
+    // underneath yield, and drive the quantity from the D-pad. D-pad up/right = +1, down/left = −1;
+    // A confirms; B cancels JUST the selector (native intercepts B → COMPANION_NAV_CANCEL while
+    // companionQtySelectorOpen, instead of closing the whole overlay). Also pushes that open flag to
+    // native so the B interception knows to fire; the counter guards against brief enter/exit overlap.
+    DisposableEffect(Unit) {
+        ModalNav.count++
+        CompanionActions.setModalCancelOpen(true)
+        onDispose {
+            ModalNav.count--
+            if (ModalNav.count == 0) CompanionActions.setModalCancelOpen(false)
+        }
+    }
+    LaunchedEffect(name, safeMax) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            when (ev) {
+                is NavEvent.Up, is NavEvent.Right -> set(qty + 1)
+                is NavEvent.Down, is NavEvent.Left -> set(qty - 1)
+                is NavEvent.Confirm -> onConfirm(qty)
+                is NavEvent.Cancel -> onCancel()
+                else -> Unit
+            }
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -2779,7 +3190,19 @@ private fun RepairOverlay(session: RepairSession) {
             )
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
-            // ---- Item list ----
+            // ---- Item list ---- (D-pad up/down navigate, A repairs the focused one, X repairs all)
+            val focusIndex = rememberListNavFocus(
+                itemCount = session.items.size,
+                onConfirm = { i ->
+                    val it = session.items[i]
+                    if (it.cost <= session.playerGold) CompanionActions.repairItem(it.sid)
+                },
+                onAction1 = { if (session.items.isNotEmpty()) CompanionActions.repairAll() },
+            )
+            val listState = rememberLazyListState()
+            LaunchedEffect(focusIndex) {
+                if (focusIndex in session.items.indices) listState.animateScrollToItem(focusIndex)
+            }
             if (session.items.isEmpty()) {
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(
@@ -2788,12 +3211,13 @@ private fun RepairOverlay(session: RepairSession) {
                     )
                 }
             } else {
-                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
-                    items(session.items, key = { it.sid }) { item ->
+                LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    itemsIndexed(session.items, key = { _, it -> it.sid }) { i, item ->
                         RepairRow(
                             item = item,
                             affordable = item.cost <= session.playerGold,
                             nameFontSize = rowFontSize,
+                            focused = i == focusIndex,
                             onRepair = { CompanionActions.repairItem(item.sid) }
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
@@ -2835,18 +3259,28 @@ private fun RepairRow(
     item: RepairItem,
     affordable: Boolean,
     nameFontSize: TextUnit = 14.sp,
+    focused: Boolean = false,
     onRepair: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // Controller focus: a bronze border + faint fill on the focused row.
+            .then(
+                if (focused) Modifier.background(BronzeLight.copy(alpha = 0.12f)).border(2.dp, BronzeLight)
+                else Modifier
+            )
             .then(if (affordable) Modifier.clickable { onRepair() } else Modifier)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             item.name,
-            color = if (affordable) Bone else BoneDim,
+            color = when {
+                !affordable -> BoneDim
+                focused -> BoneBright
+                else -> Bone
+            },
             fontSize = nameFontSize, fontFamily = MwBody,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
@@ -2962,7 +3396,18 @@ private fun TravelOverlay(session: TravelSession) {
             )
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
-            // ---- Destination list ----
+            // ---- Destination list ---- (D-pad up/down navigate, A travels to the focused one)
+            val focusIndex = rememberListNavFocus(
+                itemCount = session.destinations.size,
+                onConfirm = { i ->
+                    val d = session.destinations[i]
+                    if (d.cost <= session.playerGold) CompanionActions.travelGo(d.index)
+                },
+            )
+            val listState = rememberLazyListState()
+            LaunchedEffect(focusIndex) {
+                if (focusIndex in session.destinations.indices) listState.animateScrollToItem(focusIndex)
+            }
             if (session.destinations.isEmpty()) {
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(
@@ -2971,12 +3416,13 @@ private fun TravelOverlay(session: TravelSession) {
                     )
                 }
             } else {
-                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
-                    items(session.destinations, key = { it.index }) { dest ->
+                LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    itemsIndexed(session.destinations, key = { _, it -> it.index }) { i, dest ->
                         TravelRow(
                             dest = dest,
                             affordable = dest.cost <= session.playerGold,
                             nameFontSize = rowFontSize,
+                            focused = i == focusIndex,
                             onTravel = { CompanionActions.travelGo(dest.index) }
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
@@ -3010,18 +3456,28 @@ private fun TravelRow(
     dest: TravelDest,
     affordable: Boolean,
     nameFontSize: TextUnit = 14.sp,
+    focused: Boolean = false,
     onTravel: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // Controller focus: a bronze border + faint fill on the focused row.
+            .then(
+                if (focused) Modifier.background(BronzeLight.copy(alpha = 0.12f)).border(2.dp, BronzeLight)
+                else Modifier
+            )
             .then(if (affordable) Modifier.clickable { onTravel() } else Modifier)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             dest.name,
-            color = if (affordable) Bone else BoneDim,
+            color = when {
+                !affordable -> BoneDim
+                focused -> BoneBright
+                else -> Bone
+            },
             fontSize = nameFontSize, fontFamily = MwBody,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
@@ -3051,6 +3507,22 @@ private fun TravelRow(
 private fun RestWaitOverlay(session: SleepSession) {
     val isRest = session.mode == SleepMode.REST
     var hours by remember { mutableStateOf(1) }
+
+    // Controller: D-pad left/right adjust the hours by ±1; the left stick (SliderLeft/Right, polled
+    // at ~60ms) does the same but smoothly while held; A confirms (Rest/Wait). B cancels natively.
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            when (ev) {
+                is NavEvent.Left, is NavEvent.SliderLeft -> hours = (hours - 1).coerceIn(1, 24)
+                is NavEvent.Right, is NavEvent.SliderRight -> hours = (hours + 1).coerceIn(1, 24)
+                is NavEvent.Confirm -> CompanionActions.sleep(hours)
+                else -> Unit
+            }
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -3162,6 +3634,101 @@ private val BarterGreen = Color(0xFF7FBF7F)   // Offer / "player receives" (matc
 private val BarterRed = Color(0xFFC75C5C)     // "player pays" / rejected (matches effect red)
 private val BarterBlue = Color(0xFF6E93C9)    // Cancel
 
+/** The per-side visible barter list: filter by the selected category tab, then sort
+ *  selected-first, worn-first (player), alphabetical. Shared by the columns' display and the
+ *  controller focus index so the D-pad index maps 1:1 to a visible cell/row. */
+private fun barterVisible(items: List<BarterItem>, category: String?, isPlayerSide: Boolean): List<BarterItem> =
+    items.filter { category == null || it.category == category }
+        .sortedWith(
+            compareByDescending<BarterItem> { it.isSelected }
+                .thenByDescending { isPlayerSide && it.worn }
+                .thenBy { it.displayName().lowercase() }
+        )
+
+/** Current controller focus in the barter overlay: which [side] (0 = player/left,
+ *  1 = vendor/right) and which [index] into that side's visible list. */
+private data class BarterFocus(val side: Int, val index: Int)
+
+/**
+ * Controller focus + navigation for the barter overlay (Phase 4), shared by the BOTTOM list
+ * layout ([rows] = 1) and the SPLIT grid layout ([rows] = 4). Owns focus (side + index into that
+ * side's VISIBLE list) and consumes NavEvents:
+ *  - D-pad moves focus and WRAPS within the grid (grid: column-major ±1 within a column, ±rows
+ *    across columns, both wrapping; list: Up/Down wrap ±1, Left/Right switch side to its first item).
+ *  - L2 / R2 switch to the player / vendor side, focus → that side's FIRST item.
+ *  - A toggles the focused item (select/deselect) via [onToggle] (stacks > 1 prompt first).
+ *  - X = [onOffer] (Make offer); left stick left/right = [onSlider](-1 / +1) (gold offset). In SPLIT
+ *    these two are no-ops here — the bottom controls window owns the slider + Offer button (its own
+ *    collector), because the gold offset state lives there; passing no-ops avoids a top/bottom desync.
+ * Focus starts on the VENDOR side's first item when barter opens; clears when the overlay leaves
+ * composition. Only one barter grid layout is composed at a time (its collector owns barter nav);
+ * the dialogue collector yields while a barter session is active. B (Cancel) is the existing patch.
+ */
+@Composable
+private fun rememberBarterNavFocus(
+    visiblePlayer: List<BarterItem>,
+    visibleVendor: List<BarterItem>,
+    rows: Int,
+    onToggle: (BarterItem) -> Unit,
+    onOffer: () -> Unit,
+    onSlider: (Int) -> Unit,
+): BarterFocus {
+    var side by remember { mutableStateOf(1) } // start on the vendor side
+    var index by remember { mutableStateOf(0) }
+
+    LaunchedEffect(visiblePlayer.size, visibleVendor.size, side) {
+        val n = if (side == 0) visiblePlayer.size else visibleVendor.size
+        index = index.coerceIn(0, (n - 1).coerceAtLeast(0))
+    }
+
+    val snapshot = rememberUpdatedState(Triple(visiblePlayer, visibleVendor, rows))
+    val toggleState = rememberUpdatedState(onToggle)
+    val offerState = rememberUpdatedState(onOffer)
+    val sliderState = rememberUpdatedState(onSlider)
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (~8g/sec held)
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (ModalNav.open) return@collect // the quantity selector owns nav while up
+            val (pVis, vVis, r) = snapshot.value
+            fun list(s: Int) = if (s == 0) pVis else vVis
+            val size = list(side).size
+            // Column-major grid move with per-axis wrap (rows = r); partial last column clamps rows.
+            fun gridMove(i: Int, n: Int): Int {
+                if (n <= 0) return 0
+                val cols = (n + r - 1) / r
+                val col = i / r; val row = i % r
+                fun colLast(c: Int) = minOf((c + 1) * r, n) - 1
+                return when (ev) {
+                    is NavEvent.Down -> if (row + 1 >= r || col * r + row + 1 >= n) col * r else i + 1
+                    is NavEvent.Up -> if (row == 0) colLast(col) else i - 1
+                    is NavEvent.Right -> (if (col + 1 >= cols) 0 else col + 1).let { minOf(it * r + row, colLast(it)) }
+                    is NavEvent.Left -> (if (col - 1 < 0) cols - 1 else col - 1).let { minOf(it * r + row, colLast(it)) }
+                    else -> i
+                }
+            }
+            when (ev) {
+                is NavEvent.Down -> if (size > 0) index = if (r <= 1) (index + 1) % size else gridMove(index, size)
+                is NavEvent.Up -> if (size > 0) index = if (r <= 1) (index - 1 + size) % size else gridMove(index, size)
+                is NavEvent.Right ->
+                    if (r <= 1) { side = 1; index = 0 } else if (size > 0) index = gridMove(index, size)
+                is NavEvent.Left ->
+                    if (r <= 1) { side = 0; index = 0 } else if (size > 0) index = gridMove(index, size)
+                is NavEvent.L2 -> { side = 0; index = 0 }
+                is NavEvent.R2 -> { side = 1; index = 0 }
+                is NavEvent.Confirm -> list(side).getOrNull(index)?.let { toggleState.value(it) }
+                is NavEvent.Action1 -> offerState.value()
+                is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) sliderState.value(-1)
+                is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) sliderState.value(1)
+                else -> Unit // Scroll*/R1 handled elsewhere
+            }
+        }
+    }
+    return BarterFocus(side, index)
+}
+
 /**
  * Bottom-screen barter overlay. Driven by COMPANION_BARTER_* (native TradeWindow),
  * shown whenever [GameStateRepository.barterSession] is non-null. NOT a Compose Dialog
@@ -3243,6 +3810,23 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
         CompanionActions.barterSetExtraGold(extraGold)
     }
 
+    // Controller focus (BOTTOM = two side-by-side lists → rows = 1). All state is co-located here,
+    // so this collector also owns X (Offer) + the left-stick gold slider.
+    val visiblePlayer = remember(playerItems, playerCat) { barterVisible(playerItems, playerCat, true) }
+    val visibleVendor = remember(vendorItems, vendorCat) { barterVisible(vendorItems, vendorCat, false) }
+    // Flat 1g per left-stick tick. At the ~60ms native slider-poll cadence (~16 ticks/sec) that's
+    // ~16g/sec when held — precise for fine adjustment, still reaches large values by holding. Tune
+    // here (or add an accelerating hold) if needed.
+    val goldStep = 1
+    val focus = rememberBarterNavFocus(
+        visiblePlayer = visiblePlayer,
+        visibleVendor = visibleVendor,
+        rows = 1,
+        onToggle = ::toggle,
+        onOffer = { if (offerEnabled) CompanionActions.barterOffer() },
+        onSlider = { dir -> setBalance(offerBalance + dir * goldStep) },
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -3288,6 +3872,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     selectedCategory = playerCat,
                     onSelectCategory = { playerCat = it },
                     onToggle = ::toggle,
+                    focusedIndex = if (focus.side == 0) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
                 // Dashed vertical divider.
@@ -3307,6 +3892,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     selectedCategory = vendorCat,
                     onSelectCategory = { vendorCat = it },
                     onToggle = ::toggle,
+                    focusedIndex = if (focus.side == 1) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -3388,6 +3974,32 @@ private fun BarterControlsOnly(session: BarterSession) {
         val clamped = target.coerceIn(-session.playerGold, session.vendorGold)
         extraGold = clamped - session.merchantOffer
         CompanionActions.barterSetExtraGold(extraGold)
+    }
+
+    // Controller: in SPLIT mode the grid nav + A + L2/R2 live on the TOP grids (BarterTopOverlay);
+    // this bottom window owns the gold slider (left stick) + X (Offer) because the gold-offset state
+    // lives here. A small dedicated collector — no focus/grid on the bottom, disjoint event set from
+    // the top collector (Action1/SliderLeft/SliderRight only), so the two never double-handle.
+    // Flat 1g per left-stick tick. At the ~60ms native slider-poll cadence (~16 ticks/sec) that's
+    // ~16g/sec when held — precise for fine adjustment, still reaches large values by holding. Tune
+    // here (or add an accelerating hold) if needed.
+    val goldStep = 1
+    val ctlSnapshot = rememberUpdatedState(Triple(offerBalance, offerEnabled, goldStep))
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (~8g/sec held)
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (ModalNav.open) return@collect // the quantity selector owns nav while up
+            val (balance, enabled, step) = ctlSnapshot.value
+            when (ev) {
+                is NavEvent.Action1 -> if (enabled) CompanionActions.barterOffer()
+                is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) setBalance(balance - step)
+                is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) setBalance(balance + step)
+                else -> Unit
+            }
+        }
     }
 
     Box(
@@ -3614,6 +4226,20 @@ fun BarterTopOverlay() {
         requestQty(item.displayName(), item.count, "Select") { n -> borrow(item, n) }
     }
 
+    // Controller focus (SPLIT = two 4-row icon grids → rows = 4). X (Offer) + the gold slider are
+    // owned by the bottom controls window (BarterControlsOnly, its own collector) because the gold-
+    // offset state lives there — passing no-ops here avoids a top/bottom desync.
+    val visiblePlayer = remember(playerCol, playerCat) { barterVisible(playerCol, playerCat, true) }
+    val visibleVendor = remember(vendorCol, vendorCat) { barterVisible(vendorCol, vendorCat, false) }
+    val focus = rememberBarterNavFocus(
+        visiblePlayer = visiblePlayer,
+        visibleVendor = visibleVendor,
+        rows = 4,
+        onToggle = ::toggle,
+        onOffer = {},
+        onSlider = {},
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -3637,6 +4263,7 @@ fun BarterTopOverlay() {
                 selectedCategory = playerCat,
                 onSelectCategory = { playerCat = it },
                 onToggle = ::toggle,
+                focusedIndex = if (focus.side == 0) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
             Spacer(Modifier.width(BARTER_SPLIT_COLUMN_GAP))
@@ -3648,6 +4275,7 @@ fun BarterTopOverlay() {
                 selectedCategory = vendorCat,
                 onSelectCategory = { vendorCat = it },
                 onToggle = ::toggle,
+                focusedIndex = if (focus.side == 1) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
         }
@@ -3701,6 +4329,7 @@ private fun BarterGridColumn(
     selectedCategory: String?,
     onSelectCategory: (String?) -> Unit,
     onToggle: (BarterItem) -> Unit,
+    focusedIndex: Int = -1,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
@@ -3726,31 +4355,36 @@ private fun BarterGridColumn(
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
         Spacer(Modifier.height(6.dp))
 
+        // Same filter+sort the controller focus index is computed against (barterVisible).
         val visible = remember(items, selectedCategory, isPlayerSide) {
-            items.filter { selectedCategory == null || it.category == selectedCategory }
-                .sortedWith(
-                    compareByDescending<BarterItem> { it.isSelected }
-                        .thenByDescending { isPlayerSide && it.worn }
-                        .thenBy { it.displayName().lowercase() }
-                )
+            barterVisible(items, selectedCategory, isPlayerSide)
         }
         if (visible.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Nothing to trade", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
             }
         } else {
+            val gridState = rememberLazyGridState()
+            LaunchedEffect(focusedIndex) {
+                if (focusedIndex in visible.indices) gridState.animateScrollToItem(focusedIndex)
+            }
+            // Right stick left/right scrolls this horizontal grid while it's the focused side.
+            ScrollByNav(gridState, active = focusedIndex >= 0, horizontal = true)
             LazyHorizontalGrid(
-                // 4 rows / tight spacing — matching the looting overlay.
+                // 4 rows / tight spacing — matching the looting overlay. Column-major fill, so item
+                // index i is at grid row i%4, column i/4 — matches rememberBarterNavFocus (rows = 4).
+                state = gridState,
                 rows = GridCells.Fixed(4),
                 modifier = Modifier.fillMaxSize(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                gridItems(visible) { item ->
+                gridItemsIndexed(visible) { i, item ->
                     BarterGridCell(
                         item = item,
                         isPlayerSide = isPlayerSide,
                         iconBitmap = rememberItemIcon(item.icon),
+                        focused = i == focusedIndex,
                         onToggle = onToggle
                     )
                 }
@@ -3770,6 +4404,7 @@ private fun BarterGridCell(
     item: BarterItem,
     isPlayerSide: Boolean,
     iconBitmap: ImageBitmap? = null,
+    focused: Boolean = false,
     onToggle: (BarterItem) -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -3784,6 +4419,16 @@ private fun BarterGridCell(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
                 .width(54.dp)
+                // Controller focus: a bronze ring + faint fill around the WHOLE cell (icon + label +
+                // price). SELECTED is an inner-icon BronzeLight border + SlotWorn icon fill, so this
+                // outer-cell ring reads as a distinct "cursor here" marker even on a selected cell.
+                .then(
+                    if (focused) Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(BronzeLight.copy(alpha = 0.15f))
+                        .border(2.dp, BronzeLight, RoundedCornerShape(4.dp))
+                    else Modifier
+                )
                 .combinedClickable(
                     onClick = { onToggle(item) },
                     onLongClick = { menuOpen = true; DropdownState.open() }
@@ -3895,6 +4540,7 @@ private fun BarterColumn(
     selectedCategory: String?,
     onSelectCategory: (String?) -> Unit,
     onToggle: (BarterItem) -> Unit,
+    focusedIndex: Int = -1,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
@@ -3920,14 +4566,9 @@ private fun BarterColumn(
         Spacer(Modifier.height(4.dp))
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
 
-        // Selected-first, then worn-first (player), then alphabetical — mirrors inventory.
+        // Same filter+sort the controller focus index is computed against (barterVisible).
         val visible = remember(items, selectedCategory, isPlayerSide) {
-            items.filter { selectedCategory == null || it.category == selectedCategory }
-                .sortedWith(
-                    compareByDescending<BarterItem> { it.isSelected }
-                        .thenByDescending { isPlayerSide && it.worn }
-                        .thenBy { it.displayName().lowercase() }
-                )
+            barterVisible(items, selectedCategory, isPlayerSide)
         }
         // weight(1f) so the list explicitly takes ALL remaining height in the column —
         // the item lists expand to fill the overlay (matching the looting overlay).
@@ -3936,12 +4577,19 @@ private fun BarterColumn(
                 Text("Nothing to trade", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
             }
         } else {
-            LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
-                items(visible) { item ->
+            val listState = rememberLazyListState()
+            LaunchedEffect(focusedIndex) {
+                if (focusedIndex in visible.indices) listState.animateScrollToItem(focusedIndex)
+            }
+            // Right stick scrolls this list while it's the focused side.
+            ScrollByNav(listState, active = focusedIndex >= 0)
+            LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().weight(1f)) {
+                itemsIndexed(visible) { i, item ->
                     BarterRow(
                         item = item,
                         isPlayerSide = isPlayerSide,
                         iconBitmap = rememberItemIcon(item.icon),
+                        focused = i == focusedIndex,
                         onToggle = onToggle
                     )
                 }
@@ -3961,6 +4609,7 @@ private fun BarterRow(
     item: BarterItem,
     isPlayerSide: Boolean,
     iconBitmap: ImageBitmap? = null,
+    focused: Boolean = false,
     onToggle: (BarterItem) -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -3975,6 +4624,14 @@ private fun BarterRow(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(if (selected) SlotWorn else Color.Transparent)
+                    // Controller focus: a bronze border + faint fill on the row. SELECTED is a
+                    // SlotWorn fill (no border), so the border reads as a distinct "cursor here".
+                    .then(
+                        if (focused) Modifier
+                            .background(BronzeLight.copy(alpha = 0.12f))
+                            .border(2.dp, BronzeLight)
+                        else Modifier
+                    )
                     .combinedClickable(
                         onClick = { onToggle(item) },
                         onLongClick = { menuOpen = true; DropdownState.open() }

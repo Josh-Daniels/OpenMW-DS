@@ -114,6 +114,21 @@ static std::atomic<bool> g_companionDsTraining{ false };    // GM_Training
 // the native GM_Travel window is suppressed and the bottom screen is the sole surface.
 static std::atomic<bool> g_companionDsTravel{ false };      // GM_Travel
 
+// True while any DS overlay (looting/barter/dialogue/travel/repair/rest/…) owns controller
+// navigation, pushed from Kotlin via setCompanionNavActive() whenever such an overlay becomes
+// visible/hidden. Read by ControllerManager (companion-controller-nav.patch) through the
+// companionNavActive() bridge: while true, the controller D-pad/A/X/R1/L2/R2/left-stick are
+// intercepted in GUI mode and re-emitted as COMPANION_NAV_* log lines for the bottom-screen
+// Compose UI instead of driving the hidden native window. Default false = vanilla controller
+// behaviour. std::atomic: written on a JNI thread, read on the input thread.
+static std::atomic<bool> g_companionNavActive{ false };
+
+// True while a bottom-screen quantity selector is open (pushed from Kotlin). Read by
+// ControllerManager (companion-controller-nav.patch): while set, the controller B button is
+// intercepted as a CANCEL of just the selector (COMPANION_NAV_CANCEL) instead of closing the
+// whole overlay. std::atomic: written on a JNI thread, read on the input thread.
+static std::atomic<bool> g_companionQtySelectorOpen{ false };
+
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
 // g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
@@ -522,6 +537,19 @@ extern "C" bool companionCursorEnabled()
 {
     return g_companionCursorEnabled.load();
 }
+// Read by ControllerManager (companion-controller-nav.patch) to gate controller interception:
+// returns true while a DS overlay owns navigation, so the D-pad/A/X/R1/L2/R2/left-stick become
+// COMPANION_NAV_* signals for the bottom screen instead of driving the hidden native window.
+extern "C" bool companionNavActive()
+{
+    return g_companionNavActive.load();
+}
+// Read by ControllerManager (companion-controller-nav.patch): true while a quantity selector is up,
+// so B cancels just the selector (COMPANION_NAV_CANCEL) rather than closing the whole overlay.
+extern "C" bool companionQtySelectorOpen()
+{
+    return g_companionQtySelectorOpen.load();
+}
 // Pushed from Kotlin (EngineActivity) whenever the "Game cursor" option changes,
 // and once at startup with the persisted value. Caches into g_companionCursorEnabled
 // for companionCursorEnabled() above.
@@ -529,6 +557,20 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionCursorEnabled(JNIEnv* /*env*/, jclass /*cls*/, jboolean enabled)
 {
     g_companionCursorEnabled.store(enabled == JNI_TRUE);
+}
+// Pushed from Kotlin (EngineActivity) whenever a DS overlay becomes visible/hidden. Caches into
+// g_companionNavActive for companionNavActive() above (controller-nav interception gate).
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionNavActive(JNIEnv* /*env*/, jclass /*cls*/, jboolean active)
+{
+    g_companionNavActive.store(active == JNI_TRUE);
+}
+// Pushed from Kotlin whenever a quantity selector opens/closes. Caches into
+// g_companionQtySelectorOpen for companionQtySelectorOpen() above (B-cancel interception).
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionQtySelectorOpen(JNIEnv* /*env*/, jclass /*cls*/, jboolean open)
+{
+    g_companionQtySelectorOpen.store(open == JNI_TRUE);
 }
 // Read by the SDL event pump (companion-touch-click.patch): true while the "Touch input" option is
 // on, so a finger tap in a menu becomes a direct absolute mouse click at the tap point.

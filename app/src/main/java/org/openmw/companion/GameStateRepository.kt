@@ -80,6 +80,14 @@ object GameStateRepository {
         _itemInfo.value = null
     }
 
+    // Controller-navigation events for the DS overlays (native COMPANION_NAV_* → parseNav). Each
+    // press is stamped with an incrementing seq so identical consecutive presses are distinct
+    // StateFlow values and both re-emit (see NavEvent). Consumers (per-overlay focus handlers,
+    // added in later phases) collect this and move their selection / trigger the focused action.
+    private var navSeq = 0L
+    private val _navEvent = MutableStateFlow<NavEvent?>(null)
+    val navEvent: StateFlow<NavEvent?> = _navEvent.asStateFlow()
+
     // Bottom-screen text-input request. Non-null = a MyGUI EditBox has key focus (native
     // COMPANION_TEXT_INPUT_OPEN); the string is the field's current caption to pre-fill.
     // null = no field focused (COMPANION_TEXT_INPUT_CLOSED) → dismiss the panel + keyboard.
@@ -458,6 +466,12 @@ object GameStateRepository {
         val trimmed = line.trimEnd()
         if (trimmed.contains("COMPANION_DEBUG")) Log.d("CompanionRepo", trimmed)
         when {
+            // Controller-nav signals (companion-controller-nav.patch). Discrete/high-frequency
+            // while a DS overlay is open, so route them first. Each maps to a NavEvent stamped with
+            // a fresh seq so repeats re-emit. Non-nav lines fall through to the state parsing below.
+            trimmed.contains(LogParser.P_NAV) -> {
+                LogParser.parseNav(trimmed)?.let { factory -> _navEvent.value = factory(navSeq++) }
+            }
             trimmed.contains(LogParser.P_JOURNAL_START) -> {
                 journalBuffer = mutableListOf()
             }

@@ -1,0 +1,166 @@
+--- a/apps/openmw/mwinput/controllermanager.cpp
++++ b/apps/openmw/mwinput/controllermanager.cpp
+@@ -46,6 +46,16 @@
+ extern "C" bool companionCursorEnabled();
+ #endif
+ 
++#ifdef __ANDROID__
++// COMPANION: defined in androidmain.cpp. True while any DS overlay owns controller
++// navigation; gates the interception below that turns the controller into COMPANION_NAV_*
++// signals for the bottom-screen Compose UI. See companion-controller-nav.patch.
++extern "C" bool companionNavActive();
++// COMPANION: defined in androidmain.cpp. True while a bottom-screen quantity selector is open;
++// used to intercept B as a CANCEL (of just the selector) instead of closing the whole overlay.
++extern "C" bool companionQtySelectorOpen();
++#endif
++
+ namespace MWInput
+ {
+     ControllerManager::ControllerManager(BindingsManager* bindingsManager, MouseManager* mouseManager,
+@@ -110,6 +120,69 @@
+ 
+     void ControllerManager::update(float dt)
+     {
++#ifdef __ANDROID__
++        // COMPANION: right-stick scroll for DS overlays. SDL emits axis events only on CHANGE, so a
++        // HELD stick can't drive continuous scrolling from the event path — poll the live axis state
++        // each frame instead and emit COMPANION_NAV_SCROLL_* at a throttled cadence while deflected.
++        if (companionNavActive() && MWBase::Environment::get().getWindowManager()->isGuiMode())
++        {
++            const float ry = getAxisValue(SDL_CONTROLLER_AXIS_RIGHTY); // live hardware state, [-1,1)
++            constexpr float threshold = 0.5f;  // ~16000/32768, matches the old event threshold
++            constexpr float interval = 0.06f;  // ~60ms between emitted scroll steps while held
++            static float sScrollAccum = interval; // primed so the first deflection emits immediately
++            if (ry <= -threshold || ry >= threshold)
++            {
++                sScrollAccum += dt;
++                if (sScrollAccum >= interval)
++                {
++                    sScrollAccum = 0.0f;
++                    Log(Debug::Info) << (ry < 0.0f ? "COMPANION_NAV_SCROLL_UP:" : "COMPANION_NAV_SCROLL_DOWN:");
++                }
++            }
++            else
++            {
++                sScrollAccum = interval; // re-arm in the deadzone so the next deflection fires at once
++            }
++
++            // COMPANION: left-stick X drives the barter gold slider — same held-stick problem, same
++            // per-frame poll (reuses threshold/interval above). Negative (left) = decrease, positive
++            // (right) = increase; own accumulator so it's independent of the scroll poll.
++            const float lx = getAxisValue(SDL_CONTROLLER_AXIS_LEFTX);
++            static float sSliderAccum = interval; // primed so the first deflection emits immediately
++            if (lx <= -threshold || lx >= threshold)
++            {
++                sSliderAccum += dt;
++                if (sSliderAccum >= interval)
++                {
++                    sSliderAccum = 0.0f;
++                    Log(Debug::Info) << (lx < 0.0f ? "COMPANION_NAV_SLIDER_LEFT:" : "COMPANION_NAV_SLIDER_RIGHT:");
++                }
++            }
++            else
++            {
++                sSliderAccum = interval; // re-arm in the deadzone
++            }
++
++            // COMPANION: right-stick X scrolls the SPLIT horizontal grids left/right (the vertical
++            // right-stick Y poll above drives the BOTTOM vertical lists up/down). Same per-frame
++            // poll + own accumulator. Negative (left) = scroll left, positive (right) = scroll right.
++            const float rx = getAxisValue(SDL_CONTROLLER_AXIS_RIGHTX);
++            static float sScrollHAccum = interval; // primed so the first deflection emits immediately
++            if (rx <= -threshold || rx >= threshold)
++            {
++                sScrollHAccum += dt;
++                if (sScrollHAccum >= interval)
++                {
++                    sScrollHAccum = 0.0f;
++                    Log(Debug::Info) << (rx < 0.0f ? "COMPANION_NAV_SCROLL_LEFT:" : "COMPANION_NAV_SCROLL_RIGHT:");
++                }
++            }
++            else
++            {
++                sScrollHAccum = interval; // re-arm in the deadzone
++            }
++        }
++#endif
+         if (mGuiCursorEnabled && !(mJoystickLastUsed && !mGamepadGuiCursorEnabled)
+ #ifdef __ANDROID__
+             // COMPANION: don't let the thumbstick move the GUI cursor while the "Game cursor" option
+@@ -285,6 +358,32 @@
+ 
+     bool ControllerManager::gamepadToGuiControl(const SDL_ControllerButtonEvent& arg)
+     {
++#ifdef __ANDROID__
++        // COMPANION: while a DS overlay owns navigation, translate the controller into
++        // COMPANION_NAV_* signals for the bottom-screen Compose UI and swallow the event so the
++        // hidden native window never sees it. B is intentionally NOT intercepted (handled by
++        // companion-b-button-choice-fix.patch). See companion-controller-nav.patch.
++        if (companionNavActive())
++        {
++            switch (arg.button)
++            {
++                case SDL_CONTROLLER_BUTTON_DPAD_LEFT:      Log(Debug::Info) << "COMPANION_NAV_LEFT:";    return true;
++                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:     Log(Debug::Info) << "COMPANION_NAV_RIGHT:";   return true;
++                case SDL_CONTROLLER_BUTTON_DPAD_UP:        Log(Debug::Info) << "COMPANION_NAV_UP:";      return true;
++                case SDL_CONTROLLER_BUTTON_DPAD_DOWN:      Log(Debug::Info) << "COMPANION_NAV_DOWN:";    return true;
++                case SDL_CONTROLLER_BUTTON_A:              Log(Debug::Info) << "COMPANION_NAV_CONFIRM:"; return true;
++                case SDL_CONTROLLER_BUTTON_X:              Log(Debug::Info) << "COMPANION_NAV_ACTION1:"; return true;
++                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:  Log(Debug::Info) << "COMPANION_NAV_R1:";      return true;
++                case SDL_CONTROLLER_BUTTON_B:
++                    // Only intercept B while a quantity selector is up — then it CANCELS just the
++                    // selector (COMPANION_NAV_CANCEL) instead of closing the whole overlay. Otherwise
++                    // fall through so B keeps its normal close behaviour.
++                    if (companionQtySelectorOpen()) { Log(Debug::Info) << "COMPANION_NAV_CANCEL:"; return true; }
++                    break;
++                default: break; // B (no selector) and unlisted buttons fall through to vanilla handling
++            }
++        }
++#endif
+         MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
+ 
+         if (Settings::gui().mControllerMenus)
+@@ -395,6 +494,43 @@
+         };
+ 
+         MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
++#ifdef __ANDROID__
++        // COMPANION: DS-overlay navigation — L2/R2 triggers switch columns (edge-detected so they
++        // fire once per press), the left stick nudges sliders. Swallow (return true) so the hidden
++        // native window / camera never sees the axis. See companion-controller-nav.patch.
++        if (companionNavActive())
++        {
++            if (arg.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT)
++            {
++                handleTriggerPress(arg.value, mLeftTriggerGuiPressed,
++                    [&] { Log(Debug::Info) << "COMPANION_NAV_L2:"; });
++                return true;
++            }
++            if (arg.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
++            {
++                handleTriggerPress(arg.value, mRightTriggerGuiPressed,
++                    [&] { Log(Debug::Info) << "COMPANION_NAV_R2:"; });
++                return true;
++            }
++            if (arg.axis == SDL_CONTROLLER_AXIS_LEFTX)
++            {
++                // Left stick X drives the barter gold slider, but SDL only sends axis events on
++                // CHANGE, so a held stick can't drive continuous adjustment here. Emission is done by
++                // per-frame polling in ControllerManager::update(); this branch only SWALLOWS the
++                // event so the raw axis can't move the hidden native window's cursor.
++                return true;
++            }
++            if (arg.axis == SDL_CONTROLLER_AXIS_RIGHTY || arg.axis == SDL_CONTROLLER_AXIS_RIGHTX)
++            {
++                // Right stick scrolls DS-overlay lists/history (Y = vertical lists, X = horizontal
++                // grids), but SDL only sends axis events on CHANGE, so a held stick can't drive
++                // continuous scrolling from here. Emission is done by per-frame polling in
++                // ControllerManager::update(); this branch only SWALLOWS the events so the raw axes
++                // can't warp the hidden native window's scroll widget / cursor.
++                return true;
++            }
++        }
++#endif
+ 
+         if (Settings::gui().mControllerMenus)
+         {

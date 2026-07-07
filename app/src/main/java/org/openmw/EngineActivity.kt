@@ -79,6 +79,7 @@ import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -644,6 +645,24 @@ class EngineActivity : SDLActivity() {
         external fun setCompanionTouchClick(enabled: Boolean)
 
         /**
+         * Push whether a DS overlay currently owns controller navigation. While true, native
+         * ControllerManager (companion-controller-nav.patch) intercepts the controller D-pad/A/X/
+         * R1/L2/R2/left-stick in GUI mode and re-emits COMPANION_NAV_* signals for the bottom-screen
+         * overlay instead of driving the hidden native window. Pushed on change from the navActive
+         * collector in onCreate. B is never intercepted (companion-b-button-choice-fix.patch).
+         */
+        @JvmStatic
+        external fun setCompanionNavActive(active: Boolean)
+
+        /**
+         * Push whether a bottom-screen quantity selector is open. While true, native
+         * ControllerManager intercepts B as a CANCEL of just the selector (COMPANION_NAV_CANCEL)
+         * instead of closing the whole overlay. Pushed on open/close from QuantitySelector.
+         */
+        @JvmStatic
+        external fun setCompanionQtySelectorOpen(open: Boolean)
+
+        /**
          * Per-element native HUD visibility (companion "Vanilla HUD Elements" options).
          * true = native top-screen element shown; false = hidden. Read natively by
          * companionHud*() (companion-hud-elements.patch). Pushed on change + at startup.
@@ -1011,6 +1030,48 @@ class EngineActivity : SDLActivity() {
                 session != null && loc == ScreenLocation.SPLIT && mode == GameUiMode.DS
             }.distinctUntilChanged().collect { show ->
                 if (show) showBarterTopOverlay() else hideBarterTopOverlay()
+            }
+        }
+
+        // Controller-nav interception gate: push setCompanionNavActive(true) while ANY DS overlay is
+        // visible so native re-emits the controller as COMPANION_NAV_* (companion-controller-nav.
+        // patch) for the bottom-screen UI instead of driving the hidden native window. Each overlay
+        // contributes "its session is visible AND that element is in DS mode"; the dialogue term also
+        // covers its persuasion/choices popups (same conversation surface). Gated off during the
+        // pause/title menu so our nav never competes with the native pause-menu D-pad. Later phases
+        // add their focus handling to the Compose side; this set already routes the signals to them.
+        lifecycleScope.launch {
+            val dialogueNav = combine(
+                GameStateRepository.dialogueNpcName,
+                GameStateRepository.dialogueHistory,
+                GameStateRepository.dialogueTopics,
+                GameStateRepository.dialogueServices,
+                GameStateRepository.dialogueChoices,
+            ) { npc, hist, topics, services, choices ->
+                npc.isNotEmpty() || hist.isNotEmpty() || topics.isNotEmpty() ||
+                    services.isNotEmpty() || choices.isNotEmpty()
+            }.combine(UiPreferences.gameUiModeFlow("game_ui_conversation")) { active, mode ->
+                active && mode == GameUiMode.DS
+            }
+            // "session present AND element is DS" for the single-session overlays.
+            fun sessionNav(session: Flow<Any?>, key: String): Flow<Boolean> =
+                session.combine(UiPreferences.gameUiModeFlow(key)) { s, mode ->
+                    s != null && mode == GameUiMode.DS
+                }
+            val lootingNav = sessionNav(GameStateRepository.containerSession, "game_ui_looting")
+            val barterNav = sessionNav(GameStateRepository.barterSession, "game_ui_bartering")
+            val travelNav = sessionNav(GameStateRepository.travelSession, "game_ui_travel")
+            val repairNav = sessionNav(GameStateRepository.repairSession, "game_ui_repair")
+            val restWaitNav = sessionNav(GameStateRepository.sleepSession, "game_ui_restwait")
+
+            combine(dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav) { arr ->
+                arr.any { it }
+            }.combine(GameStateRepository.pauseMenuVisible) { anyOverlay, paused ->
+                anyOverlay && !paused
+            }.combine(GameStateRepository.titleMenuVisible) { active, title ->
+                active && !title
+            }.distinctUntilChanged().collect { active ->
+                runCatching { setCompanionNavActive(active) }
             }
         }
     }
