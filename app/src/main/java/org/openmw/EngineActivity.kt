@@ -792,9 +792,17 @@ class EngineActivity : SDLActivity() {
         // Add/remove a full-screen WindowManager overlay on the bottom-screen
         // Presentation when the in-game pause/options menu opens/closes.
         lifecycleScope.launch {
-            GameStateRepository.pauseMenuVisible.collect { visible ->
-                if (visible) showPauseOverlay() else hidePauseOverlay()
-            }
+            // Show the options/display-settings overlay for EITHER the in-game pause menu
+            // (pauseMenuVisible, from companion.lua) OR the title-screen main menu
+            // (titleMenuVisible, native from mainmenu.cpp — lets the player set up before a new game).
+            combine(
+                GameStateRepository.pauseMenuVisible,
+                GameStateRepository.titleMenuVisible
+            ) { pause, title -> pause || title }
+                .distinctUntilChanged()
+                .collect { visible ->
+                    if (visible) showPauseOverlay() else hidePauseOverlay()
+                }
         }
 
         // Text entry (character name / class name / save name) is handled by the CUSTOM on-screen

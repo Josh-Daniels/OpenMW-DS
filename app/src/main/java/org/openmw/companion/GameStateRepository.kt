@@ -63,6 +63,13 @@ object GameStateRepository {
     private val _pauseMenuVisible = MutableStateFlow(false)
     val pauseMenuVisible: StateFlow<Boolean> = _pauseMenuVisible.asStateFlow()
 
+    // COMPANION_TITLE_MENU_OPEN / _CLOSED lines from the ENGINE (mainmenu.cpp) — the TITLE-screen
+    // main menu (no game loaded), which companion.lua can't see (it doesn't run before a game
+    // exists). Also gates the options overlay (EngineActivity) so the player can set up before
+    // starting a new game, and drives the one-time "welcome" header shown only on the title screen.
+    private val _titleMenuVisible = MutableStateFlow(false)
+    val titleMenuVisible: StateFlow<Boolean> = _titleMenuVisible.asStateFlow()
+
     // Transient detail-popup contents, populated on demand by a CMP:info request
     // and its COMPANION_INFO reply. null = no popup showing. Kept separate from
     // the live GameState so opening the popup never interferes with stat updates.
@@ -582,6 +589,14 @@ object GameStateRepository {
             }
             trimmed.contains("COMPANION_PAUSE_MENU_CLOSED") -> {
                 _pauseMenuVisible.value = false
+            }
+            // Native title-screen main menu (no game loaded). CLOSED checked first (neither string
+            // contains the other, but keep the dismiss path first).
+            trimmed.contains("COMPANION_TITLE_MENU_CLOSED") -> {
+                _titleMenuVisible.value = false
+            }
+            trimmed.contains("COMPANION_TITLE_MENU_OPEN") -> {
+                _titleMenuVisible.value = true
             }
             // Native sneak indicator (sneaking && undetected), change-detected in
             // HUD::setSneakVisible. Payload is "true"/"false".

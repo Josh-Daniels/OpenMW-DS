@@ -1,0 +1,27 @@
+--- a/apps/openmw/mwgui/mainmenu.cpp
++++ b/apps/openmw/mwgui/mainmenu.cpp
+@@ -130,6 +130,24 @@
+             && MWBase::Environment::get().getStateManager()->getState() == MWBase::StateManager::State_NoGame;
+ 
+         showBackground(isMainMenu);
++
++#ifdef __ANDROID__
++        // COMPANION: tell the bottom screen when the TITLE-screen main menu is showing (isMainMenu:
++        // GM_MainMenu with NO game loaded). This lets the companion options overlay appear there so
++        // the player can set up layout/input before starting a new game. The IN-GAME pause menu
++        // (GM_MainMenu with a game running) is handled by companion.lua, which does not run before a
++        // game is loaded — hence this native signal. Change-detected so it fires only on show/hide
++        // transitions, not on every menu refresh.
++        {
++            static bool sCompanionTitleMenuShown = false;
++            const bool titleMenuShown = visible && isMainMenu;
++            if (titleMenuShown != sCompanionTitleMenuShown)
++            {
++                sCompanionTitleMenuShown = titleMenuShown;
++                Log(Debug::Info) << (titleMenuShown ? "COMPANION_TITLE_MENU_OPEN:" : "COMPANION_TITLE_MENU_CLOSED");
++            }
++        }
++#endif
+ 
+         if (visible)
+         {

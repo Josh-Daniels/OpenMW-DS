@@ -7212,6 +7212,10 @@ fun OptionsMenuOverlay() {
     val context = LocalContext.current
     remember(context) { UiPreferences.init(context); true }
 
+    // True while this overlay is being shown for the TITLE-screen main menu (no game loaded), as
+    // opposed to the in-game pause menu. Drives the one-time welcome block below.
+    val onTitleScreen by GameStateRepository.titleMenuVisible.collectAsState()
+
     // Restore the scroll position from the last time the menu was open. The overlay window is
     // added/removed each time the pause menu opens, so a plain rememberLazyListState would reset
     // to the top; OptionsMenuScrollState survives across those open/close cycles.
@@ -7231,21 +7235,30 @@ fun OptionsMenuOverlay() {
             .fillMaxSize()
             .background(OptionsBg)
     ) {
-        // Title bar
+        // Title bar — app identity always shown (labels the screen, esp. on the title screen where
+        // it appears with no game context), with a "Display settings" subtitle.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(StonePanel)
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            Text(
-                "Display settings",
-                color = BronzeLight,
-                fontSize = 18.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp
-            )
+            Column {
+                Text(
+                    "OpenMW-DS",
+                    color = BronzeLight,
+                    fontSize = 18.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+                Text(
+                    "Display settings",
+                    color = BoneDim,
+                    fontSize = 11.sp,
+                    fontFamily = MwBody
+                )
+            }
         }
         Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
@@ -7256,6 +7269,12 @@ fun OptionsMenuOverlay() {
                 .padding(horizontal = 16.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
         ) {
+            // One-time welcome, shown ONLY on the title screen (before a game is loaded), to orient
+            // first-time users and nudge them toward a starting preset. Hidden during in-game pause.
+            if (onTitleScreen) {
+                item { OptionsWelcomeBlock() }
+            }
+
             // Quick-set row: bulk-set every (non-pending) Game UI element. Never touches HUD.
             item { QuickSetRow() }
 
@@ -7293,6 +7312,50 @@ fun OptionsMenuOverlay() {
             item { TouchInputRow() }
             item { GameCursorRow() }
         }
+    }
+}
+
+/** One-time welcome shown at the top of the options overlay ONLY on the title screen (before a game
+ *  is loaded), to orient first-time users and nudge them toward a starting preset. */
+@Composable
+private fun OptionsWelcomeBlock() {
+    Column(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp)) {
+        Text(
+            "Welcome to OpenMW-DS",
+            color = BronzeLight,
+            fontSize = 15.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "This bottom screen is your companion. It shows Morrowind's menus (inventory, magic, " +
+                "map, journal and stats) with touch. Set your layout and input here before you start.",
+            color = Bone,
+            fontSize = 11.sp,
+            fontFamily = MwBody,
+            lineHeight = 15.sp
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "New here? Start with “All Vanilla” below for the closest-to-original experience, " +
+                "then move individual pieces to DS as you like. These options only effect the top screen. " +
+            "I also recommend enabling touch input (bottom of this screen)",
+            color = BoneDim,
+            fontSize = 11.sp,
+            fontFamily = MwBody,
+            lineHeight = 15.sp
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Want your old UI (health, minimap) back? SEe the Vanilla HUD section.",
+            color = BoneDim,
+            fontSize = 11.sp,
+            fontFamily = MwBody,
+            lineHeight = 15.sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
     }
 }
 
