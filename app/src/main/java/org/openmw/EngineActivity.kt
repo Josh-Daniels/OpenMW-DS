@@ -2,7 +2,7 @@
 
 package org.openmw
 
-// For MorrowindDS
+// For OpenMW-DS
 import android.app.Presentation
 import android.hardware.display.DisplayManager
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -134,7 +134,7 @@ class EngineActivity : SDLActivity() {
     private lateinit var sdlView: View
     private external fun getPathToJni(path_global: String, path_user: String)
 
-    // For MorrowindDS
+    // For OpenMW-DS
     private var companionPresentation: Presentation? = null
 
     // Full-screen options/display-settings overlay on the bottom-screen Presentation,
@@ -210,7 +210,7 @@ class EngineActivity : SDLActivity() {
         hideLootingTopOverlay()
         hideBarterTopOverlay()
 
-        // MorrowindDS
+        // OpenMW-DS
         companionPresentation?.dismiss()
 
         finishAffinity() // kill all activity
@@ -247,7 +247,7 @@ class EngineActivity : SDLActivity() {
         hideSystemBars(this)
         enableScreenStayOn(this)
 
-        // MorrowindDS Second screen
+        // OpenMW-DS Second screen
         startCompanionScreen()
 
         // Add SDL view programmatically
@@ -747,7 +747,7 @@ class EngineActivity : SDLActivity() {
         }
     }
 
-    // MorrowindDS Second screen function.
+    // OpenMW-DS Second screen function.
     private fun startCompanionScreen() {
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         val displays = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)

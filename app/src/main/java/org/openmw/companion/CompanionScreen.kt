@@ -7329,7 +7329,7 @@ private fun OptionsWelcomeBlock() {
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "This bottom screen is your companion. It shows Morrowind's menus (inventory, magic, " +
+            "An app designed for use with the AYN Thor. This bottom screen is your companion. It shows Morrowind's menus (inventory, magic, " +
                 "map, journal and stats) with touch. Set your layout and input here before you start.",
             color = Bone,
             fontSize = 11.sp,
@@ -7348,7 +7348,7 @@ private fun OptionsWelcomeBlock() {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "Want your old UI (health, minimap) back? SEe the Vanilla HUD section.",
+            "Want your old UI (health, minimap) back? See the Vanilla HUD section.",
             color = BoneDim,
             fontSize = 11.sp,
             fontFamily = MwBody,
@@ -7373,6 +7373,8 @@ private fun QuickSetRow() {
     val allDs = modes.isNotEmpty() && modes.all { it == GameUiMode.DS }
     val allVanilla = modes.isNotEmpty() && modes.all { it == GameUiMode.VANILLA }
     val mixed = !allDs && !allVanilla
+    // Whether a saved Custom layout exists — [Custom] is tappable to restore it.
+    val hasCustom by UiPreferences.customSnapshotFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
         Text("Quick set", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
@@ -7388,9 +7390,12 @@ private fun QuickSetRow() {
             OptionPill(Modifier.weight(1f), label = "All DS", active = allDs, enabled = true) {
                 UiPreferences.setAllGameUi(context, GameUiMode.DS)
             }
-            // "Custom" is a status indicator only — it lights up when the rows are a mix of DS and
-            // Vanilla. There is no custom preset to apply, so tapping it does nothing.
-            OptionPill(Modifier.weight(1f), label = "Custom", active = mixed, enabled = true) { }
+            // "Custom" lights up when the rows are a mix of DS and Vanilla. It's tappable once a
+            // custom layout has been saved (snapshotted when you hand-tweak into a mix, or before
+            // switching to a preset), restoring that layout so you can bounce back to it.
+            OptionPill(Modifier.weight(1f), label = "Custom", active = mixed, enabled = hasCustom) {
+                UiPreferences.restoreCustomGameUi(context)
+            }
             OptionPill(Modifier.weight(1f), label = "All Vanilla", active = allVanilla, enabled = true) {
                 UiPreferences.setAllGameUi(context, GameUiMode.VANILLA)
             }

@@ -129,6 +129,9 @@ object UiPreferences {
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
     private const val GAME_CURSOR = "game_cursor"
     private const val TOUCH_INPUT = "touch_input"
+    // Snapshot of the last hand-made ("Custom") Game UI layout, so [Custom] can restore it after
+    // switching to All DS / All Vanilla. Stored as "key=MODE,key=MODE,…" of non-pending elements.
+    private const val GAME_UI_CUSTOM = "game_ui_custom"
     private const val CONVERSATION_LOCATION = "conversation_location"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
@@ -148,6 +151,14 @@ object UiPreferences {
     // elements are locked to their VANILLA default and never persisted/changed.
     private val gameUiModeFlows: Map<String, MutableStateFlow<GameUiMode>> =
         GAME_UI_ELEMENTS.associate { it.key to MutableStateFlow(it.defaultMode) }
+
+    // True while a saved "Custom" Game UI snapshot exists (drives whether the [Custom] quick-set pill
+    // is tappable). Set when a hand-made mixed layout is snapshotted; loaded in init.
+    private val customSnapshotFlow = MutableStateFlow(false)
+
+    // Guards the per-element snapshot save so a bulk setAllGameUi() doesn't snapshot its own transient
+    // mid-loop mixed states. Main-thread only.
+    private var bulkGameUi = false
 
     // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default SPLIT.
     private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT)
@@ -204,6 +215,10 @@ object UiPreferences {
                     ?.let { gameUiModeFlows.getValue(el.key).value = it }
             }
         }
+        customSnapshotFlow.value = !p.getString(GAME_UI_CUSTOM, null).isNullOrEmpty()
+        // If the loaded layout is already a Custom mix, make sure a snapshot exists (covers configs
+        // made before this feature), so [Custom] is immediately tappable rather than dim-highlighted.
+        if (gameUiIsMixed()) saveCustomSnapshot(context)
         gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
         touchInputFlow.value = p.getBoolean(TOUCH_INPUT, true)
         // Game cursor and touch input are mutually exclusive. If a pre-existing config has both on,
@@ -240,6 +255,11 @@ object UiPreferences {
         if (el.pending) return
         gameUiModeFlows.getValue(key).value = mode
         editor(context).putString(GAME_UI_PREFIX + key, mode.name).apply()
+        // An individual row change that leaves the layout MIXED is a "Custom" layout — snapshot it so
+        // [Custom] can restore it after the user later switches to All DS / All Vanilla. Skipped
+        // during a bulk setAllGameUi() (its mid-loop states are transient, and its final state is
+        // uniform anyway, so the snapshot keeps holding the last real mix).
+        if (!bulkGameUi && gameUiIsMixed()) saveCustomSnapshot(context)
     }
 
     /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Vanilla" quick-set
@@ -249,12 +269,51 @@ object UiPreferences {
      *  Vanilla -> Game cursor on (Touch input off). All other Vanilla HUD toggles are left untouched;
      *  individual rows can still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
+        // Snapshot the current layout first if it's a Custom mix, so [Custom] can restore it even if
+        // it wasn't captured by an earlier individual change. (No-op if the snapshot already matches.)
+        if (gameUiIsMixed()) saveCustomSnapshot(context)
+        bulkGameUi = true
         GAME_UI_ELEMENTS.filter { !it.pending }.forEach { setGameUiMode(context, it.key, mode) }
+        bulkGameUi = false
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
         when (mode) {
             GameUiMode.DS -> setTouchInput(context, true)       // mutual exclusion turns Game cursor off
             GameUiMode.VANILLA -> setGameCursor(context, true)  // mutual exclusion turns Touch input off
         }
+    }
+
+    /** Whether a saved "Custom" Game UI layout exists (backs the [Custom] quick-set pill's enabled
+     *  state). */
+    fun customSnapshotFlow(): StateFlow<Boolean> = customSnapshotFlow.asStateFlow()
+
+    /** True when the non-pending Game UI elements are a mix of DS and Vanilla (not all one mode). */
+    private fun gameUiIsMixed(): Boolean {
+        val modes = GAME_UI_ELEMENTS.filter { !it.pending }.map { gameUiModeFlows.getValue(it.key).value }
+        return modes.isNotEmpty() && !modes.all { it == GameUiMode.DS } && !modes.all { it == GameUiMode.VANILLA }
+    }
+
+    /** Persist the current non-pending element modes as the Custom snapshot. */
+    private fun saveCustomSnapshot(context: Context) {
+        val snapshot = GAME_UI_ELEMENTS.filter { !it.pending }
+            .joinToString(",") { "${it.key}=${gameUiModeFlows.getValue(it.key).value.name}" }
+        editor(context).putString(GAME_UI_CUSTOM, snapshot).apply()
+        customSnapshotFlow.value = true
+    }
+
+    /** Re-apply the saved Custom snapshot (the [Custom] quick-set pill). No-op if none saved. Does
+     *  not touch input mode / HUD — only the per-element Game UI layout. */
+    fun restoreCustomGameUi(context: Context) {
+        val snapshot = (prefs ?: return).getString(GAME_UI_CUSTOM, null)?.takeIf { it.isNotEmpty() } ?: return
+        bulkGameUi = true
+        snapshot.split(",").forEach { entry ->
+            val eq = entry.indexOf('=')
+            if (eq > 0) {
+                val key = entry.substring(0, eq)
+                runCatching { GameUiMode.valueOf(entry.substring(eq + 1)) }.getOrNull()
+                    ?.let { setGameUiMode(context, key, it) }
+            }
+        }
+        bulkGameUi = false
     }
 
     fun hudOnFlow(key: String): StateFlow<Boolean> = hudFlows.getValue(key).asStateFlow()
