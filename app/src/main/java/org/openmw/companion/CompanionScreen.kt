@@ -765,6 +765,7 @@ private fun DialogueConversationOverlay(
                     // Inline choices only in BOTTOM mode; otherwise they show in the popup.
                     history = history,
                     choices = if (choicesInline) choices else emptyList(),
+                    topics = topics,
                     modifier = Modifier.weight(0.65f).fillMaxHeight().padding(8.dp)
                 )
                 Box(Modifier.fillMaxHeight().width(1.dp).background(BronzeDark))
@@ -872,10 +873,12 @@ fun ConversationHistoryOverlay() {
     val location by UiPreferences.conversationLocationFlow().collectAsState()
     val npcName by GameStateRepository.dialogueNpcName.collectAsState()
     val history by GameStateRepository.dialogueHistory.collectAsState()
+    // Collected here (not just in the TOP branch) so the SPLIT read-only history below
+    // can also retroactively highlight newly-introduced topics.
+    val topics by GameStateRepository.dialogueTopics.collectAsState()
 
     if (location == ConversationLocation.TOP) {
         // Full interactive conversation on the top screen (bottom screen is scrim-only).
-        val topics by GameStateRepository.dialogueTopics.collectAsState()
         val services by GameStateRepository.dialogueServices.collectAsState()
         val choices by GameStateRepository.dialogueChoices.collectAsState()
         val disposition by GameStateRepository.dialogueDisposition.collectAsState()
@@ -934,6 +937,7 @@ fun ConversationHistoryOverlay() {
             DialogueHistoryColumn(
                 history = history,
                 choices = emptyList(),
+                topics = topics,
                 modifier = Modifier.fillMaxSize().padding(12.dp),
                 interactive = true
             )
@@ -1352,7 +1356,13 @@ private fun DialogueHistoryColumn(
     history: List<DialogueSay>,
     choices: List<DialogueChoice>,
     modifier: Modifier = Modifier,
-    interactive: Boolean = true
+    interactive: Boolean = true,
+    // Current known-topic list. Unioned with each response's own captured hyperlinks
+    // so a topic INTRODUCED by a response (not yet known when that line was received —
+    // see the COMPANION_DIALOGUE emit ordering) highlights retroactively once it lands
+    // in this list. Passing it here (vs. only say.hyperlinks) is what makes the history
+    // recompose when topics change.
+    topics: List<String> = emptyList()
 ) {
     val listState = rememberLazyListState()
     // Auto-scroll to the newest item — a fresh response OR the choice block appearing.
@@ -1386,8 +1396,16 @@ private fun DialogueHistoryColumn(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                 )
             } else {
+                // Retroactive-highlight fix: union the response's captured hyperlinks with
+                // the live topic list. When a newly-introduced topic arrives in `topics`
+                // (after this line was already stored), the combined list changes and the
+                // annotated string recomposes, lighting up the topic in-place.
+                val links = remember(say.hyperlinks, topics) {
+                    if (topics.isEmpty()) say.hyperlinks
+                    else (say.hyperlinks + topics).distinct()
+                }
                 Text(
-                    dialogueAnnotated(say.text, say.hyperlinks, interactive),
+                    dialogueAnnotated(say.text, links, interactive),
                     color = Bone, fontSize = 14.sp, fontFamily = MwBody, lineHeight = 22.4.sp,
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                 )
