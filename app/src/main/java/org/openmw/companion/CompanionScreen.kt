@@ -3234,18 +3234,13 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
             }
         }
     }
-    // Step the gold offset, clamping the resulting balance to what each side can pay
-    // (you can't offer to pay more than you have, nor demand more than the vendor's gold).
-    fun adjustGold(delta: Int) {
-        val current = session.merchantOffer + extraGold
-        val target = (current + delta).coerceIn(-session.playerGold, session.vendorGold)
-        extraGold = target - session.merchantOffer
+    // Set the gold changing hands to an absolute signed balance (positive = player receives),
+    // clamped to what each side can pay; derive the manual offset from it. Matches the SPLIT
+    // controls (BarterGoldSlider).
+    fun setBalance(target: Int) {
+        val clamped = target.coerceIn(-session.playerGold, session.vendorGold)
+        extraGold = clamped - session.merchantOffer
         CompanionActions.barterSetExtraGold(extraGold)
-    }
-    // Tapping the centre resets the manual offset (back to the fair market price).
-    fun resetGold() {
-        extraGold = 0
-        CompanionActions.barterSetExtraGold(0)
     }
 
     Box(
@@ -3316,9 +3311,17 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                 )
             }
 
-            // ---- Offer section: a single compact gold row ----
+            // ---- Offer section: the gold-amount slider (same as SPLIT controls) ----
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-            BarterGoldBar(balance = offerBalance, onStep = ::adjustGold, onReset = ::resetGold)
+            Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
+                BarterGoldSlider(
+                    merchantOffer = session.merchantOffer,
+                    playerGold = session.playerGold,
+                    vendorGold = session.vendorGold,
+                    offerBalance = offerBalance,
+                    onSetBalance = ::setBalance
+                )
+            }
 
             // ---- Buttons ----
             Row(
@@ -4071,61 +4074,6 @@ private fun BarterRow(
                 colors = menuItemColors
             )
         }
-    }
-}
-
-/**
- * Compact offer bar: [−100] [−10] [ balance ] [+10] [+100]. The centre shows the gold
- * actually changing hands (the engine's fair price + the manual offset): green = you
- * receive, red = you pay. Tapping the centre resets the offset to the fair price. No
- * other text.
- */
-@Composable
-private fun BarterGoldBar(balance: Int, onStep: (Int) -> Unit, onReset: () -> Unit) {
-    val balanceColor = when {
-        balance > 0 -> BarterGreen
-        balance < 0 -> BarterRed
-        else -> Bone
-    }
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        GoldStep("−100", Modifier.weight(1f)) { onStep(-100) }
-        GoldStep("−10", Modifier.weight(1f)) { onStep(-10) }
-        // Centre: gold changing hands; tap to reset to the fair market price.
-        Box(
-            modifier = Modifier
-                .weight(1.4f)
-                .height(44.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .clickable { onReset() },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                if (balance > 0) "+${balance}g" else "${balance}g",
-                color = balanceColor, fontSize = 20.sp, fontFamily = MwData, fontWeight = FontWeight.Bold
-            )
-        }
-        GoldStep("+10", Modifier.weight(1f)) { onStep(10) }
-        GoldStep("+100", Modifier.weight(1f)) { onStep(100) }
-    }
-}
-
-/** A gold-adjust stepper button — ≥40dp tall for easy tapping. */
-@Composable
-private fun GoldStep(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .height(44.dp)
-            .clip(RoundedCornerShape(3.dp))
-            .background(SlotWorn)
-            .border(1.dp, Bronze, RoundedCornerShape(3.dp))
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(label, color = BronzeLight, fontSize = 15.sp, fontFamily = MwData, fontWeight = FontWeight.Bold)
     }
 }
 
