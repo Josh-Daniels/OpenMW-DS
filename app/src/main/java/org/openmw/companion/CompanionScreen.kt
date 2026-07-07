@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -587,6 +588,25 @@ fun CompanionScreen() {
             sleepSession?.let { session ->
                 RestWaitOverlay(session = session)
             }
+        }
+
+        // On-screen text-entry keyboard. Driven by COMPANION_TEXT_INPUT_OPEN/_CLOSED (native, when a
+        // MyGUI EditBox — character name / class name / save name — gains/loses key focus). A CUSTOM
+        // Compose keyboard, NOT the Android IME: the OS keyboard is a focusable window that steals the
+        // input-focused display to the bottom screen (controller then hits the bottom launcher, not the
+        // game — unrecoverable without a manual top-screen tap), and its screen depends on the user's
+        // IME pinning. A tappable Compose overlay needs touch, not key-focus, so nothing ever steals
+        // focus from the game and the keys are always on the bottom panel for every user. Enter sends
+        // the existing CMPTEXT:set (fill the field + accept/advance the dialog natively).
+        val textInputRequest by GameStateRepository.textInputRequest.collectAsState()
+        textInputRequest?.let { initial ->
+            TextInputOverlay(
+                initialText = initial,
+                onConfirm = { text ->
+                    CompanionActions.submitTextInput(text)
+                    GameStateRepository.dismissTextInput()
+                }
+            )
         }
     }
 }
@@ -2531,6 +2551,153 @@ private fun QtyActionButton(
             fontFamily = MwDisplay,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp
+        )
+    }
+}
+
+/* ---- On-screen text-entry keyboard (bottom screen) ---- */
+
+// Custom keyboard rows: a letters page and a numbers/symbols page. See TextInputOverlay for why
+// this is a hand-drawn Compose keyboard rather than the Android IME.
+private val KB_LETTERS = listOf(
+    listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
+    listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
+    listOf("z", "x", "c", "v", "b", "n", "m"),
+)
+private val KB_SYMBOLS = listOf(
+    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+    listOf("-", "/", ":", ";", "(", ")", "&", "@", "'", "\""),
+    listOf(".", ",", "?", "!", "+", "_"),
+)
+
+private fun shiftLabel(k: String, shift: Boolean): String = if (shift) k.uppercase() else k
+
+/**
+ * On-screen text-entry overlay for character name / class name / save name. Driven by
+ * COMPANION_TEXT_INPUT_OPEN/_CLOSED (native, when a MyGUI EditBox gains/loses key focus) and shown
+ * whenever [GameStateRepository.textInputRequest] is non-null. A CUSTOM Compose keyboard, deliberately
+ * NOT the Android OS keyboard: the IME is a focusable window that moves Android's input-focused
+ * display to the bottom screen, after which controller input goes to the bottom-screen launcher and
+ * cannot be reliably returned to the game (proven across several attempts — moveTaskToFront, focus
+ * nudges, etc.). This overlay is only TOUCH-interactive (no key focus), so the game keeps controller
+ * focus the whole time, and the keys always render on the bottom panel regardless of the user's IME
+ * pinning. [onConfirm] fires on Enter with the full text → CMPTEXT:set, which fills the field and
+ * injects Return to accept/advance the dialog. Auto-dismisses when the request clears (commit, or the
+ * top field losing focus). In-window overlay, NOT a Dialog (Dialog crashes on the Presentation).
+ */
+@Composable
+private fun TextInputOverlay(
+    initialText: String,
+    onConfirm: (String) -> Unit
+) {
+    var text by remember(initialText) { mutableStateOf(initialText) }
+    // One-shot shift: capitalises the next letter then resets. Starts on for an empty field so names
+    // begin with a capital.
+    var shift by remember(initialText) { mutableStateOf(initialText.isEmpty()) }
+    var symbols by remember(initialText) { mutableStateOf(false) }
+
+    val typeKey: (String) -> Unit = { k ->
+        text += shiftLabel(k, shift)
+        if (shift) shift = false
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(22f)
+            .background(Color(0xCC0B0906))
+            // Swallow taps outside the card — no cancel/escape (in-game prompts can't always be
+            // escaped; cancelling, when possible, is done on the top screen).
+            .pointerInput(Unit) { detectTapGestures(onTap = {}) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.97f)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures(onTap = {}) }
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "ENTER TEXT",
+                color = BronzeLight,
+                fontSize = 14.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            // Read-only display of the current text (the keys edit [text]).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(SlotBg)
+                    .border(1.dp, Bronze, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text.ifEmpty { " " },
+                    color = BoneBright,
+                    fontSize = 20.sp,
+                    fontFamily = MwData,
+                    maxLines = 1
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+
+            val rows = if (symbols) KB_SYMBOLS else KB_LETTERS
+            KbRow { rows[0].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } } }
+            KbRow { rows[1].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } } }
+            KbRow {
+                if (symbols) {
+                    Spacer(Modifier.weight(1.6f))
+                } else {
+                    KbKey("⇧", weight = 1.6f, active = shift) { shift = !shift }
+                }
+                rows[2].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } }
+                KbKey("⌫", weight = 1.6f) { if (text.isNotEmpty()) text = text.dropLast(1) }
+            }
+            KbRow {
+                KbKey(if (symbols) "ABC" else "123", weight = 1.6f) { symbols = !symbols }
+                KbKey("space", weight = 4.4f) { text += " " }
+                KbKey("Enter", weight = 2.2f, primary = true) { onConfirm(text) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KbRow(content: @Composable RowScope.() -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth(), content = content)
+}
+
+@Composable
+private fun RowScope.KbKey(
+    label: String,
+    weight: Float = 1f,
+    primary: Boolean = false,
+    active: Boolean = false,
+    onClick: () -> Unit
+) {
+    val highlight = primary || active
+    Box(
+        modifier = Modifier
+            .weight(weight)
+            .padding(2.dp)
+            .height(48.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (highlight) SlotWorn else SlotBg)
+            .border(1.dp, if (highlight) Bronze else BronzeDark, RoundedCornerShape(4.dp))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (highlight) BronzeLight else Bone,
+            fontSize = 17.sp,
+            fontFamily = MwData
         )
     }
 }

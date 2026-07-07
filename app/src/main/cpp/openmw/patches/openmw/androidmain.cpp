@@ -138,6 +138,13 @@ extern "C" void companionSleepCancel();
 // Bottom-screen travel (travelwindow.cpp). Destinations addressed by ordinal index.
 extern "C" void companionTravelGo(int index);
 extern "C" void companionTravelCancel();
+// Bottom-screen text input (windowmanagerimp.cpp). companionSetFocusedText writes the confirmed
+// text into the focused MyGUI EditBox (name / class / save-name entry) then injects Return to
+// accept/advance the modal dialog; companionCancelTextInput injects Escape to back out (discard).
+// Both close the dialog, which emits COMPANION_TEXT_INPUT_CLOSED so the bottom panel dismisses.
+// (Merely clearing key focus does not work — the modal re-grabs a cleared field the next frame.)
+extern "C" void companionSetFocusedText(const char* utf8);
+extern "C" void companionCancelTextInput();
 
 // Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
 // Quest completion status is NOT exposed to Lua in this build (types.Player.journal
@@ -373,6 +380,21 @@ void drainCompanionCommands()
             const int hours = std::atoi(cmd.c_str() + (sizeof("CMP:sleep ") - 1));
             Log(Debug::Info) << "companion: sleep " << hours;
             companionSleep(hours);
+        }
+        // Text input (CMPTEXT:set:<text>) is driven natively — the focused MyGUI EditBox
+        // lives in the C++ WindowManager and is not reachable from Lua. The text is the raw
+        // tail after the prefix (may contain spaces and ':'), so take the substring verbatim.
+        else if (cmd.rfind("CMPTEXT:set:", 0) == 0)
+        {
+            std::string text = cmd.substr(sizeof("CMPTEXT:set:") - 1);
+            Log(Debug::Info) << "companion: setText (" << text.size() << " chars)";
+            companionSetFocusedText(text.c_str());
+        }
+        else if (cmd.rfind("CMPTEXT:cancel", 0) == 0)
+        {
+            // Cancel/discard: inject Escape to back out of the modal without committing.
+            Log(Debug::Info) << "companion: cancelTextInput";
+            companionCancelTextInput();
         }
         else
         {

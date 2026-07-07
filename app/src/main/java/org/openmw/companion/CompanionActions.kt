@@ -126,6 +126,15 @@ object CompanionActions {
     // Cancel rest/wait (closes the native window + emits COMPANION_SLEEP_CLOSED).
     fun sleepCancel() = runCommand("CMP:sleep_cancel")
 
+    // Text input (CMPTEXT:*) — handled natively in drainCompanionCommands (the focused MyGUI
+    // EditBox is C++-only, unreachable from Lua). submit = write text into the field then
+    // defocus it (commit); cancel = defocus without writing (discard). Both make the top-screen
+    // field stop flashing and emit COMPANION_TEXT_INPUT_CLOSED so the bottom panel dismisses.
+    // submit's text is the raw tail after the prefix, so spaces and ':' inside it survive.
+    fun submitTextInput(text: String) = runCommand("CMPTEXT:set:$text")
+
+    fun cancelTextInput() = runCommand("CMPTEXT:cancel")
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

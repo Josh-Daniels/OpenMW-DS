@@ -70,6 +70,11 @@ object LogParser {
     const val P_SPELLMAKING_CLOSED = "COMPANION_SPELLMAKING_CLOSED"
     const val P_ENCHANTING_OPEN = "COMPANION_ENCHANTING_OPEN"
     const val P_ENCHANTING_CLOSED = "COMPANION_ENCHANTING_CLOSED"
+    // Text-input focus (native, windowmanagerimp.cpp). OPEN carries the field's current
+    // caption after the colon (may be empty); CLOSED has no payload. Drives the bottom-screen
+    // Android-keyboard panel in EngineActivity via GameStateRepository.textInputRequest.
+    const val P_TEXT_INPUT_OPEN = "COMPANION_TEXT_INPUT_OPEN:"
+    const val P_TEXT_INPUT_CLOSED = "COMPANION_TEXT_INPUT_CLOSED"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"

@@ -73,6 +73,21 @@ object GameStateRepository {
         _itemInfo.value = null
     }
 
+    // Bottom-screen text-input request. Non-null = a MyGUI EditBox has key focus (native
+    // COMPANION_TEXT_INPUT_OPEN); the string is the field's current caption to pre-fill.
+    // null = no field focused (COMPANION_TEXT_INPUT_CLOSED) → dismiss the panel + keyboard.
+    // Collected by EngineActivity to add/remove the focusable Android-keyboard panel window.
+    private val _textInputRequest = MutableStateFlow<String?>(null)
+    val textInputRequest: StateFlow<String?> = _textInputRequest.asStateFlow()
+
+    fun requestTextInput(currentText: String) {
+        _textInputRequest.value = currentText
+    }
+
+    fun dismissTextInput() {
+        _textInputRequest.value = null
+    }
+
     // --- Barter optimistic UI mutators (Phase 3 UI calls these alongside the CMP:barter_*
     // commands; the engine reconciles the authoritative balance via COMPANION_BARTER_OFFER).
     // The sim is paused during barter, so selection must feel instant rather than waiting
@@ -551,6 +566,16 @@ object GameStateRepository {
                 containerIsCorpse = false
                 containerIsPickpocket = false
                 _containerSession.value = null
+            }
+            // Native text-input focus. CLOSED checked before OPEN (neither string contains
+            // the other, but keep the dismiss path first). OPEN carries the field's current
+            // caption after the prefix — pass it through to pre-fill the panel.
+            trimmed.contains(LogParser.P_TEXT_INPUT_CLOSED) -> {
+                _textInputRequest.value = null
+            }
+            trimmed.contains(LogParser.P_TEXT_INPUT_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_TEXT_INPUT_OPEN) + LogParser.P_TEXT_INPUT_OPEN.length
+                _textInputRequest.value = trimmed.substring(idx)
             }
             trimmed.contains("COMPANION_PAUSE_MENU_OPEN") -> {
                 _pauseMenuVisible.value = true

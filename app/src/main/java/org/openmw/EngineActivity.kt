@@ -789,6 +789,11 @@ class EngineActivity : SDLActivity() {
             }
         }
 
+        // Text entry (character name / class name / save name) is handled by the CUSTOM on-screen
+        // keyboard rendered inside CompanionScreen (TextInputOverlay), driven directly by
+        // GameStateRepository.textInputRequest — NOT the Android IME (which would steal the
+        // input-focused display to the bottom screen). Nothing to wire here.
+
         // Split-conversation mode: show a read-only conversation-history overlay on the
         // TOP screen while a conversation is active AND the Conversation location is SPLIT
         // or TOP (i.e. anything but BOTTOM). Independent of the Hide UI toggle —
