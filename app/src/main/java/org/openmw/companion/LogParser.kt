@@ -188,7 +188,10 @@ object LogParser {
                 id = o.getString("id"),
                 name = o.optString("name", ""),
                 type = o.optString("type", "spell"),
-                icon = o.optString("icon", "")
+                icon = o.optString("icon", ""),
+                isItem = o.optBoolean("isItem", false),
+                charge = o.optInt("charge", 0),
+                maxCharge = o.optInt("maxCharge", 0)
             )
         }
     }

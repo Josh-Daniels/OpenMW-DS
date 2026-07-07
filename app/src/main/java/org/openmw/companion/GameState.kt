@@ -32,7 +32,13 @@ data class SpellEntry(
     val id: String,
     val name: String = "",
     val type: String = "spell",
-    val icon: String = ""   // VFS icon path, empty = no icon
+    val icon: String = "",   // VFS icon path, empty = no icon
+    // Cast-on-use enchanted item (ring/amulet/clothing/weapon), NOT a learned
+    // spell/power/scroll. Emitted with type "scroll" so it renders in the magic
+    // list, but split into its own "Enchanted Items" section via this flag.
+    val isItem: Boolean = false,
+    val charge: Int = 0,        // current enchantment charge
+    val maxCharge: Int = 0      // enchantment charge capacity (0 = not an item)
 )
 
 data class ActiveEffect(

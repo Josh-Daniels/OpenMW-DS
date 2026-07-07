@@ -48,6 +48,18 @@ local function itemName(item)
     return item.recordId
 end
 
+-- Returns the enchantment record id on an item (rings/amulets/clothing/weapons/
+-- books), or nil if the item is not enchanted. Wrapped in pcall because the
+-- .enchant field only exists on enchantable record types.
+local function itemEnchantId(item)
+    local ok, enchId = pcall(function()
+        local rec = item.type.record(item)
+        return rec and rec.enchant
+    end)
+    if ok and enchId and enchId ~= "" then return enchId end
+    return nil
+end
+
 -- ===== Exporters (outbounD) =====
 
 local function exportStats()
@@ -127,6 +139,36 @@ local function exportSpells()
                 '{"id":"%s","name":"%s","type":"scroll","icon":"%s"}',
                 jsonEscape(item.recordId), jsonEscape(itemName(item)),
                 jsonEscape(rec.icon or "")))
+        end
+    end
+
+    -- Cast-on-use enchanted items (rings, amulets, clothing, weapons whose
+    -- enchantment is "cast when used"). These are the "magic items" the vanilla
+    -- magic menu lists alongside spells and scrolls. Cast-on-strike and
+    -- constant-effect items are excluded (they fire automatically), and scrolls
+    -- (CastOnce) are already handled by the loop above. Emitted with type
+    -- "scroll" so they land in the UI's existing usable-item section, plus an
+    -- isItem flag and charge/maxCharge for future charge display.
+    local ENCH = core.magic.ENCHANTMENT_TYPE
+    for _, item in ipairs(types.Actor.inventory(self):getAll()) do
+        local enchId = itemEnchantId(item)
+        if enchId then
+            local ench = core.magic.enchantments.records[enchId]
+            if ench and ench.type == ENCH.CastOnUse then
+                local maxCharge = ench.charge or 0
+                local charge = maxCharge
+                pcall(function()
+                    local d = types.Item.itemData(item)
+                    if d and d.enchantmentCharge ~= nil then charge = d.enchantmentCharge end
+                end)
+                local rec = item.type.record(item)
+                local icon = (rec and rec.icon) or ""
+                table.insert(parts, string.format(
+                    '{"id":"%s","name":"%s","type":"scroll","icon":"%s","isItem":true,"charge":%d,"maxCharge":%d}',
+                    jsonEscape(item.recordId), jsonEscape(itemName(item)),
+                    jsonEscape(icon),
+                    math.floor(charge + 0.5), math.floor(maxCharge + 0.5)))
+            end
         end
     end
 
@@ -1504,13 +1546,14 @@ local function dispatchCommand(command)
             print("COMPANION_DEBUG: selected spell " .. arg)
         else
             local item = types.Actor.inventory(self):find(arg)
-            if item and types.Book.objectIsInstance(item)
-                    and types.Book.record(item).isScroll then
+            -- Scrolls AND cast-on-use enchanted items (rings/amulets/etc.) both
+            -- select via setSelectedEnchantedItem; accept any enchanted item.
+            if item and itemEnchantId(item) ~= nil then
                 types.Actor.setSelectedEnchantedItem(self, item)
                 ambient.playSound("Menu Click")
-                print("COMPANION_DEBUG: selected scroll " .. arg)
+                print("COMPANION_DEBUG: selected enchanted item " .. arg)
             else
-                print("COMPANION_DEBUG: spell/scroll not found: " .. arg)
+                print("COMPANION_DEBUG: spell/enchanted item not found: " .. arg)
             end
         end
         exportSelectedSpell()

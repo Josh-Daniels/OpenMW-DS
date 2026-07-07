@@ -5731,17 +5731,24 @@ private fun MagicPanel(state: GameState) {
                 state.spells.filter { it.type == "spell" }.sortedWith(bySelectionThenName)
             }
             val scrolls = remember(state.spells, sel) {
-                state.spells.filter { it.type == "scroll" }.sortedWith(bySelectionThenName)
+                state.spells.filter { it.type == "scroll" && !it.isItem }.sortedWith(bySelectionThenName)
+            }
+            // Cast-on-use enchanted items (rings/amulets/clothing/weapons). They
+            // arrive with type "scroll" but carry isItem=true; broken out into
+            // their own section.
+            val enchantedItems = remember(state.spells, sel) {
+                state.spells.filter { it.isItem }.sortedWith(bySelectionThenName)
             }
 
             // Category filter tabs — only present (non-empty) categories get a tab.
             // ALL is always shown. Mirrors InventoryPanel's CategorySubTabs pattern.
             var selectedMagicTab by remember { mutableStateOf("ALL") }
-            val presentMagicTabs = remember(powers, spells, scrolls) {
+            val presentMagicTabs = remember(powers, spells, scrolls, enchantedItems) {
                 buildList {
                     if (powers.isNotEmpty()) add("POWERS")
                     if (spells.isNotEmpty()) add("SPELLS")
                     if (scrolls.isNotEmpty()) add("SCROLLS")
+                    if (enchantedItems.isNotEmpty()) add("ITEMS")
                 }
             }
             // Reset to ALL if the selected category became empty (spells removed mid-game).
@@ -5754,6 +5761,7 @@ private fun MagicPanel(state: GameState) {
             val showPowers = selectedMagicTab == "ALL" || selectedMagicTab == "POWERS"
             val showSpells = selectedMagicTab == "ALL" || selectedMagicTab == "SPELLS"
             val showScrolls = selectedMagicTab == "ALL" || selectedMagicTab == "SCROLLS"
+            val showItems = selectedMagicTab == "ALL" || selectedMagicTab == "ITEMS"
             // Section headers only in the "ALL" view; a single-category tab is self-labelling.
             val showHeaders = selectedMagicTab == "ALL"
 
@@ -5825,6 +5833,24 @@ private fun MagicPanel(state: GameState) {
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
                     }
+                    if (showItems && enchantedItems.isNotEmpty()) {
+                        if (showHeaders) {
+                            item {
+                                SpellSectionHeader("Enchanted Items")
+                            }
+                        }
+                        items(enchantedItems) { spell ->
+                            SpellRow(
+                                spellId = spell.id,
+                                title = spell.displayName(),
+                                selected = spell.id == sel,
+                                charge = spell.charge,
+                                maxCharge = spell.maxCharge,
+                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
+                                iconBitmap = rememberItemIcon(spell.icon)
+                            ) { CompanionActions.selectSpell(spell.id) }
+                        }
+                    }
                     item { Spacer(Modifier.height(4.dp)) }
                 }
             }
@@ -5838,6 +5864,8 @@ private fun SpellRow(
     spellId: String,
     title: String,
     selected: Boolean = false,
+    charge: Int = 0,
+    maxCharge: Int = 0,
     onInfo: (() -> Unit)? = null,
     iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
@@ -5900,6 +5928,37 @@ private fun SpellRow(
                     if (isFav) {
                         Spacer(Modifier.width(4.dp))
                         FavStar()
+                    }
+                }
+                // Charge column (enchanted items only) — current / capacity with
+                // a thin bar, mirroring the inventory condition column.
+                if (maxCharge > 0) {
+                    val ratio = (charge.toFloat() / maxCharge).coerceIn(0f, 1f)
+                    val fillColor = if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C)
+                    Column(
+                        modifier = Modifier.width(56.dp).padding(end = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "$charge/$maxCharge",
+                            color = BronzeLight, fontSize = 10.sp, fontFamily = MwData,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(1.dp))
+                                .background(Color(0xFF0E0B07))
+                                .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                        ) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth(ratio)
+                                    .fillMaxHeight()
+                                    .background(fillColor)
+                            )
+                        }
                     }
                 }
                 if (selected) {
