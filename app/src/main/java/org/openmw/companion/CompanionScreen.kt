@@ -3818,13 +3818,32 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
     // ~16g/sec when held — precise for fine adjustment, still reaches large values by holding. Tune
     // here (or add an accelerating hold) if needed.
     val goldStep = 1
+    // Clamp the left-stick gold adjustment to the SAME balance range the touch slider
+    // (BarterGoldSlider) can reach — selling (merchantOffer >= 0): 0 .. vendorGold; buying
+    // (merchantOffer < 0): -min(item value, playerGold) .. 0 — so the stick can't push the
+    // offer past what the slider allows.
+    val navReceiving = session.merchantOffer >= 0
+    val navSliderMax = (if (navReceiving) session.vendorGold
+        else minOf(abs(session.merchantOffer), session.playerGold)).coerceAtLeast(0)
+    val navSliderLo = if (navReceiving) 0 else -navSliderMax
+    val navSliderHi = if (navReceiving) navSliderMax else 0
     val focus = rememberBarterNavFocus(
         visiblePlayer = visiblePlayer,
         visibleVendor = visibleVendor,
         rows = 1,
         onToggle = ::toggle,
         onOffer = { if (offerEnabled) CompanionActions.barterOffer() },
-        onSlider = { dir -> setBalance(offerBalance + dir * goldStep) },
+        // Physical stick right always moves the slider visually rightward (toward max), matching the
+        // touch slider. When selling (balance positive) rightward = +gold; when buying (balance
+        // negative, magnitude = cost) rightward = MORE negative → invert dir. Clamped to the touch-
+        // slider range; no-op at a bound. onSlider is recreated each recomposition
+        // (rememberUpdatedState'd in the collector), so offerBalance / setBalance / navReceiving here
+        // are always live-frame (unlike the SPLIT LaunchedEffect capture).
+        onSlider = { dir ->
+            val delta = (if (navReceiving) dir else -dir) * goldStep
+            val next = (offerBalance + delta).coerceIn(navSliderLo, navSliderHi)
+            if (next != offerBalance) setBalance(next)
+        },
     )
 
     Box(
@@ -3985,6 +4004,24 @@ private fun BarterControlsOnly(session: BarterSession) {
     // here (or add an accelerating hold) if needed.
     val goldStep = 1
     val ctlSnapshot = rememberUpdatedState(Triple(offerBalance, offerEnabled, goldStep))
+    // Clamp the left-stick gold adjustment to the SAME balance range the touch slider
+    // (BarterGoldSlider) can reach — selling (merchantOffer >= 0): 0 .. vendorGold; buying
+    // (merchantOffer < 0): -min(item value, playerGold) .. 0 — so the stick can't push the
+    // offer past what the slider allows.
+    val navReceiving = session.merchantOffer >= 0
+    val navSliderMax = (if (navReceiving) session.vendorGold
+        else minOf(abs(session.merchantOffer), session.playerGold)).coerceAtLeast(0)
+    val navBounds = rememberUpdatedState(
+        (if (navReceiving) 0 else -navSliderMax) to (if (navReceiving) navSliderMax else 0)
+    )
+    // Fresh (live-frame) receiving flag for the captured collector — buying inverts the stick dir.
+    val navReceivingState = rememberUpdatedState(navReceiving)
+    // setBalance() reads session.merchantOffer to derive the manual offset. LaunchedEffect(Unit)
+    // captures its closure once, so calling setBalance directly would use the STALE first-frame
+    // merchantOffer (0, before items are staged) and re-fold the item price into extraGold — the
+    // "cost doubles regardless of direction" bug. rememberUpdatedState keeps a reference to the
+    // current-frame setBalance so the offset is derived from the live merchantOffer.
+    val setBalanceState = rememberUpdatedState<(Int) -> Unit> { target -> setBalance(target) }
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (~8g/sec held)
@@ -3993,10 +4030,22 @@ private fun BarterControlsOnly(session: BarterSession) {
             lastSeq = ev.seq
             if (ModalNav.open) return@collect // the quantity selector owns nav while up
             val (balance, enabled, step) = ctlSnapshot.value
+            val (sliderLo, sliderHi) = navBounds.value
+            val receiving = navReceivingState.value
             when (ev) {
                 is NavEvent.Action1 -> if (enabled) CompanionActions.barterOffer()
-                is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) setBalance(balance - step)
-                is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) setBalance(balance + step)
+                // Physical stick right always moves the slider visually rightward (toward max cost/
+                // gold), left toward 0, matching the touch slider. Selling: right=+gold, left=-gold.
+                // Buying (balance negative, magnitude=cost): invert — right=more negative (pay more),
+                // left=less negative (pay less). Clamped; no-op at a bound.
+                is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) {
+                    val next = (balance + (if (receiving) -step else step)).coerceIn(sliderLo, sliderHi)
+                    if (next != balance) setBalanceState.value(next)
+                }
+                is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) {
+                    val next = (balance + (if (receiving) step else -step)).coerceIn(sliderLo, sliderHi)
+                    if (next != balance) setBalanceState.value(next)
+                }
                 else -> Unit
             }
         }

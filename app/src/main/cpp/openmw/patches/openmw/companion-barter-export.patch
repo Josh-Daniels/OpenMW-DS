@@ -183,12 +183,12 @@ index 93d5abb29f..4cce58ef68 100644
 +                continue;
 +            MWWorld::Ptr base = item.mBase;
 +            const int stackCount = static_cast<int>(item.mCount);
-+            // Per-unit barter price (mercantile-/disposition-adjusted). The AUTHORITATIVE
-+            // net is still the native running balance in COMPANION_BARTER_OFFER; this is a
-+            // per-item display estimate so the bottom screen can show each item's price.
-+            const int basePrice = getEffectiveValue(base, 1);
-+            const int unitValue
-+                = MWBase::Environment::get().getMechanicsManager()->getBarterOffer(mPtr, basePrice, buying);
++            // Base record value — condition-INDEPENDENT, no mercantile/disposition adjustment —
++            // so the bottom-screen list matches vanilla's barter value. getClass().getValue()
++            // handles soul gems (trapped-soul value), player-made potions (getPotionValue) and
++            // gold stacks (1) correctly. The AUTHORITATIVE net the player is actually charged
++            // still comes from getBarterOffer via updateOffer() → COMPANION_BARTER_OFFER.
++            const int unitValue = base.getClass().getValue(base);
 +            const std::string refId = base.getCellRef().getRefId().serializeText();
 +            const std::string name{ base.getClass().getName(base) };
 +            std::string icon;
