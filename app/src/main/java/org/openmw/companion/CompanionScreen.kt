@@ -612,6 +612,7 @@ fun CompanionScreen() {
                     session = session,
                     playerInventory = state.inventory,
                     playerEquipment = state.equipment,
+                    playerEncumbrance = state.encumbrance,
                     location = lootingLocation
                 )
             }
@@ -2229,6 +2230,7 @@ private fun LootingOverlay(
     session: ContainerSession,
     playerInventory: List<InventoryItem>,
     playerEquipment: Map<String, String>,
+    playerEncumbrance: Dynamic,
     location: ScreenLocation
 ) {
     // Dismiss the item info popup when the looting/pickpocket session ends (Take All/Dispose/Close/B)
@@ -2346,7 +2348,7 @@ private fun LootingOverlay(
             // ---- Two equal columns: player | container ----
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 LootColumn(
-                    header = "$playerName (${playerGold}g)",
+                    header = playerLootHeader(playerName, playerGold, playerEncumbrance),
                     legend = "tap to put · long press for more",
                     items = playerSorted,
                     isPlayerSide = true,
@@ -2366,7 +2368,7 @@ private fun LootingOverlay(
                     )
                 }
                 LootColumn(
-                    header = session.containerName.ifBlank { "Container" },
+                    header = AnnotatedString(session.containerName.ifBlank { "Container" }),
                     legend = "tap to take · long press for more",
                     items = containerSorted,
                     isPlayerSide = false,
@@ -2428,12 +2430,33 @@ private fun LootingOverlay(
     }
 }
 
+/** Colour for the loot-header encumbrance readout: muted normally, amber above 75 % of
+ *  capacity, red at/over 100 %. */
+private fun encumbranceColor(enc: Dynamic): Color = when {
+    enc.max <= 0f -> BoneMuted
+    enc.current >= enc.max -> Color(0xFFC75C5C)         // at/over capacity — red
+    enc.current / enc.max > 0.75f -> Color(0xFFD9A441)  // over 75 % — amber
+    else -> BoneMuted                                   // normal — muted bone
+}
+
+/** Player loot/pickpocket column header: "Name (123g) 145/200kg" with the weight tinted by
+ *  load (see [encumbranceColor]). The name+gold ride the base BronzeLight; only the weight
+ *  span overrides colour. NOTE: the sim is paused during GM_Container so [enc] is a snapshot
+ *  from session open — it does not track optimistic take/put (unlike gold, recomputed live). */
+private fun playerLootHeader(name: String, gold: Int, enc: Dynamic): AnnotatedString =
+    buildAnnotatedString {
+        append("$name (${gold}g) ")
+        withStyle(SpanStyle(color = encumbranceColor(enc))) {
+            append("${dynValue(enc)}kg")
+        }
+    }
+
 /** One side of the looting overlay — header, legend, and a scrolling item list. [items] arrives
  *  pre-sorted from the parent (single source of order shared with the controller focus index).
  *  [focusedIndex] highlights that row (-1 = this side isn't focused) and keeps it on-screen. */
 @Composable
 private fun LootColumn(
-    header: String,
+    header: AnnotatedString,
     legend: String,
     items: List<InventoryItem>,
     isPlayerSide: Boolean,
@@ -2777,6 +2800,11 @@ fun LootingTopOverlay() {
     var containerItems by remember { mutableStateOf(session.items) }
     var playerItems by remember { mutableStateOf(state.inventory) }
 
+    // Gold recomputed from the optimistic list so it updates live as you loot coins (matches the
+    // bottom overlay). Encumbrance can't be recomputed locally (no per-item weight) — the header
+    // uses state.encumbrance, a snapshot from open (sim paused → the Lua export is frozen anyway).
+    val playerGold = playerItems.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+
     val wornIds = remember(state.equipment) { state.equipment.values.toSet() }
     fun isWorn(item: InventoryItem): Boolean =
         if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId) else wornIds.contains(item.id)
@@ -2849,7 +2877,7 @@ fun LootingTopOverlay() {
         ) {
             // LEFT: player.
             LootGridColumn(
-                header = playerName,
+                header = playerLootHeader(playerName, playerGold, state.encumbrance),
                 items = playerItems,
                 isPlayerSide = true,
                 isWorn = { isWorn(it) },
@@ -2864,7 +2892,7 @@ fun LootingTopOverlay() {
             Spacer(Modifier.width(LOOT_SPLIT_COLUMN_GAP))
             // RIGHT: container.
             LootGridColumn(
-                header = session.containerName.ifBlank { "Container" },
+                header = AnnotatedString(session.containerName.ifBlank { "Container" }),
                 items = containerItems,
                 isPlayerSide = false,
                 isWorn = { false },
@@ -2913,7 +2941,7 @@ fun LootingTopOverlay() {
  *  cell (-1 = this side isn't focused) and keeps it on-screen. Mirrors [BarterGridColumn]. */
 @Composable
 private fun LootGridColumn(
-    header: String,
+    header: AnnotatedString,
     items: List<InventoryItem>,
     isPlayerSide: Boolean,
     isWorn: (InventoryItem) -> Boolean,
