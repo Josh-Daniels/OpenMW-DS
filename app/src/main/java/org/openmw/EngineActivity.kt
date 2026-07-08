@@ -824,6 +824,19 @@ class EngineActivity : SDLActivity() {
                 }
         }
 
+        // Hide the options overlay while native text entry is active (e.g. renaming a save file).
+        // The options panel is a full-screen opaque FLAG_NOT_FOCUSABLE window; if left up it covers
+        // the on-screen keyboard (rendered inside CompanionScreen). GONE (not removed) so the menu's
+        // state survives; restored to VISIBLE on COMPANION_TEXT_INPUT_CLOSED (textInputRequest null).
+        lifecycleScope.launch {
+            GameStateRepository.textInputRequest
+                .map { it != null }
+                .distinctUntilChanged()
+                .collect { textActive ->
+                    pauseOverlayView?.visibility = if (textActive) View.GONE else View.VISIBLE
+                }
+        }
+
         // Text entry (character name / class name / save name) is handled by the CUSTOM on-screen
         // keyboard rendered inside CompanionScreen (TextInputOverlay), driven directly by
         // GameStateRepository.textInputRequest — NOT the Android IME (which would steal the
@@ -1259,7 +1272,13 @@ class EngineActivity : SDLActivity() {
                 PixelFormat.TRANSLUCENT
             ).apply { this.token = token }
             runCatching { wm.addView(overlay, lp) }
-                .onSuccess { pauseOverlayView = overlay }
+                .onSuccess {
+                    pauseOverlayView = overlay
+                    // If a text field is already focused when the menu (re)opens, start hidden so we
+                    // don't cover the keyboard; the textInputRequest collector restores it on close.
+                    if (GameStateRepository.textInputRequest.value != null)
+                        overlay.visibility = View.GONE
+                }
                 .onFailure { Log.e(TAG, "PAUSE POC: addView failed", it) }
         }
     }
