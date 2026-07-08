@@ -129,6 +129,13 @@ static std::atomic<bool> g_companionNavActive{ false };
 // whole overlay. std::atomic: written on a JNI thread, read on the input thread.
 static std::atomic<bool> g_companionQtySelectorOpen{ false };
 
+// Set true from Kotlin (companionResetAxes()) when a DS overlay closes (companionNavActive
+// true->false). Consumed once by ControllerManager::update() (companion-controller-nav.patch, FIX 1)
+// which then injects a neutral value-0 event for both sticks, so a stick-release that was swallowed
+// while the menu was open doesn't leave the player moving/looking after the menu closes.
+// std::atomic: written on a JNI thread, exchanged(false) on the input thread.
+static std::atomic<bool> g_companionResetAxes{ false };
+
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
 // g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
@@ -550,6 +557,13 @@ extern "C" bool companionQtySelectorOpen()
 {
     return g_companionQtySelectorOpen.load();
 }
+// Read by ControllerManager::update() (companion-controller-nav.patch, FIX 1): atomic exchange(false),
+// returns true exactly once per Kotlin companionResetAxes() request so the neutral stick-reset fires a
+// single time when a DS overlay closes.
+extern "C" bool companionConsumeResetAxes()
+{
+    return g_companionResetAxes.exchange(false);
+}
 // Pushed from Kotlin (EngineActivity) whenever the "Game cursor" option changes,
 // and once at startup with the persisted value. Caches into g_companionCursorEnabled
 // for companionCursorEnabled() above.
@@ -571,6 +585,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionQtySelectorOpen(JNIEnv* /*env*/, jclass /*cls*/, jboolean open)
 {
     g_companionQtySelectorOpen.store(open == JNI_TRUE);
+}
+// Called from Kotlin (EngineActivity) when a DS overlay closes (companionNavActive true->false). Flags
+// g_companionResetAxes so ControllerManager::update() injects a neutral stick reset on the next frame
+// (engine thread) — see companion-controller-nav.patch (FIX 1). One-shot; consumed via exchange(false).
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_companionResetAxes(JNIEnv* /*env*/, jclass /*cls*/)
+{
+    g_companionResetAxes.store(true);
 }
 // Read by the SDL event pump (companion-touch-click.patch): true while the "Touch input" option is
 // on, so a finger tap in a menu becomes a direct absolute mouse click at the tap point.

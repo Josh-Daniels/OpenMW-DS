@@ -663,6 +663,15 @@ class EngineActivity : SDLActivity() {
         external fun setCompanionQtySelectorOpen(open: Boolean)
 
         /**
+         * FIX 1 — input state leak: called when a DS overlay closes (navActive true->false). Flags the
+         * engine to inject a neutral value-0 event for both sticks on the next frame, so a stick-release
+         * that was swallowed while the overlay was open doesn't leave the player moving/looking after it
+         * closes. See companion-controller-nav.patch (ControllerManager::update).
+         */
+        @JvmStatic
+        external fun companionResetAxes()
+
+        /**
          * Per-element native HUD visibility (companion "Vanilla HUD Elements" options).
          * true = native top-screen element shown; false = hidden. Read natively by
          * companionHud*() (companion-hud-elements.patch). Pushed on change + at startup.
@@ -1085,6 +1094,10 @@ class EngineActivity : SDLActivity() {
                 active && !title
             }.distinctUntilChanged().collect { active ->
                 runCatching { setCompanionNavActive(active) }
+                // FIX 1 — input state leak: on overlay close (true->false) the stick-release event was
+                // swallowed while the overlay was up, leaving the engine's movement/look axes stuck at
+                // their held value. Ask native to inject a neutral stick reset so the player stops.
+                if (!active) runCatching { companionResetAxes() }
             }
         }
     }

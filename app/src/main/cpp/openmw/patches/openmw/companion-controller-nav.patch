@@ -1,6 +1,22 @@
 --- a/apps/openmw/mwinput/controllermanager.cpp
 +++ b/apps/openmw/mwinput/controllermanager.cpp
-@@ -46,6 +46,16 @@
+@@ -2,6 +2,7 @@
+ 
+ #include <MyGUI_Button.h>
+ #include <MyGUI_InputManager.h>
++#include <MyGUI_ScrollView.h> // COMPANION: for the GM_Scroll right-stick document scroll (FIX 2)
+ 
+ #include <SDL.h>
+ 
+@@ -16,6 +17,7 @@
+ #include "../mwbase/luamanager.hpp"
+ #include "../mwbase/statemanager.hpp"
+ #include "../mwbase/windowmanager.hpp"
++#include "../mwgui/mode.hpp" // COMPANION: GM_Scroll for the document-scroll poll (FIX 2)
+ #include "../mwgui/windowbase.hpp"
+ 
+ #include "actions.hpp"
+@@ -34,6 +36,22 @@
  extern "C" bool companionCursorEnabled();
  #endif
  
@@ -12,15 +28,82 @@
 +// COMPANION: defined in androidmain.cpp. True while a bottom-screen quantity selector is open;
 +// used to intercept B as a CANCEL (of just the selector) instead of closing the whole overlay.
 +extern "C" bool companionQtySelectorOpen();
++// COMPANION: defined in androidmain.cpp. Atomic exchange(false) — returns true exactly once after
++// Kotlin requested an axis reset (a DS overlay just closed, companionNavActive true->false). When it
++// returns true we inject a neutral (value 0) event for both sticks so a stick-release event that was
++// SWALLOWED while the menu was up doesn't leave the ICS movement/look channels stuck deflected,
++// making the player keep moving/looking after the menu closes. See companion-controller-nav.patch (FIX 1).
++extern "C" bool companionConsumeResetAxes();
 +#endif
 +
  namespace MWInput
  {
      ControllerManager::ControllerManager(BindingsManager* bindingsManager, MouseManager* mouseManager,
-@@ -110,6 +120,69 @@
+@@ -98,6 +116,130 @@
  
      void ControllerManager::update(float dt)
      {
++#ifdef __ANDROID__
++        // COMPANION (FIX 1): a DS overlay just closed (companionNavActive true->false) and Kotlin asked
++        // us to reset the sticks. While the menu was open, the stick-release event was SWALLOWED by
++        // gamepadToGuiControl and never reached controllerAxisMoved, so the ICS movement/look channels
++        // can be stuck at their last held value — the player keeps moving/looking after the menu closes.
++        // Inject a neutral (value 0 -> ICS percent ~0.5) event for all four movement/look axes so the
++        // channels return to centre. deviceID 1 matches the SDL pump (sdlinputwrapper.cpp axisMoved(1,…))
++        // and the sFakeDeviceId the axis bindings are registered under (bindingsmanager.cpp).
++        if (companionConsumeResetAxes())
++        {
++            static const SDL_GameControllerAxis kResetAxes[] = { SDL_CONTROLLER_AXIS_LEFTX,
++                SDL_CONTROLLER_AXIS_LEFTY, SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY };
++            for (SDL_GameControllerAxis axis : kResetAxes)
++            {
++                SDL_ControllerAxisEvent ev{};
++                ev.type = SDL_CONTROLLERAXISMOTION;
++                ev.which = 1;
++                ev.axis = static_cast<Uint8>(axis);
++                ev.value = 0;
++                mBindingsManager->controllerAxisMoved(1, ev);
++            }
++        }
++
++        // COMPANION (FIX 2): continuous right-stick scroll while reading a scroll/letter (GM_Scroll).
++        // Independent of companionNavActive() — there is no DS overlay for scroll reading; the native
++        // ScrollWindow (top screen) is the surface. SDL sends axis events only on CHANGE, so a held
++        // stick can't scroll continuously via the event path; poll the live axis and nudge the window's
++        // text view directly (no Kotlin round-trip — the window is native). Same 60ms cadence as the
++        // DS-overlay scroll poll; 40px/step matches ScrollWindow::onKeyButtonPressed (arrow up/down).
++        {
++            MWBase::WindowManager* scrollWm = MWBase::Environment::get().getWindowManager();
++            if (scrollWm->containsMode(MWGui::GM_Scroll))
++            {
++                const float ry = getAxisValue(SDL_CONTROLLER_AXIS_RIGHTY);
++                constexpr float threshold = 0.5f;
++                constexpr float interval = 0.06f;
++                static float sDocScrollAccum = interval; // primed so the first deflection scrolls at once
++                if (ry <= -threshold || ry >= threshold)
++                {
++                    sDocScrollAccum += dt;
++                    if (sDocScrollAccum >= interval)
++                    {
++                        sDocScrollAccum = 0.0f;
++                        const int step = (ry < 0.0f) ? 40 : -40; // stick up = view up (positive offset)
++                        for (MWGui::WindowBase* w : scrollWm->getGuiModeWindows(MWGui::GM_Scroll))
++                        {
++                            MyGUI::Widget* widget = w ? w->getControllerScrollWidget() : nullptr;
++                            MyGUI::ScrollView* sv
++                                = widget ? widget->castType<MyGUI::ScrollView>(false) : nullptr;
++                            if (sv)
++                                sv->setViewOffset(sv->getViewOffset() + MyGUI::IntPoint(0, step));
++                        }
++                    }
++                }
++                else
++                {
++                    sDocScrollAccum = interval; // re-arm in the deadzone
++                }
++            }
++        }
++#endif
 +#ifdef __ANDROID__
 +        // COMPANION: right-stick scroll for DS overlays. SDL emits axis events only on CHANGE, so a
 +        // HELD stick can't drive continuous scrolling from the event path — poll the live axis state
@@ -87,7 +170,7 @@
          if (mGuiCursorEnabled && !(mJoystickLastUsed && !mGamepadGuiCursorEnabled)
  #ifdef __ANDROID__
              // COMPANION: don't let the thumbstick move the GUI cursor while the "Game cursor" option
-@@ -285,6 +358,35 @@
+@@ -273,6 +415,35 @@
  
      bool ControllerManager::gamepadToGuiControl(const SDL_ControllerButtonEvent& arg)
      {
@@ -123,7 +206,7 @@
          MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
  
          if (Settings::gui().mControllerMenus)
-@@ -395,6 +494,43 @@
+@@ -383,6 +554,43 @@
          };
  
          MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
