@@ -86,6 +86,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.layout.BoxWithConstraints
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.derivedStateOf
@@ -162,7 +166,7 @@ private val BoneDim     = Color(0xFF9A8C70)   // secondary text
 private val BoneBright  = Color(0xFFF2EEE3)   // item name, high prominence
 private val BoneMuted   = Color(0xFFBCAF96)   // item name, low prominence
 private val FloatStone  = Color(0xF02A2318)   // near-opaque stone for floating bars
-private val EnchantTint  = Color(0xFFC09010).copy(alpha = 0.4f) // subtle gold backdrop for enchanted item icons
+private val EnchantTint  = Color(0xFF5BA8E0).copy(alpha = 0.4f) // subtle light-blue backdrop for enchanted item icons
 
 private val HealthCol   = Color(0xFF8E2B20)   // blood red
 private val MagickaCol  = Color(0xFF35608F)   // arcane blue (stat bar)
@@ -322,6 +326,52 @@ private fun itemCategoryRank(category: String): Int = when (category) {
 @Composable
 private fun BoxScope.EnchantBackdrop(enchanted: Boolean) {
     if (enchanted) Box(Modifier.matchParentSize().background(EnchantTint))
+}
+
+/** The live player character name (from COMPANION_CHARACTER → state.character.name), used for the
+ *  "your side" column headers. Falls back to [fallback] until the name is known. Maps to just the
+ *  name (distinctUntilChanged) so it doesn't recompose on every fast COMPANION_STATS tick. */
+@Composable
+private fun rememberPlayerName(fallback: String = "You"): String {
+    val flow = remember { GameStateRepository.state.map { it.character.name }.distinctUntilChanged() }
+    val name by flow.collectAsState(initial = "")
+    return name.ifBlank { fallback }
+}
+
+/** A thin, subtle horizontal scrollbar for a [LazyHorizontalGrid], shown ONLY when the content is
+ *  wider than the viewport (more item-columns than fit). Track = muted bronze, thumb = brighter
+ *  bronze; thumb width/position approximated from the visible/total item counts. */
+@Composable
+private fun HorizontalGridScrollbar(state: LazyGridState, modifier: Modifier = Modifier) {
+    val metrics by remember(state) {
+        derivedStateOf {
+            val info = state.layoutInfo
+            val total = info.totalItemsCount
+            val visible = info.visibleItemsInfo.size
+            if (total <= 0 || visible >= total) null
+            else {
+                val thumb = (visible.toFloat() / total).coerceIn(0.08f, 1f)
+                val start = (state.firstVisibleItemIndex.toFloat() / total).coerceIn(0f, 1f - thumb)
+                start to thumb
+            }
+        }
+    }
+    val m = metrics
+    if (m != null) {
+        val (start, thumb) = m
+        BoxWithConstraints(modifier.fillMaxWidth().height(4.dp)) {
+            val w = maxWidth
+            Box(
+                Modifier.fillMaxWidth().height(3.dp).align(Alignment.Center)
+                    .clip(RoundedCornerShape(2.dp)).background(BronzeDark.copy(alpha = 0.35f))
+            )
+            Box(
+                Modifier.align(Alignment.CenterStart)
+                    .offset(x = w * start).width(w * thumb).height(3.dp)
+                    .clip(RoundedCornerShape(2.dp)).background(BronzeLight.copy(alpha = 0.7f))
+            )
+        }
+    }
 }
 
 // How a tap / long-press acts on an inventory item. Mutually exclusive, keyed off
@@ -994,7 +1044,7 @@ fun ConversationHistoryOverlay() {
                 .fillMaxWidth(0.75f)             // ~25% narrower than full width
                 .fillMaxHeight(0.51f)            // ~10% taller than the previous 0.46
                 .clip(RoundedCornerShape(3.dp))
-                .background(Color(0xED0D0A07))   // #0d0a07 @ ~93%
+                .background(StonePanel)          // match the TOP-view conversation panel (mwPanel)
                 .border(2.dp, Bronze, RoundedCornerShape(3.dp))
         ) {
             if (npcName.isNotEmpty()) {
@@ -2115,6 +2165,7 @@ private fun LootingOverlay(
     // so it doesn't linger. Composed in BOTH bottom and SPLIT modes, so this also covers the top-grid
     // popup (both this and LootingTopOverlay leave composition on session-null).
     DisposableEffect(Unit) { onDispose { ItemInfoPopupState.close() } }
+    val playerName = rememberPlayerName()
     // SPLIT: the item grids live on the TOP screen (LootingTopOverlay, hosted by
     // EngineActivity); the bottom screen shows ONLY the terminal controls. Take All /
     // Dispose / Close all END the session, so the bottom controls never need the
@@ -2225,7 +2276,7 @@ private fun LootingOverlay(
             // ---- Two equal columns: player | container ----
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 LootColumn(
-                    header = "Player (${playerGold}g)",
+                    header = "$playerName (${playerGold}g)",
                     legend = "tap to put · long press for more",
                     items = playerSorted,
                     isPlayerSide = true,
@@ -2648,6 +2699,7 @@ fun LootingTopOverlay() {
     val sessionState by GameStateRepository.containerSession.collectAsState()
     val state by GameStateRepository.state.collectAsState()
     val session = sessionState ?: return
+    val playerName = rememberPlayerName()
 
     // Optimistic lists — remember WITHOUT a key so they init once on enter and are NOT
     // re-synced from later (frame-starved) session emissions, matching the bottom overlay.
@@ -2693,12 +2745,12 @@ fun LootingTopOverlay() {
     val containerSorted = remember(containerItems) {
         containerItems.sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
     }
-    // Controller focus (SPLIT = two 4-row icon grids → rows = 4). X/R1 fire here too even though
+    // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X/R1 fire here too even though
     // the Take All / Dispose buttons live on the bottom controls window — they're plain commands.
     val focus = rememberLootNavFocus(
         playerSorted = playerSorted,
         containerSorted = containerSorted,
-        rows = 4,
+        rows = 3,
         isCorpse = session.isCorpse,
         requestQty = requestQty,
         onPut = { it, n -> put(it, n) },
@@ -2724,7 +2776,7 @@ fun LootingTopOverlay() {
         ) {
             // LEFT: player.
             LootGridColumn(
-                header = "You",
+                header = playerName,
                 items = playerSorted,
                 isPlayerSide = true,
                 isWorn = { isWorn(it) },
@@ -2815,12 +2867,11 @@ private fun LootGridColumn(
             // Right stick left/right scrolls this horizontal grid while it's the focused side.
             ScrollByNav(gridState, active = focusedIndex >= 0, horizontal = true)
             LazyHorizontalGrid(
-                // 4 rows now that the icons are smaller; tighter spacing fits more. Column-major fill,
-                // so item index i sits at grid row i%4, grid column i/4 — matches the focus math in
-                // rememberLootNavFocus (rows = 4).
+                // 3 rows. Column-major fill, so item index i sits at grid row i%3, grid column i/3
+                // — MUST match the focus math in rememberLootNavFocus (rows = 3).
                 state = gridState,
-                rows = GridCells.Fixed(4),
-                modifier = Modifier.fillMaxSize(),
+                rows = GridCells.Fixed(3),
+                modifier = Modifier.fillMaxWidth().weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -2836,6 +2887,7 @@ private fun LootGridColumn(
                     )
                 }
             }
+            HorizontalGridScrollbar(gridState, Modifier.padding(top = 4.dp))
         }
     }
 }
@@ -3972,6 +4024,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
     // linger over the game. Composed in BOTH bottom and SPLIT modes, so this covers the top-grid
     // popup too (both this and BarterTopOverlay leave composition on session-null).
     DisposableEffect(Unit) { onDispose { ItemInfoPopupState.close() } }
+    val playerName = rememberPlayerName()
     // SPLIT: the item grids live on the TOP screen (BarterTopOverlay, hosted by EngineActivity);
     // the bottom screen shows ONLY the gold bar + Offer/Cancel. Item selection (borrow/return) is
     // sent to the engine from the top grid; the bottom controls read the engine's authoritative
@@ -4113,7 +4166,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
             // ---- Two equal columns: player | vendor ----
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 BarterColumn(
-                    header = "You (${session.playerGold}g)",
+                    header = "$playerName (${session.playerGold}g)",
                     items = playerItems,
                     isPlayerSide = true,
                     selectedCategory = playerCat,
@@ -4408,6 +4461,7 @@ private fun BarterGoldSlider(
 fun BarterTopOverlay() {
     val sessionState by GameStateRepository.barterSession.collectAsState()
     val session = sessionState ?: return
+    val playerName = rememberPlayerName()
 
     // Optimistic COLUMN contents — remember WITHOUT a key so they init once on enter and are NOT
     // re-synced from later (frame-starved) emissions. The window is removed on session-null.
@@ -4503,7 +4557,7 @@ fun BarterTopOverlay() {
         requestQty(item.displayName(), item.count, "Select") { n -> borrow(item, n) }
     }
 
-    // Controller focus (SPLIT = two 4-row icon grids → rows = 4). X (Offer) + the gold slider are
+    // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X (Offer) + the gold slider are
     // owned by the bottom controls window (BarterControlsOnly, its own collector) because the gold-
     // offset state lives there — passing no-ops here avoids a top/bottom desync.
     val visiblePlayer = remember(playerCol, playerCat) { barterVisible(playerCol, playerCat, true) }
@@ -4511,7 +4565,7 @@ fun BarterTopOverlay() {
     val focus = rememberBarterNavFocus(
         visiblePlayer = visiblePlayer,
         visibleVendor = visibleVendor,
-        rows = 4,
+        rows = 3,
         onToggle = ::toggle,
         onOffer = {},
         onSlider = {},
@@ -4534,7 +4588,7 @@ fun BarterTopOverlay() {
         ) {
             // LEFT: player column (own inventory + bought vendor items, highlighted).
             BarterGridColumn(
-                header = "You",
+                header = playerName,
                 items = playerCol,
                 isPlayerSide = true,
                 selectedCategory = playerCat,
@@ -4654,11 +4708,11 @@ private fun BarterGridColumn(
             // Right stick left/right scrolls this horizontal grid while it's the focused side.
             ScrollByNav(gridState, active = focusedIndex >= 0, horizontal = true)
             LazyHorizontalGrid(
-                // 4 rows / tight spacing — matching the looting overlay. Column-major fill, so item
-                // index i is at grid row i%4, column i/4 — matches rememberBarterNavFocus (rows = 4).
+                // 3 rows / tight spacing — matching the looting overlay. Column-major fill, so item
+                // index i is at grid row i%3, column i/3 — MUST match rememberBarterNavFocus (rows = 3).
                 state = gridState,
-                rows = GridCells.Fixed(4),
-                modifier = Modifier.fillMaxSize(),
+                rows = GridCells.Fixed(3),
+                modifier = Modifier.fillMaxWidth().weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -4672,6 +4726,7 @@ private fun BarterGridColumn(
                     )
                 }
             }
+            HorizontalGridScrollbar(gridState, Modifier.padding(top = 4.dp))
         }
     }
 }
@@ -8178,13 +8233,72 @@ fun OptionsMenuOverlay() {
     val context = LocalContext.current
     remember(context) { UiPreferences.init(context); true }
 
-    // True while this overlay is being shown for the TITLE-screen main menu (no game loaded), as
-    // opposed to the in-game pause menu. Drives the one-time welcome block below.
+    // True while shown for the TITLE-screen main menu (no game loaded), vs the in-game pause menu.
     val onTitleScreen by GameStateRepository.titleMenuVisible.collectAsState()
+    // On the title screen the settings live in a popup (opened by the Options button) below the
+    // intro/info, keeping the welcome screen uncluttered. The in-game pause menu is UNCHANGED — it
+    // shows the settings list inline.
+    var showOptionsPopup by remember { mutableStateOf(false) }
 
-    // Restore the scroll position from the last time the menu was open. The overlay window is
-    // added/removed each time the pause menu opens, so a plain rememberLazyListState would reset
-    // to the top; OptionsMenuScrollState survives across those open/close cycles.
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().background(OptionsBg)) {
+            OptionsTitleBar(onTitleScreen)
+            if (onTitleScreen) {
+                // Title screen: intro/info + an "Options" button that opens the settings in a popup.
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    OptionsWelcomeBlock()
+                    Spacer(Modifier.height(14.dp))
+                    OptionsOpenButton { showOptionsPopup = true }
+                    Spacer(Modifier.height(24.dp))
+                }
+            } else {
+                // In-game pause menu — settings list inline (unchanged behaviour).
+                OptionsSettingsList()
+            }
+        }
+        if (onTitleScreen && showOptionsPopup) {
+            OptionsPopup(onDismiss = { showOptionsPopup = false })
+        }
+    }
+}
+
+/** The options overlay's title bar + divider. On the TITLE screen it's a large centred "OpenMW-DS"
+ *  banner (no subtitle); the in-game pause menu keeps the compact app-identity bar (unchanged). */
+@Composable
+private fun OptionsTitleBar(titleScreen: Boolean) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(StonePanel)
+            .padding(horizontal = 16.dp, vertical = if (titleScreen) 26.dp else 12.dp),
+        contentAlignment = if (titleScreen) Alignment.Center else Alignment.CenterStart
+    ) {
+        Column(horizontalAlignment = if (titleScreen) Alignment.CenterHorizontally else Alignment.Start) {
+            Text(
+                "OpenMW-DS",
+                color = BronzeLight,
+                fontSize = if (titleScreen) 46.sp else 18.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                letterSpacing = if (titleScreen) 3.sp else 1.sp
+            )
+            if (!titleScreen) {
+                Text("Display settings", color = BoneDim, fontSize = 11.sp, fontFamily = MwBody)
+            }
+        }
+    }
+    Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+}
+
+/** The scrollable list of all settings sections. Rendered inline for the in-game pause menu and
+ *  inside [OptionsPopup] for the title screen. Scroll position persists via OptionsMenuScrollState
+ *  (the pause overlay window is recreated each open, so a plain rememberLazyListState would reset). */
+@Composable
+private fun OptionsSettingsList() {
     val listState = rememberLazyListState(
         OptionsMenuScrollState.index, OptionsMenuScrollState.offset
     )
@@ -8195,88 +8309,121 @@ fun OptionsMenuOverlay() {
                 OptionsMenuScrollState.offset = offset
             }
     }
-
-    Column(
+    LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
-            .background(OptionsBg)
+            .padding(horizontal = 16.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
     ) {
-        // Title bar — app identity always shown (labels the screen, esp. on the title screen where
-        // it appears with no game context), with a "Display settings" subtitle.
-        Box(
+        // Quick-set row: bulk-set every (non-pending) Game UI element. Never touches HUD.
+        item { QuickSetRow() }
+
+        // SCREEN LAYOUT: which screen each element is drawn on.
+        item { OptionsSectionHeader("Screen Layout") }
+        item { ConversationLocationRow() }
+        item { LootingLocationRow() }
+        item { BarteringLocationRow() }
+        item { TargetHealthLocationRow() }
+        item { PlayerCombatRow() }
+        items(
+            GAME_UI_ELEMENTS.filter {
+                it.key != "game_ui_conversation" &&
+                    it.key != "game_ui_looting" &&
+                    it.key != "game_ui_bartering"
+            },
+            key = { "layout_" + it.key }
+        ) { ScreenLayoutPendingRow(it) }
+
+        // GAME UI: per-element DS/Vanilla.
+        item { OptionsSectionHeader("Game UI") }
+        items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
+
+        // VANILLA HUD: whether each native top-screen HUD element is shown.
+        item { OptionsSectionHeader("Vanilla HUD") }
+        items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
+        item { Alpha3OverlayRow() }
+
+        item { OptionsSectionHeader("Input") }
+        item { TouchInputRow() }
+        item { GameCursorRow() }
+    }
+}
+
+/** The title-screen "Options" button that opens the settings popup. */
+@Composable
+private fun OptionsOpenButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            .background(PillActiveBg.copy(alpha = 0.94f))
+            .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+            .clickable { onClick() }
+            .padding(vertical = 16.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "Options",
+            color = BronzeLight, fontSize = 24.sp, fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp
+        )
+    }
+}
+
+/** Title-screen settings popup — an in-window overlay (NOT a Compose Dialog; the options overlay
+ *  lives in a Presentation panel window). Scrim tap or the Close button dismisses. */
+@Composable
+private fun OptionsPopup(onDismiss: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(30f)
+            .background(Color(0xCC000000))
+            .pointerInput(Unit) { detectTapGestures { onDismiss() } },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .background(StonePanel)
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.9f)
+                .clip(RoundedCornerShape(4.dp))
+                .background(OptionsBg)
+                .border(2.dp, Bronze, RoundedCornerShape(4.dp))
+                // Swallow taps so tapping the panel doesn't reach the dismiss scrim.
+                .pointerInput(Unit) { detectTapGestures {} }
         ) {
-            Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(StonePanel)
+                    .padding(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Prominent Back button (top-left) — returns to the title/intro screen.
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(PillActiveBg.copy(alpha = 0.94f))
+                        .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        "◀ Back",
+                        color = BronzeLight, fontSize = 15.sp, fontFamily = MwDisplay,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
                 Text(
-                    "OpenMW-DS",
-                    color = BronzeLight,
-                    fontSize = 18.sp,
-                    fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
-                Text(
-                    "Display settings",
-                    color = BoneDim,
-                    fontSize = 11.sp,
-                    fontFamily = MwBody
+                    "Options",
+                    color = BronzeLight, fontSize = 16.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)
                 )
             }
-        }
-        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
-        ) {
-            // One-time welcome, shown ONLY on the title screen (before a game is loaded), to orient
-            // first-time users and nudge them toward a starting preset. Hidden during in-game pause.
-            if (onTitleScreen) {
-                item { OptionsWelcomeBlock() }
-            }
-
-            // Quick-set row: bulk-set every (non-pending) Game UI element. Never touches HUD.
-            item { QuickSetRow() }
-
-            // SCREEN LAYOUT: which screen each element is drawn on. Conversation, Looting
-            // and Bartering support Bottom/Split (Top pending); the rest are fully pending
-            // and locked to Bottom.
-            item { OptionsSectionHeader("Screen Layout") }
-            item { ConversationLocationRow() }
-            item { LootingLocationRow() }
-            item { BarteringLocationRow() }
-            item { TargetHealthLocationRow() }
-            item { PlayerCombatRow() }
-            items(
-                GAME_UI_ELEMENTS.filter {
-                    it.key != "game_ui_conversation" &&
-                        it.key != "game_ui_looting" &&
-                        it.key != "game_ui_bartering"
-                },
-                key = { "layout_" + it.key }
-            ) { ScreenLayoutPendingRow(it) }
-
-            // GAME UI: per-element DS/Vanilla. DS = companion draws it (native suppressed);
-            // Vanilla = native OpenMW shows on the top screen. Pending elements are locked Vanilla.
-            item { OptionsSectionHeader("Game UI") }
-            items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
-
-            // VANILLA HUD: whether each native top-screen HUD element is shown (On) or hidden (Off).
-            // Always manual — the Quick set buttons never touch these.
-            item { OptionsSectionHeader("Vanilla HUD") }
-            items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
-            // The Alpha3 launcher overlay (gear + arrow cluster) — purely Kotlin-side.
-            item { Alpha3OverlayRow() }
-
-            item { OptionsSectionHeader("Input") }
-            item { TouchInputRow() }
-            item { GameCursorRow() }
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            OptionsSettingsList()
         }
     }
 }
@@ -8285,42 +8432,42 @@ fun OptionsMenuOverlay() {
  *  is loaded), to orient first-time users and nudge them toward a starting preset. */
 @Composable
 private fun OptionsWelcomeBlock() {
-    Column(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp)) {
+    Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
         Text(
             "Welcome to OpenMW-DS",
             color = BronzeLight,
-            fontSize = 15.sp,
+            fontSize = 26.sp,
             fontFamily = MwDisplay,
             fontWeight = FontWeight.Bold
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
             "An app designed for use with the AYN Thor. This bottom screen is your companion. It shows Morrowind's menus (inventory, magic, " +
-                "map, journal and stats) with touch. Set your layout and input here before you start.",
+                "map, journal and stats) with touch. Tap Options below to set your layout and input before you start.",
             color = Bone,
-            fontSize = 11.sp,
+            fontSize = 18.sp,
             fontFamily = MwBody,
-            lineHeight = 15.sp
+            lineHeight = 25.sp
         )
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(12.dp))
         Text(
-            "New here? Start with “All Vanilla” below for the closest-to-original experience, " +
+            "New here? Open Options and start with “All Vanilla” for the closest-to-original experience, " +
                 "then move individual pieces to DS as you like. These options only effect the top screen. " +
-            "I also recommend enabling touch input (bottom of this screen)",
+            "I also recommend enabling touch input (Options → Input)",
             color = BoneDim,
-            fontSize = 11.sp,
+            fontSize = 17.sp,
             fontFamily = MwBody,
-            lineHeight = 15.sp
+            lineHeight = 24.sp
         )
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(12.dp))
         Text(
-            "Want your old UI (health, minimap) back? See the Vanilla HUD section.",
+            "Want your old UI (health, minimap) back? See Options → Vanilla HUD.",
             color = BoneDim,
-            fontSize = 11.sp,
+            fontSize = 17.sp,
             fontFamily = MwBody,
-            lineHeight = 15.sp
+            lineHeight = 24.sp
         )
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(14.dp))
         Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
     }
 }
