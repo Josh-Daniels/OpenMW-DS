@@ -130,6 +130,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.sin
@@ -161,6 +162,7 @@ private val BoneDim     = Color(0xFF9A8C70)   // secondary text
 private val BoneBright  = Color(0xFFF2EEE3)   // item name, high prominence
 private val BoneMuted   = Color(0xFFBCAF96)   // item name, low prominence
 private val FloatStone  = Color(0xF02A2318)   // near-opaque stone for floating bars
+private val EnchantTint  = Color(0xFFC09010).copy(alpha = 0.4f) // subtle gold backdrop for enchanted item icons
 
 private val HealthCol   = Color(0xFF8E2B20)   // blood red
 private val MagickaCol  = Color(0xFF35608F)   // arcane blue (stat bar)
@@ -297,6 +299,30 @@ private val INV_CATEGORIES = listOf(
     InvCategory("Consumables", setOf("potion", "ingredient")),
     InvCategory("Misc",        setOf("misc", "carried_left")),
 )
+
+// Vanilla-style category ordering (SortFilterItemModel::getTypeOrder) mapped onto BOTH the fine
+// inventory/container category strings (Lua itemCategory) AND the coarse barter category strings
+// (native companionBarterCategory), so every item list sorts by category then name like the menus.
+private fun itemCategoryRank(category: String): Int = when (category) {
+    "weapon", "ammo" -> 0
+    "armor", "helmet", "cuirass", "left_pauldron", "right_pauldron", "greaves", "boots",
+        "left_gauntlet", "right_gauntlet", "shield" -> 1
+    "apparel", "amulet", "left_ring", "shirt", "pants", "skirt", "robe", "clothing" -> 2
+    "consumable", "potion" -> 3
+    "ingredient" -> 4
+    "book", "scroll" -> 6
+    "carried_left" -> 7
+    "tools", "lockpick" -> 9
+    "probe" -> 11
+    else -> 8   // misc (apparatus/repair/light are folded into "misc" by itemCategory)
+}
+
+/** Subtle gold backdrop behind an enchanted item's icon (mirrors vanilla's menu_icon_magic frame).
+ *  Call as the FIRST child of an icon Box so it draws behind the icon image. */
+@Composable
+private fun BoxScope.EnchantBackdrop(enchanted: Boolean) {
+    if (enchanted) Box(Modifier.matchParentSize().background(EnchantTint))
+}
 
 // How a tap / long-press acts on an inventory item. Mutually exclusive, keyed off
 // the coarse category from Lua's itemCategory(). Kept in one place so the two
@@ -2140,11 +2166,11 @@ private fun LootingOverlay(
     // of order shared by the columns' display and the controller focus index.
     val playerSorted = remember(playerItems, wornIds) {
         playerItems.sortedWith(
-            compareByDescending<InventoryItem> { isWorn(it) }.thenBy { it.displayName().lowercase() }
+            compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
         )
     }
     val containerSorted = remember(containerItems) {
-        containerItems.sortedWith(compareBy { it.displayName().lowercase() })
+        containerItems.sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
     }
     // Controller focus (BOTTOM = two side-by-side lists → rows = 1).
     val focus = rememberLootNavFocus(
@@ -2400,6 +2426,7 @@ private fun LootRow(
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
                 ) {
+                    EnchantBackdrop(item.enchant != null)
                     if (iconBitmap != null) {
                         Image(
                             bitmap = iconBitmap,
@@ -2660,11 +2687,11 @@ fun LootingTopOverlay() {
     // Pre-sort both sides ONCE (shared by the grids' display and the controller focus index).
     val playerSorted = remember(playerItems, wornIds) {
         playerItems.sortedWith(
-            compareByDescending<InventoryItem> { isWorn(it) }.thenBy { it.displayName().lowercase() }
+            compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
         )
     }
     val containerSorted = remember(containerItems) {
-        containerItems.sortedWith(compareBy { it.displayName().lowercase() })
+        containerItems.sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
     }
     // Controller focus (SPLIT = two 4-row icon grids → rows = 4). X/R1 fire here too even though
     // the Take All / Dispose buttons live on the bottom controls window — they're plain commands.
@@ -2869,6 +2896,7 @@ private fun LootGridCell(
                         RoundedCornerShape(3.dp)
                     )
             ) {
+                EnchantBackdrop(item.enchant != null)
                 if (iconBitmap != null) {
                     Image(
                         bitmap = iconBitmap,
@@ -3829,9 +3857,7 @@ private val BarterBlue = Color(0xFF6E93C9)    // Cancel
 private fun barterVisible(items: List<BarterItem>, category: String?, isPlayerSide: Boolean): List<BarterItem> =
     items.filter { category == null || it.category == category }
         .sortedWith(
-            compareByDescending<BarterItem> { it.isSelected }
-                .thenByDescending { isPlayerSide && it.worn }
-                .thenBy { it.displayName().lowercase() }
+            compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
         )
 
 /** Current controller focus in the barter overlay: which [side] (0 = player/left,
@@ -4702,6 +4728,7 @@ private fun BarterGridCell(
                         RoundedCornerShape(3.dp)
                     )
             ) {
+                EnchantBackdrop(item.enchant != null)
                 if (iconBitmap != null) {
                     Image(
                         bitmap = iconBitmap,
@@ -4904,6 +4931,7 @@ private fun BarterRow(
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
                 ) {
+                    EnchantBackdrop(item.enchant != null)
                     if (iconBitmap != null) {
                         Image(
                             bitmap = iconBitmap,
@@ -6228,8 +6256,7 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                 val groupItems = state.inventory
                     .filter { it.category in grp.cats }
                     // Worn items first, then the rest alphabetically.
-                    .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }
-                        .thenBy { it.displayName().lowercase() })
+                    .sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
                 if (groupItems.isNotEmpty()) {
                     item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
                     items(groupItems) { item ->
@@ -6244,8 +6271,7 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
             val groupItems = state.inventory
                 .filter { it.category in selectedGroup.cats }
                 // Worn items first, then the rest alphabetically.
-                .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }
-                    .thenBy { it.displayName().lowercase() })
+                .sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
             items(groupItems) { item ->
                 val worn = isWorn(item)
                 ItemRow(item, worn, equippable = item.isEquippable(),
@@ -6347,6 +6373,7 @@ private fun ItemRow(
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
                 ) {
+                    EnchantBackdrop(item.enchant != null)
                     if (iconBitmap != null) {
                         Image(
                             bitmap = iconBitmap,
