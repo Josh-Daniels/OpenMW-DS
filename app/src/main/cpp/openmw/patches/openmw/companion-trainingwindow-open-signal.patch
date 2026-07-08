@@ -1,73 +1,254 @@
-Emit COMPANION_TRAINING_OPEN/_CLOSED around the native TrainingWindow
-so the bottom-screen conversation overlay (a top-screen Android panel that layers above the
-OpenMW MyGUI surface) can step aside while this dialogue-service window is open in Vanilla
-mode. OPEN is emitted from setPtr (window opened for an actor); CLOSED from an onClose()
-override, guarded by a file-static bool + !containsMode(GM_...) so it fires exactly once on
-the real mode-pop, not on a transient hide (e.g. TrainingWindow hides itself during its
-time-advance animation). These windows are Vanilla-only today, so the normal visible->hidden
-onClose() transition always fires — no explicit hidden-window emit is needed (unlike barter).
-Kotlin side: LogParser prefixes -> a boolean session StateFlow in GameStateRepository ->
-nativeServiceVanillaUp in EngineActivity. Added July 2026.
+Companion (bottom-screen training): extend the open-signal patch to stream the training session
+(NPC name, player gold, best-3 skills with cost + capped flag) and add extern "C" control bridges
+(companionTrainSkill / companionTrainingCancel) driven from drainCompanionCommands, mirroring
+companion-repair-export.patch. COMPANION_TRAINING_CLOSED is emitted from every close path (onClose
+real-close, exit() for B/Escape, the cancel bridge, and the post-train auto-close in
+onTrainingFinished) because the window is DS-hidden and the normal visible->hidden onClose won't fire.
+Prices come from getBarterOffer (native-only). Training is one-shot (auto-closes after a 2h advance),
+so no re-export. Added July 2026.
 
 --- a/apps/openmw/mwgui/trainingwindow.cpp
 +++ b/apps/openmw/mwgui/trainingwindow.cpp
-@@ -3,6 +3,8 @@
- #include <MyGUI_Button.h>
+@@ -4,6 +4,12 @@
  #include <MyGUI_Gui.h>
  #include <MyGUI_TextIterator.h>
+ 
++#include <string>
++#include <string_view>
++#include <vector>
 +
 +#include <components/debug/debuglog.hpp>
- 
++
  #include "../mwbase/environment.hpp"
  #include "../mwbase/luamanager.hpp"
-@@ -58,11 +60,17 @@
-         center();
+ #include "../mwbase/mechanicsmanager.hpp"
+@@ -22,6 +28,42 @@
+ 
+ #include "tooltips.hpp"
+ 
++namespace
++{
++    // ================= Companion (bottom-screen training) =================
++    // Mirrors the companion merchant-repair bridge (companion-repair-export.patch): the native
++    // TrainingWindow is hidden while GM_Training is in DS mode (companion-hide-gamewindows-on-
++    // dsmode.patch), and the training flow is driven from the bottom screen via the extern "C"
++    // bridges at the end of this file.
++
++    // The single live TrainingWindow, set in its constructor, so the bridges can reach it without
++    // touching WindowManager's private members. Mirrors gCompanionMerchantRepair.
++    MWGui::TrainingWindow* gCompanionTrainingWindow = nullptr;
++
++    // True between COMPANION_TRAINING_OPEN and _CLOSED so the close signal is emitted exactly once,
++    // whichever path ends the session. The native window is HIDDEN the moment the mode opens in DS
++    // mode, so the usual visible->hidden onClose() transition doesn't fire on those close paths.
++    bool gCompanionTrainingSessionOpen = false;
++
++    void companionEmitTrainingClosed()
++    {
++        if (!gCompanionTrainingSessionOpen)
++            return;
++        gCompanionTrainingSessionOpen = false;
++        Log(Debug::Info) << "COMPANION_TRAINING_CLOSED";
++    }
++
++    // Keep a name safe inside the pipe-delimited COMPANION_TRAINING_SKILL line.
++    std::string companionTrainingSanitize(std::string_view s)
++    {
++        std::string out(s);
++        for (char& c : out)
++            if (c == '|' || c == '\n' || c == '\r')
++                c = ' ';
++        return out;
++    }
++}
++
+ namespace MWGui
+ {
+ 
+@@ -43,6 +85,8 @@
+             mControllerButtons.mA = "#{Interface:Buy}";
+             mControllerButtons.mB = "#{Interface:Cancel}";
+         }
++
++        gCompanionTrainingWindow = this;
      }
  
-+    // COMPANION: true between COMPANION_TRAINING_OPEN and _CLOSED (Vanilla-only window).
-+    static bool sTrainingWindowCompanionOpen = false;
-+
-     void TrainingWindow::setPtr(const MWWorld::Ptr& actor)
-     {
-         if (actor.isEmpty() || !actor.getClass().isActor())
-             throw std::runtime_error("Invalid argument in TrainingWindow::setPtr");
-         mPtr = actor;
-+
-+        sTrainingWindowCompanionOpen = true;
-+        Log(Debug::Info) << "COMPANION_TRAINING_OPEN";
+     void TrainingWindow::onOpen()
+@@ -69,6 +113,15 @@
  
-         MWWorld::Ptr player = MWMechanics::getPlayer();
-         int playerGold = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
-@@ -160,6 +168,21 @@
+         mPlayerGold->setCaptionWithReplacing("#{sGold}: " + MyGUI::utility::toString(playerGold));
+ 
++        // COMPANION (bottom-screen training): mirror the session to the bottom screen. Emitted
++        // regardless of DS/Vanilla (the Kotlin side only SHOWS the overlay when Training is DS); the
++        // native window is separately hidden in DS mode. Streamed one small line each (START via
++        // OPEN, one SKILL per line, END) to stay clear of the 4096-byte stdout-flush truncation.
++        gCompanionTrainingSessionOpen = true;
++        Log(Debug::Info) << "COMPANION_TRAINING_OPEN:" << companionTrainingSanitize(actor.getClass().getName(actor));
++        Log(Debug::Info) << "COMPANION_PLAYER_GOLD:" << playerGold;
++        mCompanionTrainSkills.clear();
++
+         const auto& store = MWBase::Environment::get().getESMStore();
+         const MWWorld::Store<ESM::GameSetting>& gmst = store->get<ESM::GameSetting>();
+         const MWWorld::Store<ESM::Skill>& skillStore = store->get<ESM::Skill>();
+@@ -129,6 +182,17 @@
+             button->setUserData(skills[i].first);
+             button->eventMouseButtonClick += MyGUI::newDelegate(this, &TrainingWindow::onTrainingSelected);
+ 
++            // COMPANION export: index = ordinal in the trainer's best-3 list (stable while the sim is
++            // paused under GM_Training). capped mirrors the two guards in trainSkill(): the player is
++            // already at/above the trainer's skill, OR already at/above the skill's governing attribute.
++            const int curLevel = pcStats.getSkill(skill->mId).getBase();
++            const bool cappedByTrainer = getSkillForTraining(actorStats, skill->mId) <= static_cast<float>(curLevel);
++            const bool cappedByAttr = curLevel
++                >= pcStats.getAttribute(ESM::Attribute::indexToRefId(skill->mData.mAttribute)).getModified();
++            Log(Debug::Info) << "COMPANION_TRAINING_SKILL:" << i << "|" << companionTrainingSanitize(skill->mName)
++                             << "|" << curLevel << "|" << price << "|" << ((cappedByTrainer || cappedByAttr) ? 1 : 0);
++            mCompanionTrainSkills.push_back(skill);
++
+             button->setCaptionWithReplacing(
+                 MyGUI::TextIterator::toTagsString(skill->mName) + "  - " + MyGUI::utility::toString(price) + "#{sgp}");
+ 
+@@ -139,6 +203,8 @@
+             if (price <= playerGold)
+                 mTrainingButtons.emplace_back(button);
+         }
++
++        Log(Debug::Info) << "COMPANION_TRAINING_END";
+ 
+         if (Settings::gui().mControllerMenus)
+         {
+@@ -160,10 +226,34 @@
          MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Training);
      }
  
 +    void TrainingWindow::onClose()
 +    {
 +        WindowBase::onClose();
-+        // COMPANION: emit the close signal only on the real mode-pop (containsMode false),
-+        // not on a transient hide, matching TradeWindow::onClose. Lets the bottom-screen
-+        // conversation overlay come back once this native window is gone (Vanilla mode).
-+        if (sTrainingWindowCompanionOpen
-+            && !MWBase::Environment::get().getWindowManager()->containsMode(GM_Training))
-+        {
-+            sTrainingWindowCompanionOpen = false;
-+            Log(Debug::Info) << "COMPANION_TRAINING_CLOSED";
-+        }
++        // COMPANION: real-close emit (Vanilla visible->hidden). Guarded by !containsMode so a
++        // transient hide during the time-advance animation doesn't fire it. DS-hidden closes never
++        // reach here (setVisible(false) is a no-op when already hidden) — those emit explicitly via
++        // the cancel bridge / exit() / onTrainingFinished.
++        if (!MWBase::Environment::get().getWindowManager()->containsMode(GM_Training))
++            companionEmitTrainingClosed();
 +    }
-+
 +
      void TrainingWindow::onTrainingSelected(MyGUI::Widget* sender)
      {
-         const ESM::Skill* skill = *sender->getUserData<const ESM::Skill*>();
+-        const ESM::Skill* skill = *sender->getUserData<const ESM::Skill*>();
++        trainSkill(*sender->getUserData<const ESM::Skill*>());
++    }
+ 
++    // COMPANION (bottom-screen training): train the skill at the given ordinal in the exported
++    // best-3 list. Driven from the companionTrainSkill bridge (drainCompanionCommands). No-op on a
++    // stale/out-of-range index; the shared trainSkill() applies the same affordability/cap guards.
++    void TrainingWindow::companionTrainByIndex(int index)
++    {
++        if (index < 0 || index >= static_cast<int>(mCompanionTrainSkills.size()))
++            return;
++        trainSkill(mCompanionTrainSkills[index]);
++    }
++
++    void TrainingWindow::trainSkill(const ESM::Skill* skill)
++    {
+         MWWorld::Ptr player = MWBase::Environment::get().getWorld()->getPlayerPtr();
+         MWMechanics::NpcStats& pcStats = player.getClass().getNpcStats(player);
+ 
+@@ -226,6 +316,11 @@
+         // go back to game mode
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Training);
+         MWBase::Environment::get().getWindowManager()->exitCurrentGuiMode();
++
++        // COMPANION: post-train auto-close. The window was hidden the moment training started
++        // (setVisible(false) in trainSkill), so the mode-pop above never fires onClose() — emit the
++        // close signal explicitly (once-guarded) so the bottom-screen overlay dismisses.
++        companionEmitTrainingClosed();
+     }
+ 
+     float TrainingWindow::getSkillForTraining(const MWMechanics::NpcStats& stats, ESM::RefId id) const
+@@ -243,7 +338,12 @@
+ 
+     bool TrainingWindow::exit()
+     {
+-        return !mTimeAdvancer.isRunning();
++        const bool canExit = !mTimeAdvancer.isRunning();
++        // COMPANION: B/Escape close. In DS mode the window is hidden so onClose() won't fire on the
++        // following mode-pop — emit explicitly (once-guarded; no double with onClose in Vanilla).
++        if (canExit)
++            companionEmitTrainingClosed();
++        return canExit;
+     }
+ 
+     bool TrainingWindow::onControllerButtonEvent(const SDL_ControllerButtonEvent& arg)
+@@ -279,3 +379,27 @@
+         return true;
+     }
+ }
++
++// Companion (bottom-screen training): extern "C" bridges driven from drainCompanionCommands
++// (androidmain.cpp, engine main thread). Mirror the repair bridges. Each no-ops unless a training
++// session is actually live (containsMode guard, stale-window safe).
++extern "C" void companionTrainSkill(int index)
++{
++    if (!gCompanionTrainingWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Training))
++        return;
++    gCompanionTrainingWindow->companionTrainByIndex(index);
++}
++
++extern "C" void companionTrainingCancel()
++{
++    if (!gCompanionTrainingWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Training))
++        return;
++    // Pop the mode. In DS mode the window is already hidden, so the mode-pop's setVisible(false) is a
++    // no-op that never fires onClose(); emit the close signal explicitly (once-guarded).
++    MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_Training);
++    companionEmitTrainingClosed();
++}
 --- a/apps/openmw/mwgui/trainingwindow.hpp
 +++ b/apps/openmw/mwgui/trainingwindow.hpp
-@@ -34,6 +34,8 @@
+@@ -11,6 +11,11 @@
+     class NpcStats;
+ }
+ 
++namespace ESM
++{
++    struct Skill;
++}
++
+ namespace MWGui
+ {
+ 
+@@ -33,11 +38,20 @@
+ 
          std::string_view getWindowIdForLua() const override { return "Training"; }
  
++        // COMPANION (bottom-screen training): train the skill at the given ordinal in the exported
++        // best-3 list (companion-trainingwindow-open-signal.patch). Driven from the companionTrainSkill
++        // bridge; no-ops on a stale/out-of-range index.
++        void companionTrainByIndex(int index);
++
      protected:
 +        void onClose() override;
 +
          void onReferenceUnavailable() override;
  
          void onCancelButtonClicked(MyGUI::Widget* sender);
+         void onTrainingSelected(MyGUI::Widget* sender);
++        // Shared training core used by both the native button click and the companion bridge.
++        void trainSkill(const ESM::Skill* skill);
+ 
+         void onTrainingProgressChanged(int cur, int total);
+         void onTrainingFinished();
+@@ -50,6 +64,9 @@
+         MyGUI::Button* mCancelButton;
+         MyGUI::TextBox* mPlayerGold;
+         std::vector<MyGUI::Button*> mTrainingButtons;
++        // COMPANION: the exported best-3 skills, indexed by the ordinal in COMPANION_TRAINING_SKILL,
++        // so the companionTrainSkill bridge can resolve an index back to a skill.
++        std::vector<const ESM::Skill*> mCompanionTrainSkills;
+ 
+         WaitDialogProgressBar mProgressBar;
+         TimeAdvancer mTimeAdvancer;

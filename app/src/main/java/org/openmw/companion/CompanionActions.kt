@@ -126,6 +126,26 @@ object CompanionActions {
     // Cancel rest/wait (closes the native window + emits COMPANION_SLEEP_CLOSED).
     fun sleepCancel() = runCommand("CMP:sleep_cancel")
 
+    // Training (CMP:training_*) — handled natively in drainCompanionCommands (the best-3 skill
+    // selection, iTrainingMod pricing via getBarterOffer, the skill/attribute caps, skillLevelUp and
+    // the timed fade/advance all live in the C++ TrainingWindow). [index] is the skill's ordinal in
+    // the exported best-3 list. Training is one-shot: the engine emits COMPANION_TRAINING_CLOSED after
+    // the 2-hour advance completes (or immediately if it rejects the train).
+    fun trainSkill(index: Int) = runCommand("CMP:training_train:$index")
+
+    // Cancel training (closes the native window + emits COMPANION_TRAINING_CLOSED). Idempotent —
+    // native guards on containsMode(GM_Training), so it no-ops if the mode already popped.
+    fun trainCancel() = runCommand("CMP:training_cancel")
+
+    // Spell buying (CMP:spellbuying_*) — handled natively in drainCompanionCommands (the spell-cost
+    // formula, getBarterOffer price, spells.add and the NPC gold pool live in the C++
+    // SpellBuyingWindow). [index] is the spell's ordinal in the exported list; the engine re-exports
+    // COMPANION_SPELLBUYING_* after each purchase (bought spell flips to known=1, keeps its slot).
+    fun buySpell(index: Int) = runCommand("CMP:spellbuying_buy:$index")
+
+    // Cancel spell buying (closes the native window + emits COMPANION_SPELLBUYING_CLOSED).
+    fun spellBuyingCancel() = runCommand("CMP:spellbuying_cancel")
+
     // Text input (CMPTEXT:*) — handled natively in drainCompanionCommands (the focused MyGUI
     // EditBox is C++-only, unreachable from Lua). submit = write text into the field then
     // defocus it (commit); cancel = defocus without writing (discard). Both make the top-screen

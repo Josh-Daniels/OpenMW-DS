@@ -103,6 +103,15 @@ object GameStateRepository {
         _textInputRequest.value = null
     }
 
+    /**
+     * Flip the current training session into its in-progress state (drives the "Training…" popup).
+     * Called by the overlay the moment a train command is sent; cleared when COMPANION_TRAINING_CLOSED
+     * nulls the session (after the native 2-hour fade/advance). No-op if there's no session.
+     */
+    fun markTrainingInProgress() {
+        _trainingSession.value = _trainingSession.value?.copy(isTraining = true)
+    }
+
     // --- Barter optimistic UI mutators (Phase 3 UI calls these alongside the CMP:barter_*
     // commands; the engine reconciles the authoritative balance via COMPANION_BARTER_OFFER).
     // The sim is paused during barter, so selection must feel instant rather than waiting
@@ -261,6 +270,27 @@ object GameStateRepository {
     // clears it (confirming a rest/wait also closes it — the engine runs the advance on top).
     private val _sleepSession = MutableStateFlow<SleepSession?>(null)
     val sleepSession: StateFlow<SleepSession?> = _sleepSession.asStateFlow()
+
+    // --- Training session (COMPANION_TRAINING_*) ---
+    // null = not training. OPEN sets the NPC name + starts the skill buffer; PLAYER_GOLD sets the
+    // gold; SKILL appends; END commits; CLOSED clears. Same shape as repair. Training is one-shot
+    // (no re-export): sending a train command flips isTraining (markTrainingInProgress) to show the
+    // "Training…" popup, and CLOSED (after the native fade/advance) clears the whole session.
+    private val _trainingSession = MutableStateFlow<TrainingSession?>(null)
+    val trainingSession: StateFlow<TrainingSession?> = _trainingSession.asStateFlow()
+    private var trainingSkillBuffer: MutableList<TrainingSkill>? = null
+    private var trainingNpcName: String = ""
+    private var trainingPlayerGold: Int = 0
+
+    // --- Spell-buying session (COMPANION_SPELLBUYING_*) ---
+    // null = not buying. OPEN sets the NPC name + starts the spell buffer; PLAYER_GOLD sets the gold;
+    // SPELL appends; END commits; CLOSED clears. Re-exported (fresh OPEN..END) after each purchase,
+    // so END just replaces the whole session (the bought spell flips to known=1, keeping its slot).
+    private val _spellBuyingSession = MutableStateFlow<SpellBuyingSession?>(null)
+    val spellBuyingSession: StateFlow<SpellBuyingSession?> = _spellBuyingSession.asStateFlow()
+    private var spellForSaleBuffer: MutableList<SpellForSale>? = null
+    private var spellBuyingNpcName: String = ""
+    private var spellBuyingPlayerGold: Int = 0
 
     // --- Dialogue-service window OPEN/CLOSED flags (COMPANION_{SPELLBUYING,TRAINING,SPELLMAKING,
     // ENCHANTING}_{OPEN,CLOSED}) ---
@@ -709,10 +739,16 @@ object GameStateRepository {
             }
             trimmed.contains(LogParser.P_PLAYER_GOLD) -> {
                 val idx = trimmed.indexOf(LogParser.P_PLAYER_GOLD) + LogParser.P_PLAYER_GOLD.length
-                // Shared by repair and travel (mutually exclusive GM modes). Route to whichever
-                // export is currently being assembled — its OPEN ran just before this gold line.
+                // Shared by repair, travel, training and spell-buying (mutually exclusive GM modes).
+                // Route to whichever export is currently being assembled — its OPEN (which starts the
+                // matching buffer) ran just before this gold line.
                 trimmed.substring(idx).trim().toIntOrNull()?.let { gold ->
-                    if (travelDestBuffer != null) travelPlayerGold = gold else repairPlayerGold = gold
+                    when {
+                        trainingSkillBuffer != null -> trainingPlayerGold = gold
+                        spellForSaleBuffer != null -> spellBuyingPlayerGold = gold
+                        travelDestBuffer != null -> travelPlayerGold = gold
+                        else -> repairPlayerGold = gold
+                    }
                 }
             }
             trimmed.contains(LogParser.P_REPAIR_END) -> {
@@ -766,12 +802,67 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_SLEEP_CLOSED) -> {
                 _sleepSession.value = null
             }
-            // Dialogue-service window open/closed flags. Bare tokens (no payload); OPEN before
-            // CLOSED so neither is a substring of the other. Each just flips a boolean session.
-            trimmed.contains(LogParser.P_SPELLBUYING_CLOSED) -> { _spellBuyingWindowOpen.value = false }
-            trimmed.contains(LogParser.P_SPELLBUYING_OPEN) -> { _spellBuyingWindowOpen.value = true }
-            trimmed.contains(LogParser.P_TRAINING_CLOSED) -> { _trainingWindowOpen.value = false }
-            trimmed.contains(LogParser.P_TRAINING_OPEN) -> { _trainingWindowOpen.value = true }
+            // Spell buying (GM_SpellBuying → bottom-screen overlay). SPELL first (most frequent),
+            // then END, CLOSED, OPEN — none is a substring of another and this order keeps the OPEN
+            // contains()-check from swallowing the SPELL/END/CLOSED lines. OPEN also flips the boolean
+            // flow (Vanilla-mode conversation step-aside). PLAYER_GOLD is routed above.
+            trimmed.contains(LogParser.P_SPELLBUYING_SPELL) -> {
+                val idx = trimmed.indexOf(LogParser.P_SPELLBUYING_SPELL) + LogParser.P_SPELLBUYING_SPELL.length
+                LogParser.parseSpellForSale(trimmed.substring(idx).trim())?.let { spell ->
+                    (spellForSaleBuffer ?: mutableListOf<SpellForSale>().also { spellForSaleBuffer = it }).add(spell)
+                }
+            }
+            trimmed.contains(LogParser.P_SPELLBUYING_END) -> {
+                _spellBuyingSession.value = SpellBuyingSession(
+                    npcName = spellBuyingNpcName,
+                    playerGold = spellBuyingPlayerGold,
+                    spells = spellForSaleBuffer?.toList() ?: emptyList()
+                )
+                spellForSaleBuffer = null
+            }
+            trimmed.contains(LogParser.P_SPELLBUYING_CLOSED) -> {
+                spellForSaleBuffer = null
+                spellBuyingNpcName = ""
+                spellBuyingPlayerGold = 0
+                _spellBuyingSession.value = null
+                _spellBuyingWindowOpen.value = false
+            }
+            trimmed.contains(LogParser.P_SPELLBUYING_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_SPELLBUYING_OPEN) + LogParser.P_SPELLBUYING_OPEN.length
+                spellBuyingNpcName = trimmed.substring(idx).trim()
+                spellForSaleBuffer = mutableListOf()
+                _spellBuyingWindowOpen.value = true
+            }
+            // Training (GM_Training → bottom-screen overlay). Same buffered pattern. Training is
+            // one-shot (no re-export): END commits the session, a train command flips isTraining, and
+            // CLOSED (after the native fade/advance) clears it. OPEN also flips the boolean flow.
+            trimmed.contains(LogParser.P_TRAINING_SKILL) -> {
+                val idx = trimmed.indexOf(LogParser.P_TRAINING_SKILL) + LogParser.P_TRAINING_SKILL.length
+                LogParser.parseTrainingSkill(trimmed.substring(idx).trim())?.let { skill ->
+                    (trainingSkillBuffer ?: mutableListOf<TrainingSkill>().also { trainingSkillBuffer = it }).add(skill)
+                }
+            }
+            trimmed.contains(LogParser.P_TRAINING_END) -> {
+                _trainingSession.value = TrainingSession(
+                    npcName = trainingNpcName,
+                    playerGold = trainingPlayerGold,
+                    skills = trainingSkillBuffer?.toList() ?: emptyList()
+                )
+                trainingSkillBuffer = null
+            }
+            trimmed.contains(LogParser.P_TRAINING_CLOSED) -> {
+                trainingSkillBuffer = null
+                trainingNpcName = ""
+                trainingPlayerGold = 0
+                _trainingSession.value = null
+                _trainingWindowOpen.value = false
+            }
+            trimmed.contains(LogParser.P_TRAINING_OPEN) -> {
+                val idx = trimmed.indexOf(LogParser.P_TRAINING_OPEN) + LogParser.P_TRAINING_OPEN.length
+                trainingNpcName = trimmed.substring(idx).trim()
+                trainingSkillBuffer = mutableListOf()
+                _trainingWindowOpen.value = true
+            }
             trimmed.contains(LogParser.P_SPELLMAKING_CLOSED) -> { _spellmakingWindowOpen.value = false }
             trimmed.contains(LogParser.P_SPELLMAKING_OPEN) -> { _spellmakingWindowOpen.value = true }
             trimmed.contains(LogParser.P_ENCHANTING_CLOSED) -> { _enchantingWindowOpen.value = false }

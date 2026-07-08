@@ -167,6 +167,12 @@ extern "C" void companionSleepCancel();
 // Bottom-screen travel (travelwindow.cpp). Destinations addressed by ordinal index.
 extern "C" void companionTravelGo(int index);
 extern "C" void companionTravelCancel();
+// Bottom-screen training (trainingwindow.cpp). Skills addressed by ordinal index in the best-3 list.
+extern "C" void companionTrainSkill(int index);
+extern "C" void companionTrainingCancel();
+// Bottom-screen spell buying (spellbuyingwindow.cpp). Spells addressed by ordinal index.
+extern "C" void companionBuySpell(int index);
+extern "C" void companionSpellBuyingCancel();
 // Bottom-screen text input (windowmanagerimp.cpp). companionSetFocusedText writes the confirmed
 // text into the focused MyGUI EditBox (name / class / save-name entry) then injects Return to
 // accept/advance the modal dialog; companionCancelTextInput injects Escape to back out (discard).
@@ -409,6 +415,35 @@ void drainCompanionCommands()
             const int hours = std::atoi(cmd.c_str() + (sizeof("CMP:sleep ") - 1));
             Log(Debug::Info) << "companion: sleep " << hours;
             companionSleep(hours);
+        }
+        // Training (CMP:training_*) is driven natively — the best-3 skill selection, iTrainingMod
+        // pricing + getBarterOffer, the skill/attribute caps, skillLevelUp and the timed fade/advance
+        // all live in the C++ TrainingWindow, none reachable from Lua. See
+        // companion-trainingwindow-open-signal.patch. Check _cancel before the colon-arg form.
+        else if (cmd.rfind("CMP:training_cancel", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: training cancel";
+            companionTrainingCancel();
+        }
+        else if (cmd.rfind("CMP:training_train:", 0) == 0)
+        {
+            const int index = std::atoi(cmd.c_str() + (sizeof("CMP:training_train:") - 1));
+            Log(Debug::Info) << "companion: training train " << index;
+            companionTrainSkill(index);
+        }
+        // Spell buying (CMP:spellbuying_*) is driven natively — the spell-cost formula, getBarterOffer
+        // price, spells.add and the NPC gold pool all live in the C++ SpellBuyingWindow. See
+        // companion-spellbuyingwindow-open-signal.patch. Check _cancel before the colon-arg form.
+        else if (cmd.rfind("CMP:spellbuying_cancel", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: spellbuying cancel";
+            companionSpellBuyingCancel();
+        }
+        else if (cmd.rfind("CMP:spellbuying_buy:", 0) == 0)
+        {
+            const int index = std::atoi(cmd.c_str() + (sizeof("CMP:spellbuying_buy:") - 1));
+            Log(Debug::Info) << "companion: spellbuying buy " << index;
+            companionBuySpell(index);
         }
         // Text input (CMPTEXT:set:<text>) is driven natively — the focused MyGUI EditBox
         // lives in the C++ WindowManager and is not reachable from Lua. The text is the raw

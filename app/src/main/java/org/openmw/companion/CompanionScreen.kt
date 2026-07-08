@@ -700,6 +700,27 @@ fun CompanionScreen() {
             }
         }
 
+        // Training overlay. Driven by COMPANION_TRAINING_* (native TrainingWindow). Shown while
+        // Training is DS. NOT gated purely on the session: the "Training…"/completion messages must
+        // outlive the session going null on COMPANION_TRAINING_CLOSED, so the host latches its own
+        // mount (see TrainingOverlayHost's LIST→TRAINING→COMPLETE machine). zIndex 17f (repair tier).
+        val trainingDs by UiPreferences.gameUiModeFlow("game_ui_training").collectAsState()
+        val trainingSession by GameStateRepository.trainingSession.collectAsState()
+        if (trainingDs == GameUiMode.DS) {
+            TrainingOverlayHost(session = trainingSession)
+        }
+
+        // Spell-buying overlay. Driven by COMPANION_SPELLBUYING_* (native SpellBuyingWindow). Shown
+        // whenever a session exists AND Spell buying is DS. The engine re-exports the list after each
+        // purchase (bought spell flips to known=1, keeping its slot). zIndex 17f (repair tier).
+        val spellBuyingDs by UiPreferences.gameUiModeFlow("game_ui_spellbuying").collectAsState()
+        val spellBuyingSession by GameStateRepository.spellBuyingSession.collectAsState()
+        if (spellBuyingDs == GameUiMode.DS) {
+            spellBuyingSession?.let { session ->
+                SpellBuyingOverlay(session = session)
+            }
+        }
+
         // Rest/wait overlay. Driven by COMPANION_SLEEP_* from the engine (native WaitDialog).
         // Shown whenever a rest/wait picker is open AND Rest/Wait is DS. Confirming dismisses it
         // (the engine runs the fade + time advance on the top screen). zIndex 17f (same tier as
@@ -1290,7 +1311,9 @@ private fun DialogueRightColumn(
                 GameStateRepository.barterSession.value != null ||
                 GameStateRepository.repairSession.value != null ||
                 GameStateRepository.travelSession.value != null ||
-                GameStateRepository.sleepSession.value != null
+                GameStateRepository.sleepSession.value != null ||
+                GameStateRepository.trainingSession.value != null ||
+                GameStateRepository.spellBuyingSession.value != null
             ) return@collect
             val items = itemsState.value
             if (items.isEmpty()) return@collect
@@ -3497,9 +3520,9 @@ private fun repairCondColor(ratio: Float): Color = when {
  */
 @Composable
 private fun RepairOverlay(session: RepairSession) {
-    // Larger, unified row font in SPLIT conversation mode (matches the topics/services increase).
-    val splitMode = UiPreferences.conversationLocationFlow().collectAsState().value ==
-        ConversationLocation.SPLIT
+    // Bottom vs Split from the repair layout pref (Top pending → falls back to the bottom card).
+    // Currently BOTTOM-only (no Split pill), so this is always the centred card.
+    val splitMode = UiPreferences.repairLocationFlow().collectAsState().value == ScreenLocation.SPLIT
     val rowFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
     Box(
         modifier = Modifier
@@ -3690,6 +3713,398 @@ private fun RepairButton(
     }
 }
 
+/* ---- Training overlay (bottom screen) ---- */
+
+// Tweakable timings for the training completion flow (see TrainingOverlayHost).
+private const val TRAINING_SAFETY_MS = 5000L         // force-dismiss if CLOSED never arrives
+private const val TRAINING_COMPLETE_DWELL_MS = 1200L // how long "…training complete" shows
+
+private enum class TrainingPhase { LIST, TRAINING, COMPLETE }
+
+/**
+ * Host for the bottom-screen training overlay. Driven by COMPANION_TRAINING_* (native TrainingWindow).
+ * Unlike Repair, the overlay must OUTLIVE [GameStateRepository.trainingSession] going null: the repo
+ * nulls the session on COMPANION_TRAINING_CLOSED (fired after the native 2-hour fade/advance), but the
+ * "…training complete" message needs to show afterwards. So mount is latched locally ([overlayActive],
+ * set when a session first appears, cleared only by the dismiss path) and the NPC name is cached, and
+ * a local three-state machine drives the content:
+ *
+ *   LIST → (tap a valid skill) → TRAINING → (CLOSED / 5s safety) → COMPLETE → (1.2s dwell) → dismissed
+ *
+ * On EVERY dismiss path we also call [CompanionActions.trainCancel] — idempotent (native guards on
+ * containsMode(GM_Training); the CLOSED emit is once-guarded), so it no-ops if the mode already popped,
+ * but rescues a stuck hidden GM_Training if a train command was rejected and no CLOSED ever came.
+ */
+@Composable
+private fun TrainingOverlayHost(session: TrainingSession?) {
+    var overlayActive by remember { mutableStateOf(false) }
+    var phase by remember { mutableStateOf(TrainingPhase.LIST) }
+    var trainedSkillName by remember { mutableStateOf("") }
+    var cachedNpcName by remember { mutableStateOf("") }
+
+    val hasSession = session != null
+
+    fun dismiss() {
+        CompanionActions.trainCancel() // idempotent; rescues a stuck GM_Training if the train was rejected
+        overlayActive = false
+        phase = TrainingPhase.LIST
+    }
+
+    // Activate + cache the NPC name when a session first appears. Latched — we do NOT unmount when
+    // the session later goes null (the TRAINING/COMPLETE messages must outlive COMPANION_TRAINING_CLOSED).
+    LaunchedEffect(hasSession) {
+        if (session != null) {
+            overlayActive = true
+            session.npcName.takeIf { it.isNotBlank() }?.let { cachedNpcName = it }
+        }
+    }
+
+    // Session-null transitions: from TRAINING it means the train finished (→ COMPLETE); from LIST it
+    // means the conversation ended externally (B / native close / NPC left) with no train in flight,
+    // so just tear the overlay down. COMPLETE is timer-driven and ignores the session.
+    LaunchedEffect(phase, hasSession) {
+        if (!hasSession && overlayActive) {
+            when (phase) {
+                TrainingPhase.TRAINING -> phase = TrainingPhase.COMPLETE
+                TrainingPhase.LIST -> dismiss()
+                else -> Unit
+            }
+        }
+    }
+
+    // Timed transitions: safety net out of TRAINING, and the COMPLETE dwell before dismiss.
+    LaunchedEffect(phase) {
+        when (phase) {
+            TrainingPhase.TRAINING -> {
+                delay(TRAINING_SAFETY_MS)
+                if (phase == TrainingPhase.TRAINING) phase = TrainingPhase.COMPLETE
+            }
+            TrainingPhase.COMPLETE -> {
+                delay(TRAINING_COMPLETE_DWELL_MS)
+                dismiss()
+            }
+            else -> Unit
+        }
+    }
+
+    if (!overlayActive) return
+
+    // Bottom vs Split from the training layout pref (Top pending → never selectable; falls back to
+    // the bottom card). Mirrors the looting/bartering per-service layout selectors.
+    val splitMode = UiPreferences.trainingLocationFlow().collectAsState().value == ScreenLocation.SPLIT
+    val rowFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
+    val skills = session?.skills ?: emptyList()
+    val playerGold = session?.playerGold ?: 0
+
+    // Tapping any NON-capped row sends the train command; native silently rejects it if the player
+    // can't afford it (matches Spell Buying — unaffordable is a transient gold state, not a hard block
+    // like capped). We only enter the TRAINING/COMPLETE flow when the train will actually happen
+    // (affordable), so a rejected unaffordable tap stays on the list instead of showing a false
+    // "…training complete". Capped rows never reach here (non-tappable / onConfirm-guarded).
+    fun attemptTrain(sk: TrainingSkill) {
+        if (sk.capped) return
+        CompanionActions.trainSkill(sk.index)
+        if (sk.cost <= playerGold) {
+            trainedSkillName = sk.skillName
+            GameStateRepository.markTrainingInProgress()
+            phase = TrainingPhase.TRAINING
+        }
+    }
+
+    // List navigation (LIST phase only): D-pad up/down, A trains the focused row, B cancels.
+    val focusIndex = rememberListNavFocus(
+        itemCount = skills.size,
+        enabled = phase == TrainingPhase.LIST,
+        onConfirm = { i -> skills.getOrNull(i)?.let { attemptTrain(it) } },
+        onCancel = { if (phase == TrainingPhase.LIST) dismiss() }
+    )
+    val listState = rememberLazyListState()
+    LaunchedEffect(focusIndex) {
+        if (focusIndex in skills.indices) listState.animateScrollToItem(focusIndex)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(17f)
+            .background(Color(0xCC0F0C08))
+            .then(
+                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
+                else Modifier
+            )
+            .pointerInput(Unit) { detectTapGestures {} }, // swallow taps; NO tap-outside dismiss
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .then(if (splitMode) Modifier.splitDialoguePanel() else Modifier.fillMaxWidth(0.7f).fillMaxHeight(0.86f))
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- Title bar ----
+            Text(
+                "Training — ${cachedNpcName.ifBlank { "Trainer" }}",
+                color = BronzeLight, fontSize = 15.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            // ---- Content: list (LIST) or centred message (TRAINING / COMPLETE) ----
+            if (phase == TrainingPhase.LIST) {
+                if (skills.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        Text("No skills to train", color = BoneDim, fontSize = 13.sp, fontFamily = MwBody)
+                    }
+                } else {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().weight(1f)) {
+                        itemsIndexed(skills, key = { _, sk -> sk.index }) { i, sk ->
+                            TrainingRow(
+                                skill = sk,
+                                affordable = sk.cost <= playerGold,
+                                nameFontSize = rowFontSize,
+                                focused = i == focusIndex,
+                                onTrain = { attemptTrain(sk) }
+                            )
+                            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+                        }
+                    }
+                }
+            } else {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        if (phase == TrainingPhase.COMPLETE) "${trainedSkillName.ifBlank { "Skill" }} training complete"
+                        else "Training…",
+                        color = BronzeLight, fontSize = 16.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 20.dp)
+                    )
+                }
+            }
+
+            // ---- Divider + bottom row ----
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Gold: $playerGold", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwData, modifier = Modifier.weight(1f)
+                )
+                // Cancel only makes sense while choosing (LIST); during the messages it's inert.
+                RepairButton(label = "Cancel", color = BarterBlue, enabled = phase == TrainingPhase.LIST) {
+                    dismiss()
+                }
+            }
+        }
+    }
+}
+
+/** One training row: skill name (flex) + "Current: X[ (capped)]" beneath + cost. Capped rows are
+ *  dimmed with "—" and fully non-tappable (a hard block — the skill can't be trained here at all).
+ *  Unaffordable rows show a RED cost but stay tappable/focusable (matches SpellForSaleRow): a tap
+ *  sends the train command and the native window rejects it silently, and keeping them focusable
+ *  preserves a stable D-pad order as gold changes. */
+@Composable
+private fun TrainingRow(
+    skill: TrainingSkill,
+    affordable: Boolean,
+    nameFontSize: TextUnit = 14.sp,
+    focused: Boolean = false,
+    onTrain: () -> Unit
+) {
+    val tappable = !skill.capped
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (focused) Modifier.background(BronzeLight.copy(alpha = 0.12f)).border(2.dp, BronzeLight)
+                else Modifier
+            )
+            .then(if (tappable) Modifier.clickable { onTrain() } else Modifier)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                skill.skillName,
+                color = when {
+                    skill.capped -> BoneDim
+                    focused -> BoneBright
+                    else -> Bone
+                },
+                fontSize = nameFontSize, fontFamily = MwBody,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                if (skill.capped) "Current: ${skill.currentLevel} (capped)" else "Current: ${skill.currentLevel}",
+                color = BoneDim, fontSize = 10.sp, fontFamily = MwData
+            )
+        }
+        Text(
+            if (skill.capped) "—" else "${skill.cost}g",
+            color = when {
+                skill.capped -> BoneDim
+                affordable -> BronzeLight
+                else -> RepairCondRed
+            },
+            fontSize = 13.sp, fontFamily = MwData, fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(60.dp)
+        )
+    }
+}
+
+/* ---- Spell-buying overlay (bottom screen) ---- */
+
+/**
+ * Bottom-screen spell-buying overlay. Driven by COMPANION_SPELLBUYING_* (native SpellBuyingWindow),
+ * shown whenever [GameStateRepository.spellBuyingSession] is non-null and Spell buying is DS. Same
+ * frame as RepairOverlay (in-window centred Box at zIndex 17f, no tap-outside dismiss). Each row taps
+ * to buy immediately; the engine re-exports the list + gold after each purchase, so [session] just
+ * refreshes in place (the bought spell reappears greyed as "Already known", holding indices stable).
+ */
+@Composable
+private fun SpellBuyingOverlay(session: SpellBuyingSession) {
+    // Bottom vs Split from the spell-buying layout pref (Top pending → falls back to the bottom card).
+    val splitMode = UiPreferences.spellBuyingLocationFlow().collectAsState().value == ScreenLocation.SPLIT
+    val rowFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(17f)
+            .background(Color(0xCC0F0C08))
+            .then(
+                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
+                else Modifier
+            )
+            .pointerInput(Unit) { detectTapGestures {} }, // swallow taps; NO tap-outside dismiss
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .then(if (splitMode) Modifier.splitDialoguePanel() else Modifier.fillMaxWidth(0.7f).fillMaxHeight(0.86f))
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures {} }
+        ) {
+            // ---- Title bar ----
+            Text(
+                "Spells — ${session.npcName.ifBlank { "Merchant" }}",
+                color = BronzeLight, fontSize = 15.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+            // ---- Spell list ---- (D-pad up/down navigate, A buys the focused one)
+            val focusIndex = rememberListNavFocus(
+                itemCount = session.spells.size,
+                onConfirm = { i ->
+                    session.spells.getOrNull(i)?.let { sp ->
+                        // Known → nothing to buy. Unaffordable → tappable but native rejects silently.
+                        if (!sp.known) CompanionActions.buySpell(sp.index)
+                    }
+                },
+            )
+            val listState = rememberLazyListState()
+            LaunchedEffect(focusIndex) {
+                if (focusIndex in session.spells.indices) listState.animateScrollToItem(focusIndex)
+            }
+            if (session.spells.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text("No spells for sale", color = BoneDim, fontSize = 13.sp, fontFamily = MwBody)
+                }
+            } else {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    itemsIndexed(session.spells, key = { _, sp -> sp.index }) { i, spell ->
+                        SpellForSaleRow(
+                            spell = spell,
+                            affordable = spell.cost <= session.playerGold,
+                            nameFontSize = rowFontSize,
+                            focused = i == focusIndex,
+                            onBuy = { if (!spell.known) CompanionActions.buySpell(spell.index) }
+                        )
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+                    }
+                }
+            }
+
+            // ---- Divider + bottom row ----
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Gold: ${session.playerGold}", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwData, modifier = Modifier.weight(1f)
+                )
+                RepairButton(label = "Cancel", color = BarterBlue, enabled = true) {
+                    CompanionActions.spellBuyingCancel()
+                }
+            }
+        }
+    }
+}
+
+/** One spell-for-sale row: name (flex) + school beneath + cost. Known spells are dimmed with
+ *  "Already known" + "—" and non-tappable; unaffordable spells show a red cost but stay tappable
+ *  (the native window rejects the purchase silently — the red cost is the only signal). */
+@Composable
+private fun SpellForSaleRow(
+    spell: SpellForSale,
+    affordable: Boolean,
+    nameFontSize: TextUnit = 14.sp,
+    focused: Boolean = false,
+    onBuy: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (focused) Modifier.background(BronzeLight.copy(alpha = 0.12f)).border(2.dp, BronzeLight)
+                else Modifier
+            )
+            .then(if (!spell.known) Modifier.clickable { onBuy() } else Modifier)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                spell.spellName,
+                color = when {
+                    spell.known -> BoneDim
+                    focused -> BoneBright
+                    else -> Bone
+                },
+                fontSize = nameFontSize, fontFamily = MwBody,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                if (spell.known) "Already known" else spell.school,
+                color = BoneDim, fontSize = 10.sp, fontFamily = MwData
+            )
+        }
+        Text(
+            if (spell.known) "—" else "${spell.cost}g",
+            color = when {
+                spell.known -> BoneDim
+                affordable -> BronzeLight
+                else -> RepairCondRed
+            },
+            fontSize = 13.sp, fontFamily = MwData, fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(60.dp)
+        )
+    }
+}
+
 /* ---- Travel overlay (bottom screen) ---- */
 
 /**
@@ -3703,9 +4118,9 @@ private fun RepairButton(
  */
 @Composable
 private fun TravelOverlay(session: TravelSession) {
-    // Larger, unified row font in SPLIT conversation mode (matches the topics/services increase).
-    val splitMode = UiPreferences.conversationLocationFlow().collectAsState().value ==
-        ConversationLocation.SPLIT
+    // Bottom vs Split from the travel layout pref (Top pending → falls back to the bottom card).
+    // Currently BOTTOM-only (no Split pill), so this is always the centred card.
+    val splitMode = UiPreferences.travelLocationFlow().collectAsState().value == ScreenLocation.SPLIT
     val rowFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
     Box(
         modifier = Modifier
@@ -8413,11 +8828,19 @@ private fun OptionsSettingsList() {
         item { BarteringLocationRow() }
         item { TargetHealthLocationRow() }
         item { PlayerCombatRow() }
+        item { RepairLocationRow() }
+        item { TravelLocationRow() }
+        item { SpellBuyingLocationRow() }
+        item { TrainingLocationRow() }
         items(
             GAME_UI_ELEMENTS.filter {
                 it.key != "game_ui_conversation" &&
                     it.key != "game_ui_looting" &&
-                    it.key != "game_ui_bartering"
+                    it.key != "game_ui_bartering" &&
+                    it.key != "game_ui_spellbuying" &&
+                    it.key != "game_ui_training" &&
+                    it.key != "game_ui_repair" &&
+                    it.key != "game_ui_travel"
             },
             key = { "layout_" + it.key }
         ) { ScreenLayoutPendingRow(it) }
@@ -8697,16 +9120,18 @@ private fun ConversationLocationRow() {
     }
 }
 
-/** A service (Looting / Bartering) location row: a three-option [Bottom][Split][Top] pill
- *  selector. BOTTOM = classic bottom-screen overlay; SPLIT = icon grid on top, controls on the
- *  bottom; TOP = pending (greyed, not selectable). Writes a [ScreenLocation] on every tap.
- *  Dimmed and inert when the element's Game UI mode is Vanilla (native handles it, so there's no
- *  layout to pick). */
+/** A service location row: a pill selector ending in a greyed, not-yet-implemented Top pill with a
+ *  small "PENDING" caption above it. Looting / Bartering use the full [Bottom][Split][Top]
+ *  ([showSplit] = true); Spell buying / Training use [Bottom][Top] ([showSplit] = false — only the
+ *  centred bottom card is built, no Split, matching Repair). BOTTOM = classic bottom-screen overlay;
+ *  SPLIT = icon grid on top, controls on the bottom; TOP = pending. Writes a [ScreenLocation] on
+ *  every tap. Dimmed and inert when the element's Game UI mode is Vanilla (native handles it). */
 @Composable
 private fun ServiceLocationRow(
     label: String,
     gameUiKey: String,
     loc: ScreenLocation,
+    showSplit: Boolean = true,
     onSelect: (ScreenLocation) -> Unit
 ) {
     val mode by UiPreferences.gameUiModeFlow(gameUiKey).collectAsState()
@@ -8718,6 +9143,24 @@ private fun ServiceLocationRow(
     Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
         Text(label, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Spacer(Modifier.height(6.dp))
+        // "PENDING" caption aligned above the greyed Top pill (Top isn't implemented for any of these
+        // rows yet). Same weight-1f column layout as the pills below, so it centres over the Top pill;
+        // styled like the persuasion/level-up pending tag.
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Spacer(Modifier.weight(1f)) // over Bottom
+            if (showSplit) Spacer(Modifier.weight(1f)) // over Split
+            Text(
+                "PENDING",
+                color = BoneDim.copy(alpha = 0.7f),
+                fontSize = 9.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Spacer(Modifier.height(2.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
                 Modifier.weight(1f),
@@ -8725,13 +9168,15 @@ private fun ServiceLocationRow(
                 active = loc == ScreenLocation.BOTTOM,
                 enabled = true
             ) { if (enabled) onSelect(ScreenLocation.BOTTOM) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Split",
-                active = loc == ScreenLocation.SPLIT,
-                enabled = true
-            ) { if (enabled) onSelect(ScreenLocation.SPLIT) }
-            // TOP is not implemented yet — greyed and inert.
+            if (showSplit) {
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = "Split",
+                    active = loc == ScreenLocation.SPLIT,
+                    enabled = true
+                ) { if (enabled) onSelect(ScreenLocation.SPLIT) }
+            }
+            // TOP is not implemented yet — greyed and inert (see the PENDING caption above).
             OptionPill(
                 Modifier.weight(1f),
                 label = "Top",
@@ -8759,6 +9204,50 @@ private fun BarteringLocationRow() {
     val loc by UiPreferences.barterLocationFlow().collectAsState()
     ServiceLocationRow("Bartering", "game_ui_bartering", loc) {
         UiPreferences.setBarterLocation(context, it)
+    }
+}
+
+/** The Spell-buying location row (Bottom/Split, Top pending). Gated on the Spell buying Game UI
+ *  element. Only Bottom + Split are implemented (there's no top-screen SpellBuyingOverlay). */
+@Composable
+private fun SpellBuyingLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.spellBuyingLocationFlow().collectAsState()
+    ServiceLocationRow("Spell buying", "game_ui_spellbuying", loc, showSplit = false) {
+        UiPreferences.setSpellBuyingLocation(context, it)
+    }
+}
+
+/** The Training location row (Bottom/Split, Top pending). Gated on the Training Game UI element.
+ *  Only Bottom + Split are implemented (there's no top-screen TrainingOverlay). */
+@Composable
+private fun TrainingLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.trainingLocationFlow().collectAsState()
+    ServiceLocationRow("Training", "game_ui_training", loc, showSplit = false) {
+        UiPreferences.setTrainingLocation(context, it)
+    }
+}
+
+/** The Repair location row (Bottom; Top pending). Gated on the Repair Game UI element.
+ *  Bottom = the centred RepairOverlay card; no Split / Top yet. */
+@Composable
+private fun RepairLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.repairLocationFlow().collectAsState()
+    ServiceLocationRow("Repair", "game_ui_repair", loc, showSplit = false) {
+        UiPreferences.setRepairLocation(context, it)
+    }
+}
+
+/** The Travel location row (Bottom; Top pending). Gated on the Travel Game UI element.
+ *  Bottom = the centred TravelOverlay card; no Split / Top yet. */
+@Composable
+private fun TravelLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.travelLocationFlow().collectAsState()
+    ServiceLocationRow("Travel", "game_ui_travel", loc, showSplit = false) {
+        UiPreferences.setTravelLocation(context, it)
     }
 }
 

@@ -274,6 +274,61 @@ data class SleepSession(
     val isVisible: Boolean = true
 )
 
+/**
+ * One trainable skill in a training session. [index] is the skill's ordinal in the trainer's
+ * best-3 list (a stable handle used by CMP:training_train — GM_Training pauses the sim).
+ * [currentLevel] is the player's current base skill; [cost] the merchant-adjusted price.
+ * [capped] = the player is already at/above the trainer's skill OR at/above the skill's governing
+ * attribute — the native window would reject training it, so the row is greyed and non-tappable.
+ */
+data class TrainingSkill(
+    val index: Int,
+    val skillName: String,
+    val currentLevel: Int,
+    val cost: Int,
+    val capped: Boolean
+)
+
+/**
+ * An open training session (the native GM_Training window, mirrored to the bottom screen).
+ * Transient — its own StateFlow, not part of GameState; null = not training. Driven entirely by
+ * COMPANION_TRAINING_* + COMPANION_PLAYER_GOLD from the engine. [isTraining] is set true when a
+ * train command is sent and drives the in-progress "Training…" popup; the engine runs the actual
+ * 2-hour fade + time advance on the top screen, then emits COMPANION_TRAINING_CLOSED.
+ */
+data class TrainingSession(
+    val npcName: String,
+    val playerGold: Int,
+    val skills: List<TrainingSkill> = emptyList(),
+    val isTraining: Boolean = false
+)
+
+/**
+ * One spell for sale in a spell-buying session. [index] is the spell's ordinal in the exported
+ * list (a stable handle used by CMP:spellbuying_buy — GM_SpellBuying pauses the sim; a purchase
+ * only flips [known], keeping the slot). [school] is the spell's effective governing-skill name
+ * (e.g. "Destruction"). [cost] is the merchant-adjusted price. [known] = the player already knows
+ * it, so the row is greyed ("Already known") and non-tappable.
+ */
+data class SpellForSale(
+    val index: Int,
+    val spellName: String,
+    val school: String,
+    val cost: Int,
+    val known: Boolean
+)
+
+/**
+ * An open spell-buying session (the native GM_SpellBuying window, mirrored to the bottom screen).
+ * Transient — its own StateFlow, not part of GameState; null = not buying. Driven entirely by
+ * COMPANION_SPELLBUYING_* + COMPANION_PLAYER_GOLD from the engine.
+ */
+data class SpellBuyingSession(
+    val npcName: String,
+    val playerGold: Int,
+    val spells: List<SpellForSale> = emptyList()
+)
+
 data class AttributeStat(
     val id: String, val name: String, val current: Float, val base: Float,
     /** In-game description (from the streamed CHARDETAIL batch); "" until it lands. */

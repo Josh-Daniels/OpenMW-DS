@@ -1,65 +1,291 @@
-Emit COMPANION_SPELLBUYING_OPEN/_CLOSED around the native SpellBuyingWindow
-so the bottom-screen conversation overlay (a top-screen Android panel that layers above the
-OpenMW MyGUI surface) can step aside while this dialogue-service window is open in Vanilla
-mode. OPEN is emitted from setPtr (window opened for an actor); CLOSED from an onClose()
-override, guarded by a file-static bool + !containsMode(GM_...) so it fires exactly once on
-the real mode-pop, not on a transient hide (e.g. TrainingWindow hides itself during its
-time-advance animation). These windows are Vanilla-only today, so the normal visible->hidden
-onClose() transition always fires — no explicit hidden-window emit is needed (unlike barter).
-Kotlin side: LogParser prefixes -> a boolean session StateFlow in GameStateRepository ->
-nativeServiceVanillaUp in EngineActivity. Added July 2026.
+Companion (bottom-screen spell buying): extend the open-signal patch to stream the session (NPC
+name, player gold, purchasable+known spells with school + cost + known flag) and add extern "C"
+control bridges (companionBuySpell / companionSpellBuyingCancel) driven from drainCompanionCommands,
+mirroring companion-repair-export.patch. Unlike the native list, the export INCLUDES already-known
+spells (known=1) so the overlay can grey them. companionExportOpen() runs at the end of setPtr, so a
+purchase (companionBuySpellByIndex -> setPtr) re-exports with the bought spell now known and gold
+updated; the ordinal index is stable because a purchase only flips a spell's known flag. COMPANION_
+SPELLBUYING_CLOSED is emitted from every close path (onClose real-close, exit() for B/Escape, the
+cancel bridge, onReferenceUnavailable) since the window is DS-hidden. Prices/school via
+getBarterOffer/getSpellSchool (native-only). Added July 2026.
 
 --- a/apps/openmw/mwgui/spellbuyingwindow.cpp
 +++ b/apps/openmw/mwgui/spellbuyingwindow.cpp
-@@ -7,6 +7,8 @@
+@@ -6,8 +6,15 @@
+ 
  #include <components/esm3/loadgmst.hpp>
  #include <components/esm3/loadrace.hpp>
++#include <components/esm3/loadskil.hpp>
  #include <components/settings/values.hpp>
+ 
++#include <string>
++#include <string_view>
++#include <vector>
 +
 +#include <components/debug/debuglog.hpp>
- 
++
  #include "../mwbase/environment.hpp"
  #include "../mwbase/inputmanager.hpp"
-@@ -95,10 +97,31 @@
-         mSpellButtons.clear();
+ #include "../mwbase/mechanicsmanager.hpp"
+@@ -22,6 +29,41 @@
+ #include "../mwmechanics/spells.hpp"
+ #include "../mwmechanics/spellutil.hpp"
+ 
++namespace
++{
++    // ================= Companion (bottom-screen spell buying) =================
++    // Mirrors the companion merchant-repair bridge (companion-repair-export.patch): the native
++    // SpellBuyingWindow is hidden while GM_SpellBuying is in DS mode (companion-hide-gamewindows-on-
++    // dsmode.patch), and the purchase flow is driven from the bottom screen via the extern "C"
++    // bridges at the end of this file.
++
++    // The single live SpellBuyingWindow, set in its constructor. Mirrors gCompanionMerchantRepair.
++    MWGui::SpellBuyingWindow* gCompanionSpellBuyingWindow = nullptr;
++
++    // True between COMPANION_SPELLBUYING_OPEN and _CLOSED so the close signal is emitted exactly once,
++    // whichever path ends the session. The native window is HIDDEN the moment the mode opens in DS
++    // mode, so the usual visible->hidden onClose() transition doesn't fire on those close paths.
++    bool gCompanionSpellBuyingSessionOpen = false;
++
++    void companionEmitSpellBuyingClosed()
++    {
++        if (!gCompanionSpellBuyingSessionOpen)
++            return;
++        gCompanionSpellBuyingSessionOpen = false;
++        Log(Debug::Info) << "COMPANION_SPELLBUYING_CLOSED";
++    }
++
++    // Keep a name safe inside the pipe-delimited COMPANION_SPELLBUYING_SPELL line.
++    std::string companionSpellBuyingSanitize(std::string_view s)
++    {
++        std::string out(s);
++        for (char& c : out)
++            if (c == '|' || c == '\n' || c == '\r')
++                c = ' ';
++        return out;
++    }
++}
++
+ namespace MWGui
+ {
+     SpellBuyingWindow::SpellBuyingWindow()
+@@ -42,6 +84,8 @@
+             mControllerButtons.mB = "#{Interface:Cancel}";
+             mControllerButtons.mR3 = "#{Interface:Info}";
+         }
++
++        gCompanionSpellBuyingWindow = this;
      }
  
-+    // COMPANION: true between COMPANION_SPELLBUYING_OPEN and _CLOSED (Vanilla-only window;
-+    // drives the conversation overlay stepping aside). File-static: one window instance.
-+    static bool sSpellBuyingWindowCompanionOpen = false;
+     bool SpellBuyingWindow::sortSpells(const ESM::Spell* left, const ESM::Spell* right)
+@@ -164,6 +208,10 @@
+             MyGUI::IntSize(mSpellsView->getWidth(), std::max(mSpellsView->getHeight(), mCurrentY)));
+         mSpellsView->setVisibleVScroll(true);
+         mSpellsView->setViewOffset(MyGUI::IntPoint(0, startOffset));
 +
-     void SpellBuyingWindow::setPtr(const MWWorld::Ptr& actor)
-     {
-+        sSpellBuyingWindowCompanionOpen = true;
-+        Log(Debug::Info) << "COMPANION_SPELLBUYING_OPEN";
-         setPtr(actor, 0);
++        // COMPANION: mirror the whole session to the bottom screen (also fires on the post-purchase
++        // re-export, since onSpellButtonClick / companionBuySpellByIndex call setPtr again).
++        companionExportOpen();
      }
-+
+ 
+     bool SpellBuyingWindow::playerHasSpell(const ESM::RefId& id)
+@@ -202,6 +250,128 @@
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_SpellBuying);
+     }
+ 
 +    void SpellBuyingWindow::onClose()
 +    {
 +        WindowBase::onClose();
-+        // COMPANION: emit the close signal only on the real mode-pop (containsMode false),
-+        // not on a transient hide, matching TradeWindow::onClose. Lets the bottom-screen
-+        // conversation overlay come back once this native window is gone (Vanilla mode).
-+        if (sSpellBuyingWindowCompanionOpen
++        // COMPANION: real-close emit (Vanilla visible->hidden). Guarded by !containsMode so a transient
++        // hide doesn't fire it. DS-hidden closes never reach here — those emit via the cancel bridge /
++        // exit() / onReferenceUnavailable.
++        if (gCompanionSpellBuyingSessionOpen
 +            && !MWBase::Environment::get().getWindowManager()->containsMode(GM_SpellBuying))
-+        {
-+            sSpellBuyingWindowCompanionOpen = false;
-+            Log(Debug::Info) << "COMPANION_SPELLBUYING_CLOSED";
-+        }
++            companionEmitSpellBuyingClosed();
 +    }
 +
- 
-     void SpellBuyingWindow::setPtr(const MWWorld::Ptr& actor, int startOffset)
++    bool SpellBuyingWindow::exit()
++    {
++        // COMPANION: B/Escape close. In DS mode the window is hidden so onClose() won't fire on the
++        // following mode-pop — emit explicitly (once-guarded; no double with onClose in Vanilla).
++        companionEmitSpellBuyingClosed();
++        return true;
++    }
++
++    // COMPANION (bottom-screen spell buying): the merchant-adjusted price for one spell. Same formula
++    // as addSpell() (calcSpellCost x fSpellValueMult, floored at 1, then getBarterOffer) so the exported
++    // cost and the bridge's affordability check agree with the native window. getBarterOffer is native-
++    // only — the reason this whole flow must be a native bridge (same as Repair/Barter).
++    int SpellBuyingWindow::companionSpellPrice(const ESM::Spell& spell) const
++    {
++        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
++        int price = std::max(1,
++            static_cast<int>(MWMechanics::calcSpellCost(spell)
++                * store.get<ESM::GameSetting>().find("fSpellValueMult")->mValue.getFloat()));
++        return MWBase::Environment::get().getMechanicsManager()->getBarterOffer(mPtr, price, true);
++    }
++
++    // COMPANION: stream the spell-buying session to the bottom screen. Unlike the native list (which
++    // hides spells the player already knows), this includes known spells with known=1 so the overlay
++    // can show them greyed ("Already known"). index = ordinal in THIS list, stable while the sim is
++    // paused under GM_SpellBuying; a purchase only flips a spell's known flag (it keeps its slot), so
++    // the index survives the re-export. Streamed one small line each (4096-byte flush safety).
++    void SpellBuyingWindow::companionExportOpen()
++    {
++        if (mPtr.isEmpty())
++            return;
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int playerGold
++            = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
++
++        gCompanionSpellBuyingSessionOpen = true;
++        Log(Debug::Info) << "COMPANION_SPELLBUYING_OPEN:"
++                         << companionSpellBuyingSanitize(mPtr.getClass().getName(mPtr));
++        Log(Debug::Info) << "COMPANION_PLAYER_GOLD:" << playerGold;
++
++        mCompanionSpellIds.clear();
++
++        // Same eligibility filter as the native setPtr EXCEPT we keep spells the player already knows.
++        MWMechanics::Spells& merchantSpells = mPtr.getClass().getCreatureStats(mPtr).getSpells();
++        std::vector<const ESM::Spell*> spellsToSort;
++        for (const ESM::Spell* spell : merchantSpells)
++        {
++            if (spell->mData.mType != ESM::Spell::ST_Spell)
++                continue; // don't sell diseases, curses or powers
++            if (mPtr.getClass().isNpc())
++            {
++                const ESM::Race* race = MWBase::Environment::get().getESMStore()->get<ESM::Race>().find(
++                    mPtr.get<ESM::NPC>()->mBase->mRace);
++                if (race->mPowers.exists(spell->mId))
++                    continue;
++            }
++            spellsToSort.push_back(spell);
++        }
++        std::stable_sort(spellsToSort.begin(), spellsToSort.end(), sortSpells);
++
++        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
++        for (std::size_t i = 0; i < spellsToSort.size(); ++i)
++        {
++            const ESM::Spell* spell = spellsToSort[i];
++            const bool known = playerHasSpell(spell->mId);
++            const int price = companionSpellPrice(*spell);
++
++            // school = the spell's effective (governing-skill) school name, e.g. "Destruction".
++            std::string school;
++            const ESM::RefId schoolSkill = MWMechanics::getSpellSchool(spell, player);
++            if (const ESM::Skill* sk = store.get<ESM::Skill>().search(schoolSkill))
++                school = sk->mName;
++
++            Log(Debug::Info) << "COMPANION_SPELLBUYING_SPELL:" << i << "|"
++                             << companionSpellBuyingSanitize(spell->mName) << "|"
++                             << companionSpellBuyingSanitize(school) << "|" << price << "|" << (known ? 1 : 0);
++            mCompanionSpellIds.push_back(spell->mId);
++        }
++        Log(Debug::Info) << "COMPANION_SPELLBUYING_END";
++    }
++
++    // COMPANION: buy the spell at the given ordinal in the exported list. Driven from the
++    // companionBuySpell bridge (drainCompanionCommands). Mirrors onSpellButtonClick, then re-exports.
++    void SpellBuyingWindow::companionBuySpellByIndex(int index)
++    {
++        if (index < 0 || index >= static_cast<int>(mCompanionSpellIds.size()))
++            return;
++        const ESM::RefId spellId = mCompanionSpellIds[index];
++
++        if (playerHasSpell(spellId))
++            return; // already known — nothing to buy
++
++        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
++        const ESM::Spell* spell = store.get<ESM::Spell>().search(spellId);
++        if (!spell)
++            return;
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        const int price = companionSpellPrice(*spell);
++        if (price > player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId))
++            return; // can't afford — engine-style silent reject
++
++        player.getClass().getCreatureStats(player).getSpells().add(spellId);
++        player.getClass().getContainerStore(player).remove(MWWorld::ContainerStore::sGoldId, price);
++        MWMechanics::CreatureStats& npcStats = mPtr.getClass().getCreatureStats(mPtr);
++        npcStats.setGoldPool(npcStats.getGoldPool() + price);
++        MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Item Gold Up"));
++
++        setPtr(mPtr, mSpellsView->getViewOffset().top); // rebuild native list + re-export to bottom screen
++    }
++
+     void SpellBuyingWindow::updateLabels()
      {
+         MWWorld::Ptr player = MWMechanics::getPlayer();
+@@ -213,6 +383,9 @@
+ 
+     void SpellBuyingWindow::onReferenceUnavailable()
+     {
++        // COMPANION: the merchant walked away / died. The window is DS-hidden so onClose() won't fire
++        // on the mode-pop below — emit the close signal explicitly (once-guarded).
++        companionEmitSpellBuyingClosed();
+         // remove both Spells and Dialogue (since you always trade with the NPC/creature that you have previously talked
+         // to)
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_SpellBuying);
+@@ -292,3 +465,27 @@
+         return true;
+     }
+ }
++
++// Companion (bottom-screen spell buying): extern "C" bridges driven from drainCompanionCommands
++// (androidmain.cpp, engine main thread). Mirror the repair bridges. Each no-ops unless a spell-buying
++// session is actually live (containsMode guard, stale-window safe).
++extern "C" void companionBuySpell(int index)
++{
++    if (!gCompanionSpellBuyingWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_SpellBuying))
++        return;
++    gCompanionSpellBuyingWindow->companionBuySpellByIndex(index);
++}
++
++extern "C" void companionSpellBuyingCancel()
++{
++    if (!gCompanionSpellBuyingWindow)
++        return;
++    if (!MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_SpellBuying))
++        return;
++    // Pop the mode. In DS mode the window is already hidden, so the mode-pop's setVisible(false) is a
++    // no-op that never fires onClose(); emit the close signal explicitly (once-guarded).
++    MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_SpellBuying);
++    companionEmitSpellBuyingClosed();
++}
 --- a/apps/openmw/mwgui/spellbuyingwindow.hpp
 +++ b/apps/openmw/mwgui/spellbuyingwindow.hpp
-@@ -51,6 +51,8 @@
+@@ -32,7 +32,20 @@
  
-         void updateLabels();
+         std::string_view getWindowIdForLua() const override { return "SpellBuying"; }
  
-+        void onClose() override;
++        // COMPANION (bottom-screen spell buying): buy the spell at the given ordinal in the exported
++        // list (companion-spellbuyingwindow-open-signal.patch). Driven from the companionBuySpell
++        // bridge; no-ops on a stale/out-of-range index, an already-known spell, or an unaffordable one.
++        void companionBuySpellByIndex(int index);
 +
-         void onReferenceUnavailable() override;
+     protected:
++        void onClose() override;
++        bool exit() override;
++        // COMPANION: stream the session (OPEN/gold/SPELL*/END) to the bottom screen; the merchant-
++        // adjusted per-spell price. Called at the end of setPtr, so it also fires on the re-export
++        // after a purchase.
++        void companionExportOpen();
++        int companionSpellPrice(const ESM::Spell& spell) const;
++
+         MyGUI::Button* mCancelButton;
+         MyGUI::TextBox* mPlayerGold;
  
-         bool playerHasSpell(const ESM::RefId& id);
+@@ -59,6 +72,9 @@
+         static bool sortSpells(const ESM::Spell* left, const ESM::Spell* right);
+         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
+         size_t mControllerFocus = 0;
++        // COMPANION: the exported spells (including already-known ones), indexed by the ordinal in
++        // COMPANION_SPELLBUYING_SPELL, so the companionBuySpell bridge can resolve an index to a spell.
++        std::vector<ESM::RefId> mCompanionSpellIds;
+     };
+ }
+ 

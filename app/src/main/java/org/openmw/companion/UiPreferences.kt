@@ -80,11 +80,14 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // GM_Travel window is suppressed and the bottom screen is the sole surface.
     GameUiElement("game_ui_travel", "Travel"),
     GameUiElement("game_ui_levelup", "Level up", pending = true),
-    // Dialogue-service windows (GM_SpellBuying / GM_Training) — pending until a companion overlay
-    // lands. Their native suppression is wired (companion-hide-gamewindows-on-dsmode.patch), inert
-    // while pending; the menu shows them locked VANILLA / Bottom, same as the other pending rows.
-    GameUiElement("game_ui_spellbuying", "Spell buying", pending = true),
-    GameUiElement("game_ui_training", "Training", pending = true),
+    // Dialogue-service windows (GM_SpellBuying / GM_Training) — now non-pending (default DS): the
+    // bottom-screen SpellBuyingOverlay / TrainingOverlayHost exist, and DS suppresses the native
+    // window via companion-hide-gamewindows-on-dsmode.patch (setCompanionDsSpellBuying/Training →
+    // companionDs*() atomics, driven by dsPushes in EngineActivity). Vanilla un-suppresses and shows
+    // the real native window (the _spellBuyingWindowOpen/_trainingWindowOpen booleans still fire for
+    // the conversation step-aside).
+    GameUiElement("game_ui_spellbuying", "Spell buying"),
+    GameUiElement("game_ui_training", "Training"),
     GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
     GameUiElement("game_ui_enchanting", "Enchanting", pending = true),
     GameUiElement("game_ui_alchemy", "Alchemy", pending = true),
@@ -135,6 +138,17 @@ object UiPreferences {
     private const val CONVERSATION_LOCATION = "conversation_location"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
+    // Training / spell-buying popup location (Bottom only for now; Top pending — same as Repair,
+    // which is Bottom/Top). There is NO Split for these two (only the centred bottom card is built),
+    // so the menu offers just [Bottom][Top]. Default BOTTOM. A stale SPLIT persisted by the earlier
+    // build is rejected on load (see init) so it can't leave the pills showing nothing selected.
+    private const val TRAINING_LOCATION = "layout_training"
+    private const val SPELLBUYING_LOCATION = "layout_spellbuying"
+    // Repair / travel popup location — same [Bottom][Top] shape as training/spell-buying (Bottom
+    // built, Top pending, no Split). Default BOTTOM. These overlays previously followed the
+    // Conversation location; they now read their own pref (a stale SPLIT is rejected on load).
+    private const val REPAIR_LOCATION = "layout_repair"
+    private const val TRAVEL_LOCATION = "layout_travel"
     private const val TARGET_HEALTH_LOCATION = "layout_target_health"
     private const val PLAYER_COMBAT = "layout_player_combat"
     private const val HUD_ON_PREFIX = "hud_on_"
@@ -167,6 +181,10 @@ object UiPreferences {
     // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
     private val lootingLocationFlow = MutableStateFlow(ScreenLocation.SPLIT)
     private val barterLocationFlow = MutableStateFlow(ScreenLocation.SPLIT)
+    private val trainingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val spellBuyingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val repairLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val travelLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
 
     // Where the combat target's health bar is drawn (BOTTOM / TOP). Default TOP.
     private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.TOP)
@@ -236,6 +254,24 @@ object UiPreferences {
         p.getString(BARTER_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
             ?.let { barterLocationFlow.value = it }
+        // Only BOTTOM / TOP are valid for these two (no Split). Reject a stale SPLIT from the earlier
+        // build so it falls back to the BOTTOM default.
+        p.getString(TRAINING_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != ScreenLocation.SPLIT }
+            ?.let { trainingLocationFlow.value = it }
+        p.getString(SPELLBUYING_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != ScreenLocation.SPLIT }
+            ?.let { spellBuyingLocationFlow.value = it }
+        p.getString(REPAIR_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != ScreenLocation.SPLIT }
+            ?.let { repairLocationFlow.value = it }
+        p.getString(TRAVEL_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != ScreenLocation.SPLIT }
+            ?.let { travelLocationFlow.value = it }
         p.getString(TARGET_HEALTH_LOCATION, null)
             ?.let { runCatching { TargetHealthLocation.valueOf(it) }.getOrNull() }
             ?.let { targetHealthLocationFlow.value = it }
@@ -373,6 +409,42 @@ object UiPreferences {
     fun setBarterLocation(context: Context, loc: ScreenLocation) {
         barterLocationFlow.value = loc
         editor(context).putString(BARTER_LOCATION, loc.name).apply()
+    }
+
+    /** Where the training popup is drawn (BOTTOM / SPLIT; TOP pending). */
+    fun trainingLocationFlow(): StateFlow<ScreenLocation> = trainingLocationFlow.asStateFlow()
+
+    /** Set the training popup location and persist. */
+    fun setTrainingLocation(context: Context, loc: ScreenLocation) {
+        trainingLocationFlow.value = loc
+        editor(context).putString(TRAINING_LOCATION, loc.name).apply()
+    }
+
+    /** Where the spell-buying popup is drawn (BOTTOM / SPLIT; TOP pending). */
+    fun spellBuyingLocationFlow(): StateFlow<ScreenLocation> = spellBuyingLocationFlow.asStateFlow()
+
+    /** Set the spell-buying popup location and persist. */
+    fun setSpellBuyingLocation(context: Context, loc: ScreenLocation) {
+        spellBuyingLocationFlow.value = loc
+        editor(context).putString(SPELLBUYING_LOCATION, loc.name).apply()
+    }
+
+    /** Where the repair popup is drawn (BOTTOM; TOP pending). */
+    fun repairLocationFlow(): StateFlow<ScreenLocation> = repairLocationFlow.asStateFlow()
+
+    /** Set the repair popup location and persist. */
+    fun setRepairLocation(context: Context, loc: ScreenLocation) {
+        repairLocationFlow.value = loc
+        editor(context).putString(REPAIR_LOCATION, loc.name).apply()
+    }
+
+    /** Where the travel popup is drawn (BOTTOM; TOP pending). */
+    fun travelLocationFlow(): StateFlow<ScreenLocation> = travelLocationFlow.asStateFlow()
+
+    /** Set the travel popup location and persist. */
+    fun setTravelLocation(context: Context, loc: ScreenLocation) {
+        travelLocationFlow.value = loc
+        editor(context).putString(TRAVEL_LOCATION, loc.name).apply()
     }
 
     /** Where the combat target's health bar is drawn (BOTTOM / TOP). */

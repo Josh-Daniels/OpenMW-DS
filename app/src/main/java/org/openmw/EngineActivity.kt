@@ -1085,8 +1085,12 @@ class EngineActivity : SDLActivity() {
             val travelNav = sessionNav(GameStateRepository.travelSession, "game_ui_travel")
             val repairNav = sessionNav(GameStateRepository.repairSession, "game_ui_repair")
             val restWaitNav = sessionNav(GameStateRepository.sleepSession, "game_ui_restwait")
+            val trainingNav = sessionNav(GameStateRepository.trainingSession, "game_ui_training")
+            val spellBuyingNav = sessionNav(GameStateRepository.spellBuyingSession, "game_ui_spellbuying")
 
-            combine(dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav) { arr ->
+            combine(
+                dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav, trainingNav, spellBuyingNav
+            ) { arr ->
                 arr.any { it }
             }.combine(GameStateRepository.pauseMenuVisible) { anyOverlay, paused ->
                 anyOverlay && !paused

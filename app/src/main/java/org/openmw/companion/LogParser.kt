@@ -59,13 +59,23 @@ object LogParser {
     // Rest/wait (GM_Rest). OPEN:<mode>|<dateString>|<warning> then CLOSED. Distinct tokens.
     const val P_SLEEP_OPEN = "COMPANION_SLEEP_OPEN:"
     const val P_SLEEP_CLOSED = "COMPANION_SLEEP_CLOSED"
-    // Bare open/closed signals (no payload) for the four dialogue-service windows that push over
-    // GM_Dialogue. Drive a boolean session in GameStateRepository so the conversation overlay steps
-    // aside while the native window is up in Vanilla mode. Emitted from each window's setPtr/onClose.
-    const val P_SPELLBUYING_OPEN = "COMPANION_SPELLBUYING_OPEN"
+    // Spell buying (GM_SpellBuying → bottom-screen overlay). OPEN:<npcName> → PLAYER_GOLD →
+    // SPELL:<index|name|school|cost|known>* → END, then CLOSED. Same buffered pattern as repair.
+    // OPEN also flips the boolean flow below (Vanilla-mode conversation step-aside). OPEN carries a
+    // colon so its token can't match the SPELL/END lines; none is a substring of another.
+    const val P_SPELLBUYING_OPEN = "COMPANION_SPELLBUYING_OPEN:"
+    const val P_SPELLBUYING_SPELL = "COMPANION_SPELLBUYING_SPELL:"
+    const val P_SPELLBUYING_END = "COMPANION_SPELLBUYING_END"
     const val P_SPELLBUYING_CLOSED = "COMPANION_SPELLBUYING_CLOSED"
-    const val P_TRAINING_OPEN = "COMPANION_TRAINING_OPEN"
+    // Training (GM_Training → bottom-screen overlay). OPEN:<npcName> → PLAYER_GOLD →
+    // SKILL:<index|name|currentLevel|cost|capped>* → END, then CLOSED. Same buffered pattern.
+    const val P_TRAINING_OPEN = "COMPANION_TRAINING_OPEN:"
+    const val P_TRAINING_SKILL = "COMPANION_TRAINING_SKILL:"
+    const val P_TRAINING_END = "COMPANION_TRAINING_END"
     const val P_TRAINING_CLOSED = "COMPANION_TRAINING_CLOSED"
+    // Bare open/closed signals (no payload) for the two remaining dialogue-service windows that push
+    // over GM_Dialogue (no DS overlay yet). Drive a boolean session in GameStateRepository so the
+    // conversation overlay steps aside while the native window is up in Vanilla mode.
     const val P_SPELLMAKING_OPEN = "COMPANION_SPELLMAKING_OPEN"
     const val P_SPELLMAKING_CLOSED = "COMPANION_SPELLMAKING_CLOSED"
     const val P_ENCHANTING_OPEN = "COMPANION_ENCHANTING_OPEN"
@@ -448,6 +458,42 @@ object LogParser {
             mode = if (parts[0].trim() == "rest") SleepMode.REST else SleepMode.WAIT,
             dateString = parts.getOrElse(1) { "" }.trim(),
             warning = parts.getOrElse(2) { "" }.trim()
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * A single COMPANION_TRAINING_SKILL payload: index|skillName|currentLevel|cost|capped(1/0).
+     * Pipe-delimited (the engine sanitizes '|' out of the name) → exactly 5 fields.
+     */
+    fun parseTrainingSkill(payload: String): TrainingSkill? = try {
+        val parts = payload.split('|')
+        if (parts.size < 5) null
+        else TrainingSkill(
+            index = parts[0].trim().toInt(),
+            skillName = parts[1],
+            currentLevel = parts[2].trim().toInt(),
+            cost = parts[3].trim().toInt(),
+            capped = parts[4].trim() == "1"
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * A single COMPANION_SPELLBUYING_SPELL payload: index|spellName|school|cost|known(1/0).
+     * Pipe-delimited (the engine sanitizes '|' out of name/school) → exactly 5 fields.
+     */
+    fun parseSpellForSale(payload: String): SpellForSale? = try {
+        val parts = payload.split('|')
+        if (parts.size < 5) null
+        else SpellForSale(
+            index = parts[0].trim().toInt(),
+            spellName = parts[1],
+            school = parts[2],
+            cost = parts[3].trim().toInt(),
+            known = parts[4].trim() == "1"
         )
     } catch (e: Exception) {
         null
