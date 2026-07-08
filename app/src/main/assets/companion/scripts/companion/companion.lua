@@ -1606,7 +1606,13 @@ local function dispatchCommand(command)
         -- itself. Open Interface showing only the Map window (same as the ui.lua
         -- doc example I.UI.setMode('Interface', {windows = {'Map'}})). Reuses the
         -- AddUiMode event already used by the 'read' handler.
-        self:sendEvent('AddUiMode', { mode = 'Interface', windows = { 'Map' } })
+        -- TOGGLE: if the Interface mode (the map view) is already the active mode,
+        -- a second minimap tap closes it instead of re-opening (mirrors B/Back).
+        if interfaces.UI.getMode() == interfaces.UI.MODE.Interface then
+            pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Interface) end)
+        else
+            self:sendEvent('AddUiMode', { mode = 'Interface', windows = { 'Map' } })
+        end
         return
     end
     if payload == "container_take_all" then
