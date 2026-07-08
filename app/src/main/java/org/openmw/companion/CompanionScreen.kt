@@ -2066,6 +2066,30 @@ private fun InfoEffectRow(text: String, harmful: Boolean, iconPath: String?) {
  *  1 = container/right) and which [index] into that side's sorted list. */
 private data class LootFocus(val side: Int, val index: Int)
 
+/** The per-side visible looting list: filter by the selected category tab (an INV_CATEGORIES
+ *  label, null = All), then sort by category then name. Shared by the SPLIT grid columns' display
+ *  and the controller focus index so the D-pad index maps 1:1 to a visible cell. Mirrors
+ *  [barterVisible]. */
+private fun lootVisible(items: List<InventoryItem>, categoryLabel: String?): List<InventoryItem> {
+    val group = INV_CATEGORIES.find { it.label == categoryLabel }
+    return items.filter { group == null || it.category in group.cats }
+        .sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+}
+
+/** Cycle a looting column's category filter by [dir] (-1 = previous, +1 = next) through
+ *  [All] + the INV_CATEGORIES actually present in [items] (in INV_CATEGORIES order), wrapping.
+ *  Returns the new selection (null = All). Matches the visible CategoryTab set, so the L1/R1
+ *  shoulder buttons mirror tapping the tabs. Mirrors [cycleBarterCat]. */
+private fun cycleLootCat(items: List<InventoryItem>, current: String?, dir: Int): String? {
+    val present = items.map { it.category }.toSet()
+    val avail: List<String?> =
+        listOf<String?>(null) + INV_CATEGORIES.filter { grp -> grp.cats.any { it in present } }.map { it.label }
+    if (avail.size <= 1) return current
+    val cur = avail.indexOf(current).coerceAtLeast(0)
+    val next = ((cur + dir) % avail.size + avail.size) % avail.size
+    return avail[next]
+}
+
 /**
  * Controller focus + navigation for the looting overlay (Phase 3), shared by the BOTTOM list
  * layout ([rows] = 1) and the SPLIT grid layout ([rows] = 4). Owns focus (side + index into that
@@ -2075,7 +2099,8 @@ private data class LootFocus(val side: Int, val index: Int)
  *    (rows = 1) Up/Down step ±1 and Left/Right switch side (the two lists sit side by side).
  *  - L2 / R2 switch to the player / container side (in both layouts).
  *  - A activates the focused item via [requestQty] → [onPut]/[onTake] (stacks > 1 prompt first).
- *  - X = [onTakeAll]; R1 = [onDispose] (corpse only, [isCorpse]).
+ *  - X = [onTakeAll]; Y = [onDispose] (corpse only, [isCorpse]).
+ *  - L1 / R1 cycle the focused column's category filter via [onCycleCategory] (SPLIT grids only).
  * Focus starts on the container side when it has items (the point of looting), else the player
  * side, and is clamped as items move between sides. Returns the live focus so the columns can
  * highlight the focused cell. Only ONE looting layout is composed at a time, so this collector is
@@ -2092,6 +2117,9 @@ private fun rememberLootNavFocus(
     onTake: (InventoryItem, Int) -> Unit,
     onTakeAll: () -> Unit,
     onDispose: () -> Unit,
+    // Cycle the focused column's category filter (L1 = -1 prev, R1 = +1 next). No-op in the
+    // BOTTOM list layout (no category tabs there); wired to the per-side state in the SPLIT grids.
+    onCycleCategory: (side: Int, dir: Int) -> Unit = { _, _ -> },
 ): LootFocus {
     var side by remember { mutableStateOf(if (containerSorted.isNotEmpty()) 1 else 0) }
     var index by remember { mutableStateOf(0) }
@@ -2103,6 +2131,8 @@ private fun rememberLootNavFocus(
     }
 
     val snapshot = rememberUpdatedState(Triple(playerSorted, containerSorted, isCorpse))
+    // Category-cycle callback reads the parent's live per-side category state, so keep it fresh.
+    val cycleState = rememberUpdatedState(onCycleCategory)
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         GameStateRepository.navEvent.collect { ev ->
@@ -2138,7 +2168,11 @@ private fun rememberLootNavFocus(
                     }
                 }
                 is NavEvent.Action1 -> onTakeAll()
-                is NavEvent.R1 -> if (corpse) onDispose()
+                is NavEvent.Action2 -> if (corpse) onDispose()
+                // Shoulder buttons cycle the focused side's category filter; reset focus to the
+                // first item of the new (filtered) list. No-op in BOTTOM mode (no tabs there).
+                is NavEvent.L1 -> { cycleState.value(side, -1); index = 0 }
+                is NavEvent.R1 -> { cycleState.value(side, 1); index = 0 }
                 is NavEvent.Info -> (if (side == 0) pSorted else cSorted).getOrNull(index)?.let {
                     ItemInfoPopupState.toggle(it.id, it.displayName(), it.enchant, onTop = rows > 1)
                 }
@@ -2684,7 +2718,7 @@ private fun LootingControlsOnly(session: ContainerSession) {
             ) { CompanionActions.containerTakeAll() }
             if (session.isCorpse) {
                 LootButton(
-                    label = "Dispose of Corpse", hint = "R1", enabled = true,
+                    label = "Dispose of Corpse", hint = "Y", enabled = true,
                     modifier = Modifier.fillMaxWidth()
                 ) { CompanionActions.containerDispose() }
             }
@@ -2749,20 +2783,19 @@ fun LootingTopOverlay() {
         CompanionActions.containerTakeAll()
     }
 
-    // Pre-sort both sides ONCE (shared by the grids' display and the controller focus index).
-    val playerSorted = remember(playerItems, wornIds) {
-        playerItems.sortedWith(
-            compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
-        )
-    }
-    val containerSorted = remember(containerItems) {
-        containerItems.sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
-    }
-    // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X/R1 fire here too even though
+    // Per-side category filter (an INV_CATEGORIES label; null = All), matching the barter grids.
+    var playerCat by remember { mutableStateOf<String?>(null) }
+    var containerCat by remember { mutableStateOf<String?>(null) }
+
+    // The VISIBLE (category-filtered + sorted) lists — shared by the controller focus index; each
+    // column re-derives the same via lootVisible for its display. Mirrors the barter overlay.
+    val playerVisible = remember(playerItems, playerCat) { lootVisible(playerItems, playerCat) }
+    val containerVisible = remember(containerItems, containerCat) { lootVisible(containerItems, containerCat) }
+    // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X/Y fire here too even though
     // the Take All / Dispose buttons live on the bottom controls window — they're plain commands.
     val focus = rememberLootNavFocus(
-        playerSorted = playerSorted,
-        containerSorted = containerSorted,
+        playerSorted = playerVisible,
+        containerSorted = containerVisible,
         rows = 3,
         isCorpse = session.isCorpse,
         requestQty = requestQty,
@@ -2770,6 +2803,10 @@ fun LootingTopOverlay() {
         onTake = { it, n -> take(it, n) },
         onTakeAll = { takeAll() },
         onDispose = { CompanionActions.containerDispose() },
+        onCycleCategory = { side, dir ->
+            if (side == 0) playerCat = cycleLootCat(playerItems, playerCat, dir)
+            else containerCat = cycleLootCat(containerItems, containerCat, dir)
+        },
     )
 
     Box(
@@ -2790,10 +2827,12 @@ fun LootingTopOverlay() {
             // LEFT: player.
             LootGridColumn(
                 header = playerName,
-                items = playerSorted,
+                items = playerItems,
                 isPlayerSide = true,
                 isWorn = { isWorn(it) },
                 emptyText = "Empty",
+                selectedCategory = playerCat,
+                onSelectCategory = { playerCat = it },
                 onTransfer = { it, n -> put(it, n) },
                 onRequestQty = requestQty,
                 focusedIndex = if (focus.side == 0) focus.index else -1,
@@ -2803,10 +2842,12 @@ fun LootingTopOverlay() {
             // RIGHT: container.
             LootGridColumn(
                 header = session.containerName.ifBlank { "Container" },
-                items = containerSorted,
+                items = containerItems,
                 isPlayerSide = false,
                 isWorn = { false },
                 emptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
+                selectedCategory = containerCat,
+                onSelectCategory = { containerCat = it },
                 onTransfer = { it, n -> take(it, n) },
                 onRequestQty = requestQty,
                 focusedIndex = if (focus.side == 1) focus.index else -1,
@@ -2843,9 +2884,10 @@ fun LootingTopOverlay() {
     }
 }
 
-/** One side of the SPLIT looting grids — header + a 4-row horizontally-scrolling icon grid.
- *  [items] arrives pre-sorted from the parent (shared with the controller focus index);
- *  [focusedIndex] highlights that cell (-1 = this side isn't focused) and keeps it on-screen. */
+/** One side of the SPLIT looting grids — header, per-side category tabs, 3-row horizontally-
+ *  scrolling icon grid. [items] is the FULL column; it's filtered+sorted here via [lootVisible]
+ *  (the same the parent computes for the controller focus index). [focusedIndex] highlights that
+ *  cell (-1 = this side isn't focused) and keeps it on-screen. Mirrors [BarterGridColumn]. */
 @Composable
 private fun LootGridColumn(
     header: String,
@@ -2853,6 +2895,8 @@ private fun LootGridColumn(
     isPlayerSide: Boolean,
     isWorn: (InventoryItem) -> Boolean,
     emptyText: String,
+    selectedCategory: String?,
+    onSelectCategory: (String?) -> Unit,
     onTransfer: (InventoryItem, Int) -> Unit,
     onRequestQty: (String, Int, String, (Int) -> Unit) -> Unit,
     focusedIndex: Int = -1,
@@ -2866,16 +2910,31 @@ private fun LootGridColumn(
             maxLines = 1, overflow = TextOverflow.Ellipsis
         )
         Spacer(Modifier.height(4.dp))
+        val presentCats = remember(items) { items.map { it.category }.toSet() }
+        val tabs = remember(presentCats) { INV_CATEGORIES.filter { grp -> grp.cats.any { it in presentCats } } }
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            CategoryTab("All", active = selectedCategory == null) { onSelectCategory(null) }
+            tabs.forEach { c ->
+                CategoryTab(c.label, active = selectedCategory == c.label) { onSelectCategory(c.label) }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
         Spacer(Modifier.height(6.dp))
-        if (items.isEmpty()) {
+
+        // Same filter+sort the controller focus index is computed against (lootVisible).
+        val visible = remember(items, selectedCategory) { lootVisible(items, selectedCategory) }
+        if (visible.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
             }
         } else {
             val gridState = rememberLazyGridState()
             LaunchedEffect(focusedIndex) {
-                if (focusedIndex in items.indices) gridState.animateScrollToItem(focusedIndex)
+                if (focusedIndex in visible.indices) gridState.animateScrollToItem(focusedIndex)
             }
             // Right stick left/right scrolls this horizontal grid while it's the focused side.
             ScrollByNav(gridState, active = focusedIndex >= 0, horizontal = true)
@@ -2888,7 +2947,7 @@ private fun LootGridColumn(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                gridItemsIndexed(items) { i, item ->
+                gridItemsIndexed(visible) { i, item ->
                     LootGridCell(
                         item = item,
                         isPlayerSide = isPlayerSide,

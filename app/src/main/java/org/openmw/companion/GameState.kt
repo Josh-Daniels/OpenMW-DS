@@ -394,7 +394,8 @@ sealed class NavEvent {
     data class Right(override val seq: Long) : NavEvent()
     data class Confirm(override val seq: Long) : NavEvent()      // A button
     data class Action1(override val seq: Long) : NavEvent()      // X button
-    data class L1(override val seq: Long) : NavEvent()           // left shoulder (barter: prev category)
+    data class Action2(override val seq: Long) : NavEvent()      // Y button (looting: Dispose of Corpse)
+    data class L1(override val seq: Long) : NavEvent()           // left shoulder (barter/looting: prev category)
     data class R1(override val seq: Long) : NavEvent()
     data class L2(override val seq: Long) : NavEvent()
     data class R2(override val seq: Long) : NavEvent()

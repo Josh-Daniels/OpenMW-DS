@@ -87,7 +87,7 @@
          if (mGuiCursorEnabled && !(mJoystickLastUsed && !mGamepadGuiCursorEnabled)
  #ifdef __ANDROID__
              // COMPANION: don't let the thumbstick move the GUI cursor while the "Game cursor" option
-@@ -285,6 +358,34 @@
+@@ -285,6 +358,35 @@
  
      bool ControllerManager::gamepadToGuiControl(const SDL_ControllerButtonEvent& arg)
      {
@@ -106,6 +106,7 @@
 +                case SDL_CONTROLLER_BUTTON_DPAD_DOWN:      Log(Debug::Info) << "COMPANION_NAV_DOWN:";    return true;
 +                case SDL_CONTROLLER_BUTTON_A:              Log(Debug::Info) << "COMPANION_NAV_CONFIRM:"; return true;
 +                case SDL_CONTROLLER_BUTTON_X:              Log(Debug::Info) << "COMPANION_NAV_ACTION1:"; return true;
++                case SDL_CONTROLLER_BUTTON_Y:              Log(Debug::Info) << "COMPANION_NAV_ACTION2:"; return true;
 +                case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:   Log(Debug::Info) << "COMPANION_NAV_L1:";      return true;
 +                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:  Log(Debug::Info) << "COMPANION_NAV_R1:";      return true;
 +                case SDL_CONTROLLER_BUTTON_RIGHTSTICK:     Log(Debug::Info) << "COMPANION_NAV_INFO:";    return true;
