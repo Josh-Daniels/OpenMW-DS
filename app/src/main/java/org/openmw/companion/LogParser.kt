@@ -165,6 +165,7 @@ object LogParser {
     const val P_NAV_DOWN = "COMPANION_NAV_DOWN:"
     const val P_NAV_CONFIRM = "COMPANION_NAV_CONFIRM:"   // A button
     const val P_NAV_ACTION1 = "COMPANION_NAV_ACTION1:"   // X button
+    const val P_NAV_L1 = "COMPANION_NAV_L1:"
     const val P_NAV_R1 = "COMPANION_NAV_R1:"
     const val P_NAV_L2 = "COMPANION_NAV_L2:"
     const val P_NAV_R2 = "COMPANION_NAV_R2:"
@@ -197,6 +198,7 @@ object LogParser {
         line.contains(P_NAV_DOWN) -> { seq -> NavEvent.Down(seq) }
         line.contains(P_NAV_CONFIRM) -> { seq -> NavEvent.Confirm(seq) }
         line.contains(P_NAV_ACTION1) -> { seq -> NavEvent.Action1(seq) }
+        line.contains(P_NAV_L1) -> { seq -> NavEvent.L1(seq) }
         line.contains(P_NAV_R1) -> { seq -> NavEvent.R1(seq) }
         line.contains(P_NAV_L2) -> { seq -> NavEvent.L2(seq) }
         line.contains(P_NAV_R2) -> { seq -> NavEvent.R2(seq) }

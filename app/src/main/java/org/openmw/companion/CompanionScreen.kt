@@ -409,6 +409,19 @@ private val BARTER_CATEGORIES = listOf(
     BarterCat("Misc", "misc"),
 )
 
+/** Cycle a barter side's category filter by [dir] (-1 = previous, +1 = next) through
+ *  [All] + the categories actually present in [items] (in BARTER_CATEGORIES order), wrapping.
+ *  Returns the new selection (null = All). Matches the visible CategoryTab set, so the L1/R1
+ *  shoulder buttons mirror tapping the tabs. */
+private fun cycleBarterCat(items: List<BarterItem>, current: String?, dir: Int): String? {
+    val present = items.map { it.category }.toSet()
+    val avail: List<String?> = listOf<String?>(null) + BARTER_CATEGORIES.filter { it.cat in present }.map { it.cat }
+    if (avail.size <= 1) return current
+    val cur = avail.indexOf(current).coerceAtLeast(0)
+    val next = ((cur + dir) % avail.size + avail.size) % avail.size
+    return avail[next]
+}
+
 /** Stone panel with a bronze frame — the signature Morrowind window look. */
 private fun Modifier.mwPanel(): Modifier = this
     .clip(RoundedCornerShape(3.dp))
@@ -3939,6 +3952,8 @@ private fun rememberBarterNavFocus(
     onToggle: (BarterItem) -> Unit,
     onOffer: () -> Unit,
     onSlider: (Int) -> Unit,
+    // Cycle the given side's category filter (L1 = -1 prev, R1 = +1 next).
+    onCycleCategory: (side: Int, dir: Int) -> Unit,
 ): BarterFocus {
     var side by remember { mutableStateOf(1) } // start on the vendor side
     var index by remember { mutableStateOf(0) }
@@ -3952,6 +3967,7 @@ private fun rememberBarterNavFocus(
     val toggleState = rememberUpdatedState(onToggle)
     val offerState = rememberUpdatedState(onOffer)
     val sliderState = rememberUpdatedState(onSlider)
+    val cycleState = rememberUpdatedState(onCycleCategory)
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (~8g/sec held)
@@ -3985,6 +4001,10 @@ private fun rememberBarterNavFocus(
                     if (r <= 1) { side = 0; index = 0 } else if (size > 0) index = gridMove(index, size)
                 is NavEvent.L2 -> { side = 0; index = 0 }
                 is NavEvent.R2 -> { side = 1; index = 0 }
+                // Shoulder buttons cycle the focused side's category filter; reset focus to the
+                // first item of the new (filtered) list.
+                is NavEvent.L1 -> { cycleState.value(side, -1); index = 0 }
+                is NavEvent.R1 -> { cycleState.value(side, 1); index = 0 }
                 is NavEvent.Confirm -> list(side).getOrNull(index)?.let { toggleState.value(it) }
                 is NavEvent.Action1 -> offerState.value()
                 is NavEvent.Info -> list(side).getOrNull(index)?.let {
@@ -3992,7 +4012,7 @@ private fun rememberBarterNavFocus(
                 }
                 is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) sliderState.value(-1)
                 is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) sliderState.value(1)
-                else -> Unit // Scroll*/R1 handled elsewhere
+                else -> Unit // Scroll* handled elsewhere
             }
             // While the info popup is open, D-pad focus moves follow to the newly focused item.
             if (ItemInfoPopupState.isOpen) {
@@ -4124,6 +4144,10 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
             val delta = (if (navReceiving) dir else -dir) * goldStep
             val next = (offerBalance + delta).coerceIn(navSliderLo, navSliderHi)
             if (next != offerBalance) setBalance(next)
+        },
+        onCycleCategory = { side, dir ->
+            if (side == 0) playerCat = cycleBarterCat(playerItems, playerCat, dir)
+            else vendorCat = cycleBarterCat(vendorItems, vendorCat, dir)
         },
     )
 
@@ -4569,6 +4593,10 @@ fun BarterTopOverlay() {
         onToggle = ::toggle,
         onOffer = {},
         onSlider = {},
+        onCycleCategory = { side, dir ->
+            if (side == 0) playerCat = cycleBarterCat(playerCol, playerCat, dir)
+            else vendorCat = cycleBarterCat(vendorCol, vendorCat, dir)
+        },
     )
 
     Box(

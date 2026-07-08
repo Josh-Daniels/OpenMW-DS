@@ -28,7 +28,9 @@
 | L2 / R2 | Switch between player and container column |
 | A | Take/put selected item |
 | X | Take All |
-| R1 | Dispose of Corpse (looting only) |
+| Y | Dispose of Corpse (looting only) |
+| L1 | Previous category (focused column) |
+| R1 | Next category (focused column) |
 | B | Close |
 
 ---
@@ -41,6 +43,8 @@
 | L2 / R2 | Switch between player and vendor column |
 | A | Select/deselect item for offer |
 | Left stick left/right | Adjust gold offer slider |
+| L1 | Previous category (focused column) |
+| R1 | Next category (focused column) |
 | X | Make offer |
 | B | Cancel |
 
@@ -76,13 +80,16 @@
 
 ---
 
-## Books (NOT YET IMPLEMENTED)
+## Books
 
 | Input | Action |
 |-------|--------|
 | L1 | Previous page |
 | R1 | Next page |
 | B | Close book |
+
+Note: book page turning works natively via OpenMW's existing
+controller support — no companion patch needed.
 
 ---
 
@@ -107,10 +114,8 @@
 
 ## Notes / TBD
 
-- Bottom barter overlay needs slider replacing step buttons
-  for consistency with split mode controller scheme
-- Controller navigation needs a visual focus indicator
-  (highlighted border on selected item/row)
 - All DS menus use same controls regardless of Bottom/Split/Top
 - Vanilla menus retain existing native OpenMW controller support
-- Books page turning (L1/R1) pending implementation
+- Right stick scroll for documents/scrolls (letters, scrolls)
+  pending implementation
+- Input state leak (stick held while menu opens) pending fix
