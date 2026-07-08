@@ -26,6 +26,9 @@ data class InventoryItem(
     val statKey: String = "",
     /** Condition ratio 0..1; null = item has no durability (no cond bar). */
     val cond: Float? = null,
+    /** Per-unit weight (record weight; gold = 0). Backs the loot overlay's optimistic
+     *  encumbrance delta. Defaults 0 so older lines without the field are inert. */
+    val weight: Float = 0f,
     /** Enchantment (id + type label + effects) for the info popup; null = not enchanted. */
     val enchant: ItemEnchant? = null
 )

@@ -753,15 +753,16 @@ end
 local function itemJson(item)
     local ok, rec = pcall(function() return item.type.record(item) end)
     local icon = (ok and rec and rec.icon) or ""
+    local weight = (ok and rec and rec.weight) or 0   -- for the loot overlay's optimistic encumbrance
     local sid = stackId(item)
     local cat = itemCategory(item)
     local statVal, statKey, cond = itemStats(item, cat)
     local condField = ""
     if cond ~= nil then condField = string.format(',"cond":%.3f', cond) end
     return string.format(
-        '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","statVal":"%s","statKey":"%s"%s%s}',
+        '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","weight":%.2f,"statVal":"%s","statKey":"%s"%s%s}',
         jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
-        item.count, cat, jsonEscape(icon),
+        item.count, cat, jsonEscape(icon), weight,
         jsonEscape(statVal), jsonEscape(statKey), condField, enchantJson(item))
 end
 

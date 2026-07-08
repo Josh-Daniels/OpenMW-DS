@@ -2260,6 +2260,11 @@ private fun LootingOverlay(
     var playerItems by remember { mutableStateOf(playerInventory) }
 
     val playerGold = playerItems.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+    // Optimistic encumbrance: anchor on the real value at open (playerEncumbrance), then add/subtract
+    // moved item weight per take/put/takeAll so the header updates live while GM_Container has the
+    // Lua export frozen. Reconciles exactly to the engine value once looting closes.
+    var encDelta by remember { mutableStateOf(0f) }
+    val liveEncumbrance = Dynamic(playerEncumbrance.current + encDelta, playerEncumbrance.max)
     val wornIds = remember(playerEquipment) { playerEquipment.values.toSet() }
     fun isWorn(item: InventoryItem): Boolean =
         if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId) else wornIds.contains(item.id)
@@ -2268,16 +2273,19 @@ private fun LootingOverlay(
     fun take(item: InventoryItem, n: Int) {
         val (c, p) = moveOptimistic(containerItems, playerItems, item, n)
         containerItems = c; playerItems = p
+        encDelta += item.weight * n
         CompanionActions.containerTake(item.stackId.ifEmpty { item.id }, n)
     }
     fun put(item: InventoryItem, n: Int) {
         val (p, c) = moveOptimistic(playerItems, containerItems, item, n)
         playerItems = p; containerItems = c
+        encDelta -= item.weight * n
         CompanionActions.containerPut(item.stackId.ifEmpty { item.id }, n)
     }
     // Take All: optimistically empty the container into the player list, then fire the command
     // (Lua takes all AND closes the overlay). Shared by the button and the controller X action.
     fun takeAll() {
+        encDelta += containerItems.sumOf { (it.weight * it.count).toDouble() }.toFloat()
         playerItems = containerItems.fold(playerItems) { acc, it ->
             moveOptimistic(listOf(it), acc, it, it.count).second
         }
@@ -2348,7 +2356,7 @@ private fun LootingOverlay(
             // ---- Two equal columns: player | container ----
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 LootColumn(
-                    header = playerLootHeader(playerName, playerGold, playerEncumbrance),
+                    header = playerLootHeader(playerName, playerGold, liveEncumbrance),
                     legend = "tap to put · long press for more",
                     items = playerSorted,
                     isPlayerSide = true,
@@ -2801,9 +2809,13 @@ fun LootingTopOverlay() {
     var playerItems by remember { mutableStateOf(state.inventory) }
 
     // Gold recomputed from the optimistic list so it updates live as you loot coins (matches the
-    // bottom overlay). Encumbrance can't be recomputed locally (no per-item weight) — the header
-    // uses state.encumbrance, a snapshot from open (sim paused → the Lua export is frozen anyway).
+    // bottom overlay).
     val playerGold = playerItems.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+    // Optimistic encumbrance: anchor on the real value snapshotted at open, then add/subtract moved
+    // item weight per take/put/takeAll (mirrors the bottom overlay). Reconciles exactly on close.
+    val baseEncumbrance = remember { state.encumbrance }
+    var encDelta by remember { mutableStateOf(0f) }
+    val liveEncumbrance = Dynamic(baseEncumbrance.current + encDelta, baseEncumbrance.max)
 
     val wornIds = remember(state.equipment) { state.equipment.values.toSet() }
     fun isWorn(item: InventoryItem): Boolean =
@@ -2819,14 +2831,17 @@ fun LootingTopOverlay() {
     fun take(item: InventoryItem, n: Int) {
         val (c, p) = moveOptimistic(containerItems, playerItems, item, n)
         containerItems = c; playerItems = p
+        encDelta += item.weight * n
         CompanionActions.containerTake(item.stackId.ifEmpty { item.id }, n)
     }
     fun put(item: InventoryItem, n: Int) {
         val (p, c) = moveOptimistic(playerItems, containerItems, item, n)
         playerItems = p; containerItems = c
+        encDelta -= item.weight * n
         CompanionActions.containerPut(item.stackId.ifEmpty { item.id }, n)
     }
     fun takeAll() {
+        encDelta += containerItems.sumOf { (it.weight * it.count).toDouble() }.toFloat()
         playerItems = containerItems.fold(playerItems) { acc, it ->
             moveOptimistic(listOf(it), acc, it, it.count).second
         }
@@ -2877,7 +2892,7 @@ fun LootingTopOverlay() {
         ) {
             // LEFT: player.
             LootGridColumn(
-                header = playerLootHeader(playerName, playerGold, state.encumbrance),
+                header = playerLootHeader(playerName, playerGold, liveEncumbrance),
                 items = playerItems,
                 isPlayerSide = true,
                 isWorn = { isWorn(it) },

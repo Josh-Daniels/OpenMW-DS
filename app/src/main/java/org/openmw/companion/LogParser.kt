@@ -358,6 +358,7 @@ object LogParser {
             statVal = o.optString("statVal", ""),
             statKey = o.optString("statKey", ""),
             cond = if (o.has("cond")) o.optDouble("cond", 1.0).toFloat() else null,
+            weight = o.optDouble("weight", 0.0).toFloat(),
             enchant = parseEnchant(o)
         )
     } catch (e: Exception) {
