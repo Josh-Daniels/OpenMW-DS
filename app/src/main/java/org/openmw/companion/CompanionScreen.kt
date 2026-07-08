@@ -122,6 +122,14 @@ import java.io.File
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.sin
@@ -335,6 +343,8 @@ private fun Modifier.mwPanel(): Modifier = this
 fun CompanionScreen() {
     val state by GameStateRepository.state.collectAsState()
     var tab by remember { mutableStateOf(Tab.HUD) }
+    // Dismiss the item info popup when the tab changes so it never lingers over another screen.
+    LaunchedEffect(tab) { ItemInfoPopupState.close() }
 
     // Log-tail fallback: feeds GameStateRepository the same way the JNI sink does,
     // so the UI works even if installCompanionSink() has a hiccup.
@@ -458,13 +468,16 @@ fun CompanionScreen() {
             SplashPanel(onDismiss = { splashVisible = false })
         }
 
-        // Detail popup — appears when a COMPANION_INFO reply lands (in response to
-        // an "Info" menu tap). Rendered as an in-window overlay (NOT a Dialog):
-        // the companion UI lives inside a Presentation on a secondary display, and
-        // a Compose Dialog tries to add a TYPE_APPLICATION window into that
-        // Presentation's window context, which throws "Window type mismatch".
-        val info by GameStateRepository.itemInfo.collectAsState()
-        info?.let { ItemInfoOverlay(it, onDismiss = { GameStateRepository.dismissItemInfo() }) }
+        // Item info popup — a small, position-aware tooltip anchored near the triggering item
+        // (long-press → Info, or R3 on the focused item). In-window overlay (NOT a Dialog — see the
+        // Presentation window-type mismatch). Base rows arrive async via COMPANION_INFO; the
+        // enchant section renders instantly from the local item's `enchant`. Dismiss: tap the scrim,
+        // R3 again (toggle), or it follows D-pad focus to the newly focused item.
+        // Bottom-screen host: renders unless the trigger came from a SPLIT top-grid cell (then the
+        // top overlay hosts it — see ItemInfoPopupHost usage in LootingTopOverlay/BarterTopOverlay).
+        if (ItemInfoPopupState.isOpen && !ItemInfoPopupState.onTopScreen) {
+            ItemInfoPopupHost()
+        }
 
         // Stat detail popup (Stats screen). Same in-window overlay pattern as
         // ItemInfoOverlay — tap outside to dismiss.
@@ -1714,90 +1727,247 @@ private fun dialogueAnnotated(text: String, links: List<String>, interactive: Bo
     }
 }
 
-/* ---- Item / spell detail popup ---- */
+/* ---- Item / spell info popup (small, position-aware) ---- */
 
+private enum class PopupEdge { LEFT, RIGHT, TOP, BOTTOM }
+
+/**
+ * Global holder for the item info popup (mirrors the DropdownState pattern). Set from a long-press
+ * "Info" tap or an R3 (NavEvent.Info) press on the focused item; consumed by the popup host at the
+ * CompanionScreen root. `name`/`enchant` come from the LOCAL item (instant); the detailed base
+ * rows arrive asynchronously via COMPANION_INFO (GameStateRepository.itemInfo). `anchor` is the
+ * triggering row's bounds in root coords, refreshed by that row's onGloballyPositioned.
+ */
+object ItemInfoPopupState {
+    var targetId by mutableStateOf<String?>(null)
+    var name by mutableStateOf("")
+    var enchant by mutableStateOf<ItemEnchant?>(null)
+    var anchor by mutableStateOf<Rect?>(null)
+    // true = the trigger came from a SPLIT top-screen grid cell, so the popup must render in the
+    // top overlay (LootingTopOverlay/BarterTopOverlay), not the bottom CompanionScreen root.
+    var onTopScreen by mutableStateOf(false)
+    val isOpen get() = targetId != null
+
+    fun open(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
+        if (id.isBlank()) return
+        targetId = id
+        this.name = name
+        enchant = ench
+        anchor = null
+        onTopScreen = onTop
+        GameStateRepository.dismissItemInfo()      // clear stale rows so the previous item's don't flash
+        if (isSpell) CompanionActions.requestSpellInfo(id) else CompanionActions.requestItemInfo(id)
+    }
+
+    /** Long-press / R3 on the SAME item toggles the popup; a different item re-targets. */
+    fun toggle(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
+        if (targetId == id) close() else open(id, name, ench, isSpell, onTop)
+    }
+
+    /** D-pad focus moved while open → follow to the newly focused item (don't dismiss). */
+    fun follow(id: String, name: String, ench: ItemEnchant?, onTop: Boolean = false) {
+        if (isOpen && id != targetId) open(id, name, ench, onTop = onTop)
+    }
+
+    fun close() {
+        targetId = null
+        name = ""
+        enchant = null
+        anchor = null
+        onTopScreen = false
+        GameStateRepository.dismissItemInfo()
+    }
+
+    /** A row reports its current bounds; only the active target's anchor is tracked (survives scroll). */
+    fun reportAnchor(id: String, r: Rect) {
+        if (targetId == id) anchor = r
+    }
+}
+
+/**
+ * Full scrim (tap-to-dismiss) + the floating card. Hosted at the bottom CompanionScreen root for
+ * bottom contexts, and inside LootingTopOverlay/BarterTopOverlay for SPLIT top-grid triggers, so the
+ * popup renders on whichever screen the triggering item lives (and anchors in that screen's coords).
+ */
 @Composable
-private fun ItemInfoOverlay(info: ItemInfo, onDismiss: () -> Unit) {
-    // Full-screen scrim; tapping it (outside the panel) dismisses. The scrim also
-    // blocks tap-through to the tabs/list underneath while the popup is open.
+private fun ItemInfoPopupHost() {
+    // Own fillMaxSize box with TopStart alignment so the card's absolute .offset positioning is
+    // independent of the CALLER's contentAlignment. The top overlays' root uses BottomCenter, which
+    // would otherwise offset the card from a bottom-centre base and push it off-screen.
+    Box(modifier = Modifier.fillMaxSize().zIndex(20f), contentAlignment = Alignment.TopStart) {
+        // Scrim: tap outside dismisses. Shown immediately so interaction is blocked while we wait
+        // for the anchor.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) { detectTapGestures { ItemInfoPopupState.close() } }
+        )
+        // Only render the card once the triggering row's onGloballyPositioned has reported its
+        // anchor. On open, anchor is reset to null; rendering with a null anchor would flash the
+        // card centred for a frame before it jumps to the item — so wait for the real anchor.
+        ItemInfoPopupState.anchor?.let { a ->
+            ItemInfoFloatingPopup(anchor = a, enchant = ItemInfoPopupState.enchant)
+        }
+    }
+}
+
+/**
+ * Positions the info card next to [anchor] and flips to stay on-screen: to the item's right when it
+ * fits, else its left; vertically aligned to the row top, clamped to the screen. The side the popup
+ * lands on is highlighted with a bright border edge (in lieu of a drawn arrow).
+ */
+@Composable
+private fun ItemInfoFloatingPopup(anchor: Rect?, enchant: ItemEnchant?) {
+    val info by GameStateRepository.itemInfo.collectAsState()
+    val density = LocalDensity.current
+    val cfg = LocalConfiguration.current
+    val screenW = with(density) { cfg.screenWidthDp.dp.toPx() }
+    val screenH = with(density) { cfg.screenHeightDp.dp.toPx() }
+    val marginPx = with(density) { 8.dp.toPx() }
+    val widthPx = with(density) { INFO_POPUP_WIDTH.dp.toPx() }
+    var popupSize by remember { mutableStateOf(IntSize.Zero) }
+    val hPx = popupSize.height.toFloat()
+
+    val x: Float
+    val y: Float
+    val edge: PopupEdge
+    if (anchor == null) {
+        x = ((screenW - widthPx) / 2f).coerceAtLeast(marginPx)
+        y = ((screenH - hPx) / 2f).coerceAtLeast(marginPx)
+        edge = PopupEdge.TOP
+    } else {
+        val placeRight = anchor.right + widthPx + marginPx <= screenW
+        edge = if (placeRight) PopupEdge.LEFT else PopupEdge.RIGHT
+        val xRaw = if (placeRight) anchor.right + marginPx else anchor.left - widthPx - marginPx
+        x = xRaw.coerceIn(marginPx, (screenW - widthPx - marginPx).coerceAtLeast(marginPx))
+        y = anchor.top.coerceIn(marginPx, (screenH - hPx - marginPx).coerceAtLeast(marginPx))
+    }
+
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .zIndex(20f)
-            .background(Color(0xB3000000))
-            .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) },
-        contentAlignment = Alignment.Center
+            .zIndex(21f)
+            .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+            .width(INFO_POPUP_WIDTH.dp)
+            .onSizeChanged { popupSize = it }
+            // Swallow taps so tapping the card doesn't reach the dismiss scrim underneath.
+            .pointerInput(Unit) { detectTapGestures {} }
     ) {
+        ItemInfoPopupCard(info = info, enchant = enchant, edge = edge)
+    }
+}
+
+private const val INFO_POPUP_WIDTH = 220
+
+@Composable
+private fun ItemInfoPopupCard(info: ItemInfo?, enchant: ItemEnchant?, edge: PopupEdge) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(StonePanel.copy(alpha = 0.97f))
+            .border(2.dp, BronzeDark, RoundedCornerShape(3.dp))
+            .wrapContentHeight()
+    ) {
+        // The Column drives the card height (wraps its content, scrolls if it exceeds the cap).
         Column(
             modifier = Modifier
-                .width(400.dp)
-                .heightIn(max = 560.dp)
-                .mwPanel()
-                // Swallow taps inside the panel so they don't reach the scrim.
-                .pointerInput(Unit) { detectTapGestures(onTap = {}) }
-                .padding(16.dp)
+                .padding(12.dp)
+                .heightIn(max = 480.dp)
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                info.name,
-                color = BronzeLight,
-                fontSize = 16.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold
+                ItemInfoPopupState.name.ifBlank { info?.name ?: "" },
+                color = BronzeLight, fontSize = 14.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Bronze))
+            Spacer(Modifier.height(6.dp))
 
-            info.rows.forEachIndexed { i, (label, value) ->
-                if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(label, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
-                    Text(
-                        value,
-                        color = Bone,
-                        fontSize = 12.sp,
-                        fontFamily = MwData,
-                        modifier = Modifier.padding(start = 12.dp)
-                    )
-                }
-            }
-
-            if (info.effects.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "EFFECTS",
-                    color = BronzeLight,
-                    fontSize = 11.sp,
-                    fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp
-                )
-                Spacer(Modifier.height(4.dp))
-                info.effects.forEach { eff ->
+            if (info == null) {
+                Text("…", color = BoneDim, fontSize = 11.sp, fontFamily = MwData)
+            } else {
+                info.rows.forEach { (label, value) ->
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (eff.harmful) Color(0xFFC75C5C) else Color(0xFF7FBF7F))
-                        )
+                        Text(label, color = BoneDim, fontSize = 11.sp, fontFamily = MwBody)
                         Text(
-                            eff.text,
-                            color = Bone,
-                            fontSize = 12.sp,
-                            fontFamily = MwBody,
-                            modifier = Modifier.padding(start = 8.dp)
+                            value, color = Bone, fontSize = 11.sp, fontFamily = MwData,
+                            modifier = Modifier.padding(start = 10.dp)
                         )
                     }
                 }
+                // Intrinsic potion/ingredient alchemy effects (COMPANION_INFO effects).
+                if (info.effects.isNotEmpty()) {
+                    InfoSectionHeader("EFFECTS")
+                    info.effects.forEach { eff -> InfoEffectRow(eff.text, eff.harmful, null) }
+                }
+            }
+
+            // Enchantment section (from the local item — renders instantly, with effect icons).
+            if (enchant != null && enchant.effects.isNotEmpty()) {
+                InfoSectionHeader("ENCHANTMENT")
+                if (enchant.type.isNotBlank()) {
+                    Text(enchant.type, color = BronzeLight, fontSize = 10.sp, fontFamily = MwBody)
+                    Spacer(Modifier.height(2.dp))
+                }
+                enchant.effects.forEach { e ->
+                    val parts = buildString {
+                        if (e.mag.isNotBlank() && e.mag != "0") append(" ${e.mag} pts")
+                        if (e.durationSecs > 0) append(" for ${e.durationSecs}s")
+                        if (e.area > 0) append(" in ${e.area}ft")
+                    }
+                    InfoEffectRow(e.name + parts, e.harmful, e.icon)
+                }
             }
         }
+
+        // Bright edge strip on the side facing the source item (border-highlight instead of an
+        // arrow). matchParentSize() makes this overlay MATCH the Column-driven card height rather
+        // than inflate it — a fillMaxHeight() direct child would have stretched the card to the
+        // incoming (near-screen) height constraint, leaving empty space below the content.
+        Box(Modifier.matchParentSize()) {
+            val strip = when (edge) {
+                PopupEdge.LEFT -> Modifier.align(Alignment.CenterStart).fillMaxHeight().width(3.dp)
+                PopupEdge.RIGHT -> Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(3.dp)
+                PopupEdge.TOP -> Modifier.align(Alignment.TopCenter).fillMaxWidth().height(3.dp)
+                PopupEdge.BOTTOM -> Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(3.dp)
+            }
+            Box(strip.background(BronzeLight))
+        }
+    }
+}
+
+@Composable
+private fun InfoSectionHeader(text: String) {
+    Spacer(Modifier.height(8.dp))
+    Text(
+        text, color = BronzeLight, fontSize = 10.sp, fontFamily = MwDisplay,
+        fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp
+    )
+    Spacer(Modifier.height(3.dp))
+}
+
+@Composable
+private fun InfoEffectRow(text: String, harmful: Boolean, iconPath: String?) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (!iconPath.isNullOrBlank()) {
+            val bmp = rememberItemIcon(iconPath)
+            Box(
+                Modifier.size(18.dp).clip(RoundedCornerShape(2.dp)).background(SlotBg)
+            ) { if (bmp != null) Image(bmp, null, modifier = Modifier.fillMaxSize()) }
+            Spacer(Modifier.width(6.dp))
+        } else {
+            Box(Modifier.size(8.dp).clip(CircleShape)
+                .background(if (harmful) Color(0xFFC75C5C) else Color(0xFF7FBF7F)))
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(text, color = Bone, fontSize = 11.sp, fontFamily = MwBody)
     }
 }
 
@@ -1880,7 +2050,16 @@ private fun rememberLootNavFocus(
                 }
                 is NavEvent.Action1 -> onTakeAll()
                 is NavEvent.R1 -> if (corpse) onDispose()
+                is NavEvent.Info -> (if (side == 0) pSorted else cSorted).getOrNull(index)?.let {
+                    ItemInfoPopupState.toggle(it.id, it.displayName(), it.enchant, onTop = rows > 1)
+                }
                 else -> Unit // Slider* / R2 handled above; nothing else used here
+            }
+            // While the info popup is open, D-pad focus moves follow to the newly focused item.
+            if (ItemInfoPopupState.isOpen) {
+                (if (side == 0) pSorted else cSorted).getOrNull(index)?.let {
+                    ItemInfoPopupState.follow(it.id, it.displayName(), it.enchant, onTop = rows > 1)
+                }
             }
         }
     }
@@ -1906,6 +2085,10 @@ private fun LootingOverlay(
     playerEquipment: Map<String, String>,
     location: ScreenLocation
 ) {
+    // Dismiss the item info popup when the looting/pickpocket session ends (Take All/Dispose/Close/B)
+    // so it doesn't linger. Composed in BOTH bottom and SPLIT modes, so this also covers the top-grid
+    // popup (both this and LootingTopOverlay leave composition on session-null).
+    DisposableEffect(Unit) { onDispose { ItemInfoPopupState.close() } }
     // SPLIT: the item grids live on the TOP screen (LootingTopOverlay, hosted by
     // EngineActivity); the bottom screen shows ONLY the terminal controls. Take All /
     // Dispose / Close all END the session, so the bottom controls never need the
@@ -2188,7 +2371,7 @@ private fun LootRow(
         }
     }
 
-    Box {
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
         Column {
             Row(
                 modifier = Modifier
@@ -2310,7 +2493,7 @@ private fun LootRow(
             }
             DropdownMenuItem(
                 text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); ItemInfoPopupState.open(item.id, item.name, item.enchant) },
                 colors = menuItemColors
             )
             // Favourite (player side only).
@@ -2559,6 +2742,12 @@ fun LootingTopOverlay() {
                 onCancel = { qtyReq = null }
             )
         }
+
+        // Item info popup on the TOP screen (SPLIT looting): anchored to the grid cell in THIS
+        // window's coords. Only when the trigger came from here (onTopScreen).
+        if (ItemInfoPopupState.isOpen && ItemInfoPopupState.onTopScreen) {
+            ItemInfoPopupHost()
+        }
     }
 }
 
@@ -2649,7 +2838,7 @@ private fun LootGridCell(
     val confirmLabel = if (isPlayerSide) "Put" else "Take"
     fun transfer() { onRequestQty(label, item.count, confirmLabel) { n -> onTransfer(item, n) } }
 
-    Box {
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
@@ -2737,7 +2926,7 @@ private fun LootGridCell(
             )
             DropdownMenuItem(
                 text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); ItemInfoPopupState.open(item.id, item.name, item.enchant, onTop = true) },
                 colors = menuItemColors
             )
             if (isPlayerSide) {
@@ -3720,9 +3909,18 @@ private fun rememberBarterNavFocus(
                 is NavEvent.R2 -> { side = 1; index = 0 }
                 is NavEvent.Confirm -> list(side).getOrNull(index)?.let { toggleState.value(it) }
                 is NavEvent.Action1 -> offerState.value()
+                is NavEvent.Info -> list(side).getOrNull(index)?.let {
+                    ItemInfoPopupState.toggle(it.id, it.displayName(), it.enchant, onTop = r > 1)
+                }
                 is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) sliderState.value(-1)
                 is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) sliderState.value(1)
                 else -> Unit // Scroll*/R1 handled elsewhere
+            }
+            // While the info popup is open, D-pad focus moves follow to the newly focused item.
+            if (ItemInfoPopupState.isOpen) {
+                list(side).getOrNull(index)?.let {
+                    ItemInfoPopupState.follow(it.id, it.displayName(), it.enchant, onTop = r > 1)
+                }
             }
         }
     }
@@ -3744,6 +3942,10 @@ private fun rememberBarterNavFocus(
  */
 @Composable
 private fun BarterOverlay(session: BarterSession, disposition: Int, location: ScreenLocation) {
+    // Dismiss the item info popup when the barter session ends (Offer/Cancel/B/close) so it doesn't
+    // linger over the game. Composed in BOTH bottom and SPLIT modes, so this covers the top-grid
+    // popup too (both this and BarterTopOverlay leave composition on session-null).
+    DisposableEffect(Unit) { onDispose { ItemInfoPopupState.close() } }
     // SPLIT: the item grids live on the TOP screen (BarterTopOverlay, hosted by EngineActivity);
     // the bottom screen shows ONLY the gold bar + Offer/Cancel. Item selection (borrow/return) is
     // sent to the engine from the top grid; the bottom controls read the engine's authoritative
@@ -4366,6 +4568,12 @@ fun BarterTopOverlay() {
                 )
             }
         }
+
+        // Item info popup on the TOP screen (SPLIT barter): anchored to the grid cell in THIS
+        // window's coords. Only when the trigger came from here (onTopScreen).
+        if (ItemInfoPopupState.isOpen && ItemInfoPopupState.onTopScreen) {
+            ItemInfoPopupHost()
+        }
     }
 }
 
@@ -4463,7 +4671,7 @@ private fun BarterGridCell(
     val selected = item.isSelected
     val label = item.displayName()
 
-    Box {
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
@@ -4573,7 +4781,7 @@ private fun BarterGridCell(
             )
             DropdownMenuItem(
                 text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); ItemInfoPopupState.open(item.id, item.name, item.enchant, onTop = true) },
                 colors = menuItemColors
             )
         }
@@ -4667,7 +4875,7 @@ private fun BarterRow(
     }
     val selected = item.isSelected
     val label = item.displayName()
-    Box {
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
         Column {
             Row(
                 modifier = Modifier
@@ -4776,7 +4984,7 @@ private fun BarterRow(
             )
             DropdownMenuItem(
                 text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); ItemInfoPopupState.open(item.id, item.name, item.enchant) },
                 colors = menuItemColors
             )
         }
@@ -6108,7 +6316,7 @@ private fun ItemRow(
     val favs by FavouritesRepository.state.collectAsState()
     val isFav = favs.gear.any { it?.id == item.id }
 
-    Box {
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
         Column {
             Row(
                 modifier = Modifier
@@ -6303,7 +6511,7 @@ private fun ItemRow(
             }
             DropdownMenuItem(
                 text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.requestItemInfo(item.id) },
+                onClick = { menuOpen = false; DropdownState.closeAll(); ItemInfoPopupState.open(item.id, item.name, item.enchant) },
                 colors = menuItemColors
             )
             DropdownMenuItem(
@@ -6468,7 +6676,7 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
-                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
+                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -6484,7 +6692,7 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
-                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
+                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -6500,7 +6708,7 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = false,
-                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
+                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -6518,7 +6726,7 @@ private fun MagicPanel(state: GameState) {
                                 selected = spell.id == sel,
                                 charge = spell.charge,
                                 maxCharge = spell.maxCharge,
-                                onInfo = { CompanionActions.requestSpellInfo(spell.id) },
+                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -6549,7 +6757,7 @@ private fun SpellRow(
     }
     val favs by FavouritesRepository.state.collectAsState()
     val isFav = favs.magic.any { it?.id == spellId }
-    Box {
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(spellId, it.boundsInRoot()) }) {
         Column {
             Row(
                 modifier = Modifier

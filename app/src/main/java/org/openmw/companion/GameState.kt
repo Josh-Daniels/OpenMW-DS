@@ -25,7 +25,23 @@ data class InventoryItem(
     /** Pre-formatted stat label (e.g. "SLASH", "ARMOR"); "" = no stat. */
     val statKey: String = "",
     /** Condition ratio 0..1; null = item has no durability (no cond bar). */
-    val cond: Float? = null
+    val cond: Float? = null,
+    /** Enchantment (id + type label + effects) for the info popup; null = not enchanted. */
+    val enchant: ItemEnchant? = null
+)
+
+/** One enchantment effect line for the item info popup (from the streamed item exports). */
+data class ItemEnchantEffect(
+    val id: String = "", val name: String = "", val mag: String = "",
+    val durationSecs: Int = 0, val area: Int = 0,
+    val icon: String = "", val harmful: Boolean = false
+)
+
+/** An item's enchantment: type label (Cast Once / Cast on Strike / Cast on Use / Constant Effect)
+ *  + its effect list. Carried on InventoryItem/BarterItem so the info popup renders it instantly. */
+data class ItemEnchant(
+    val id: String = "", val type: String = "",
+    val effects: List<ItemEnchantEffect> = emptyList()
 )
 
 data class SpellEntry(
@@ -133,7 +149,9 @@ data class BarterItem(
      *  vendor items are always true). Player items with sellable=false can't be offered. */
     val sellable: Boolean = true,
     val isSelected: Boolean = false,
-    val selectedCount: Int = 0
+    val selectedCount: Int = 0,
+    /** Enchantment (id + type label + effects) for the info popup; null = not enchanted. */
+    val enchant: ItemEnchant? = null
 )
 
 /**
@@ -386,6 +404,7 @@ sealed class NavEvent {
     data class ScrollLeft(override val seq: Long) : NavEvent()    // right stick left (horizontal grids)
     data class ScrollRight(override val seq: Long) : NavEvent()   // right stick right (horizontal grids)
     data class Cancel(override val seq: Long) : NavEvent()        // B while a quantity selector is open
+    data class Info(override val seq: Long) : NavEvent()          // R3 (right stick click) — item info popup
 }
 
 data class GameState(

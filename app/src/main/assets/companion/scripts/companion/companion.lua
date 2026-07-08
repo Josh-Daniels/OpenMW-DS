@@ -687,6 +687,62 @@ local function itemStats(item, cat)
     return "", "", nil
 end
 
+-- Enchantment JSON fragment for the item info popup, appended to itemJson (and mirrored by the
+-- native barter export). Shape: ,"ench":{"id","type","effects":[{"id","n","mag","dur","area",
+-- "ic","h"}...]}. Returns "" when the item is not enchanted (so non-enchanted item lines stay
+-- byte-identical → backward compatible). Self-contained (only earlier helpers) because itemJson
+-- is defined before formatEffect/rangeName/capitalize.
+local ENCH_TYPE_LABELS = nil
+local function enchantJson(item)
+    local enchId = itemEnchantId(item)
+    if not enchId then return "" end
+    local out = ""
+    pcall(function()
+        local ench = core.magic.enchantments.records[enchId]
+        if not ench then return end
+        if ENCH_TYPE_LABELS == nil then
+            local ET = core.magic.ENCHANTMENT_TYPE
+            ENCH_TYPE_LABELS = {
+                [ET.CastOnce] = "Cast Once", [ET.CastOnStrike] = "Cast on Strike",
+                [ET.CastOnUse] = "Cast on Use", [ET.ConstantEffect] = "Constant Effect",
+            }
+        end
+        local typeLabel = ENCH_TYPE_LABELS[ench.type] or "Cast Once"
+        local effs = {}
+        for _, eff in ipairs(ench.effects or {}) do
+            local nm = magicEffectName(eff) or "?"
+            pcall(function()
+                if eff.affectedAttribute then
+                    nm = nm .. " " .. (tostring(eff.affectedAttribute):gsub("^%l", string.upper))
+                end
+                if eff.affectedSkill then
+                    nm = nm .. " " .. (tostring(eff.affectedSkill):gsub("^%l", string.upper))
+                end
+            end)
+            local mn = math.floor((eff.magnitudeMin or 0) + 0.5)
+            local mx = math.floor((eff.magnitudeMax or 0) + 0.5)
+            local mag = (mn == mx) and tostring(mn) or string.format("%d-%d", mn, mx)
+            local dur = math.floor((eff.duration or 0) + 0.5)
+            local area = math.floor((eff.area or 0) + 0.5)
+            local ic, harmful, effId = "", false, ""
+            pcall(function()
+                effId = tostring(eff.id or "")
+                if eff.effect then
+                    ic = eff.effect.icon or ""
+                    if eff.effect.harmful then harmful = true end
+                end
+            end)
+            table.insert(effs, string.format(
+                '{"id":"%s","n":"%s","mag":"%s","dur":%d,"area":%d,"ic":"%s","h":%s}',
+                jsonEscape(effId), jsonEscape(nm), jsonEscape(mag), dur, area,
+                jsonEscape(ic), harmful and "true" or "false"))
+        end
+        out = string.format(',"ench":{"id":"%s","type":"%s","effects":[%s]}',
+            jsonEscape(tostring(enchId)), jsonEscape(typeLabel), table.concat(effs, ','))
+    end)
+    return out
+end
+
 -- Streamed as START / ITEM* / END (one item per line) rather than one giant
 -- JSON array line. The engine's stdout sink flushes in 4096-byte chunks and
 -- only the first chunk keeps its COMPANION_ prefix, so a single long inventory
@@ -703,10 +759,10 @@ local function itemJson(item)
     local condField = ""
     if cond ~= nil then condField = string.format(',"cond":%.3f', cond) end
     return string.format(
-        '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","statVal":"%s","statKey":"%s"%s}',
+        '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","statVal":"%s","statKey":"%s"%s%s}',
         jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
         item.count, cat, jsonEscape(icon),
-        jsonEscape(statVal), jsonEscape(statKey), condField)
+        jsonEscape(statVal), jsonEscape(statKey), condField, enchantJson(item))
 end
 
 local function exportInventory()
@@ -1318,6 +1374,58 @@ local function appendEnchantEffects(enchantId, out)
     end)
 end
 
+-- Ingredient alchemy effects with vanilla "reveal" gating: the i-th effect is only shown once
+-- Alchemy skill >= fWortChanceValue * i, otherwise it shows as "Unknown" (matches the tooltip).
+local function appendIngredientEffects(rec, out)
+    local alchemy = 0
+    pcall(function() alchemy = types.NPC.stats.skills.alchemy(self).modified end)
+    local wort = 15
+    pcall(function() wort = core.getGMST("fWortChanceValue") end)
+    pcall(function()
+        local i = 0
+        for _, eff in ipairs(rec.effects or {}) do
+            i = i + 1
+            if alchemy >= wort * i then
+                local text, harmful = formatEffect(eff, false)
+                table.insert(out, string.format('{"t":"%s","h":%s}',
+                    jsonEscape(text), harmful and "true" or "false"))
+            else
+                table.insert(out, '{"t":"Unknown","h":false}')
+            end
+        end
+    end)
+end
+
+-- Readable weapon type label ("Long Blade, One-Handed" / "Marksman (Bow)" / …) from the record's
+-- weapon type enum, for the info popup's "Type" row. Mirrors the vanilla tooltip's skill + handedness.
+local WEAPON_TYPE_LABELS = nil
+local function weaponTypeStr(rec)
+    local label
+    pcall(function()
+        if WEAPON_TYPE_LABELS == nil then
+            local WT = types.Weapon.TYPE
+            WEAPON_TYPE_LABELS = {
+                [WT.ShortBladeOneHand] = "Short Blade, One-Handed",
+                [WT.LongBladeOneHand] = "Long Blade, One-Handed",
+                [WT.LongBladeTwoHand] = "Long Blade, Two-Handed",
+                [WT.BluntOneHand] = "Blunt, One-Handed",
+                [WT.BluntTwoClose] = "Blunt, Two-Handed",
+                [WT.BluntTwoWide] = "Blunt, Two-Handed",
+                [WT.SpearTwoWide] = "Spear, Two-Handed",
+                [WT.AxeOneHand] = "Axe, One-Handed",
+                [WT.AxeTwoHand] = "Axe, Two-Handed",
+                [WT.MarksmanBow] = "Marksman (Bow)",
+                [WT.MarksmanCrossbow] = "Marksman (Crossbow)",
+                [WT.MarksmanThrown] = "Thrown",
+                [WT.Arrow] = "Arrow",
+                [WT.Bolt] = "Bolt",
+            }
+        end
+        label = WEAPON_TYPE_LABELS[rec.type]
+    end)
+    return label
+end
+
 local function fmtNum(n)
     if n == nil then return nil end
     if math.floor(n) == n then return string.format("%d", n) end
@@ -1438,10 +1546,12 @@ local function exportInfo(arg)
             local cls = armorWeightClass(rec)
             if cls then weightStr = weightStr .. " (" .. cls .. ")" end
         end
-        addRow(rows, "Weight", weightStr)
-        addRow(rows, "Value", fmtNum(rec.value))
-
+        -- Type-specific stat rows FIRST (vanilla tooltip order), then Weight/Value LAST. Enchantment
+        -- is NOT emitted here — it rides the streamed item exports (itemJson "ench") and the popup
+        -- renders it from local state, so `effects` here carries only intrinsic potion/ingredient
+        -- alchemy effects (avoids showing enchant effects twice).
         if isType(types.Weapon) then
+            addRow(rows, "Type", weaponTypeStr(rec))
             addRow(rows, "Chop", string.format("%d-%d",
                 math.floor((rec.chopMinDamage or 0) + 0.5), math.floor((rec.chopMaxDamage or 0) + 0.5)))
             addRow(rows, "Slash", string.format("%d-%d",
@@ -1452,30 +1562,27 @@ local function exportInfo(arg)
             addRow(rows, "Speed", fmtNum(rec.speed))
             enchantPts()
             addRow(rows, "Condition", condStr(rec.health))
-            appendEnchantEffects(rec.enchant, effects)
         elseif isType(types.Armor) then
             addRow(rows, "Armor Rating", fmtNum(rec.baseArmor))
             enchantPts()
             addRow(rows, "Condition", condStr(rec.health))
-            appendEnchantEffects(rec.enchant, effects)
         elseif isType(types.Clothing) then
             enchantPts()
-            appendEnchantEffects(rec.enchant, effects)
         elseif isType(types.Potion) then
             appendEffectList(rec.effects, effects, false)
         elseif isType(types.Ingredient) then
-            appendEffectList(rec.effects, effects, false)
+            appendIngredientEffects(rec, effects)
         elseif isType(types.Lockpick) or isType(types.Probe) then
             addRow(rows, "Quality", fmtNum(rec.quality))
             addRow(rows, "Uses Left", condStr(rec.maxCondition))
         elseif isType(types.Book) then
-            if rec.isScroll then
-                appendEnchantEffects(rec.enchant, effects)
-            elseif rec.skill and rec.skill ~= "" then
-                addRow(rows, "Teaches", capitalize(tostring(rec.skill)))
+            if not rec.isScroll and rec.skill and rec.skill ~= "" then
+                addRow(rows, "Skill", capitalize(tostring(rec.skill)))
             end
         end
-        -- Misc and anything else: weight/value only (already added).
+        -- Weight (with armor-class suffix for armor) and Value LAST, matching the vanilla tooltip.
+        addRow(rows, "Weight", weightStr)
+        addRow(rows, "Value", fmtNum(rec.value))
     else
         print("COMPANION_DEBUG: info - unknown kind: " .. tostring(kind))
         return

@@ -25,7 +25,7 @@ diff --git a/apps/openmw/mwgui/tradewindow.cpp b/apps/openmw/mwgui/tradewindow.c
 index 93d5abb29f..4cce58ef68 100644
 --- a/apps/openmw/mwgui/tradewindow.cpp
 +++ b/apps/openmw/mwgui/tradewindow.cpp
-@@ -6,8 +6,21 @@
+@@ -6,8 +6,26 @@
  #include <MyGUI_ImageBox.h>
  #include <MyGUI_InputManager.h>
  
@@ -35,15 +35,20 @@ index 93d5abb29f..4cce58ef68 100644
 +#include <components/esm3/loadalch.hpp>
 +#include <components/esm3/loadarmo.hpp>
 +#include <components/esm3/loadclot.hpp>
++#include <components/esm3/loadench.hpp>
 +#include <components/esm3/loadingr.hpp>
 +#include <components/esm3/loadlock.hpp>
++#include <components/esm3/loadmgef.hpp>
 +#include <components/esm3/loadprob.hpp>
++#include <components/esm3/loadskil.hpp>
 +#include <components/esm3/loadweap.hpp>
++#include <components/esm/attr.hpp>
 +#include <components/misc/resourcehelpers.hpp>
  #include <components/misc/rng.hpp>
  #include <components/misc/strings/format.hpp>
 +#include <components/resource/resourcesystem.hpp>
 +#include <components/vfs/manager.hpp>
++#include "../mwmechanics/magiceffects.hpp"
  #include <components/widgets/numericeditbox.hpp>
  
  #include "../mwbase/dialoguemanager.hpp"
@@ -158,7 +163,7 @@ index 93d5abb29f..4cce58ef68 100644
      }
  
      void TradeWindow::onNameFilterChanged(MyGUI::EditBox* sender)
-@@ -658,6 +754,324 @@ namespace MWGui
+@@ -658,6 +754,379 @@ namespace MWGui
          return merchantGold;
      }
  
@@ -201,6 +206,61 @@ index 93d5abb29f..4cce58ef68 100644
 +            const bool sellable
 +                = buying ? true : base.getClass().canSell(base, getMerchantServices());
 +
++            // Companion: enchantment (id, type label, per-effect list) for the item info popup —
++            // present only when the item is enchanted. Mirrors the Lua itemJson "ench" object so
++            // barter items render the same enchant section as inventory/container items.
++            std::string enchJson;
++            const ESM::RefId enchId = base.getClass().getEnchantment(base);
++            if (!enchId.empty())
++            {
++                const auto& estore = *MWBase::Environment::get().getESMStore();
++                const ESM::Enchantment* ench = estore.get<ESM::Enchantment>().search(enchId);
++                if (ench)
++                {
++                    const char* typeLabel;
++                    switch (ench->mData.mType)
++                    {
++                        case ESM::Enchantment::WhenStrikes:    typeLabel = "Cast on Strike";  break;
++                        case ESM::Enchantment::WhenUsed:       typeLabel = "Cast on Use";     break;
++                        case ESM::Enchantment::ConstantEffect: typeLabel = "Constant Effect"; break;
++                        default:                               typeLabel = "Cast Once";       break;
++                    }
++                    std::ostringstream e;
++                    e << ",\"ench\":{\"id\":\"" << companionJsonEscape(enchId.serializeText())
++                      << "\",\"type\":\"" << typeLabel << "\",\"effects\":[";
++                    bool firstEff = true;
++                    for (const ESM::IndexedENAMstruct& en : ench->mEffects.mList)
++                    {
++                        const ESM::ENAMstruct& ed = en.mData;
++                        const ESM::MagicEffect* mgef = estore.get<ESM::MagicEffect>().search(ed.mEffectID);
++                        if (!mgef)
++                            continue;
++                        const ESM::Attribute* attr = estore.get<ESM::Attribute>().search(ed.mAttribute);
++                        const ESM::Skill* skl = estore.get<ESM::Skill>().search(ed.mSkill);
++                        const std::string effName = MWMechanics::getMagicEffectString(*mgef, attr, skl);
++                        std::string effIcon;
++                        if (!mgef->mIcon.empty() && vfs)
++                            effIcon = Misc::ResourceHelpers::correctIconPath(
++                                VFS::Path::toNormalized(mgef->mIcon), *vfs);
++                        std::string mag = std::to_string(ed.mMagnMin);
++                        if (ed.mMagnMax != ed.mMagnMin)
++                            mag += "-" + std::to_string(ed.mMagnMax);
++                        const bool harmful = (mgef->mData.mFlags & ESM::MagicEffect::Harmful) != 0;
++                        if (!firstEff)
++                            e << ",";
++                        firstEff = false;
++                        e << "{\"id\":\"" << companionJsonEscape(ed.mEffectID.serializeText())
++                          << "\",\"n\":\"" << companionJsonEscape(effName)
++                          << "\",\"mag\":\"" << mag << "\",\"dur\":" << ed.mDuration
++                          << ",\"area\":" << ed.mArea
++                          << ",\"ic\":\"" << companionJsonEscape(effIcon)
++                          << "\",\"h\":" << (harmful ? "true" : "false") << "}";
++                    }
++                    e << "]}";
++                    enchJson = e.str();
++                }
++            }
++
 +            std::ostringstream out;
 +            out << "COMPANION_BARTER_ITEM:{\"side\":\"" << side << "\""
 +                << ",\"id\":\"" << companionJsonEscape(refId) << "\""
@@ -211,7 +271,7 @@ index 93d5abb29f..4cce58ef68 100644
 +                << ",\"cat\":\"" << companionBarterCategory(base) << "\""
 +                << ",\"icon\":\"" << companionJsonEscape(icon) << "\""
 +                << ",\"sellable\":" << (sellable ? "true" : "false")
-+                << ",\"worn\":" << (worn ? "true" : "false") << "}";
++                << ",\"worn\":" << (worn ? "true" : "false") << enchJson << "}";
 +            Log(Debug::Info) << out.str();
 +        }
 +    }

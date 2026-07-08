@@ -175,6 +175,7 @@ object LogParser {
     const val P_NAV_SCROLL_LEFT = "COMPANION_NAV_SCROLL_LEFT:"   // right stick left (horizontal grids)
     const val P_NAV_SCROLL_RIGHT = "COMPANION_NAV_SCROLL_RIGHT:" // right stick right (horizontal grids)
     const val P_NAV_CANCEL = "COMPANION_NAV_CANCEL:"             // B while a quantity selector is open
+    const val P_NAV_INFO = "COMPANION_NAV_INFO:"                 // R3 (right stick click) — item info popup
 
     /**
      * Maps a COMPANION_NAV_* line to a factory that builds the [NavEvent] once the repo stamps it
@@ -187,6 +188,7 @@ object LogParser {
         line.contains(P_NAV_SCROLL_LEFT) -> { seq -> NavEvent.ScrollLeft(seq) }
         line.contains(P_NAV_SCROLL_RIGHT) -> { seq -> NavEvent.ScrollRight(seq) }
         line.contains(P_NAV_CANCEL) -> { seq -> NavEvent.Cancel(seq) }
+        line.contains(P_NAV_INFO) -> { seq -> NavEvent.Info(seq) }
         line.contains(P_NAV_SLIDER_LEFT) -> { seq -> NavEvent.SliderLeft(seq) }
         line.contains(P_NAV_SLIDER_RIGHT) -> { seq -> NavEvent.SliderRight(seq) }
         line.contains(P_NAV_LEFT) -> { seq -> NavEvent.Left(seq) }
@@ -306,6 +308,29 @@ object LogParser {
         null
     }
 
+    /** Optional enchantment object ("ench") shared by inventory/container/barter item payloads.
+     *  Null when absent (non-enchanted item, or older engine). Backs the info popup's enchant section. */
+    private fun parseEnchant(parent: JSONObject): ItemEnchant? {
+        val e = parent.optJSONObject("ench") ?: return null
+        val effects = mutableListOf<ItemEnchantEffect>()
+        val arr = e.optJSONArray("effects")
+        if (arr != null) for (i in 0 until arr.length()) {
+            val eo = arr.optJSONObject(i) ?: continue
+            effects.add(
+                ItemEnchantEffect(
+                    id = eo.optString("id", ""),
+                    name = eo.optString("n", ""),
+                    mag = eo.optString("mag", ""),
+                    durationSecs = eo.optInt("dur", 0),
+                    area = eo.optInt("area", 0),
+                    icon = eo.optString("ic", ""),
+                    harmful = eo.optBoolean("h", false)
+                )
+            )
+        }
+        return ItemEnchant(id = e.optString("id", ""), type = e.optString("type", ""), effects = effects)
+    }
+
     /** Parses a single COMPANION_INVENTORY_ITEM payload. Null if malformed. */
     fun parseInventoryItem(json: String): InventoryItem? = try {
         val o = JSONObject(json)
@@ -318,7 +343,8 @@ object LogParser {
             icon = o.optString("icon", ""),
             statVal = o.optString("statVal", ""),
             statKey = o.optString("statKey", ""),
-            cond = if (o.has("cond")) o.optDouble("cond", 1.0).toFloat() else null
+            cond = if (o.has("cond")) o.optDouble("cond", 1.0).toFloat() else null,
+            enchant = parseEnchant(o)
         )
     } catch (e: Exception) {
         null
@@ -363,7 +389,8 @@ object LogParser {
             side = side,
             worn = o.optBoolean("worn", false),
             // Absent (older engine) → default true (unrestricted).
-            sellable = o.optBoolean("sellable", true)
+            sellable = o.optBoolean("sellable", true),
+            enchant = parseEnchant(o)
         )
     } catch (e: Exception) {
         null
