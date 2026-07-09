@@ -17,6 +17,8 @@ import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
 import org.openmw.companion.LootingTopOverlay
+import org.openmw.companion.PersuasionLocation
+import org.openmw.companion.PersuasionTopOverlay
 import org.openmw.companion.PlayerCombatTopOverlay
 import org.openmw.companion.ScreenLocation
 import org.openmw.companion.TargetHealthLocation
@@ -147,6 +149,10 @@ class EngineActivity : SDLActivity() {
     // element is routed to the top screen (the split-conversation mode).
     private var conversationTopView: View? = null
 
+    // INTERACTIVE persuasion popup on the TOP screen (this activity's own window / Display 0), shown
+    // while the persuasion popup is open AND the Persuasion Screen Layout location == TOP.
+    private var persuasionTopView: View? = null
+
     // Read-only combat overlays on the TOP screen (this activity's own window / Display 0), shown
     // while a combat target exists. Target health (top-centre) is gated on the "Target health"
     // Screen Layout option == TOP; player vitals (top-left) on the "Player status in combat" == On.
@@ -206,6 +212,7 @@ class EngineActivity : SDLActivity() {
 
         hidePauseOverlay()
         hideConversationTopOverlay()
+        hidePersuasionTopOverlay()
         hideCombatTargetTopOverlay()
         hidePlayerCombatTopOverlay()
         hideLootingTopOverlay()
@@ -1042,6 +1049,22 @@ class EngineActivity : SDLActivity() {
             }
         }
 
+        // Top-screen INTERACTIVE persuasion popup: shown while the persuasion popup is open AND the
+        // Persuasion location is TOP AND the Persuasion element is DS. The BOTTOM location is hosted
+        // in CompanionScreen instead. Reset paths on the repo flow (Cancel / conversation-close / NPC
+        // change) tear the window down; the shared flow drives both host locations symmetrically.
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.persuasionVisible,
+                UiPreferences.persuasionLocationFlow(),
+                UiPreferences.gameUiModeFlow("game_ui_persuasion"),
+            ) { visible, loc, mode ->
+                visible && loc == PersuasionLocation.TOP && mode == GameUiMode.DS
+            }.distinctUntilChanged().collect { show ->
+                if (show) showPersuasionTopOverlay() else hidePersuasionTopOverlay()
+            }
+        }
+
         // Top-screen INTERACTIVE barter grids: shown while a barter session is active AND Bartering
         // is routed to SPLIT AND the Bartering element is DS. The bottom screen shows only the gold
         // bar + Offer/Cancel (BarterControlsOnly).
@@ -1253,6 +1276,17 @@ class EngineActivity : SDLActivity() {
         val overlay = lootingTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         lootingTopView = null
+    }
+
+    private fun showPersuasionTopOverlay() = showInteractiveTopScreenOverlay(
+        alreadyShown = { persuasionTopView != null },
+        onAdded = { persuasionTopView = it },
+    ) { PersuasionTopOverlay() }
+
+    private fun hidePersuasionTopOverlay() {
+        val overlay = persuasionTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        persuasionTopView = null
     }
 
     private fun showBarterTopOverlay() = showInteractiveTopScreenOverlay(

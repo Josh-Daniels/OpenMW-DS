@@ -635,11 +635,6 @@ fun CompanionScreen() {
                 dialogueServices.isNotEmpty() || dialogueHistory.isNotEmpty() ||
                 dialogueChoices.isNotEmpty())
         ) {
-            // Player gold for the persuasion popup. Prefer the live COMPANION_DIALOGUE_GOLD
-            // value (emitted from updateDisposition, so it updates after a bribe); fall back
-            // to the inventory gold_001 count until the first gold line arrives.
-            val playerGold = if (dialogueGold >= 0) dialogueGold
-                else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
             // Bottom-screen conversation UI depends on where the conversation is routed:
             // - BOTTOM: the classic full two-column overlay here.
             // - SPLIT: history is on the top screen; the bottom shows ONLY the controls.
@@ -651,8 +646,35 @@ fun CompanionScreen() {
             val persuadeAvailable = dialoguePersuadeAvailable && persuasionDs == GameUiMode.DS
             DialogueTopicsOverlay(
                 dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices,
-                dialogueChoices, dialogueDisposition, persuadeAvailable, playerGold,
+                dialogueChoices, dialogueDisposition, persuadeAvailable,
                 location = conversationLocation
+            )
+        }
+
+        // Persuasion popup — BOTTOM location. Hosted at the CompanionScreen root (independent of the
+        // conversation overlay above, so it works even when the conversation is routed to the top
+        // screen). Open-state is the shared GameStateRepository.persuasionVisible flow (set by the
+        // Persuade row, reset on Cancel / conversation-close / NPC-change). Gated on the persuasion
+        // element being DS. The TOP location is a separate top-screen panel window (EngineActivity).
+        // Renders at PersuasionPopup's own zIndex(30f) — above the dialogue (15f) / service overlays.
+        val persuasionVisible by GameStateRepository.persuasionVisible.collectAsState()
+        val persuasionLocation by UiPreferences.persuasionLocationFlow().collectAsState()
+        if (persuasionVisible && persuasionLocation == PersuasionLocation.BOTTOM &&
+            persuasionDs == GameUiMode.DS
+        ) {
+            // Prefer the live COMPANION_DIALOGUE_GOLD value (updates after a bribe); fall back to the
+            // inventory gold_001 count until the first gold line arrives.
+            val persuasionGold = if (dialogueGold >= 0) dialogueGold
+                else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+            // Band-sized only when the conversation controls are the SPLIT bottom band, matching them.
+            val conversationLocation by UiPreferences.conversationLocationFlow().collectAsState()
+            PersuasionPopup(
+                gold = persuasionGold,
+                bandSized = conversationLocation == ConversationLocation.SPLIT,
+                onPersuade = { type ->
+                    CompanionActions.persuade(type); GameStateRepository.setPersuasionVisible(false)
+                },
+                onCancel = { GameStateRepository.setPersuasionVisible(false) }
             )
         }
 
@@ -765,14 +787,12 @@ private fun DialogueTopicsOverlay(
     choices: List<DialogueChoice>,
     disposition: Int,
     persuadeAvailable: Boolean,
-    playerGold: Int,
     location: ConversationLocation
 ) {
-    // Persuasion popup visibility for the SPLIT controls-only layout below (the BOTTOM full
-    // layout manages its own inside DialogueConversationOverlay). Keyed on npcName so
-    // switching NPCs mid-session closes any open popup; it also disappears when the whole
-    // overlay leaves the composition on COMPANION_DIALOGUE_CLOSED.
-    var showPersuasion by remember(npcName) { mutableStateOf(false) }
+    // Persuasion popup open-state is a shared repo flow now (the popup is hosted independently by
+    // its own Screen Layout location — bottom root or top window — so it's not composed here).
+    // While it's open the topic/service list is dimmed + inert, same as when a choice question is up.
+    val persuasionVisible by GameStateRepository.persuasionVisible.collectAsState()
 
     // Non-interactive dark scrim (NOT a Dialog — that crashes on the Presentation display).
     // NO tap-away dismiss; the empty detectTapGestures swallows taps so they don't fall
@@ -811,12 +831,13 @@ private fun DialogueTopicsOverlay(
                         DialogueRightColumn(
                             topics = topics, services = services, disposition = disposition,
                             persuadeAvailable = persuadeAvailable,
-                            // A choice question dims the topic/service/Goodbye rows; the answers
-                            // show in the centred choices popup instead of inline (the history
-                            // it would normally sit under is on the other screen).
-                            choicesActive = choices.isNotEmpty(),
-                            interactive = choices.isEmpty(),
-                            onPersuadeTapped = { showPersuasion = true },
+                            // A choice question OR an open persuasion popup dims the topic/service/
+                            // Goodbye rows and makes them inert; a choice's answers show in the
+                            // centred choices popup (the history it would sit under is on the other
+                            // screen), and the persuasion popup is hosted by its own location.
+                            choicesActive = choices.isNotEmpty() || persuasionVisible,
+                            interactive = choices.isEmpty() && !persuasionVisible,
+                            onPersuadeTapped = { GameStateRepository.setPersuasionVisible(true) },
                             // SPLIT mode uses a larger, unified row font (topics/services on the
                             // bottom screen — matches the persuade/repair/travel popups).
                             // BOTTOM/TOP keep the default 13sp.
@@ -824,13 +845,6 @@ private fun DialogueTopicsOverlay(
                             modifier = Modifier.fillMaxSize().padding(8.dp)
                         )
                     }
-                }
-                if (showPersuasion && choices.isEmpty()) {
-                    PersuasionPopup(
-                        gold = playerGold,
-                        onPersuade = { type -> CompanionActions.persuade(type); showPersuasion = false },
-                        onCancel = { showPersuasion = false }
-                    )
                 }
                 if (choices.isNotEmpty()) {
                     DialogueChoicesPopup(choices)
@@ -845,7 +859,7 @@ private fun DialogueTopicsOverlay(
                 DialogueConversationOverlay(
                     npcName = npcName, history = history, topics = topics, services = services,
                     choices = choices, disposition = disposition,
-                    persuadeAvailable = persuadeAvailable, playerGold = playerGold,
+                    persuadeAvailable = persuadeAvailable,
                     choicesInline = false,
                     panelAlignment = Alignment.Center,
                     panelWidthFraction = null, panelHeightFraction = null,
@@ -872,14 +886,15 @@ private fun DialogueConversationOverlay(
     choices: List<DialogueChoice>,
     disposition: Int,
     persuadeAvailable: Boolean,
-    playerGold: Int,
     choicesInline: Boolean,
     panelAlignment: Alignment,
     panelWidthFraction: Float?,
     panelHeightFraction: Float?,
     panelPadding: PaddingValues
 ) {
-    var showPersuasion by remember(npcName) { mutableStateOf(false) }
+    // Persuasion popup open-state is a shared repo flow (the popup is hosted separately by its own
+    // Screen Layout location). While open, the topic/service list here is dimmed + inert.
+    val persuasionVisible by GameStateRepository.persuasionVisible.collectAsState()
 
     Box(
         modifier = Modifier.fillMaxSize().padding(panelPadding),
@@ -916,26 +931,16 @@ private fun DialogueConversationOverlay(
                 DialogueRightColumn(
                     topics = topics, services = services, disposition = disposition,
                     persuadeAvailable = persuadeAvailable,
-                    // While a choice is active, the topic/service/Goodbye rows stay visible but
-                    // greyed and non-tappable — the choices take priority over topic selection.
-                    choicesActive = choices.isNotEmpty(),
-                    interactive = choices.isEmpty(),
-                    onPersuadeTapped = { showPersuasion = true },
+                    // While a choice is active OR the persuasion popup is open, the topic/service/
+                    // Goodbye rows stay visible but greyed and non-tappable — the popup takes
+                    // priority over topic selection.
+                    choicesActive = choices.isNotEmpty() || persuasionVisible,
+                    interactive = choices.isEmpty() && !persuasionVisible,
+                    onPersuadeTapped = { GameStateRepository.setPersuasionVisible(true) },
                     modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
                 )
             }
         }
-    }
-
-    // Persuasion popup — centred over the whole overlay (its own scrim). Suppressed while a
-    // choice is active (Persuade is non-tappable then). Each action sends the command and
-    // closes the popup; Cancel / scrim-tap also dismisses.
-    if (showPersuasion && choices.isEmpty()) {
-        PersuasionPopup(
-            gold = playerGold,
-            onPersuade = { type -> CompanionActions.persuade(type); showPersuasion = false },
-            onCancel = { showPersuasion = false }
-        )
     }
 
     // Centred choices popup — only when choices don't render inline (i.e. the TOP layout).
@@ -1047,16 +1052,12 @@ fun ConversationHistoryOverlay() {
         val choices by GameStateRepository.dialogueChoices.collectAsState()
         val disposition by GameStateRepository.dialogueDisposition.collectAsState()
         val persuadeAvailable by GameStateRepository.dialoguePersuadeAvailable.collectAsState()
-        val dialogueGold by GameStateRepository.dialogueGold.collectAsState()
-        val state by GameStateRepository.state.collectAsState()
-        val playerGold = if (dialogueGold >= 0) dialogueGold
-            else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
 
         Box(Modifier.fillMaxSize()) {
             DialogueConversationOverlay(
                 npcName = npcName, history = history, topics = topics, services = services,
                 choices = choices, disposition = disposition,
-                persuadeAvailable = persuadeAvailable, playerGold = playerGold,
+                persuadeAvailable = persuadeAvailable,
                 choicesInline = false,
                 panelAlignment = Alignment.BottomCenter,
                 panelWidthFraction = 0.83f,   // ~10% wider than the SPLIT history box (0.75)
@@ -1106,6 +1107,33 @@ fun ConversationHistoryOverlay() {
                 interactive = true
             )
         }
+    }
+}
+
+/**
+ * Top-screen persuasion popup (a panel-window ComposeView added by EngineActivity on Display 0 when
+ * the persuasion Screen Layout location is [PersuasionLocation.TOP] AND the popup is open). The
+ * window's lifecycle is driven by [GameStateRepository.persuasionVisible]; this just renders the
+ * centred [PersuasionPopup] card. Fully interactive (the window omits FLAG_NOT_TOUCHABLE). Actions
+ * send the persuade command and clear the shared open-flow; Cancel clears it.
+ */
+@Composable
+fun PersuasionTopOverlay() {
+    val dialogueGold by GameStateRepository.dialogueGold.collectAsState()
+    val state by GameStateRepository.state.collectAsState()
+    // Prefer the live COMPANION_DIALOGUE_GOLD value (updates after a bribe); fall back to inventory.
+    val gold = if (dialogueGold >= 0) dialogueGold
+        else state.inventory.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
+
+    Box(Modifier.fillMaxSize()) {
+        PersuasionPopup(
+            gold = gold,
+            bandSized = false,   // centred card on the top screen (never the SPLIT bottom band)
+            onPersuade = { type ->
+                CompanionActions.persuade(type); GameStateRepository.setPersuasionVisible(false)
+            },
+            onCancel = { GameStateRepository.setPersuasionVisible(false) }
+        )
     }
 }
 
@@ -1453,14 +1481,16 @@ private const val TOPIC_SPECIFIC = 1
 private const val TOPIC_EXHAUSTED = 2
 
 /** Persuasion popup — a centred in-window overlay (NOT a Dialog; that crashes on the
- *  Presentation display) + scrim over the conversation panel. Six persuasion option rows
- *  (bribes greyed + non-tappable when the player can't afford them, live gold via
- *  dialogueGold), a gold readout and a Cancel button. Each option sends CMPDLG:persuade:
- *  <type> and closes the popup (matches native Morrowind — reopen Persuade for another
- *  attempt); Cancel / scrim-tap dismisses locally (the native modal is never shown, so
- *  there is nothing to cancel engine-side). */
+ *  Presentation display) + scrim. Six persuasion option rows (bribes greyed + non-tappable
+ *  when the player can't afford them, live gold via dialogueGold), a gold readout and a Cancel
+ *  button. Each option sends CMPDLG:persuade:<type> and closes the popup (matches native
+ *  Morrowind — reopen Persuade for another attempt); only the Cancel button dismisses (the scrim
+ *  swallows taps — no tap-outside dismiss). Hosted independently of the conversation overlay, by
+ *  the persuasion Screen Layout location (BOTTOM = CompanionScreen root; TOP = a top-screen panel
+ *  window). [bandSized] = draw as the SPLIT topics-band panel (bottom screen, SPLIT conversation)
+ *  instead of a centred 360dp card. */
 @Composable
-private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -> Unit) {
+private fun PersuasionPopup(gold: Int, bandSized: Boolean, onPersuade: (Int) -> Unit, onCancel: () -> Unit) {
     // label, persuade type (matches native companionPersuade switch), gold cost
     val options = listOf(
         Triple("Admire", 0, 0),
@@ -1470,10 +1500,9 @@ private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -
         Triple("Bribe 100 Gold", 4, 100),
         Triple("Bribe 1000 Gold", 5, 1000)
     )
-    // In SPLIT conversation mode the bottom-screen popups use a larger row font (matches the
-    // topics/services increase); BOTTOM/TOP keep the default size.
-    val splitMode = UiPreferences.conversationLocationFlow().collectAsState().value ==
-        ConversationLocation.SPLIT
+    // In the SPLIT bottom-screen band the popups use a larger row font (matches the topics/services
+    // increase); the centred card keeps the default size.
+    val splitMode = bandSized
     val optionFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
 
     // Controller: this popup is a cancelable modal. Mark it open so the dialogue-topic nav collector
@@ -1510,7 +1539,8 @@ private fun PersuasionPopup(gold: Int, onPersuade: (Int) -> Unit, onCancel: () -
                 if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
                 else Modifier
             )
-            .pointerInput(Unit) { detectTapGestures { onCancel() } },
+            // No tap-outside dismiss — the scrim swallows taps; only the Cancel button closes it.
+            .pointerInput(Unit) { detectTapGestures {} },
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -9052,6 +9082,7 @@ private fun OptionsSettingsList() {
         // SCREEN LAYOUT: which screen each element is drawn on.
         item { OptionsSectionHeader("Screen Layout") }
         item { ConversationLocationRow() }
+        item { PersuasionLocationRow() }
         item { LootingLocationRow() }
         item { BarteringLocationRow() }
         item { TargetHealthLocationRow() }
@@ -9063,6 +9094,7 @@ private fun OptionsSettingsList() {
         items(
             GAME_UI_ELEMENTS.filter {
                 it.key != "game_ui_conversation" &&
+                    it.key != "game_ui_persuasion" &&
                     it.key != "game_ui_looting" &&
                     it.key != "game_ui_bartering" &&
                     it.key != "game_ui_spellbuying" &&
@@ -9345,6 +9377,43 @@ private fun ConversationLocationRow() {
                 active = loc == ConversationLocation.TOP,
                 enabled = true
             ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.TOP) }
+        }
+    }
+}
+
+/** The Persuasion location row: a [Bottom][Top] selector (both implemented — the popup is hosted at
+ *  the CompanionScreen root for Bottom, or a top-screen panel window for Top). Gated on the
+ *  Persuasion Game UI element being DS; dimmed + inert when Vanilla (native handles persuasion). */
+@Composable
+private fun PersuasionLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.persuasionLocationFlow().collectAsState()
+    val mode by UiPreferences.gameUiModeFlow("game_ui_persuasion").collectAsState()
+    val enabled = mode == GameUiMode.DS
+
+    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
+        Text("Persuasion", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Which screen the persuasion popup opens on",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Bottom",
+                active = loc == PersuasionLocation.BOTTOM,
+                enabled = true
+            ) { if (enabled) UiPreferences.setPersuasionLocation(context, PersuasionLocation.BOTTOM) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Top",
+                active = loc == PersuasionLocation.TOP,
+                enabled = true
+            ) { if (enabled) UiPreferences.setPersuasionLocation(context, PersuasionLocation.TOP) }
         }
     }
 }

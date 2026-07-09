@@ -202,6 +202,14 @@ object GameStateRepository {
     private val _dialoguePersuadeAvailable = MutableStateFlow(false)
     val dialoguePersuadeAvailable: StateFlow<Boolean> = _dialoguePersuadeAvailable.asStateFlow()
 
+    // Whether the persuasion popup is currently open. Promoted from local composable state so the
+    // popup can be hosted independently of the conversation overlay (its own Screen Layout location,
+    // Bottom or Top). Set true when the Persuade row is tapped; reset on Cancel, on the conversation
+    // ending (COMPANION_DIALOGUE_CLOSED) and on the NPC changing.
+    private val _persuasionVisible = MutableStateFlow(false)
+    val persuasionVisible: StateFlow<Boolean> = _persuasionVisible.asStateFlow()
+    fun setPersuasionVisible(visible: Boolean) { _persuasionVisible.value = visible }
+
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
@@ -946,6 +954,7 @@ object GameStateRepository {
                 _dialogueGold.value = -1
                 _dialoguePersuadeAvailable.value = false
                 dialoguePersuadePending = false
+                _persuasionVisible.value = false
             }
             // Disposition (0-100) for the conversation disposition bar. Matched before the
             // generic dialogue branches — its token is not a substring of any other prefix.
@@ -993,6 +1002,8 @@ object GameStateRepository {
                 // Persuade availability is re-asserted by the new actor's services block.
                 _dialoguePersuadeAvailable.value = false
                 dialoguePersuadePending = false
+                // Close any open persuasion popup when switching NPCs mid-session.
+                _persuasionVisible.value = false
             }
             // Response text, streamed SAY_START / SAY_TOPIC / SAY_LINE* / SAY_END, then an
             // optional SAY_LINKS attached to the just-published entry. Buffer until END so

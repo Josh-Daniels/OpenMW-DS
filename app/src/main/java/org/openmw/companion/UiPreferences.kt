@@ -39,6 +39,14 @@ enum class ScreenLocation { BOTTOM, SPLIT, TOP }
 enum class TargetHealthLocation { BOTTOM, TOP }
 
 /**
+ * Where the persuasion popup is drawn. Decoupled from the conversation location so persuasion can
+ * live on a different screen than the conversation controls (same pattern as Repair / Travel).
+ * - [BOTTOM]: a centred in-window popup on the bottom screen (hosted at the CompanionScreen root).
+ * - [TOP]: an interactive top-screen panel window, shown while the persuasion popup is open.
+ */
+enum class PersuasionLocation { BOTTOM, TOP }
+
+/**
  * Per-element rendering mode for a "Game UI" element (a menu/overlay the companion can take
  * over from native OpenMW).
  * - [DS]: the companion draws it on the bottom screen; the native top-screen version is suppressed.
@@ -150,6 +158,8 @@ object UiPreferences {
     private const val REPAIR_LOCATION = "layout_repair"
     private const val TRAVEL_LOCATION = "layout_travel"
     private const val TARGET_HEALTH_LOCATION = "layout_target_health"
+    // Persuasion popup location (Bottom / Top — both implemented, unlike the pending service rows).
+    private const val PERSUASION_LOCATION = "layout_persuasion"
     private const val PLAYER_COMBAT = "layout_player_combat"
     private const val HUD_ON_PREFIX = "hud_on_"
     private const val ALPHA3_OVERLAY = "alpha3_overlay"
@@ -188,6 +198,7 @@ object UiPreferences {
 
     // Where the combat target's health bar is drawn (BOTTOM / TOP). Default TOP.
     private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.TOP)
+    private val persuasionLocationFlow = MutableStateFlow(PersuasionLocation.BOTTOM)
 
     // Whether the player's vitals (health/magicka/fatigue) ALSO show on the top screen during
     // combat. Default true (also shown on the top screen).
@@ -275,6 +286,9 @@ object UiPreferences {
         p.getString(TARGET_HEALTH_LOCATION, null)
             ?.let { runCatching { TargetHealthLocation.valueOf(it) }.getOrNull() }
             ?.let { targetHealthLocationFlow.value = it }
+        p.getString(PERSUASION_LOCATION, null)
+            ?.let { runCatching { PersuasionLocation.valueOf(it) }.getOrNull() }
+            ?.let { persuasionLocationFlow.value = it }
         playerCombatFlow.value = p.getBoolean(PLAYER_COMBAT, true)
         HUD_ELEMENTS.forEach { el ->
             hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, hudDefaultOn(el.key))
@@ -454,6 +468,15 @@ object UiPreferences {
     fun setTargetHealthLocation(context: Context, loc: TargetHealthLocation) {
         targetHealthLocationFlow.value = loc
         editor(context).putString(TARGET_HEALTH_LOCATION, loc.name).apply()
+    }
+
+    /** Where the persuasion popup is drawn (BOTTOM / TOP — both implemented). */
+    fun persuasionLocationFlow(): StateFlow<PersuasionLocation> = persuasionLocationFlow.asStateFlow()
+
+    /** Set the persuasion popup location and persist. */
+    fun setPersuasionLocation(context: Context, loc: PersuasionLocation) {
+        persuasionLocationFlow.value = loc
+        editor(context).putString(PERSUASION_LOCATION, loc.name).apply()
     }
 
     /** Whether player vitals also show on the top screen during combat. */
