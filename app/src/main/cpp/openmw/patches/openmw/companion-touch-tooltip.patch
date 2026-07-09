@@ -1,0 +1,35 @@
+--- a/apps/openmw/mwgui/tooltips.cpp
++++ b/apps/openmw/mwgui/tooltips.cpp
+@@ -30,6 +30,16 @@
+ 
+ #include "itemmodel.hpp"
+ 
++#ifdef __ANDROID__
++// Companion: when the on-screen "Touch input" option is active and a GUI menu is open, a finger
++// tap synthesises a mouse click that leaves the cursor resting on the tapped widget. Let tooltips
++// show in that case even though the game cursor is hidden (mirrors the controller-tooltip escape
++// hatch), so a single tap on e.g. a local-map door marker reveals its name. See companion-touch-
++// tooltip.patch + the touch-click bridge in androidmain.cpp.
++extern "C" bool companionTouchClick();
++extern "C" bool companionIsGuiMode();
++#endif
++
+ namespace MWGui
+ {
+     ToolTips::ToolTips()
+@@ -95,7 +105,14 @@
+ 
+         if (guiMode)
+         {
+-            if (!winMgr->getCursorVisible() && !winMgr->getControllerTooltipVisible())
++            if (!winMgr->getCursorVisible() && !winMgr->getControllerTooltipVisible()
++#ifdef __ANDROID__
++                // Companion touch-tooltip: keep the gate open while touch input drives the menus,
++                // so a tap (which rests the cursor on the widget) shows its tooltip despite the
++                // hidden game cursor. tooltip delay defaults to 0, so it appears immediately.
++                && !(companionTouchClick() && companionIsGuiMode())
++#endif
++            )
+                 return;
+             const MyGUI::IntPoint& mousePos = MyGUI::InputManager::getInstance().getMousePosition();
+ 
