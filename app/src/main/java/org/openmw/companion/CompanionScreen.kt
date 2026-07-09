@@ -5892,6 +5892,12 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     val selectedSpellName = selectedSpellEntry?.displayName() ?: "None"
     val spellIcon = selectedSpellEntry?.icon ?: ""
 
+    // The game's own player-direction arrow texture (same asset the native HUD minimap and world
+    // map use, via RotatingSkin). Extracted through the shared icon pipeline (raw VFS path, DXT
+    // decompressed) and drawn rotated by arrowDeg below; falls back to the drawn arrow while it
+    // loads or if extraction fails.
+    val compassBitmap = rememberItemIcon("textures/compass.dds")
+
     var showWeaponName by remember { mutableStateOf(false) }
     var showSpellName by remember { mutableStateOf(false) }
 
@@ -6005,7 +6011,24 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 }
             }
 
-            if (hasMap) drawArrow(cx, cy, size.minDimension * 0.04f, arrowDeg)
+            if (hasMap) {
+                val bmp = compassBitmap
+                if (bmp != null) {
+                    // Draw the game's compass.dds arrow centered on the player, rotated to face.
+                    // Its neutral orientation is "up" (angle 0), matching drawArrow, so arrowDeg
+                    // feeds in directly. Diameter ~matches the old drawn arrow's footprint.
+                    val side = (size.minDimension * 0.12f)
+                    rotate(degrees = arrowDeg, pivot = Offset(cx, cy)) {
+                        drawImage(
+                            image = bmp,
+                            dstOffset = IntOffset((cx - side / 2f).toInt(), (cy - side / 2f).toInt()),
+                            dstSize = IntSize(side.toInt(), side.toInt()),
+                        )
+                    }
+                } else {
+                    drawArrow(cx, cy, size.minDimension * 0.04f, arrowDeg)
+                }
+            }
         }
 
         // Cell name — bottom-centre overlay. Horizontal padding keeps it clear of
@@ -6915,28 +6938,41 @@ private fun rememberItemIcon(iconPath: String): ImageBitmap? {
     var bitmap by remember(iconPath) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(iconPath) {
         if (iconPath.isEmpty()) return@LaunchedEffect
-        bitmap = withContext(Dispatchers.IO) {
-            val cacheDir = File(context.cacheDir, "item_icons").apply { mkdirs() }
-            val cacheFile = File(cacheDir, iconPath.replace('\\', '_').replace('/', '_') + ".png")
-            if (!cacheFile.exists()) {
-                CompanionActions.exportIconToPng(iconPath, cacheFile.absolutePath)
-            }
-            if (cacheFile.exists()) {
+        val cacheDir = File(context.cacheDir, "item_icons").apply { mkdirs() }
+        val cacheFile = File(cacheDir, iconPath.replace('\\', '_').replace('/', '_') + ".png")
+        // Bounded retry: exportIconToPng needs the engine's ResourceSystem, which may not be ready
+        // yet when an icon on the default HUD tab (the compass) first composes at launch / save-load.
+        // A single early failure used to be permanent (LaunchedEffect(iconPath) never re-runs); now
+        // we retry until it succeeds. A genuinely-missing texture just exhausts the retries and the
+        // caller shows its placeholder/fallback (same end state as before, only delayed).
+        var attempt = 0
+        while (true) {
+            val decoded = withContext(Dispatchers.IO) {
+                if (!cacheFile.exists()) {
+                    CompanionActions.exportIconToPng(iconPath, cacheFile.absolutePath)
+                }
+                if (!cacheFile.exists()) return@withContext null
                 val rawBitmap = BitmapFactory.decodeFile(cacheFile.absolutePath)
                 if (rawBitmap == null) {
-                    null
-                } else {
-                    // Flip vertically: OpenGL row 0 = bottom, Android bitmap row 0
-                    // = top, so exported icon PNGs come out upside-down (same as
-                    // the minimap flip in GameStateRepository).
-                    val flipMatrix = Matrix().apply { preScale(1f, -1f) }
-                    val flipped = Bitmap.createBitmap(
-                        rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, flipMatrix, false
-                    )
-                    rawBitmap.recycle()
-                    flipped.asImageBitmap()
+                    cacheFile.delete()  // corrupt/partial write — let the next attempt re-extract
+                    return@withContext null
                 }
-            } else null
+                // Flip vertically: OpenGL row 0 = bottom, Android bitmap row 0 = top, so exported
+                // icon PNGs come out upside-down (same as the minimap flip in GameStateRepository).
+                val flipMatrix = Matrix().apply { preScale(1f, -1f) }
+                val flipped = Bitmap.createBitmap(
+                    rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, flipMatrix, false
+                )
+                rawBitmap.recycle()
+                flipped.asImageBitmap()
+            }
+            if (decoded != null) {
+                bitmap = decoded
+                return@LaunchedEffect
+            }
+            attempt++
+            if (attempt >= 12) return@LaunchedEffect
+            delay(500L)
         }
     }
     return bitmap
