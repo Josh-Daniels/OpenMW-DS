@@ -9190,8 +9190,9 @@ private fun OptionsWelcomeBlock() {
         Spacer(Modifier.height(12.dp))
         Text(
             "New here? Open Options and start with “All Vanilla” for the closest-to-original experience, " +
-                "then move individual pieces to DS as you like. These options only effect the top screen. " +
-            "I also recommend enabling touch input (Options → Input)",
+                "then move individual pieces to DS as you like.\n" +
+            "I also recommend enabling touch input (in the Input section at the bottom).\n" +
+            "This app is a work in progress, some features are missing or greyed out",
             color = BoneDim,
             fontSize = 17.sp,
             fontFamily = MwBody,
