@@ -454,8 +454,9 @@ object LogParser {
     }
 
     /**
-     * A COMPANION_SLEEP_OPEN payload: <mode>|<dateString>|<warning>. Pipe-delimited (the engine
-     * sanitizes '|' out of each field), always 3 fields (warning may be empty).
+     * A COMPANION_SLEEP_OPEN payload: <mode>|<dateString>|<warning>|<untilHealed>|<hoursToHeal>.
+     * Pipe-delimited (the engine sanitizes '|' out of each field). The last two fields back the
+     * "Rest Until Healed" button; getOrElse defaults keep an older 3-field line (no button) valid.
      */
     fun parseSleepOpen(payload: String): SleepSession? = try {
         val parts = payload.split('|')
@@ -463,7 +464,9 @@ object LogParser {
         else SleepSession(
             mode = if (parts[0].trim() == "rest") SleepMode.REST else SleepMode.WAIT,
             dateString = parts.getOrElse(1) { "" }.trim(),
-            warning = parts.getOrElse(2) { "" }.trim()
+            warning = parts.getOrElse(2) { "" }.trim(),
+            untilHealedAvailable = parts.getOrElse(3) { "0" }.trim() == "1",
+            hoursToHeal = parts.getOrElse(4) { "0" }.trim().toIntOrNull() ?: 0
         )
     } catch (e: Exception) {
         null

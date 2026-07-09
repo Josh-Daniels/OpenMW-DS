@@ -274,6 +274,12 @@ data class SleepSession(
     val mode: SleepMode,
     val dateString: String,
     val warning: String = "",
+    // "Rest Until Healed" affordance, straight from the engine (COMPANION_SLEEP_OPEN). [untilHealedAvailable]
+    // mirrors vanilla's mUntilHealedButton visibility (canRest && !full — REST mode with health OR magicka
+    // below max); [hoursToHeal] is getHoursToRest() verbatim, replayed via CMP:sleep <hours>. Both default
+    // off/0 so an older 3-field line (no version skew in practice) degrades to "no button".
+    val untilHealedAvailable: Boolean = false,
+    val hoursToHeal: Int = 0,
     val isVisible: Boolean = true
 )
 

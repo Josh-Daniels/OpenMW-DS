@@ -8,10 +8,15 @@ rest/wait is confirmed — that logic is not reimplemented.
 Outbound, emitted from WaitDialog::setPtr → companionExportOpen() (onOpen, which builds the
 date caption, runs BEFORE setPtr, and setCanRest() in setPtr has just set mSleeping + the
 rest-text caption, so both are current):
-  COMPANION_SLEEP_OPEN:<mode>|<dateString>|<warning>
-    mode       = "rest" (mSleeping) or "wait"
-    dateString = the resolved mDateTimeText caption, e.g. "24 Last Seed (Day 9) 10 a.m."
-    warning    = the mRestText caption in WAIT mode (illegal-rest / werewolf message), else ""
+  COMPANION_SLEEP_OPEN:<mode>|<dateString>|<warning>|<untilHealed>|<hoursToHeal>
+    mode        = "rest" (mSleeping) or "wait"
+    dateString  = the resolved mDateTimeText caption, e.g. "24 Last Seed (Day 9) 10 a.m."
+    warning     = the mRestText caption in WAIT mode (illegal-rest / werewolf message), else ""
+    untilHealed = 1 if the "Rest Until Healed" button is available (mUntilHealedButton->getVisible(),
+                  = vanilla's canRest && !full — REST mode with health OR magicka below max), else 0
+    hoursToHeal = getMechanicsManager()->getHoursToRest() — the SAME native calc vanilla's button
+                  uses; exported verbatim (never approximated Kotlin-side). Meaningful only when
+                  untilHealed = 1. The existing CMP:sleep <hours> command replays it (no new bridge).
   COMPANION_SLEEP_CLOSED on close.
 Guarded by getRestEnabled() (matches onOpen's own gate). The hard-reject cases (enemies
 nearby / underwater / in air without a bed) pop the mode in setPtr before this point, so no
@@ -30,7 +35,7 @@ guarded (gCompanionSleepSessionOpen), from every end path: companionStartWait (c
 picker's job is done, the top screen takes over the advance), onCancelButtonClicked (Cancel,
 native or companion), and exit() (B/Escape).
 diff --git a/apps/openmw/mwgui/waitdialog.cpp b/apps/openmw/mwgui/waitdialog.cpp
-index 3f41a78d38..fe95c54ee4 100644
+index 3f41a78d38..f42d77e631 100644
 --- a/apps/openmw/mwgui/waitdialog.cpp
 +++ b/apps/openmw/mwgui/waitdialog.cpp
 @@ -1,9 +1,13 @@
@@ -125,7 +130,7 @@ index 3f41a78d38..fe95c54ee4 100644
              clear();
              stopWaiting();
          }
-@@ -233,9 +287,56 @@ namespace MWGui
+@@ -233,9 +287,66 @@ namespace MWGui
  
      void WaitDialog::onCancelButtonClicked(MyGUI::Widget* /*sender*/)
      {
@@ -151,8 +156,18 @@ index 3f41a78d38..fe95c54ee4 100644
 +        if (!mSleeping)
 +            warning = mRestText->getCaption().asUTF8();
 +
++        // Also export the "Rest Until Healed" affordance. mUntilHealedButton->getVisible()
++        // already reflects vanilla's exact `canRest && !full` condition (setCanRest ran just
++        // before this, in setPtr), so read it directly rather than re-deriving the health/
++        // magicka comparison. getHoursToRest() is the SAME native calc vanilla's button uses
++        // (onUntilHealedButtonClicked → startWaiting(getHoursToRest())) — export it verbatim; it
++        // depends on fRestMagicMult + Stunted Magicka, not exported to Kotlin, so it must not be
++        // approximated there. mUntilHealedButton is only ever visible in REST mode (canRest).
++        const int untilHealed = mUntilHealedButton->getVisible() ? 1 : 0;
++        const int hoursToHeal = MWBase::Environment::get().getMechanicsManager()->getHoursToRest();
++
 +        Log(Debug::Info) << "COMPANION_SLEEP_OPEN:" << mode << "|" << companionSleepSanitize(dateStr) << "|"
-+                         << companionSleepSanitize(warning);
++                         << companionSleepSanitize(warning) << "|" << untilHealed << "|" << hoursToHeal;
 +        gCompanionSleepSessionOpen = true;
 +    }
 +
@@ -182,7 +197,7 @@ index 3f41a78d38..fe95c54ee4 100644
      void WaitDialog::onHourSliderChangedPosition(MyGUI::ScrollBar* sender, size_t position)
      {
          mHourText->setCaptionWithReplacing(MyGUI::utility::toString(position + 1) + " #{sRestMenu2}");
-@@ -394,3 +495,24 @@ namespace MWGui
+@@ -394,3 +505,24 @@ namespace MWGui
      }
  
  }

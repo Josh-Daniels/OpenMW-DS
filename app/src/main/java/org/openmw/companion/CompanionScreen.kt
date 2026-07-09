@@ -4372,7 +4372,8 @@ private fun RestWaitOverlay(session: SleepSession) {
     var hours by remember { mutableStateOf(1) }
 
     // Controller: D-pad left/right adjust the hours by ±1; the left stick (SliderLeft/Right, polled
-    // at ~60ms) does the same but smoothly while held; A confirms (Rest/Wait). B cancels natively.
+    // at ~60ms) does the same but smoothly while held; A confirms (Rest/Wait); X rests until healed
+    // when that button is available (mirrors vanilla's X binding). B cancels natively.
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         GameStateRepository.navEvent.collect { ev ->
@@ -4382,6 +4383,8 @@ private fun RestWaitOverlay(session: SleepSession) {
                 is NavEvent.Left, is NavEvent.SliderLeft -> hours = (hours - 1).coerceIn(1, 24)
                 is NavEvent.Right, is NavEvent.SliderRight -> hours = (hours + 1).coerceIn(1, 24)
                 is NavEvent.Confirm -> CompanionActions.sleep(hours)
+                is NavEvent.Action1 ->
+                    if (isRest && session.untilHealedAvailable) CompanionActions.sleep(session.hoursToHeal)
                 else -> Unit
             }
         }
@@ -4473,6 +4476,21 @@ private fun RestWaitOverlay(session: SleepSession) {
 
             // ---- Buttons ----
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+            // "Rest Until Healed" — REST mode only, and only when the engine reports it available
+            // (health or magicka below max). Rests for the exact native getHoursToRest() count,
+            // replayed via the existing CMP:sleep <hours>. Full-width row above Rest/Cancel so the
+            // long label has room; mirrors vanilla, which shows it only in this same condition.
+            if (isRest && session.untilHealedAvailable) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 14.dp),
+                ) {
+                    RepairButton(
+                        label = "Rest Until Healed",
+                        color = BronzeLight, enabled = true,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { CompanionActions.sleep(session.hoursToHeal) }
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(14.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
