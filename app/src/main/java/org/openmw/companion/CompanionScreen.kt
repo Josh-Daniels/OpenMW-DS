@@ -9190,9 +9190,9 @@ private fun OptionsWelcomeBlock() {
         Spacer(Modifier.height(12.dp))
         Text(
             "New here? Open Options and start with “All Vanilla” for the closest-to-original experience, " +
-                "then move individual pieces to DS as you like.\n" +
+                    "then move individual pieces to DS as you like. " +
             "I also recommend enabling touch input (in the Input section at the bottom).\n" +
-            "This app is a work in progress, some features are missing or greyed out",
+            "Want your old UI (health, minimap) back? See the Vanilla HUD section.",
             color = BoneDim,
             fontSize = 17.sp,
             fontFamily = MwBody,
@@ -9200,7 +9200,7 @@ private fun OptionsWelcomeBlock() {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "Want your old UI (health, minimap) back? See Options → Vanilla HUD.",
+            "This app is a work in progress, some features are missing or greyed out.",
             color = BoneDim,
             fontSize = 17.sp,
             fontFamily = MwBody,
@@ -9648,17 +9648,17 @@ private fun GameCursorRow() {
 
 @Composable
 private fun OptionsSectionHeader(title: String, dimmed: Boolean = false) {
-    Column(Modifier.alpha(if (dimmed) 0.4f else 1f).padding(top = 18.dp, bottom = 2.dp)) {
+    Column(Modifier.alpha(if (dimmed) 0.4f else 1f).padding(top = 20.dp, bottom = 4.dp)) {
         Text(
             title.uppercase(),
-            color = BoneDim,
-            fontSize = 11.sp,
+            color = BronzeLight,
+            fontSize = 22.sp,
             fontFamily = MwDisplay,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.5.sp,
-            modifier = Modifier.padding(bottom = 5.dp)
+            modifier = Modifier.padding(bottom = 6.dp)
         )
-        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
     }
 }
 
