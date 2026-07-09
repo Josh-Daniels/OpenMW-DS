@@ -9082,11 +9082,11 @@ private fun OptionsSettingsList() {
         // SCREEN LAYOUT: which screen each element is drawn on.
         item { OptionsSectionHeader("Screen Layout") }
         item { ConversationLocationRow() }
-        item { PersuasionLocationRow() }
         item { LootingLocationRow() }
         item { BarteringLocationRow() }
         item { TargetHealthLocationRow() }
         item { PlayerCombatRow() }
+        item { PersuasionLocationRow() }
         item { RepairLocationRow() }
         item { TravelLocationRow() }
         item { SpellBuyingLocationRow() }
