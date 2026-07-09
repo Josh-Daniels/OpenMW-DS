@@ -4,11 +4,12 @@ A second-screen for OpenMW on the AYN Thor handheld. The game plays on the top s
 stats, inventory, magic, journal, and a minimap. It handles full touch implementation.
 
 This project is a fork of **[Alpha3](#credits)**, a multi-engine Android launcher that can handle OpenMW,
-which is itself a fork of the **[openmw-android](#credits)** project, which builds on **[OpenMW](#creadits)**, the open-source Morrowind engine.
+which is itself a fork of the **[openmw-android](#credits)** project, which builds on **[OpenMW](#credits)**, the open-source Morrowind engine.
 
 If you don't have a thor or don't care about dual-screen Morrowind, you probably want **[Alpha3](#credits)** instead.
 
 ![Image of the HUD tab in game](./outputs/hud.jpeg)
+> Image much more blurry than in real life.
 
 ---
 ## Features
@@ -61,7 +62,7 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
 OpenMW-DS runs on top of Alpha3, which handles game file management and device configuration. These instructions cover
 setting up Alpha3 specifically for the AYN Thor running Morrowind.
 
-> I did not create Alpha3, these are just the steps I take to get OpenMW running [Credits](#credits--license-chain).
+> I did not create Alpha3, these are just the steps I take to get OpenMW running [Credits](#credits).
 
 ### Settings up the game files.
 
