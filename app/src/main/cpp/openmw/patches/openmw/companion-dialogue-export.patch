@@ -213,7 +213,7 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
          // Reset history
          mHistoryContents.clear();
      }
-@@ -559,6 +606,15 @@
+@@ -559,6 +606,22 @@
              return false;
          mIsCompanion = isCompanion();
          mKeywords = keyWords;
@@ -222,9 +222,16 @@ Both bridges no-op unless a dialogue is open (stale-mPtr guard).
 +        // stdout-flush split that would corrupt a single unbounded line. This is the
 +        // single choke point for topic-list changes (fires on dialogue open, after every
 +        // topic selection, and on service refresh); the early-return above skips no-ops.
++        // Each TOPIC line carries the read-status flag (0 none / 1 Specific / 2 Exhausted,
++        // the "color topic" state — see updateTopicFormat) so the bottom screen can colour
++        // topics the same way the native list does: <flag>|<name>.
 +        Log(Debug::Info) << "COMPANION_DIALOGUE_START";
 +        for (const std::string& companionTopic : mKeywords)
-+            Log(Debug::Info) << "COMPANION_DIALOGUE_TOPIC:" << companionTopic;
++        {
++            int companionTopicFlag = MWBase::Environment::get().getDialogueManager()->getTopicFlag(
++                ESM::RefId::stringRefId(companionTopic));
++            Log(Debug::Info) << "COMPANION_DIALOGUE_TOPIC:" << companionTopicFlag << "|" << companionTopic;
++        }
 +        Log(Debug::Info) << "COMPANION_DIALOGUE_END";
          updateTopicsPane();
          return true;

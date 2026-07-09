@@ -159,6 +159,12 @@ object GameStateRepository {
     // Kept separate from GameState (transient, like itemInfo / the map bitmaps).
     private val _dialogueTopics = MutableStateFlow<List<String>>(emptyList())
     val dialogueTopics: StateFlow<List<String>> = _dialogueTopics.asStateFlow()
+    // Per-topic "color topic" read-status flag (name -> 0 none / 1 Specific-unheard / 2 Exhausted-read),
+    // from the <flag>|<name> prefix on each COMPANION_DIALOGUE_TOPIC line. Lets the DS topic rows be
+    // coloured like the native list. Filled alongside dialogueTopics, cleared on CLOSED.
+    private val _dialogueTopicFlags = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val dialogueTopicFlags: StateFlow<Map<String, Int>> = _dialogueTopicFlags.asStateFlow()
+    private var dialogueFlagBuffer: MutableMap<String, Int>? = null
 
     // Service entries (Barter/Spells/Travel/...) for the current NPC, streamed
     // separately from topics (COMPANION_DIALOGUE_SERVICES_*). Empty = hide the
@@ -902,23 +908,36 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_DIALOGUE_TOPIC) -> {
                 dialogueBuffer?.let { buf ->
                     val idx = trimmed.indexOf(LogParser.P_DIALOGUE_TOPIC) + LogParser.P_DIALOGUE_TOPIC.length
-                    val topic = trimmed.substring(idx).trim()
-                    if (topic.isNotEmpty()) buf.add(topic)
+                    val payload = trimmed.substring(idx).trim()
+                    // Format is "<flag>|<name>" (flag = read-status). Tolerate an old "<name>" line
+                    // with no pipe (flag 0) so a pre-update engine still works.
+                    val sep = payload.indexOf('|')
+                    val name = if (sep >= 0) payload.substring(sep + 1) else payload
+                    val flag = if (sep >= 0) payload.substring(0, sep).toIntOrNull() ?: 0 else 0
+                    if (name.isNotEmpty()) {
+                        buf.add(name)
+                        if (flag != 0) dialogueFlagBuffer?.put(name, flag)
+                    }
                 }
             }
             trimmed.contains(LogParser.P_DIALOGUE_START) -> {
                 dialogueBuffer = mutableListOf()
+                dialogueFlagBuffer = mutableMapOf()
             }
             trimmed.contains(LogParser.P_DIALOGUE_END) -> {
                 dialogueBuffer?.let { buf -> _dialogueTopics.value = buf.toList() }
+                dialogueFlagBuffer?.let { m -> _dialogueTopicFlags.value = m.toMap() }
                 dialogueBuffer = null
+                dialogueFlagBuffer = null
             }
             trimmed.contains(LogParser.P_DIALOGUE_CLOSED) -> {
                 dialogueBuffer = null
+                dialogueFlagBuffer = null
                 dialogueServiceBuffer = null
                 sayLineBuffer = null
                 dialogueChoiceBuffer = null
                 _dialogueTopics.value = emptyList()
+                _dialogueTopicFlags.value = emptyMap()
                 _dialogueServices.value = emptyList()
                 _dialogueNpcName.value = ""
                 _dialogueHistory.value = emptyList()

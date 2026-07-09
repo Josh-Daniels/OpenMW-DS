@@ -1237,6 +1237,9 @@ private fun DialogueRightColumn(
     rowFontSize: TextUnit = 13.sp,
     modifier: Modifier = Modifier
 ) {
+    // Per-topic read-status flags (name -> 0/Specific/Exhausted) for colouring the topic rows,
+    // collected directly here (this column already reads the repo for nav/session state).
+    val topicFlags by GameStateRepository.dialogueTopicFlags.collectAsState()
     // Barter, Repair and Travel are pulled out of the services list so they can sit above the
     // divider (matched by their display strings — the sBarter/sRepair/sTravel GMST values the engine
     // exports). EVERY other service drops into the scrollable list with the topics.
@@ -1371,7 +1374,11 @@ private fun DialogueRightColumn(
                     navItem.label,
                     dimmed = choicesActive,
                     fontSize = rowFontSize,
-                    focused = index == focusIndex
+                    focused = index == focusIndex,
+                    // Only the below-divider topic rows carry the read-status colour; the service
+                    // block (Persuade/Barter/…/Beds) stays the normal colour. Service rows below the
+                    // divider aren't in the flags map either, so they resolve to 0.
+                    topicFlag = if (index >= dividerAt) topicFlags[navItem.label] ?: 0 else 0
                 ) {
                     if (interactive) navItem.onActivate()
                 }
@@ -1409,6 +1416,9 @@ private fun DialogueOptionRow(
     dimmed: Boolean = false,
     fontSize: TextUnit = 13.sp,
     focused: Boolean = false,
+    // "color topic" read-status (0 none, 1 Specific-unheard, 2 Exhausted-read) — 0 for service/choice
+    // rows. Colours a topic like the native list: BronzeLight = new/unheard, BoneDim = already read.
+    topicFlag: Int = 0,
     onClick: () -> Unit
 ) {
     Column(
@@ -1425,8 +1435,10 @@ private fun DialogueOptionRow(
         Text(
             label,
             color = when {
-                dimmed -> BoneDim
                 focused -> BoneBright
+                dimmed -> BoneDim
+                topicFlag and TOPIC_SPECIFIC != 0 -> BronzeLight   // NPC-specific info not yet heard
+                topicFlag and TOPIC_EXHAUSTED != 0 -> BoneDim       // already read (in journal)
                 else -> Bone
             },
             fontSize = fontSize, fontFamily = MwBody,
@@ -1435,6 +1447,10 @@ private fun DialogueOptionRow(
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
     }
 }
+
+// "color topic" read-status bit flags (mirror MWBase::DialogueManager::TopicType).
+private const val TOPIC_SPECIFIC = 1
+private const val TOPIC_EXHAUSTED = 2
 
 /** Persuasion popup — a centred in-window overlay (NOT a Dialog; that crashes on the
  *  Presentation display) + scrim over the conversation panel. Six persuasion option rows
