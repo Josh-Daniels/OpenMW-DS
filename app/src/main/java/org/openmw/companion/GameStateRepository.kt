@@ -10,7 +10,15 @@ import kotlinx.coroutines.flow.update
 
 /** One captured interior map segment plus the interior's mBounds min corner (world units),
  *  needed to compute the player's position within the segment for centering/zoom. */
-data class InteriorSegment(val bitmap: Bitmap, val boundsMinX: Float, val boundsMinY: Float)
+// angle = the interior local map's rotation (radians, from the cell NorthMarker); centerX/Y =
+// the rotation center in world units (mCenter). The map texture is rendered rotated by `angle`,
+// so the player dot must be rotatePoint(pos, center, angle)'d and the arrow offset by `angle`
+// to line up (mirrors LocalMap::worldToInteriorMapPosition / updatePlayer). Constant across all
+// segments of one interior. Added July 2026 to fix interior arrow/position being unrotated.
+data class InteriorSegment(
+    val bitmap: Bitmap, val boundsMinX: Float, val boundsMinY: Float,
+    val angle: Float = 0f, val centerX: Float = 0f, val centerY: Float = 0f
+)
 
 /**
  * The single source of truth for live game state. The LogReader writes to it;
@@ -416,7 +424,7 @@ object GameStateRepository {
      */
     fun onMapTexture(
         width: Int, height: Int, segX: Int, segY: Int, isInterior: Int,
-        boundsMinX: Float, boundsMinY: Float, rgba: ByteArray
+        boundsMinX: Float, boundsMinY: Float, angle: Float, centerX: Float, centerY: Float, rgba: ByteArray
     ) {
         // Convert RGBA bytes to Android ARGB_8888 pixel array.
         val pixels = IntArray(width * height)
@@ -440,7 +448,8 @@ object GameStateRepository {
                 // arrival is a reliable "start of a new capture batch" signal — unlike the
                 // COMPANION_STATS cell-name transition (see below), which runs on its own
                 // 0.1s Lua timer and isn't ordered relative to when segments actually render.
-                _interiorMapBitmaps.value = mapOf(Pair(0, 0) to InteriorSegment(bmp, boundsMinX, boundsMinY))
+                _interiorMapBitmaps.value =
+                    mapOf(Pair(0, 0) to InteriorSegment(bmp, boundsMinX, boundsMinY, angle, centerX, centerY))
                 // Also drop stale exterior segments here: state.cellIsExterior only flips
                 // once the next COMPANION_STATS line arrives (its own async 0.1s timer), so
                 // there's a window right after entering an interior where MapPanel would
@@ -449,7 +458,8 @@ object GameStateRepository {
                 _exteriorMapBitmaps.value = emptyMap()
             } else {
                 _interiorMapBitmaps.update { current ->
-                    val updated = current + (Pair(segX, segY) to InteriorSegment(bmp, boundsMinX, boundsMinY))
+                    val updated = current +
+                        (Pair(segX, segY) to InteriorSegment(bmp, boundsMinX, boundsMinY, angle, centerX, centerY))
                     if (updated.size <= MAX_INTERIOR_SEGMENTS) updated
                     else updated.entries.drop(updated.size - MAX_INTERIOR_SEGMENTS).associate { it.key to it.value }
                 }

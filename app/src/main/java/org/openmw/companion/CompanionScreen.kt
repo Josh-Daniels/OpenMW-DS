@@ -5924,7 +5924,9 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             val cx = size.width / 2f
             val cy = size.height / 2f
             val cellPx = size.minDimension / MINIMAP_CROP_FRACTION
-            val arrowDeg = state.rotZ * (180f / Math.PI.toFloat())
+            // Interior maps are rendered rotated by the cell's NorthMarker angle, so the interior
+            // branch adds that angle below; exterior maps are world-aligned (angle 0).
+            var arrowDeg = state.rotZ * (180f / Math.PI.toFloat())
 
             if (state.cellIsExterior) {
                 val cellSize = 8192f
@@ -5956,11 +5958,28 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 // Compute which segment the player is standing in and their fractional
                 // position within it, then crop/zoom exactly like the exterior branch.
                 val interiorMapWorldSize = 8192f
-                val boundsMinX = interiorMaps.values.first().boundsMinX
-                val boundsMinY = interiorMaps.values.first().boundsMinY
+                val seg0 = interiorMaps.values.first()
+                val boundsMinX = seg0.boundsMinX
+                val boundsMinY = seg0.boundsMinY
 
-                val rawX = (state.pos.x - boundsMinX) / interiorMapWorldSize
-                val rawY = (state.pos.y - boundsMinY) / interiorMapWorldSize
+                // The interior map texture is rendered ROTATED by the cell's NorthMarker angle, so
+                // the raw world position/yaw don't line up with it. Mirror the engine's
+                // LocalMap::worldToInteriorMapPosition: rotate the player position by `angle` about
+                // `center` (rotatePoint), THEN crop; and offset the arrow by the same `angle`
+                // (LocalMap::updatePlayer applies +mAngle to the direction). Without this the dot
+                // and arrow are off by a constant angle (the interior-spawn bug). angle=0 for a
+                // pre-fix export leaves the old world-aligned behaviour.
+                val cosA = cos(seg0.angle)
+                val sinA = sin(seg0.angle)
+                val rotX = cosA * (state.pos.x - seg0.centerX) - sinA * (state.pos.y - seg0.centerY) + seg0.centerX
+                val rotY = sinA * (state.pos.x - seg0.centerX) + cosA * (state.pos.y - seg0.centerY) + seg0.centerY
+                // Subtract (not add) the map angle: the vertical bitmap flip inverts the arrow's
+                // rotation sense, so the interior offset is -angle. Position uses +angle (rotatePoint
+                // matches the engine exactly); the arrow's screen convention is the mirror of it.
+                arrowDeg -= seg0.angle * (180f / Math.PI.toFloat())
+
+                val rawX = (rotX - boundsMinX) / interiorMapWorldSize
+                val rawY = (rotY - boundsMinY) / interiorMapWorldSize
                 val playerSegX = floor(rawX).toInt()
                 val playerSegY = floor(rawY).toInt()
                 val playerU = (rawX - playerSegX).coerceIn(0f, 1f)

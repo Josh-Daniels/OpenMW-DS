@@ -477,7 +477,7 @@ Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*
     g_companionMethod = env->GetStaticMethodID(g_companionClass, "onCompanionLine",
                                                "(Ljava/lang/String;)V");
     g_mapTextureMethod = env->GetStaticMethodID(g_companionClass, "onCompanionMapTexture",
-                                                "(IIIIIFF[B)V");
+                                                "(IIIIIFFFFF[B)V");
     g_hudVisibilityMethod = env->GetStaticMethodID(g_companionClass, "onHudVisibilityChanged",
                                                    "(Z)V");
     env->DeleteLocalRef(cls);
@@ -519,13 +519,18 @@ Java_org_openmw_EngineActivity_sendCompanionCommand(JNIEnv* env, jclass /*cls*/,
 // segX/segY are the map segment grid coordinates; isInterior distinguishes interior
 // cells (where segments are 0,0 0,1 etc.) from exterior grid cells. boundsMinX/Y are
 // the interior's mBounds min corner in world units (0.0f for exterior, unused there).
+// angle/centerX/centerY are the interior map's rotation (radians) and rotation center
+// (world units) — the companion applies rotatePoint(pos, center, angle) to the player
+// position and adds angle to the arrow so the dot/arrow match the rotated interior
+// texture (0.0f for exterior, unused there).
 extern "C" void companionDeliverMapTexture(
     int width, int height, int segX, int segY, int isInterior, float boundsMinX, float boundsMinY,
-    const unsigned char* rgba)
+    float angle, float centerX, float centerY, const unsigned char* rgba)
 {
     Log(Debug::Info) << "companion map: w=" << width << " h=" << height
                       << " segX=" << segX << " segY=" << segY << " interior=" << isInterior
-                      << " boundsMinX=" << boundsMinX << " boundsMinY=" << boundsMinY;
+                      << " boundsMinX=" << boundsMinX << " boundsMinY=" << boundsMinY
+                      << " angle=" << angle << " centerX=" << centerX << " centerY=" << centerY;
 
     if (!g_companionVm || !g_companionClass || !g_mapTextureMethod) return;
 
@@ -539,7 +544,8 @@ extern "C" void companionDeliverMapTexture(
     e->SetByteArrayRegion(arr, 0, size, reinterpret_cast<const jbyte*>(rgba));
     e->CallStaticVoidMethod(g_companionClass, g_mapTextureMethod,
                             (jint)width, (jint)height, (jint)segX, (jint)segY,
-                            (jint)isInterior, (jfloat)boundsMinX, (jfloat)boundsMinY, arr);
+                            (jint)isInterior, (jfloat)boundsMinX, (jfloat)boundsMinY,
+                            (jfloat)angle, (jfloat)centerX, (jfloat)centerY, arr);
     if (e->ExceptionCheck()) {
         e->ExceptionDescribe();
         e->ExceptionClear();

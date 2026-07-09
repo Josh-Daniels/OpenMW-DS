@@ -609,9 +609,11 @@ class EngineActivity : SDLActivity() {
         @JvmStatic
         fun onCompanionMapTexture(
             width: Int, height: Int, segX: Int, segY: Int, isInterior: Int,
-            boundsMinX: Float, boundsMinY: Float, rgba: ByteArray
+            boundsMinX: Float, boundsMinY: Float, angle: Float, centerX: Float, centerY: Float,
+            rgba: ByteArray
         ) {
-            GameStateRepository.onMapTexture(width, height, segX, segY, isInterior, boundsMinX, boundsMinY, rgba)
+            GameStateRepository.onMapTexture(
+                width, height, segX, segY, isInterior, boundsMinX, boundsMinY, angle, centerX, centerY, rgba)
         }
 
         /**
