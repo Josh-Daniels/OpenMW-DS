@@ -1184,6 +1184,46 @@ local function exportPlayerStatus()
     print('COMPANION_PLAYER_STATUS:' .. str)
 end
 
+-- Door markers for the companion minimap: the teleport doors near the player (interior doors,
+-- or doors in nearby exterior cells) with their world position + destination cell name. This is
+-- the same data the native map's clickable square markers use (World::getDoorMarkers), but the
+-- companion map is zoomed in so the squares are finger-sized. Streamed one per line (a town cell
+-- can have many) and change-detected so it only emits on cell transitions. No fog-of-war gating —
+-- we show all nearby teleport doors (the companion map has no fog data).
+local lastDoorMarkersStr = nil
+local function exportDoorMarkers()
+    local parts = {}
+    pcall(function()
+        for _, door in ipairs(nearby.doors) do
+            if types.Door.isTeleport(door) then
+                local name = ""
+                pcall(function()
+                    local dc = types.Door.destCell(door)
+                    if dc then
+                        if dc.name and dc.name ~= "" then
+                            name = dc.name
+                        elseif dc.region then
+                            local reg = core.regions.records[dc.region]
+                            if reg and reg.name and reg.name ~= "" then name = reg.name end
+                        end
+                    end
+                end)
+                local pos = door.position
+                parts[#parts + 1] = string.format('{"x":%.1f,"y":%.1f,"name":"%s"}',
+                    pos.x, pos.y, jsonEscape(name))
+            end
+        end
+    end)
+    local joined = table.concat(parts, '|')
+    if joined == lastDoorMarkersStr then return end
+    lastDoorMarkersStr = joined
+    print('COMPANION_DOORMARKER_START:' .. #parts)
+    for _, p in ipairs(parts) do
+        print('COMPANION_DOORMARKER_ITEM:' .. p)
+    end
+    print('COMPANION_DOORMARKER_END:' .. #parts)
+end
+
 -- Play a generic equip/unequip sound (the data path skips the engine's
 -- normal equip sound, so we trigger one ourselves). Polish per-item later.
 local function playEquipSound(equipping)
@@ -1795,6 +1835,7 @@ local function onUpdate(dt)
         exportCharacterDetail()
         exportTarget()
         exportPlayerStatus()
+        exportDoorMarkers()
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then

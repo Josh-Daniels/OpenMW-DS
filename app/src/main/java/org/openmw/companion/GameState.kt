@@ -421,6 +421,15 @@ data class TopicInfo(
     val entries: List<TopicEntry>
 )
 
+/** A teleport-door marker for the companion minimap: the door's world position + destination cell
+ *  name (COMPANION_DOORMARKER_*). Transient — own StateFlow in the repo. worldX/worldY are placed
+ *  on the map with the same transform as the player position (exterior grid / interior rotation). */
+data class DoorMarker(
+    val worldX: Float,
+    val worldY: Float,
+    val name: String
+)
+
 data class JournalEntry(
     val questId: String,
     val questName: String = "",  // display name from core.dialogue; empty = fall back to prettified ID

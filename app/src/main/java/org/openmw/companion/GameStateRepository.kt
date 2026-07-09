@@ -210,6 +210,12 @@ object GameStateRepository {
     private var currentTopicName: String = ""
     private var currentTopicEntries: MutableList<TopicEntry>? = null
 
+    // Teleport-door markers for the companion minimap (COMPANION_DOORMARKER_*), streamed
+    // START/ITEM/END and buffered like the other batches. Change-detected on the Lua side.
+    private val _doorMarkers = MutableStateFlow<List<DoorMarker>>(emptyList())
+    val doorMarkers: StateFlow<List<DoorMarker>> = _doorMarkers.asStateFlow()
+    private var doorMarkerBuffer: MutableList<DoorMarker>? = null
+
     // Set of finished (completed) quest ids, exported natively on CMP:questStatus
     // (androidmain.cpp). Kept separate from GameState (transient, refreshed on demand
     // when the Journal tab is viewed). Ids match JournalEntry.questId (RefId text form).
@@ -576,6 +582,19 @@ object GameStateRepository {
                 topicsBuffer = null
                 currentTopicName = ""
                 currentTopicEntries = null
+            }
+            trimmed.contains(LogParser.P_DOORMARKER_ITEM) -> {
+                doorMarkerBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_DOORMARKER_ITEM) + LogParser.P_DOORMARKER_ITEM.length
+                    LogParser.parseDoorMarker(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_DOORMARKER_START) -> {
+                doorMarkerBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_DOORMARKER_END) -> {
+                doorMarkerBuffer?.let { _doorMarkers.value = it.toList() }
+                doorMarkerBuffer = null
             }
             trimmed.contains(LogParser.P_INVENTORY_ITEM) -> {
                 inventoryBuffer?.let { buf ->

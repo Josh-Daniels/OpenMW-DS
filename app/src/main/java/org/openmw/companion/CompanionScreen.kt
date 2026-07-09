@@ -1241,7 +1241,13 @@ private fun DialogueRightColumn(
     // divider (matched by their display strings — the sBarter/sRepair/sTravel GMST values the engine
     // exports). EVERY other service drops into the scrollable list with the topics.
     val barterService = services.firstOrNull { it.equals("Barter", ignoreCase = true) }
+    val spellsService = services.firstOrNull { it.equals("Spells", ignoreCase = true) }
     val repairService = services.firstOrNull { it.equals("Repair", ignoreCase = true) }
+    // sSpellmakingMenuTitle / sEnchanting GMST display values (verified against Morrowind.esm);
+    // matched case-insensitively so "SpellMaking"/"Spellmaking" spelling variants both hit.
+    val spellmakingService = services.firstOrNull { it.equals("Spellmaking", ignoreCase = true) }
+    val enchantingService = services.firstOrNull { it.equals("Enchanting", ignoreCase = true) }
+    val trainingService = services.firstOrNull { it.equals("Training", ignoreCase = true) }
     val travelService = services.firstOrNull { it.equals("Travel", ignoreCase = true) }
     // "Beds" (renting a room) is a dialogue TOPIC in Morrowind, not a service window — it's exported
     // among the topics and (when tapped) fires a yes/no choice. Pull it out of whichever list it
@@ -1251,7 +1257,9 @@ private fun DialogueRightColumn(
     val bedsFromTopic = topics.firstOrNull { it.equals("Beds", ignoreCase = true) }
     val bedsService = bedsFromService ?: bedsFromTopic
     val otherServices = services.filter {
-        it != barterService && it != repairService && it != travelService && it != bedsService
+        it != barterService && it != spellsService && it != repairService &&
+            it != spellmakingService && it != enchantingService && it != trainingService &&
+            it != travelService && it != bedsService
     }
     val topicRows = topics.filter { it != bedsService }
 
@@ -1259,17 +1267,23 @@ private fun DialogueRightColumn(
     // then any OTHER services, then the dialogue topics — the SAME order they render, so the D-pad
     // focus index maps 1:1 to a visible row. Goodbye is deliberately excluded (controller B closes
     // the conversation via companion-b-button-choice-fix.patch).
+    // Above-divider order: Persuade → Barter → Spells → Repair → Spellmaking → Enchanting →
+    // Training → Travel → Beds. (Beds is the conditional rent-a-room topic; Persuade sits first.)
     val serviceBlock = buildList {
+        if (persuadeAvailable) add(DialogueNavItem("Persuade") { onPersuadeTapped() })
         barterService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        spellsService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        repairService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        spellmakingService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        enchantingService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        trainingService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
+        travelService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
         bedsService?.let { s ->
             add(DialogueNavItem(s) {
                 if (bedsFromService != null) CompanionActions.activateDialogueService(s)
                 else CompanionActions.selectDialogueTopic(s)
             })
         }
-        if (persuadeAvailable) add(DialogueNavItem("Persuade") { onPersuadeTapped() })
-        repairService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
-        travelService?.let { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
     }
     val listRows = buildList {
         otherServices.forEach { s -> add(DialogueNavItem(s) { CompanionActions.activateDialogueService(s) }) }
@@ -1346,8 +1360,12 @@ private fun DialogueRightColumn(
         LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
             itemsIndexed(navItems) { index, navItem ->
                 if (index == dividerAt && dividerAt > 0) {
+                    // Extra breathing room either side of the services/topics divider so it reads
+                    // clearly — especially in Split mode and when Persuade (the last block row) is
+                    // focused/highlighted right above it.
+                    Spacer(Modifier.height(8.dp))
                     Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(8.dp))
                 }
                 DialogueOptionRow(
                     navItem.label,
@@ -5872,6 +5890,15 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     else
         interiorMaps.isNotEmpty()
 
+    // Teleport-door markers + the interior rotation params for placing them (exterior = identity).
+    // selectedMarker holds the tapped marker + its screen offset so its name bubble can anchor to it.
+    val doorMarkers by GameStateRepository.doorMarkers.collectAsState()
+    val markerSeg = if (!state.cellIsExterior) interiorMaps.values.firstOrNull() else null
+    val markerAngle = markerSeg?.angle ?: 0f
+    val markerCX = markerSeg?.centerX ?: 0f
+    val markerCY = markerSeg?.centerY ?: 0f
+    var selectedMarker by remember { mutableStateOf<Pair<DoorMarker, Offset>?>(null) }
+
     val favs by FavouritesRepository.state.collectAsState()
     val context = LocalContext.current
 
@@ -5917,15 +5944,34 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 .fillMaxWidth()
                 .mwPanel()
         ) {
-        // Canvas fills the whole panel; labels float over it. Tapping the map
-        // (anywhere not covered by an overlay declared later in this Box — those
-        // consume the tap first via Compose z-order) opens the in-game world map.
+        // Canvas fills the whole panel; labels float over it. A tap on a door marker shows its
+        // destination name (and is reserved for richer per-marker info later); a tap anywhere else
+        // (not covered by an overlay declared later in this Box — those consume the tap first via
+        // Compose z-order) opens the in-game world map. Disabled while the splash is up.
         Canvas(
             Modifier
                 .fillMaxSize()
-                // Disabled while the splash is up so a splash-dismiss tap doesn't
-                // fall through to the map canvas and open the world map instead.
-                .clickable(enabled = !splashVisible) { CompanionActions.openWorldMap() }
+                .pointerInput(doorMarkers, state.pos, markerAngle, markerCX, markerCY, splashVisible) {
+                    detectTapGestures { tap ->
+                        if (splashVisible) return@detectTapGestures
+                        val w = size.width.toFloat(); val h = size.height.toFloat()
+                        val hitR = minOf(w, h) * 0.06f
+                        // Nearest marker within the (generous, finger-sized) hit radius wins.
+                        val hit = doorMarkers
+                            .map { m ->
+                                m to markerScreenPos(m.worldX, m.worldY, state.pos.x, state.pos.y,
+                                    markerAngle, markerCX, markerCY, w, h)
+                            }
+                            .filter { (_, p) -> (p - tap).getDistance() <= hitR }
+                            .minByOrNull { (_, p) -> (p - tap).getDistance() }
+                        if (hit != null) {
+                            selectedMarker = hit
+                        } else {
+                            selectedMarker = null
+                            CompanionActions.openWorldMap()
+                        }
+                    }
+                }
         ) {
             val cx = size.width / 2f
             val cy = size.height / 2f
@@ -6011,6 +6057,28 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 }
             }
 
+            // Door markers: a small square per teleport door, placed with the same transform as the
+            // arrow (drawn UNDER the arrow). The tapped marker is highlighted with a brighter border.
+            if (hasMap) {
+                val half = size.minDimension * 0.028f
+                doorMarkers.forEach { m ->
+                    val p = markerScreenPos(m.worldX, m.worldY, state.pos.x, state.pos.y,
+                        markerAngle, markerCX, markerCY, size.width, size.height)
+                    if (p.x < -half || p.x > size.width + half || p.y < -half || p.y > size.height + half)
+                        return@forEach
+                    val sel = selectedMarker?.first == m
+                    val topLeft = Offset(p.x - half, p.y - half)
+                    val sz = Size(half * 2f, half * 2f)
+                    drawRect(color = SlotBg, topLeft = topLeft, size = sz)
+                    drawRect(
+                        color = if (sel) BoneBright else BronzeLight,
+                        topLeft = topLeft, size = sz,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = half * (if (sel) 0.55f else 0.35f))
+                    )
+                }
+            }
+
             if (hasMap) {
                 val bmp = compassBitmap
                 if (bmp != null) {
@@ -6028,6 +6096,35 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 } else {
                     drawArrow(cx, cy, size.minDimension * 0.04f, arrowDeg)
                 }
+            }
+        }
+
+        // Tapped door marker's name, anchored just above the marker (px offset within this Box; the
+        // offset{} lambda is a Density receiver so dp→px is available). Tapping it dismisses; tapping
+        // elsewhere on the map clears it and opens the world map. This is the seed for the future
+        // richer per-marker info popup.
+        selectedMarker?.let { (marker, pos) ->
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .offset {
+                        IntOffset(
+                            (pos.x - 80.dp.toPx()).roundToInt().coerceAtLeast(4),
+                            (pos.y - 46.dp.toPx()).roundToInt().coerceAtLeast(4)
+                        )
+                    }
+                    .widthIn(max = 160.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(StoneDark)
+                    .border(1.dp, Bronze, RoundedCornerShape(4.dp))
+                    .pointerInput(Unit) { detectTapGestures { selectedMarker = null } }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    marker.name.ifBlank { "Door" },
+                    color = BoneBright, fontSize = 12.sp, fontFamily = MwBody,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 14.sp
+                )
             }
         }
 
@@ -6461,6 +6558,23 @@ private fun EquippedDisplayPill(value: String) {
             modifier = Modifier.padding(horizontal = 6.dp)
         )
     }
+}
+
+// Screen position (px, within a wxh canvas) of a world point on the companion minimap, using the
+// SAME transform as the player arrow: player centered, exterior world-aligned or interior rotated by
+// `angle` about (centerX,centerY). angle=0 (with center 0,0) → the identity used for exterior. Shared
+// by the door-marker draw and the tap hit-test so they can never diverge.
+private fun markerScreenPos(
+    worldX: Float, worldY: Float, playerX: Float, playerY: Float,
+    angle: Float, centerX: Float, centerY: Float, w: Float, h: Float
+): Offset {
+    val cellPx = minOf(w, h) / MINIMAP_CROP_FRACTION
+    val ca = cos(angle); val sa = sin(angle)
+    val rmx = ca * (worldX - centerX) - sa * (worldY - centerY) + centerX
+    val rmy = sa * (worldX - centerX) + ca * (worldY - centerY) + centerY
+    val rpx = ca * (playerX - centerX) - sa * (playerY - centerY) + centerX
+    val rpy = sa * (playerX - centerX) + ca * (playerY - centerY) + centerY
+    return Offset(w / 2f + (rmx - rpx) / 8192f * cellPx, h / 2f - (rmy - rpy) / 8192f * cellPx)
 }
 
 private fun DrawScope.drawArrow(cx: Float, cy: Float, r: Float, degrees: Float) {

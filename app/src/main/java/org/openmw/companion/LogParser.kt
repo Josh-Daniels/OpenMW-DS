@@ -112,6 +112,11 @@ object LogParser {
     const val P_TOPIC_START = "COMPANION_TOPIC_START:"
     const val P_TOPIC_ENTRY = "COMPANION_TOPIC_ENTRY:"
     const val P_TOPIC_END = "COMPANION_TOPIC_END"
+    // Streamed teleport-door markers for the companion minimap (one per line). Each ITEM is a
+    // small JSON object {x,y,name}. Change-detected on the Lua side (only re-emits on cell change).
+    const val P_DOORMARKER_START = "COMPANION_DOORMARKER_START:"
+    const val P_DOORMARKER_ITEM = "COMPANION_DOORMARKER_ITEM:"
+    const val P_DOORMARKER_END = "COMPANION_DOORMARKER_END:"
     // Streamed dialogue topic list (one topic per line so a long list never trips
     // the engine's 4096-byte stdout flush). Topic payloads are plain strings, not JSON.
     // CLOSED signals the conversation ended → clear the list.
@@ -607,6 +612,18 @@ object LogParser {
             actorName = payload.substring(0, sep),
             text = payload.substring(sep + 1)
         )
+    }
+
+    /** One COMPANION_DOORMARKER_ITEM payload → a DoorMarker. Null if malformed. */
+    fun parseDoorMarker(json: String): DoorMarker? = try {
+        val o = JSONObject(json)
+        DoorMarker(
+            worldX = o.getDouble("x").toFloat(),
+            worldY = o.getDouble("y").toFloat(),
+            name = o.optString("name", "")
+        )
+    } catch (e: Exception) {
+        null
     }
 
     /** Empty payload {} or a missing name/health → null (no current target). */
