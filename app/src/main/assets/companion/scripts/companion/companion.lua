@@ -800,6 +800,14 @@ local containerReexportTicks = 0
 local containerRefreshTimer = 0
 local CONTAINER_REFRESH_INTERVAL = 0.08
 local lastContainerJson = nil
+-- true = Take All / Dispose queued a bulk transfer and is keeping the container OPEN for the
+-- refresh window (scheduleContainerRefresh) so the DEFERRED item:moveInto actions land, then
+-- closing it from onFrame once the window elapses. Closing in the SAME frame the transfer was
+-- queued raced the deferred add and silently no-oped it (the "Take All does nothing on first
+-- use" bug — item:moveInto is a queued LuaManager action, objectbindings.cpp). Also a reentrancy
+-- flag: while set, further take/put/take-all/dispose are ignored so we don't double-queue or
+-- close before the first batch lands. Reset on container open/close.
+local containerCloseAfterRefresh = false
 
 -- Schedule a post-transfer refresh burst (consumed by onFrame). Resets the throttle
 -- so the first refresh waits a full interval, giving the async moveInto time to land.
@@ -1657,16 +1665,21 @@ local function dispatchCommand(command)
         return
     end
     if payload == "container_take_all" then
-        if containerObj then
+        -- Reentrancy: ignore if a bulk take-all/dispose close is already pending (its deferred
+        -- transfer is still landing) so we don't double-queue or race the pending close.
+        if containerObj and not containerCloseAfterRefresh then
             core.sendGlobalEvent('CompanionContainerTransfer',
                 { container = containerObj, player = self.object, dir = 'takeall',
                   hiddenSids = hiddenSidList() })
-            -- Take All closes the overlay after grabbing everything (same as Dispose):
-            -- the queued moveInto still runs after removeMode, and the mode pop fires
-            -- UiModeChanged -> COMPANION_CONTAINER_CLOSED, dismissing the overlay. No
-            -- refresh scheduled since the session ends.
-            pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
-            print("COMPANION_DEBUG: container take all + close")
+            -- Do NOT removeMode this frame. item:moveInto is a DEFERRED LuaManager action
+            -- (objectbindings.cpp) that only adds/removes on a later update(); closing the container
+            -- in the same frame tore it down before the add ran, silently no-oping the transfer.
+            -- The GLOBAL script sends CompanionContainerClose back AFTER queuing the transfer, and we
+            -- close on that event (onContainerCloseRequest). Event-driven, NOT an onFrame timer,
+            -- because dt is 0 / frames don't advance while the container is open and idle, so a timed
+            -- close never fired. The flag blocks a second take-all/dispose/take/put until we close.
+            containerCloseAfterRefresh = true
+            print("COMPANION_DEBUG: container take all (await close)")
         end
         return
     end
@@ -1677,15 +1690,18 @@ local function dispatchCommand(command)
         return
     end
     if payload == "container_dispose" then
-        if containerObj then
-            -- dispose = take all + REMOVE the corpse (dir='dispose', handled in
-            -- companion_global.lua) + close the container window. Plain take-all does
-            -- not remove the body, which is the whole point of "Dispose of Corpse".
+        -- dispose = take all + REMOVE the corpse (dir='dispose', handled in companion_global.lua).
+        -- Same deferred-transfer race as take-all (the moveInto loop AND the container:remove are
+        -- queued LuaManager actions), so defer the close the same way instead of removeMode-ing this
+        -- frame. Reentrancy-guarded like take-all.
+        if containerObj and not containerCloseAfterRefresh then
             core.sendGlobalEvent('CompanionContainerTransfer',
                 { container = containerObj, player = self.object, dir = 'dispose',
                   hiddenSids = hiddenSidList() })
-            pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
-            print("COMPANION_DEBUG: container dispose")
+            -- Same event-driven close as take-all (see container_take_all). Global sends
+            -- CompanionContainerClose after queuing the transfer + corpse removal.
+            containerCloseAfterRefresh = true
+            print("COMPANION_DEBUG: container dispose (await close)")
         end
         return
     end
@@ -1745,7 +1761,8 @@ local function dispatchCommand(command)
         exportInfo(arg)
     elseif action == "container_take" then
         local sid, countStr = string.match(arg, "^(.+)|(%d+)$")
-        if sid and containerObj then
+        -- Ignore while a bulk take-all/dispose close is pending (its deferred transfer is landing).
+        if sid and containerObj and not containerCloseAfterRefresh then
             core.sendGlobalEvent('CompanionContainerTransfer',
                 { container = containerObj, player = self.object, sid = sid,
                   count = tonumber(countStr), dir = 'take' })
@@ -1754,7 +1771,7 @@ local function dispatchCommand(command)
         end
     elseif action == "container_put" then
         local sid, countStr = string.match(arg, "^(.+)|(%d+)$")
-        if sid and containerObj then
+        if sid and containerObj and not containerCloseAfterRefresh then
             core.sendGlobalEvent('CompanionContainerTransfer',
                 { container = containerObj, player = self.object, sid = sid,
                   count = tonumber(countStr), dir = 'put' })
@@ -1804,6 +1821,7 @@ local function onUiModeChanged(data)
         containerHiddenSids = computeHiddenSids()   -- roll the Sneak-hidden set ONCE
         lastContainerJson = nil
         containerReexportTicks = 0
+        containerCloseAfterRefresh = false
         exportContainer(true)
     elseif containerObj ~= nil and not isContainer then
         containerObj = nil
@@ -1811,6 +1829,7 @@ local function onUiModeChanged(data)
         containerHiddenSids = nil
         lastContainerJson = nil
         containerReexportTicks = 0
+        containerCloseAfterRefresh = false
         print('COMPANION_CONTAINER_CLOSED:')
     end
 end
@@ -1882,6 +1901,17 @@ local function onActive()
     print('COMPANION_PAUSE_MENU_CLOSED:')
 end
 
+-- Global-script callback: the bulk transfer (take-all / dispose) has been queued in
+-- companion_global.lua, so close the container window NOW. Driven by an event (not an onFrame
+-- timer) so it fires reliably — while a container is open the game is paused and frames don't
+-- advance dt / don't render while idle, so any timed close would stall until the next input.
+-- Sent AFTER the moveInto loop, so the transfer's deferred adds are already queued (and run in
+-- applyDelayedActions) before this closes. removeMode -> UiModeChanged clears containerObj + the flag.
+local function onContainerCloseRequest()
+    containerCloseAfterRefresh = false
+    pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
+end
+
 return {
     engineHandlers = {
         onUpdate = onUpdate,
@@ -1893,5 +1923,6 @@ return {
         CompanionCombatTarget = onCombatTarget,
         Hit = onPlayerHit,
         UiModeChanged = onUiModeChanged,
+        CompanionContainerClose = onContainerCloseRequest,
     },
 }

@@ -90,6 +90,11 @@ local function onContainerTransfer(data)
         if data.dir == 'dispose' then
             pcall(function() container:remove() end)
         end
+        -- Ask the player script to close the container NOW that the bulk transfer is queued. The
+        -- player can't safely close in the same frame it sent the transfer (it would race the
+        -- deferred moveInto), and a timed close there never fires (paused/idle -> no frames). This
+        -- cross-script event lands after the transfer's deferred adds, so the close is safe.
+        pcall(function() player:sendEvent('CompanionContainerClose') end)
         return
     end
     local srcInv, dest

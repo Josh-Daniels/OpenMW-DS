@@ -952,49 +952,13 @@ class EngineActivity : SDLActivity() {
                 show && mode == GameUiMode.DS
             }
 
-            // BUGFIX: the top-screen conversation overlay is a panel sub-window on Display 0 that
-            // layers ABOVE the OpenMW MyGUI surface, so it covers ANY native service window (barter,
-            // repair, travel) pushed over the conversation while that element is Vanilla — the native
-            // window isn't suppressed in Vanilla mode. Track whether any such native window is open so
-            // the conversation overlay can step aside; it reappears when the window closes (its session
-            // clears via the matching COMPANION_*_CLOSED) if the conversation is still active. In DS
-            // mode each native window IS suppressed and the companion draws it on the bottom, so
-            // there's nothing to hide. (Sessions are emitted regardless of DS/Vanilla; the mode gate
-            // is what distinguishes "native window on top" from "companion overlay on the bottom".)
-            val nativeServiceVanillaUp = combine(
-                GameStateRepository.barterSession,
-                GameStateRepository.repairSession,
-                GameStateRepository.travelSession,
-                UiPreferences.gameUiModeFlow("game_ui_bartering"),
-                UiPreferences.gameUiModeFlow("game_ui_repair"),
-            ) { barter, repair, travel, barterMode, repairMode ->
-                Triple(
-                    barter != null && barterMode == GameUiMode.VANILLA,
-                    repair != null && repairMode == GameUiMode.VANILLA,
-                    travel != null,
-                )
-            }.combine(UiPreferences.gameUiModeFlow("game_ui_travel")) { (barterUp, repairUp, travelPresent), travelMode ->
-                barterUp || repairUp || (travelPresent && travelMode == GameUiMode.VANILLA)
-            }
-
-            // Same idea for the four dialogue-service windows that only emit a bare open/closed flag
-            // (spell buying, training, spellmaking, enchanting). Each is "up" while its native window
-            // is open AND the element is Vanilla. They're pending (always Vanilla) today, so this is
-            // effectively "window open" — but gating on the mode keeps it correct once un-pended.
-            fun serviceOpenVanilla(open: kotlinx.coroutines.flow.StateFlow<Boolean>, key: String) =
-                open.combine(UiPreferences.gameUiModeFlow(key)) { isOpen, mode ->
-                    isOpen && mode == GameUiMode.VANILLA
-                }
-            val extraServiceVanillaUp = combine(
-                serviceOpenVanilla(GameStateRepository.spellBuyingWindowOpen, "game_ui_spellbuying"),
-                serviceOpenVanilla(GameStateRepository.trainingWindowOpen, "game_ui_training"),
-                serviceOpenVanilla(GameStateRepository.spellmakingWindowOpen, "game_ui_spellmaking"),
-                serviceOpenVanilla(GameStateRepository.enchantingWindowOpen, "game_ui_enchanting"),
-            ) { spellBuy, train, spellMake, enchant -> spellBuy || train || spellMake || enchant }
-
-            val anyServiceVanillaUp = nativeServiceVanillaUp.combine(extraServiceVanillaUp) { base, extra ->
-                base || extra
-            }
+            // The top-screen conversation overlay is a panel sub-window on Display 0 that layers ABOVE
+            // the OpenMW MyGUI surface, so it covers ANY Vanilla native service window (barter/repair/
+            // travel/…) pushed over the conversation. Track whether any such native window is open so
+            // the overlay steps aside; it reappears when the window closes (its session clears via the
+            // matching COMPANION_*_CLOSED) if the conversation is still active. The SAME signal also
+            // narrows the controller-nav gate below (see anyServiceVanillaUpFlow / the navActive block).
+            val anyServiceVanillaUp = anyServiceVanillaUpFlow()
 
             wantConversationTop.combine(anyServiceVanillaUp) { show, serviceUp ->
                 show && !serviceUp
@@ -1121,6 +1085,15 @@ class EngineActivity : SDLActivity() {
                 anyOverlay && !paused
             }.combine(GameStateRepository.titleMenuVisible) { active, title ->
                 active && !title
+            // A Vanilla native service window layered over a DS conversation is the only surface on
+            // screen and needs NATIVE controller input, but the DS-conversation term above keeps
+            // navActive true — which makes the controller-nav patch swallow EVERY input (R3 item-info,
+            // A/X/Y, D-pad, L1/R1, sticks) as COMPANION_NAV_*, so the native window gets nothing. Force
+            // navActive false whenever such a window is up; it returns to true when the window closes
+            // and the DS conversation is still active. (Vanilla-service terms only fire in Vanilla mode,
+            // so DS overlays — incl. DS barter/repair — are unaffected: their own nav term stays true.)
+            }.combine(anyServiceVanillaUpFlow()) { active, serviceUp ->
+                active && !serviceUp
             }.distinctUntilChanged().collect { active ->
                 runCatching { setCompanionNavActive(active) }
                 // FIX 1 — input state leak: on overlay close (true->false) the stick-release event was
@@ -1129,6 +1102,49 @@ class EngineActivity : SDLActivity() {
                 if (!active) runCatching { companionResetAxes() }
             }
         }
+    }
+
+    /**
+     * True while ANY Vanilla native service window is currently open — barter / repair / travel
+     * (session flows) plus spell-buying / training / spellmaking / enchanting (bare open flags),
+     * each gated on its element being Vanilla. Sessions/flags are emitted regardless of DS/Vanilla;
+     * the mode gate is what distinguishes "native window on the top screen" from "companion overlay
+     * on the bottom". Such a window is layered ABOVE the OpenMW MyGUI surface over a (possibly still
+     * active) DS conversation, and is the only thing on screen needing input — so it drives BOTH the
+     * top-screen conversation overlay step-aside AND the controller-nav gate (a Vanilla service window
+     * over a DS conversation must get NATIVE controller input, not COMPANION_NAV_*, so navActive must
+     * go false). Rebuilt per collector (cold flows); both collectors observe identical state.
+     */
+    private fun anyServiceVanillaUpFlow(): Flow<Boolean> {
+        fun serviceOpenVanilla(open: kotlinx.coroutines.flow.StateFlow<Boolean>, key: String) =
+            open.combine(UiPreferences.gameUiModeFlow(key)) { isOpen, mode ->
+                isOpen && mode == GameUiMode.VANILLA
+            }
+        val nativeServiceVanillaUp = combine(
+            GameStateRepository.barterSession,
+            GameStateRepository.repairSession,
+            GameStateRepository.travelSession,
+            UiPreferences.gameUiModeFlow("game_ui_bartering"),
+            UiPreferences.gameUiModeFlow("game_ui_repair"),
+        ) { barter, repair, travel, barterMode, repairMode ->
+            Triple(
+                barter != null && barterMode == GameUiMode.VANILLA,
+                repair != null && repairMode == GameUiMode.VANILLA,
+                travel != null,
+            )
+        }.combine(UiPreferences.gameUiModeFlow("game_ui_travel")) { (barterUp, repairUp, travelPresent), travelMode ->
+            barterUp || repairUp || (travelPresent && travelMode == GameUiMode.VANILLA)
+        }
+        val extraServiceVanillaUp = combine(
+            serviceOpenVanilla(GameStateRepository.spellBuyingWindowOpen, "game_ui_spellbuying"),
+            serviceOpenVanilla(GameStateRepository.trainingWindowOpen, "game_ui_training"),
+            serviceOpenVanilla(GameStateRepository.spellmakingWindowOpen, "game_ui_spellmaking"),
+            serviceOpenVanilla(GameStateRepository.enchantingWindowOpen, "game_ui_enchanting"),
+            // Native persuasion modal, when persuasion is Vanilla — step the conversation overlay aside
+            // (it would otherwise cover the top-screen modal) and free the controller for it.
+            serviceOpenVanilla(GameStateRepository.persuasionWindowOpen, "game_ui_persuasion"),
+        ) { spellBuy, train, spellMake, enchant, persuade -> spellBuy || train || spellMake || enchant || persuade }
+        return nativeServiceVanillaUp.combine(extraServiceVanillaUp) { base, extra -> base || extra }
     }
 
     private fun showConversationTopOverlay() {

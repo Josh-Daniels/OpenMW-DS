@@ -641,9 +641,10 @@ fun CompanionScreen() {
             // - TOP: the whole conversation is on the top screen (hosted by EngineActivity);
             //   the bottom screen is just a dimmed, inert scrim over the current tab.
             val conversationLocation by UiPreferences.conversationLocationFlow().collectAsState()
-            // Persuasion is its own Game UI element: only surface the DS persuade affordance when
-            // it's set to DS (Vanilla → native OpenMW handles persuasion).
-            val persuadeAvailable = dialoguePersuadeAvailable && persuasionDs == GameUiMode.DS
+            // Show the "Persuade" entry whenever the NPC offers persuasion, in BOTH modes: DS opens
+            // the companion popup, Vanilla opens the native modal (see triggerPersuade). Gating it to
+            // DS-only previously left Vanilla persuasion with no trigger in a DS conversation.
+            val persuadeAvailable = dialoguePersuadeAvailable
             DialogueTopicsOverlay(
                 dialogueNpcName, dialogueHistory, dialogueTopics, dialogueServices,
                 dialogueChoices, dialogueDisposition, persuadeAvailable,
@@ -776,6 +777,24 @@ fun CompanionScreen() {
     }
 }
 
+/**
+ * Route a "Persuade" tap by the persuasion Game UI mode:
+ *  - DS: open the companion persuasion popup (hosted by its own Screen Layout location).
+ *  - Vanilla: open the NATIVE PersuasionDialog modal by selecting the sPersuasion topic
+ *    (CMPDLG:topic:<name> -> onSelectListItem(sPersuasion) -> setVisible(true)); the DS overlay
+ *    doesn't list persuasion as a topic, so this is the only trigger. The native modal's onOpen
+ *    emits COMPANION_PERSUASION_OPEN, stepping the conversation overlay aside so it's visible.
+ * Reads the mode/name synchronously off the flows (this runs on tap, not during composition).
+ */
+private fun triggerPersuade() {
+    if (UiPreferences.gameUiModeFlow("game_ui_persuasion").value == GameUiMode.DS) {
+        GameStateRepository.setPersuasionVisible(true)
+    } else {
+        val name = GameStateRepository.dialoguePersuadeTopicName.value
+        if (name.isNotEmpty()) CompanionActions.selectDialogueTopic(name)
+    }
+}
+
 /* ---- Dialogue topic list overlay (bottom screen) ---- */
 
 @Composable
@@ -837,7 +856,7 @@ private fun DialogueTopicsOverlay(
                             // screen), and the persuasion popup is hosted by its own location.
                             choicesActive = choices.isNotEmpty() || persuasionVisible,
                             interactive = choices.isEmpty() && !persuasionVisible,
-                            onPersuadeTapped = { GameStateRepository.setPersuasionVisible(true) },
+                            onPersuadeTapped = { triggerPersuade() },
                             // SPLIT mode uses a larger, unified row font (topics/services on the
                             // bottom screen — matches the persuade/repair/travel popups).
                             // BOTTOM/TOP keep the default 13sp.
@@ -936,7 +955,7 @@ private fun DialogueConversationOverlay(
                     // priority over topic selection.
                     choicesActive = choices.isNotEmpty() || persuasionVisible,
                     interactive = choices.isEmpty() && !persuasionVisible,
-                    onPersuadeTapped = { GameStateRepository.setPersuasionVisible(true) },
+                    onPersuadeTapped = { triggerPersuade() },
                     modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
                 )
             }

@@ -201,6 +201,11 @@ object GameStateRepository {
     // committed on SERVICES_END, reset on new actor and _CLOSED.
     private val _dialoguePersuadeAvailable = MutableStateFlow(false)
     val dialoguePersuadeAvailable: StateFlow<Boolean> = _dialoguePersuadeAvailable.asStateFlow()
+    // The localized "Persuasion" topic name, carried on COMPANION_DIALOGUE_PERSUADE_AVAILABLE:<name>.
+    // When persuasion is VANILLA the DS "Persuade" tap sends CMPDLG:topic:<name> to open the NATIVE
+    // modal (onSelectListItem(sPersuasion)); unused when persuasion is DS. Empty until first seen.
+    private val _dialoguePersuadeTopicName = MutableStateFlow("")
+    val dialoguePersuadeTopicName: StateFlow<String> = _dialoguePersuadeTopicName.asStateFlow()
 
     // Whether the persuasion popup is currently open. Promoted from local composable state so the
     // popup can be hosted independently of the conversation overlay (its own Screen Layout location,
@@ -333,6 +338,10 @@ object GameStateRepository {
     val spellmakingWindowOpen: StateFlow<Boolean> = _spellmakingWindowOpen.asStateFlow()
     private val _enchantingWindowOpen = MutableStateFlow(false)
     val enchantingWindowOpen: StateFlow<Boolean> = _enchantingWindowOpen.asStateFlow()
+    // Native persuasion modal open (Vanilla-persuasion mode). Same shape; consumed by
+    // anyServiceVanillaUpFlow so the conversation overlay steps aside + the controller reaches it.
+    private val _persuasionWindowOpen = MutableStateFlow(false)
+    val persuasionWindowOpen: StateFlow<Boolean> = _persuasionWindowOpen.asStateFlow()
 
     // Accumulates dialogue topics across DIALOGUE_START / DIALOGUE_TOPIC / DIALOGUE_END.
     private var dialogueBuffer: MutableList<String>? = null
@@ -910,6 +919,9 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_SPELLMAKING_OPEN) -> { _spellmakingWindowOpen.value = true }
             trimmed.contains(LogParser.P_ENCHANTING_CLOSED) -> { _enchantingWindowOpen.value = false }
             trimmed.contains(LogParser.P_ENCHANTING_OPEN) -> { _enchantingWindowOpen.value = true }
+            // CLOSED before OPEN (neither token is a substring of the other, but keep the convention).
+            trimmed.contains(LogParser.P_PERSUASION_CLOSED) -> { _persuasionWindowOpen.value = false }
+            trimmed.contains(LogParser.P_PERSUASION_OPEN) -> { _persuasionWindowOpen.value = true }
             // Dialogue topic list. Streamed START/TOPIC/END while a conversation is
             // open (re-sent on every topic-list change); CLOSED clears it. TOPIC
             // payloads are plain strings. Buffer until END so the UI swaps atomically.
@@ -1067,6 +1079,11 @@ object GameStateRepository {
             // first for clarity).
             trimmed.contains(LogParser.P_DIALOGUE_PERSUADE_AVAILABLE) -> {
                 dialoguePersuadePending = true
+                // Optional ":<sPersuasion name>" tail (used to open the native modal in Vanilla mode).
+                val idx = trimmed.indexOf(LogParser.P_DIALOGUE_PERSUADE_AVAILABLE) +
+                    LogParser.P_DIALOGUE_PERSUADE_AVAILABLE.length
+                trimmed.substring(idx).removePrefix(":").trim()
+                    .takeIf { it.isNotEmpty() }?.let { _dialoguePersuadeTopicName.value = it }
             }
             trimmed.contains(LogParser.P_DIALOGUE_SERVICES_START) -> {
                 dialogueServiceBuffer = mutableListOf()

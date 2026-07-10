@@ -80,6 +80,10 @@ object LogParser {
     const val P_SPELLMAKING_CLOSED = "COMPANION_SPELLMAKING_CLOSED"
     const val P_ENCHANTING_OPEN = "COMPANION_ENCHANTING_OPEN"
     const val P_ENCHANTING_CLOSED = "COMPANION_ENCHANTING_CLOSED"
+    // Native persuasion modal (PersuasionDialog, Vanilla-persuasion mode). Same open/close-flag shape
+    // as the other dialogue-service windows; drives the conversation step-aside + controller-nav gate.
+    const val P_PERSUASION_OPEN = "COMPANION_PERSUASION_OPEN"
+    const val P_PERSUASION_CLOSED = "COMPANION_PERSUASION_CLOSED"
     // Text-input focus (native, windowmanagerimp.cpp). OPEN carries the field's current
     // caption after the colon (may be empty); CLOSED has no payload. Drives the bottom-screen
     // Android-keyboard panel in EngineActivity via GameStateRepository.textInputRequest.

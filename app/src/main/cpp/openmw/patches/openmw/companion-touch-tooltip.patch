@@ -1,6 +1,27 @@
+Companion touch-tooltip: let a single touch TAP show a native menu tooltip (item stats, map-marker
+name, etc.) when "Touch input" is on. ToolTips::update early-returns in GUI mode when the cursor
+isn't visible; touch hides the game cursor, so tooltips never showed. Hold the gate open while touch
+drives the menus (tooltip delay defaults to 0, so it appears at the tap point immediately).
+
+Refined: the touch term now also requires TOUCH to be the ACTIVE input (!joystickLastUsed()) — a
+touch tap clears joystickLastUsed (MouseManager), any controller press sets it. Without this, while
+navigating a controller menu with touch merely ENABLED (not used), the term held the tooltip open
+regardless of getControllerTooltipVisible, so R3 only FROZE the tooltip on the current item instead
+of hiding it. Gating on the active input makes R3 hide/show cleanly under the controller (matching
+touch-off) while a real tap still shows its tooltip. Needs <../mwbase/inputmanager.hpp>.
+diff --git a/apps/openmw/mwgui/tooltips.cpp b/apps/openmw/mwgui/tooltips.cpp
+index cc39043556..fe1d76cc5b 100644
 --- a/apps/openmw/mwgui/tooltips.cpp
 +++ b/apps/openmw/mwgui/tooltips.cpp
-@@ -30,6 +30,16 @@
+@@ -17,6 +17,7 @@
+ #include <components/widgets/box.hpp>
+ 
+ #include "../mwbase/environment.hpp"
++#include "../mwbase/inputmanager.hpp" // COMPANION: joystickLastUsed() for the touch-tooltip gate
+ #include "../mwbase/mechanicsmanager.hpp"
+ #include "../mwbase/windowmanager.hpp"
+ 
+@@ -30,6 +31,16 @@
  
  #include "itemmodel.hpp"
  
@@ -17,7 +38,7 @@
  namespace MWGui
  {
      ToolTips::ToolTips()
-@@ -95,7 +105,14 @@
+@@ -95,7 +106,22 @@ namespace MWGui
  
          if (guiMode)
          {
@@ -27,7 +48,15 @@
 +                // Companion touch-tooltip: keep the gate open while touch input drives the menus,
 +                // so a tap (which rests the cursor on the widget) shows its tooltip despite the
 +                // hidden game cursor. tooltip delay defaults to 0, so it appears immediately.
-+                && !(companionTouchClick() && companionIsGuiMode())
++                // BUT only when TOUCH is the active input (!joystickLastUsed) — a touch tap clears
++                // joystickLastUsed via MouseManager, whereas any controller press sets it. Otherwise,
++                // while navigating a controller menu (touch merely ENABLED, not used), this term would
++                // hold the tooltip open regardless of getControllerTooltipVisible, so R3 would only
++                // FREEZE the tooltip on the current item instead of hiding it. Gating on the active
++                // input lets R3 cleanly hide/show under the controller (like touch-off) while a real
++                // tap still shows its tooltip.
++                && !(companionTouchClick() && companionIsGuiMode()
++                    && !MWBase::Environment::get().getInputManager()->joystickLastUsed())
 +#endif
 +            )
                  return;

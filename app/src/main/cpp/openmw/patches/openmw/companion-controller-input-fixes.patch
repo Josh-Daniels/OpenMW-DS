@@ -1,0 +1,105 @@
+Companion controller-input fixes for Vanilla-UI menus, layered on top of
+companion-controller-nav.patch (applied LAST in the chain so its context matches the fully
+patched ControllerManager::update()).
+
+FIX 1 (generalized) — stuck movement/look after closing ANY pausing menu. While a menu is open a
+held stick's RELEASE event is swallowed before reaching the ICS movement/look channels: by our
+companionNavActive() block (DS overlays) OR by the vanilla `return !mGamepadGuiCursorEnabled`
+deadzone branch in gamepadToGuiControl (any native menu — inventory/container/barter/dialogue/pause
+— while the Game cursor is off). The channel stays deflected and the player keeps moving/looking on
+close. The original FIX 1 only reset on a DS overlay close (companionNavActive true->false); this
+generalizes it to fire on the GUI->gameplay transition (isGuiMode true->false), covering vanilla
+menus, containers and the pause screen too. The companionConsumeResetAxes() path is kept (ORed in)
+for the DS overlay->overlay case where GUI mode never drops.
+
+FIX 3b — right-stick scroll of a Vanilla conversation (GM_Dialogue). Same problem/pattern as FIX 2
+(GM_Scroll document reading): the native DialogueWindow exposes its history ScrollView via
+getControllerScrollWidget(), but the native right-stick-scroll routing needs the game cursor, so
+with the Game cursor OFF a held stick can't scroll it (and its value leaks into the look channel).
+Poll the live right-stick Y and nudge the view directly. Gated on !companionNavActive() so it drives
+ONLY the native (Vanilla) conversation — a DS conversation scrolls via COMPANION_NAV_SCROLL_* — and
+on getMode() == GM_Dialogue so it never scrolls the history behind a service window pushed on top.
+
+Kotlin: none. Native-only, no new externs. Verify markers: sWasGuiMode / leftGuiMode (FIX 1),
+"FIX 3b" + sDlgScrollAccum (FIX 3b).
+--- a/apps/openmw/mwinput/controllermanager.cpp
++++ b/apps/openmw/mwinput/controllermanager.cpp
+@@ -177,14 +177,21 @@
+     void ControllerManager::update(float dt)
+     {
+ #ifdef __ANDROID__
+-        // COMPANION (FIX 1): a DS overlay just closed (companionNavActive true->false) and Kotlin asked
+-        // us to reset the sticks. While the menu was open, the stick-release event was SWALLOWED by
+-        // gamepadToGuiControl and never reached controllerAxisMoved, so the ICS movement/look channels
+-        // can be stuck at their last held value — the player keeps moving/looking after the menu closes.
+-        // Inject a neutral (value 0 -> ICS percent ~0.5) event for all four movement/look axes so the
+-        // channels return to centre. deviceID 1 matches the SDL pump (sdlinputwrapper.cpp axisMoved(1,…))
+-        // and the sFakeDeviceId the axis bindings are registered under (bindingsmanager.cpp).
+-        if (companionConsumeResetAxes())
++        // COMPANION (FIX 1, generalized): while ANY pausing menu is open, a held stick's RELEASE event
++        // is SWALLOWED before it reaches the ICS movement/look channels — by our companionNavActive()
++        // block below (DS overlays) OR by the vanilla `return !mGamepadGuiCursorEnabled` deadzone branch
++        // in gamepadToGuiControl (any native menu — inventory/container/barter/dialogue/pause — while
++        // the Game cursor is off). Either way the channel stays deflected and the player keeps moving/
++        // looking after the menu closes. Reset on the GUI->gameplay transition (covers vanilla menus,
++        // containers and the pause screen, not just DS overlays), OR when Kotlin explicitly asks
++        // (companionConsumeResetAxes, a DS overlay closed — kept for the DS overlay->overlay case where
++        // GUI mode never drops). Inject a neutral (value 0 -> ICS percent ~0.5) event for all four axes;
++        // deviceID 1 matches the SDL pump and the sFakeDeviceId the axis bindings are registered under.
++        static bool sWasGuiMode = false;
++        const bool guiModeNow = MWBase::Environment::get().getWindowManager()->isGuiMode();
++        const bool leftGuiMode = sWasGuiMode && !guiModeNow;
++        sWasGuiMode = guiModeNow;
++        if (leftGuiMode || companionConsumeResetAxes())
+         {
+             static const SDL_GameControllerAxis kResetAxes[] = { SDL_CONTROLLER_AXIS_LEFTX,
+                 SDL_CONTROLLER_AXIS_LEFTY, SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY };
+@@ -236,6 +243,48 @@
+                 }
+             }
+         }
++
++        // COMPANION (FIX 3b): continuous right-stick scroll of a Vanilla conversation (GM_Dialogue).
++        // Same rationale/pattern as FIX 2 (GM_Scroll): the native DialogueWindow registers its history
++        // ScrollView via getControllerScrollWidget(), but the native right-stick-scroll routing needs
++        // the game cursor, so with the Game cursor OFF a held stick can't scroll it (and its value
++        // leaks into the look channel — see FIX 1). Poll the live axis and nudge the view directly.
++        // Gated on !companionNavActive() so it ONLY drives the native (Vanilla) conversation; when the
++        // conversation is DS the overlay owns scrolling via COMPANION_NAV_SCROLL_* (the poll below).
++        // getMode() == GM_Dialogue (not containsMode) so it doesn't scroll the history behind a service
++        // window (barter/etc.) pushed on top.
++        if (!companionNavActive())
++        {
++            MWBase::WindowManager* dlgWm = MWBase::Environment::get().getWindowManager();
++            if (dlgWm->getMode() == MWGui::GM_Dialogue)
++            {
++                const float ry = getAxisValue(SDL_CONTROLLER_AXIS_RIGHTY);
++                constexpr float threshold = 0.5f;
++                constexpr float interval = 0.06f;
++                static float sDlgScrollAccum = interval; // primed so the first deflection scrolls at once
++                if (ry <= -threshold || ry >= threshold)
++                {
++                    sDlgScrollAccum += dt;
++                    if (sDlgScrollAccum >= interval)
++                    {
++                        sDlgScrollAccum = 0.0f;
++                        const int step = (ry < 0.0f) ? 40 : -40; // stick up = view up (positive offset)
++                        for (MWGui::WindowBase* w : dlgWm->getGuiModeWindows(MWGui::GM_Dialogue))
++                        {
++                            MyGUI::Widget* widget = w ? w->getControllerScrollWidget() : nullptr;
++                            MyGUI::ScrollView* sv
++                                = widget ? widget->castType<MyGUI::ScrollView>(false) : nullptr;
++                            if (sv)
++                                sv->setViewOffset(sv->getViewOffset() + MyGUI::IntPoint(0, step));
++                        }
++                    }
++                }
++                else
++                {
++                    sDlgScrollAccum = interval; // re-arm in the deadzone
++                }
++            }
++        }
+ #endif
+ #ifdef __ANDROID__
+         // COMPANION: right-stick scroll for DS overlays. SDL emits axis events only on CHANGE, so a

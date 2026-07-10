@@ -1,0 +1,104 @@
+Native persuasion support for a DS conversation with persuasion set to Vanilla.
+
+1) COMPANION_PERSUASION_OPEN/_CLOSED around the native PersuasionDialog (a WindowModal shown by
+   setVisible(true)), so the bottom-screen conversation overlay steps aside (anyServiceVanillaUp in
+   EngineActivity) instead of covering the modal on the top screen, AND the controller-nav gate goes
+   false so the controller reaches the modal. OPEN from PersuasionDialog::onOpen(); CLOSED from a new
+   onClose() override (every close path — mouse Cancel / a persuade action / controller B — routes
+   through setVisible(false) -> WindowBase::onClose). Once-guarded via gPersuasionCompanionOpen.
+
+2) COMPANION_DIALOGUE_PERSUADE_AVAILABLE now carries the sPersuasion display string. When persuasion
+   is Vanilla the DS overlay's "Persuade" entry routes back through the EXISTING topic bridge
+   (CMPDLG:topic:<name> -> companionSelectEntry -> onSelectListItem(sPersuasion) ->
+   mPersuasionDialog.setVisible(true)), opening the native modal — no new bridge needed. Previously
+   the entry was gated to persuasion==DS only, so Vanilla persuasion had NO trigger in a DS
+   conversation (and the modal never opened, so the step-aside never fired). The parser matches the
+   token before the ':' so the availability flag still works; the name is unused when persuasion=DS.
+
+dialogue.cpp is otherwise touched only by companion-dialogue-export.patch (applied earlier in the
+chain); this patch applies after it. Kotlin: LogParser prefixes -> persuasionWindowOpen StateFlow +
+dialoguePersuadeTopicName -> anyServiceVanillaUpFlow() (gated on game_ui_persuasion == VANILLA) and
+the DS "Persuade" tap routing.
+--- a/apps/openmw/mwgui/dialogue.cpp
++++ b/apps/openmw/mwgui/dialogue.cpp
+@@ -49,6 +49,13 @@
+     // Same change-detection for the player's gold (drives the persuasion popup's Gold
+     // readout so it updates live after a bribe). Reset with disposition on a new actor.
+     int gCompanionLastGold = -1;
++    // Companion: true between COMPANION_PERSUASION_OPEN and _CLOSED. The native PersuasionDialog is
++    // a WindowModal (not a GM mode) shown by setVisible(true) when the "Persuasion" topic is picked
++    // in Vanilla-persuasion mode; the signal lets the bottom-screen conversation overlay step aside
++    // (anyServiceVanillaUp) so it doesn't cover the modal, and frees the controller for it. Once-
++    // guarded so the close fires exactly once whichever path ends it (Cancel/Bribe/Admire/B all go
++    // through setVisible(false) -> WindowBase::onClose). See companion-persuasion-open-signal.patch.
++    bool gPersuasionCompanionOpen = false;
+ }
+ 
+ namespace MWGui
+@@ -148,6 +155,14 @@
+ 
+     void PersuasionDialog::onOpen()
+     {
++        // COMPANION: the native persuasion modal just opened (Vanilla-persuasion mode). Tell the
++        // bottom screen so its conversation overlay steps aside and the controller reaches this modal.
++        if (!gPersuasionCompanionOpen)
++        {
++            gPersuasionCompanionOpen = true;
++            Log(Debug::Info) << "COMPANION_PERSUASION_OPEN";
++        }
++
+         center();
+ 
+         MWWorld::Ptr player = MWMechanics::getPlayer();
+@@ -186,6 +201,19 @@
+         WindowModal::onOpen();
+     }
+ 
++    void PersuasionDialog::onClose()
++    {
++        WindowModal::onClose();
++        // COMPANION: the modal closed (Cancel / a persuade action / B — all route through
++        // setVisible(false) -> WindowBase::onClose). Once-guarded so it fires exactly once; lets the
++        // bottom-screen conversation overlay come back and reclaim the controller.
++        if (gPersuasionCompanionOpen)
++        {
++            gPersuasionCompanionOpen = false;
++            Log(Debug::Info) << "COMPANION_PERSUASION_CLOSED";
++        }
++    }
++
+     MyGUI::Widget* PersuasionDialog::getDefaultKeyFocus()
+     {
+         return mAdmireButton;
+@@ -760,10 +788,15 @@
+         // tapped service routed back through companionSelectEntry -> onSelectListItem
+         // matches exactly. Empty START/END = NPC has no services (hide the section).
+         Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICES_START";
+-        // Companion: persuasion is handled by a bottom-screen popup (never the native
+-        // modal), so flag its availability rather than listing it as a routable service.
++        // Companion: flag persuasion availability rather than listing it as a routable service.
++        // Carries the sPersuasion display string so that when persuasion is VANILLA the bottom-screen
++        // "Persuade" entry can route back through CMPDLG:topic:<name> -> companionSelectEntry ->
++        // onSelectListItem(sPersuasion) -> mPersuasionDialog.setVisible(true), opening the NATIVE modal
++        // (its onOpen emits COMPANION_PERSUASION_OPEN, stepping the conversation overlay aside). When
++        // persuasion is DS the name is unused (the DS popup handles it). The parser matches on the
++        // token before the ':' so the flag still works.
+         if (mPtr.getType() == ESM::NPC::sRecordId)
+-            Log(Debug::Info) << "COMPANION_DIALOGUE_PERSUADE_AVAILABLE";
++            Log(Debug::Info) << "COMPANION_DIALOGUE_PERSUADE_AVAILABLE:" << gmst.find("sPersuasion")->mValue.getString();
+         if (services & ESM::NPC::AllItems)
+             Log(Debug::Info) << "COMPANION_DIALOGUE_SERVICE:" << gmst.find("sBarter")->mValue.getString();
+         if (services & ESM::NPC::Spells)
+--- a/apps/openmw/mwgui/dialogue.hpp
++++ b/apps/openmw/mwgui/dialogue.hpp
+@@ -46,6 +46,10 @@
+         PersuasionDialog(std::unique_ptr<ResponseCallback> callback);
+ 
+         void onOpen() override;
++        // COMPANION: emit COMPANION_PERSUASION_CLOSED on the real close so the bottom-screen
++        // conversation overlay stops covering this native (Vanilla) modal. See
++        // companion-persuasion-open-signal.patch.
++        void onClose() override;
+ 
+         MyGUI::Widget* getDefaultKeyFocus() override;
+ 
