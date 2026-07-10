@@ -109,17 +109,43 @@ android {
 
     androidComponents.onVariants { variant ->
         val cap = variant.name.replaceFirstChar { it.uppercase() }
+        // The Android variant name is NOT always the CMake build type AGP generates.
+        // AGP maps a non-debuggable `release` variant to the `RelWithDebInfo` CMake build
+        // type (it keeps native debug symbols for crash stack traces), so the real task is
+        // `buildCMakeRelWithDebInfo[arm64-v8a]` — there is NO `buildCMakeRelease` task.
+        // Map variant -> CMake task suffix explicitly; deriving one from the other silently
+        // wires `mergeReleaseAssets`/`restorePinnedLibs` to a non-existent task (the latter
+        // failure is the dangerous one: the release APK would ship UNPINNED native libs).
+        val cmakeBuildType = when (variant.name) {
+            "release" -> "RelWithDebInfo"
+            else -> cap   // debug -> Debug (names already line up)
+        }
+        val cmakeTaskName = "buildCMake$cmakeBuildType[arm64-v8a]"
         tasks.withType<MergeSourceSetFolders>().configureEach {
             if (name == "merge${cap}Assets") {
                 dependsOn(generateOpenMWAssets)
-                dependsOn("buildCMake$cap[arm64-v8a]")
+                dependsOn(cmakeTaskName)
             }
             if (name == "merge${cap}JniLibFolders") {
                 dependsOn(restorePinnedLibs)
             }
         }
-        tasks.matching { it.name == "buildCMake${cap}[arm64-v8a]" }.configureEach {
+        tasks.matching { it.name == cmakeTaskName }.configureEach {
             finalizedBy(restorePinnedLibs)
+        }
+        // Lint's release "vital" model/analysis tasks scan the merged assets — which
+        // include our generated_assets srcDir (registered under `sourceSets` below via
+        // assets.directories.add) — but AGP does NOT wire them to `generateOpenMWAssets`
+        // (the task that declares that dir as its output). Without this, the FIRST-EVER
+        // release build fails Gradle's implicit-dependency validation on
+        // `generate${cap}LintVitalReportModel`. The debug variant never runs lint-vital,
+        // so this only ever bites the release variant. Declare the dependency explicitly
+        // (Gradle's own recommended fix); it can't cycle since generateOpenMWAssets has no
+        // lint dependency.
+        tasks.matching {
+            it.name.contains("lint", ignoreCase = true) && it.name.contains(cap)
+        }.configureEach {
+            dependsOn(generateOpenMWAssets)
         }
     }
 

@@ -207,5 +207,5 @@ adb shell am force-stop com.alpha3.launcher
 adb uninstall com.alpha3.launcher
 adb shell rm -rf /storage/emulated/0/Alpha3/
 adb shell rm -rf /storage/emulated/0/Android/data/com.alpha3.launcher/
-adb install -t app/build/outputs/apk/debug/app-debug.apk
+adb install app/build/outputs/apk/release/app-release.apk
 ```
