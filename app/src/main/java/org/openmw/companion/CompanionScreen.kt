@@ -855,9 +855,9 @@ private fun DialogueTopicsOverlay(
                             topics = topics, services = services, disposition = disposition,
                             persuadeAvailable = persuadeAvailable,
                             // A choice question OR an open persuasion popup dims the topic/service/
-                            // Goodbye rows and makes them inert; a choice's answers show in the
-                            // centred choices popup (the history it would sit under is on the other
-                            // screen), and the persuasion popup is hosted by its own location.
+                            // Goodbye rows and makes them inert; a choice's answers render inline in
+                            // the history on the top screen (SPLIT), and the persuasion popup is
+                            // hosted by its own location.
                             choicesActive = choices.isNotEmpty() || persuasionVisible,
                             interactive = choices.isEmpty() && !persuasionVisible,
                             onPersuadeTapped = { triggerPersuade() },
@@ -869,21 +869,17 @@ private fun DialogueTopicsOverlay(
                         )
                     }
                 }
-                if (choices.isNotEmpty()) {
-                    DialogueChoicesPopup(choices)
-                }
             }
 
             // BOTTOM: the classic full two-column conversation on the bottom screen. Choices render
-            // as the centred DialogueChoicesPopup (choicesInline = false), same as SPLIT/TOP — a real
-            // popup rather than inline in the history, and controller-navigable (Phase 5). Fills the
-            // screen (12dp insets, covering the tab bar — dialogue is a modal left via Goodbye).
+            // inline in the history (below the newest response), matching vanilla, and are
+            // controller-navigable. Fills the screen (12dp insets, covering the tab bar — dialogue
+            // is a modal left via Goodbye).
             ConversationLocation.BOTTOM -> {
                 DialogueConversationOverlay(
                     npcName = npcName, history = history, topics = topics, services = services,
                     choices = choices, disposition = disposition,
                     persuadeAvailable = persuadeAvailable,
-                    choicesInline = false,
                     panelAlignment = Alignment.Center,
                     panelWidthFraction = null, panelHeightFraction = null,
                     panelPadding = PaddingValues(12.dp)
@@ -894,12 +890,11 @@ private fun DialogueTopicsOverlay(
 }
 
 /** The full interactive two-column conversation — NPC title bar, scrollable history (left)
- *  and the right column of controls — plus its persuasion/choices popups. Shared by the
- *  BOTTOM-screen layout ([choicesInline] = true, choices render inline in the history) and
- *  the TOP-screen full layout ([choicesInline] = false, choices render as a centred popup).
- *  The panel is sized/anchored by [panelWidthFraction]/[panelHeightFraction]/[panelAlignment]
- *  /[panelPadding] (null fraction = fill that axis); the popups always fill the whole overlay
- *  so they centre over the entire screen. Must be placed inside a fillMaxSize parent Box. */
+ *  and the right column of controls. Shared by the BOTTOM-screen and TOP-screen full layouts.
+ *  A mid-dialogue choice question renders INLINE in the history (below the newest response),
+ *  matching vanilla — never a separate popup. The panel is sized/anchored by
+ *  [panelWidthFraction]/[panelHeightFraction]/[panelAlignment]/[panelPadding] (null fraction =
+ *  fill that axis). Must be placed inside a fillMaxSize parent Box. */
 @Composable
 private fun DialogueConversationOverlay(
     npcName: String,
@@ -909,7 +904,6 @@ private fun DialogueConversationOverlay(
     choices: List<DialogueChoice>,
     disposition: Int,
     persuadeAvailable: Boolean,
-    choicesInline: Boolean,
     panelAlignment: Alignment,
     panelWidthFraction: Float?,
     panelHeightFraction: Float?,
@@ -944,9 +938,9 @@ private fun DialogueConversationOverlay(
             // ---- Two columns: dialogue history (65%) | topics/services (35%) ----
             Row(Modifier.fillMaxSize()) {
                 DialogueHistoryColumn(
-                    // Inline choices only in BOTTOM mode; otherwise they show in the popup.
+                    // Choices render inline in the history (below the newest response).
                     history = history,
-                    choices = if (choicesInline) choices else emptyList(),
+                    choices = choices,
                     topics = topics,
                     modifier = Modifier.weight(0.65f).fillMaxHeight().padding(8.dp)
                 )
@@ -962,90 +956,6 @@ private fun DialogueConversationOverlay(
                     onPersuadeTapped = { triggerPersuade() },
                     modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
                 )
-            }
-        }
-    }
-
-    // Centred choices popup — only when choices don't render inline (i.e. the TOP layout).
-    // No tap-outside dismiss: it stays until a choice is tapped or the dialogue closes.
-    if (!choicesInline && choices.isNotEmpty()) {
-        DialogueChoicesPopup(choices)
-    }
-}
-
-/** Centred popup listing the current dialogue [choices] (guard confrontation, taunt
- *  goodbye, etc.), used only in the split (conversation-on-top) layout. 50%-width panel,
- *  bronze border, tappable choice rows. NO tap-outside dismiss — the scrim swallows taps
- *  but never dismisses; the popup leaves when a choice is tapped or the dialogue closes. */
-@Composable
-private fun DialogueChoicesPopup(choices: List<DialogueChoice>) {
-    // D-pad up/down navigate the choices, A selects the focused one (id -1 = forced-goodbye prompt).
-    val focusIndex = rememberListNavFocus(
-        itemCount = choices.size,
-        onConfirm = { i ->
-            val c = choices[i]
-            if (c.id == -1) CompanionActions.dialogueGoodbye()
-            else CompanionActions.activateDialogueChoice(c.id)
-        },
-    )
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .zIndex(28f)
-            .background(Color(0x99000000))
-            .pointerInput(Unit) { detectTapGestures {} },
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth(0.5f)
-                .heightIn(max = 460.dp)
-                .mwPanel()
-                .pointerInput(Unit) { detectTapGestures {} }
-        ) {
-            Text(
-                "CHOOSE",
-                color = BronzeLight, fontSize = 13.sp,
-                fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 2.sp,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
-            )
-            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(12.dp)
-            ) {
-                choices.forEachIndexed { i, choice ->
-                    if (i > 0) Spacer(Modifier.height(8.dp))
-                    val choiceFocused = i == focusIndex
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(2.dp))
-                            // Focused choice: brighter fill + thicker bronze border; others dimmed so
-                            // the controller focus stands out (all rows used to share one bronze border).
-                            .background(BronzeLight.copy(alpha = if (choiceFocused) 0.22f else 0.06f))
-                            .border(
-                                if (choiceFocused) 2.dp else 1.dp,
-                                if (choiceFocused) BronzeLight else BronzeDark,
-                                RoundedCornerShape(2.dp)
-                            )
-                            .clickable {
-                                // id -1 = the synthetic forced-goodbye prompt (NPC taunted
-                                // into combat, etc.) — route it to goodbye, not a real answer.
-                                if (choice.id == -1) CompanionActions.dialogueGoodbye()
-                                else CompanionActions.activateDialogueChoice(choice.id)
-                            }
-                            .padding(horizontal = 14.dp, vertical = 12.dp)
-                    ) {
-                        Text(
-                            choice.text,
-                            color = if (choiceFocused) BoneBright else BronzeLight,
-                            fontSize = 14.sp, fontFamily = MwBody
-                        )
-                    }
-                }
             }
         }
     }
@@ -1081,7 +991,6 @@ fun ConversationHistoryOverlay() {
                 npcName = npcName, history = history, topics = topics, services = services,
                 choices = choices, disposition = disposition,
                 persuadeAvailable = persuadeAvailable,
-                choicesInline = false,
                 panelAlignment = Alignment.BottomCenter,
                 panelWidthFraction = 0.83f,   // ~10% wider than the SPLIT history box (0.75)
                 panelHeightFraction = 0.70f,  // taller than the previous 0.55
@@ -1091,7 +1000,10 @@ fun ConversationHistoryOverlay() {
         return
     }
 
-    // SPLIT: read-only history box (bottom-anchored, 75% width, 51% height).
+    // SPLIT: read-only history box (bottom-anchored, 75% width, 51% height). A mid-dialogue
+    // choice question renders inline here (with the conversation), controller-navigable — the
+    // controls live on the bottom screen but the choices live with the text, matching vanilla.
+    val choices by GameStateRepository.dialogueChoices.collectAsState()
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1119,15 +1031,18 @@ fun ConversationHistoryOverlay() {
                 }
                 Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
             }
-            // No inline choices (they live in the bottom-screen popup). interactive = true so
-            // topic hyperlinks in the response text are tappable on the top screen (the panel
-            // window has FLAG_NOT_TOUCHABLE removed, so touch reaches these clickable spans).
+            // interactive = true so topic hyperlinks AND inline choices are tappable/navigable on
+            // the top screen (the panel window has FLAG_NOT_TOUCHABLE removed, so touch reaches
+            // these clickable spans; the controller drives choice nav via the shared navEvent flow).
+            // choicesHorizontal = true → the short, wide Split box lays the options side-by-side,
+            // navigated Left/Right (BOTTOM/TOP keep the vertical Up/Down stack).
             DialogueHistoryColumn(
                 history = history,
-                choices = emptyList(),
+                choices = choices,
                 topics = topics,
                 modifier = Modifier.fillMaxSize().padding(12.dp),
-                interactive = true
+                interactive = true,
+                choicesHorizontal = true
             )
         }
     }
@@ -1695,6 +1610,9 @@ private fun DispositionBar(value: Int) {
 private fun rememberListNavFocus(
     itemCount: Int,
     enabled: Boolean = true,
+    // Which D-pad axis moves focus. false (default) = a vertical list (Up/Down); true = a
+    // horizontal row (Left/Right — e.g. side-by-side choices in the Split conversation box).
+    horizontal: Boolean = false,
     onConfirm: (Int) -> Unit,
     onAction1: (() -> Unit)? = null,
     onCancel: (() -> Unit)? = null,
@@ -1715,12 +1633,15 @@ private fun rememberListNavFocus(
             lastSeq = ev.seq
             if (!enabledState.value) return@collect
             val n = countState.value
-            when (ev) {
-                is NavEvent.Down -> if (n > 0) index = (index + 1) % n
-                is NavEvent.Up -> if (n > 0) index = (index - 1 + n) % n
-                is NavEvent.Confirm -> if (n > 0) confirmState.value(index)
-                is NavEvent.Action1 -> action1State.value?.invoke()
-                is NavEvent.Cancel -> cancelState.value?.invoke()
+            // The "next"/"prev" events depend on the axis: horizontal → Right/Left, else Down/Up.
+            val isNext = if (horizontal) ev is NavEvent.Right else ev is NavEvent.Down
+            val isPrev = if (horizontal) ev is NavEvent.Left else ev is NavEvent.Up
+            when {
+                isNext -> if (n > 0) index = (index + 1) % n
+                isPrev -> if (n > 0) index = (index - 1 + n) % n
+                ev is NavEvent.Confirm -> if (n > 0) confirmState.value(index)
+                ev is NavEvent.Action1 -> action1State.value?.invoke()
+                ev is NavEvent.Cancel -> cancelState.value?.invoke()
                 else -> Unit
             }
         }
@@ -1783,7 +1704,11 @@ private fun DialogueHistoryColumn(
     // see the COMPANION_DIALOGUE emit ordering) highlights retroactively once it lands
     // in this list. Passing it here (vs. only say.hyperlinks) is what makes the history
     // recompose when topics change.
-    topics: List<String> = emptyList()
+    topics: List<String> = emptyList(),
+    // Lay the inline choice block out side-by-side (a Row, Left/Right nav) instead of a
+    // vertical stack (Up/Down). Only the Split top-screen box uses this — the box is short
+    // and wide, so two options read better beside each other. BOTTOM/TOP keep the stack.
+    choicesHorizontal: Boolean = false
 ) {
     val listState = rememberLazyListState()
     // Auto-scroll to the newest item — a fresh response OR the choice block appearing.
@@ -1796,6 +1721,21 @@ private fun DialogueHistoryColumn(
     }
     // Right stick scrolls the conversation history.
     ScrollByNav(listState)
+    // Controller focus for the inline choice block (a mid-dialogue question). Reuses the same
+    // nav helper the old centred DialogueChoicesPopup used: D-pad move focus (Up/Down for the
+    // vertical stack, Left/Right for the Split side-by-side row), A confirms. Disabled unless a
+    // choice is active AND the history is interactive; returns -1 when idle. id -1 = the synthetic
+    // forced-goodbye prompt (NPC taunted into combat, etc.) → goodbye.
+    val choiceFocus = rememberListNavFocus(
+        itemCount = choices.size,
+        enabled = choices.isNotEmpty() && interactive,
+        horizontal = choicesHorizontal,
+        onConfirm = { i ->
+            val c = choices[i]
+            if (c.id == -1) CompanionActions.dialogueGoodbye()
+            else CompanionActions.activateDialogueChoice(c.id)
+        },
+    )
     LazyColumn(state = listState, modifier = modifier) {
         itemsIndexed(history) { i, say ->
             if (i > 0) {
@@ -1844,34 +1784,70 @@ private fun DialogueHistoryColumn(
                     fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 2.sp,
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
-                choices.forEachIndexed { i, choice ->
-                    if (i > 0) Spacer(Modifier.height(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(BronzeLight.copy(alpha = 0.12f))
-                            .border(1.dp, BronzeLight, RoundedCornerShape(2.dp))
-                            .clickable {
-                                if (interactive) {
-                                    // id -1 = the synthetic forced-goodbye prompt (NPC
-                                    // taunted into combat, etc.) — route it to goodbye, not
-                                    // a real choice answer.
-                                    if (choice.id == -1) CompanionActions.dialogueGoodbye()
-                                    else CompanionActions.activateDialogueChoice(choice.id)
-                                }
-                            }
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                    ) {
-                        Text(
-                            choice.text,
-                            color = BronzeLight, fontSize = 14.sp, fontFamily = MwBody
+                if (choicesHorizontal) {
+                    // Split: side-by-side options in equal-width columns, navigated Left/Right.
+                    Row(Modifier.fillMaxWidth()) {
+                        choices.forEachIndexed { i, choice ->
+                            if (i > 0) Spacer(Modifier.width(6.dp))
+                            DialogueChoiceBox(
+                                choice, focused = i == choiceFocus, interactive = interactive,
+                                centered = true, modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                } else {
+                    // Bottom/Top: vertical stack, navigated Up/Down.
+                    choices.forEachIndexed { i, choice ->
+                        if (i > 0) Spacer(Modifier.height(6.dp))
+                        DialogueChoiceBox(
+                            choice, focused = i == choiceFocus, interactive = interactive,
+                            modifier = Modifier.fillMaxWidth()
                         )
                     }
                 }
                 Spacer(Modifier.height(10.dp))
             }
         }
+    }
+}
+
+/** One inline dialogue-choice button, shared by [DialogueHistoryColumn]'s vertical stack and its
+ *  Split side-by-side row. [focused] draws the controller-focus highlight (brighter fill + thicker
+ *  BronzeLight border + BoneBright text — same as the old popup); taps are inert unless
+ *  [interactive]. [centered] centres the label (for the equal-width side-by-side layout). id -1 =
+ *  the synthetic forced-goodbye prompt (NPC taunted into combat, etc.) → goodbye, not an answer. */
+@Composable
+private fun DialogueChoiceBox(
+    choice: DialogueChoice,
+    focused: Boolean,
+    interactive: Boolean,
+    modifier: Modifier = Modifier,
+    centered: Boolean = false
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(2.dp))
+            .background(BronzeLight.copy(alpha = if (focused) 0.22f else 0.06f))
+            .border(
+                if (focused) 2.dp else 1.dp,
+                if (focused) BronzeLight else BronzeDark,
+                RoundedCornerShape(2.dp)
+            )
+            .clickable {
+                if (interactive) {
+                    if (choice.id == -1) CompanionActions.dialogueGoodbye()
+                    else CompanionActions.activateDialogueChoice(choice.id)
+                }
+            }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = if (centered) Alignment.Center else Alignment.CenterStart
+    ) {
+        Text(
+            choice.text,
+            color = if (focused) BoneBright else BronzeLight,
+            fontSize = 14.sp, fontFamily = MwBody,
+            textAlign = if (centered) TextAlign.Center else null
+        )
     }
 }
 

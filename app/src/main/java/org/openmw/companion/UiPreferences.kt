@@ -64,8 +64,11 @@ data class GameUiElement(
     val label: String,
     val pending: Boolean = false,
 ) {
-    /** Pending elements are locked to VANILLA; everything else defaults to DS. */
-    val defaultMode: GameUiMode get() = if (pending) GameUiMode.VANILLA else GameUiMode.DS
+    /** First-launch default mode. The app ships in an "all Vanilla" state (native OpenMW handles
+     *  every menu on the top screen) — the player opts into DS per element, or all at once via the
+     *  All-DS quick-set. Pending elements are locked to VANILLA regardless. (This mirrors a fresh
+     *  install immediately having "All Vanilla" pressed.) */
+    val defaultMode: GameUiMode get() = GameUiMode.VANILLA
 }
 
 /** Catalogue of every Game UI element, in display order — the single source of truth the
@@ -221,13 +224,15 @@ object UiPreferences {
     // preference; the touch handler reads it to decide whether to inject the direct click.
     private val touchInputFlow = MutableStateFlow(true)
 
-    // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default false.
-    // Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
-    private val alpha3OverlayFlow = MutableStateFlow(false)
+    // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default true (shown on
+    // first launch). Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
+    private val alpha3OverlayFlow = MutableStateFlow(true)
 
-    /** Default On/Off for a Vanilla HUD element: only the crosshair defaults On; the companion
-     *  draws every other HUD element on the bottom screen, so their native versions default Off. */
-    private fun hudDefaultOn(key: String): Boolean = key == "hud_crosshair"
+    /** Default On/Off for a Vanilla HUD element on first launch. The crosshair and the controller
+     *  button-hint bar default On (the app ships in the all-Vanilla state, which shows the hint bar
+     *  alongside the native menus); the companion draws every other HUD element on the bottom
+     *  screen, so their native versions default Off. */
+    private fun hudDefaultOn(key: String): Boolean = key == "hud_crosshair" || key == CONTROLLER_TOOLTIPS_KEY
 
     /** Load persisted values into the flows. Idempotent — safe to call on every compose. */
     fun init(context: Context) {
@@ -293,7 +298,7 @@ object UiPreferences {
         HUD_ELEMENTS.forEach { el ->
             hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, hudDefaultOn(el.key))
         }
-        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, false)
+        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, true)
     }
 
     /** The DS/Vanilla mode for a Game UI element (e.g. "game_ui_looting"). */
