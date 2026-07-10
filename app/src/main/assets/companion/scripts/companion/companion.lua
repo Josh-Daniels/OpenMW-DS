@@ -1660,7 +1660,16 @@ local function dispatchCommand(command)
         if interfaces.UI.getMode() == interfaces.UI.MODE.Interface then
             pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Interface) end)
         else
-            self:sendEvent('AddUiMode', { mode = 'Interface', windows = { 'Map' } })
+            -- Guard: only OPEN the map once the character is created. During character creation the
+            -- in-game inventory/map GUI isn't available, and forcing it (AddUiMode Interface) wedges
+            -- the game (the top-screen map can't render). The first journal entry is the reliable
+            -- "character created" signal. The close branch above is never gated (if the map is open,
+            -- the character already exists). The Kotlin map tap gates on this too — defence in depth.
+            local ready = false
+            pcall(function() ready = #types.Player.journal(self).journalTextEntries > 0 end)
+            if ready then
+                self:sendEvent('AddUiMode', { mode = 'Interface', windows = { 'Map' } })
+            end
         end
         return
     end

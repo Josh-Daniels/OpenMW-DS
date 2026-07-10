@@ -260,6 +260,10 @@ private val ICON_CACHE_DIR by lazy {
 // 0.25 = tight zoom (25% of cell visible); increase toward 1.0 to zoom out.
 private const val MINIMAP_CROP_FRACTION = 0.25f
 
+// How long a tapped door-marker's name bubble stays before auto-dismissing (ms). Tweakable;
+// mirrors the Training overlay's dwell consts. A tap elsewhere / re-tapping it closes it sooner.
+private const val DOOR_MARKER_POPUP_MS = 3000L
+
 private val FAV_SLOT_WIDTH  = 132.dp
 private val FAV_SLOT_HEIGHT = 34.dp
 
@@ -5981,6 +5985,16 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     val markerCX = markerSeg?.centerX ?: 0f
     val markerCY = markerSeg?.centerY ?: 0f
     var selectedMarker by remember { mutableStateOf<Pair<DoorMarker, Offset>?>(null) }
+    // Auto-dismiss the door-marker name bubble after DOOR_MARKER_POPUP_MS. Keyed on selectedMarker,
+    // so tapping a DIFFERENT marker restarts the timer for it, and closing it (tap-elsewhere / re-tap)
+    // cancels the pending dismiss (the null-key branch does nothing). Same LaunchedEffect+delay pattern
+    // as the splash / Training dwell timers.
+    LaunchedEffect(selectedMarker) {
+        if (selectedMarker != null) {
+            delay(DOOR_MARKER_POPUP_MS)
+            selectedMarker = null
+        }
+    }
 
     val favs by FavouritesRepository.state.collectAsState()
     val context = LocalContext.current
@@ -6031,10 +6045,15 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         // destination name (and is reserved for richer per-marker info later); a tap anywhere else
         // (not covered by an overlay declared later in this Box — those consume the tap first via
         // Compose z-order) opens the in-game world map. Disabled while the splash is up.
+        // mapReady gates opening the in-game map: during character creation the inventory/map GUI
+        // isn't available, and forcing it (CMP:openmap -> AddUiMode Interface) wedges the game (the
+        // top-screen map can't render). The first journal entry is the reliable "character created"
+        // signal; it's a pointerInput key so the handler refreshes once char-gen completes.
+        val mapReady = state.journalEntries.isNotEmpty()
         Canvas(
             Modifier
                 .fillMaxSize()
-                .pointerInput(doorMarkers, state.pos, markerAngle, markerCX, markerCY, splashVisible) {
+                .pointerInput(doorMarkers, state.pos, markerAngle, markerCX, markerCY, splashVisible, mapReady) {
                     detectTapGestures { tap ->
                         if (splashVisible) return@detectTapGestures
                         val w = size.width.toFloat(); val h = size.height.toFloat()
@@ -6048,11 +6067,18 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                             .filter { (_, p) -> (p - tap).getDistance() <= hitR }
                             .minByOrNull { (_, p) -> (p - tap).getDistance() }
                         if (hit != null) {
-                            selectedMarker = hit
-                        } else {
+                            // Re-tapping the marker already shown toggles it closed; tapping a
+                            // different one swaps (and the LaunchedEffect above restarts its 3s timer).
+                            selectedMarker = if (selectedMarker?.first == hit.first) null else hit
+                        } else if (selectedMarker != null) {
+                            // A name bubble is showing: this empty-map tap just dismisses it and is
+                            // consumed — do NOT also open the world map. A subsequent tap opens it.
                             selectedMarker = null
+                        } else if (mapReady) {
                             CompanionActions.openWorldMap()
                         }
+                        // else: character not yet created (no journal entries) — ignore the tap
+                        // rather than opening the map, which would wedge the game during char-gen.
                     }
                 }
         ) {
