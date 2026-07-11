@@ -1,26 +1,6 @@
 {
     "buttons": [
         {
-            "type": "scroll_Wheel",
-            "keyCode": 0,
-            "label": "Scroll Wheel1",
-            "position": -1,
-            "id": 101,
-            "size": 30.0,
-            "offsetX": 0.01953125,
-            "offsetY": 0.1875,
-            "isLocked": false,
-            "blockMouse": false,
-            "color": "#97afb1b0",
-            "alpha": 0.39215687,
-            "uri": null,
-            "group": 1,
-            "vibrate": false,
-            "isMouseButton": false,
-            "mouseButton": 1,
-            "buttonTint": true
-        },
-        {
             "type": "leftStick",
             "keyCode": 0,
             "label": "Left Thumbstick",
