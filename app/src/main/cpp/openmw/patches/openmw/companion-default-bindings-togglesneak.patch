@@ -1,0 +1,41 @@
+--- a/apps/openmw/mwinput/bindingsmanager.cpp
++++ b/apps/openmw/mwinput/bindingsmanager.cpp
+@@ -365,17 +365,22 @@
+         std::map<int, int> defaultButtonBindings;
+ 
+         defaultButtonBindings[A_Activate] = SDL_CONTROLLER_BUTTON_A;
+-        defaultButtonBindings[A_ToggleWeapon] = SDL_CONTROLLER_BUTTON_X;
+-        defaultButtonBindings[A_ToggleSpell] = SDL_CONTROLLER_BUTTON_Y;
++        // COMPANION (OpenMW-DS): controller defaults tuned for the AYN Thor layout. Ready Weapon/Magic
++        // swapped to Y/X; Inventory on D-Pad Up; Rest on Back; Quick Save on Right Shoulder; camera
++        // zoom on D-Pad Right/Left. Journal stays on Left Shoulder (already the desired button).
++        defaultButtonBindings[A_ToggleWeapon] = SDL_CONTROLLER_BUTTON_Y;
++        defaultButtonBindings[A_ToggleSpell] = SDL_CONTROLLER_BUTTON_X;
+         // defaultButtonBindings[A_QuickButtonsMenu] = SDL_GetButtonFromScancode(SDL_SCANCODE_F1); // Need to implement,
+         // should be ToggleSpell(5) AND Wait(9)
+         defaultButtonBindings[A_Sneak] = SDL_CONTROLLER_BUTTON_LEFTSTICK;
+         defaultButtonBindings[A_Journal] = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
+-        defaultButtonBindings[A_Rest] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
++        defaultButtonBindings[A_Rest] = SDL_CONTROLLER_BUTTON_BACK;
+         defaultButtonBindings[A_TogglePOV] = SDL_CONTROLLER_BUTTON_RIGHTSTICK;
+-        defaultButtonBindings[A_Inventory] = SDL_CONTROLLER_BUTTON_B;
++        defaultButtonBindings[A_Inventory] = SDL_CONTROLLER_BUTTON_DPAD_UP;
+         defaultButtonBindings[A_GameMenu] = SDL_CONTROLLER_BUTTON_START;
+-        defaultButtonBindings[A_QuickSave] = SDL_CONTROLLER_BUTTON_GUIDE;
++        defaultButtonBindings[A_QuickSave] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
++        defaultButtonBindings[A_ZoomIn] = SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
++        defaultButtonBindings[A_ZoomOut] = SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+ 
+         std::map<int, int> defaultAxisBindings;
+         defaultAxisBindings[A_MoveForwardBackward] = SDL_CONTROLLER_AXIS_LEFTY;
+--- a/files/data/scripts/omw/input/settings.lua
++++ b/files/data/scripts/omw/input/settings.lua
+@@ -33,7 +33,7 @@
+     permanentStorage = true,
+     settings = {
+         boolSetting('alwaysRun', false),
+-        boolSetting('toggleSneak', false), -- TODO: consider removing this setting when we have the advanced binding UI
++        boolSetting('toggleSneak', true), -- OpenMW-DS: default to toggle-sneak (was false). TODO: consider removing this setting when we have the advanced binding UI
+         boolSetting('smoothControllerMovement', true),
+     },
+ })

@@ -79,6 +79,8 @@ setting up Alpha3 specifically for the AYN Thor running Morrowind.
 ### Other Settings
 - Have a look through the Settings.cfg (left side menu) to enable or disable any settings you like.
 - I have already enabled controller by default.
+- I have changed some in game controller inputs for a better in game experience. You can change them back in game.
+- To disable "toggle sneak" go to the in game Settings > Scripts > OpenMW Controls > Toggle Sneak.
 
 These settings are optional but work well with OpenMW-DS.
 

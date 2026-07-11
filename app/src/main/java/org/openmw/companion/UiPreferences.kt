@@ -9,12 +9,13 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * Where the conversation UI is drawn.
  * - [BOTTOM]: original two-column layout entirely on the bottom screen.
- * - [SPLIT]: history on the top screen, topics/controls on the bottom (current default).
- * - [TOP]: full conversation on the top screen (not yet implemented — treated as [SPLIT]).
+ * - [SPLIT]: history on the top screen, topics/controls on the bottom.
+ * - [TOP]: full conversation on the top screen (current default).
  *
  * NOTE: distinct from [GameUiMode]. This only chooses which screen the (DS) conversation is
  * drawn on; whether the companion draws conversation at all is the "game_ui_conversation"
- * [GameUiMode]. No longer has a dedicated options-menu row — defaults to [SPLIT].
+ * [GameUiMode]. Selectable via the Screen Layout "Conversation" row; defaults to [TOP], and
+ * the "All DS" quick-set forces it back to [TOP].
  */
 enum class ConversationLocation { BOTTOM, SPLIT, TOP }
 
@@ -187,8 +188,10 @@ object UiPreferences {
     // mid-loop mixed states. Main-thread only.
     private var bulkGameUi = false
 
-    // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default SPLIT.
-    private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT)
+    // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default TOP. This MutableStateFlow
+    // init IS the fresh-install fallback: the load below passes null to getString and only overrides
+    // when a value is actually stored, so there is no second default site.
+    private val conversationLocationFlow = MutableStateFlow(ConversationLocation.TOP)
 
     // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default SPLIT
     // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
@@ -226,7 +229,7 @@ object UiPreferences {
 
     // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default true (shown on
     // first launch). Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
-    private val alpha3OverlayFlow = MutableStateFlow(true)
+    private val alpha3OverlayFlow = MutableStateFlow(false)
 
     /** Default On/Off for a Vanilla HUD element on first launch. The crosshair and the controller
      *  button-hint bar default On (the app ships in the all-Vanilla state, which shows the hint bar
@@ -298,7 +301,7 @@ object UiPreferences {
         HUD_ELEMENTS.forEach { el ->
             hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, hudDefaultOn(el.key))
         }
-        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, true)
+        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, false)
     }
 
     /** The DS/Vanilla mode for a Game UI element (e.g. "game_ui_looting"). */
@@ -320,9 +323,12 @@ object UiPreferences {
     /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Vanilla" quick-set
      *  buttons). Pending elements stay locked to VANILLA. Also flips the controller button-hint bar
      *  ([CONTROLLER_TOOLTIPS_KEY]): DS -> Off, Vanilla -> On (only useful when navigating native
-     *  menus), and the input mode: DS -> Touch input on (Game cursor off via mutual exclusion),
-     *  Vanilla -> Game cursor on (Touch input off). All other Vanilla HUD toggles are left untouched;
-     *  individual rows can still be overridden afterwards. */
+     *  menus), and the input mode: BOTH presets now turn Touch input ON (Game cursor OFF via mutual
+     *  exclusion) — neither preset enables the Game cursor, so a user who wants it must toggle it
+     *  manually in the Input section. DS additionally forces the Conversation Screen Layout to TOP
+     *  (the other per-window layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at
+     *  their own settings). All other Vanilla HUD toggles are left untouched; individual rows can
+     *  still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
         // Snapshot the current layout first if it's a Custom mix, so [Custom] can restore it even if
         // it wasn't captured by an earlier individual change. (No-op if the snapshot already matches.)
@@ -332,8 +338,13 @@ object UiPreferences {
         bulkGameUi = false
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
         when (mode) {
-            GameUiMode.DS -> setTouchInput(context, true)       // mutual exclusion turns Game cursor off
-            GameUiMode.VANILLA -> setGameCursor(context, true)  // mutual exclusion turns Touch input off
+            // Both presets use Touch input (Game cursor off via mutual exclusion). All DS also drops
+            // the DS conversation onto the top screen (Conversation layout -> TOP).
+            GameUiMode.DS -> {
+                setTouchInput(context, true)
+                setConversationLocation(context, ConversationLocation.TOP)
+            }
+            GameUiMode.VANILLA -> setTouchInput(context, true)  // was setGameCursor(true) — swapped so All Vanilla is touch-driven
         }
     }
 
