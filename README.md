@@ -76,23 +76,11 @@ setting up Alpha3 specifically for the AYN Thor running Morrowind.
   files folder, tap "use this folder".
 - Check the content tab again to see if esm's and now mods are there too.
 
-### Recommended Settings
+### Other Settings
+- Have a look through the Settings.cfg (left side menu) to enable or disable any settings you like.
+- I have already enabled controller by default.
 
-These settings are optional but work well with OpenMW-DS. 
-- Tap settings, then go to Settings.cfg on the left.
-- Open the GUI drop down from the list and enable controller menus and controller tooltips.
-- If you want you can play around with some settings in the settings.cfg again, like adding shadows etc.
-- Getting rid of random scroll wheel on the screen in game:
-    - Run the game by tapping the OpenMW-DS logo with a green arrow on the right middle of the Home Screen.
-    - Tap the arrow next to the gear, then the spanner icon, now a spinning icon should appear above the scroll wheel,
-      tap that.
-    - Go to the colours tab and turn the alpha all the way down (the slider under the colour wheel) and save.
-    - It is still visible. So now carefully tap and hold the spinning icon and drag it down so the wheel is as 
-      off-screen as you can (It should go fully off-screen with the spinning circle still visible.)
-    - Now tap that spanner icon and make sure you can't see the scroll wheel anymore. If it's still slightly visible,
-      tap the spanner and move it again.
-    - Tap the Gear icon and choose "return to launcher"/
-- You should now be able to play the game happily.
+These settings are optional but work well with OpenMW-DS.
 
 ### Save Location
 
