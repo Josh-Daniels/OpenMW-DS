@@ -5954,13 +5954,18 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         interiorMaps.isNotEmpty()
 
     // Teleport-door markers + the interior rotation params for placing them (exterior = identity).
-    // selectedMarker holds the tapped marker + its screen offset so its name bubble can anchor to it.
     val doorMarkers by GameStateRepository.doorMarkers.collectAsState()
     val markerSeg = if (!state.cellIsExterior) interiorMaps.values.firstOrNull() else null
     val markerAngle = markerSeg?.angle ?: 0f
     val markerCX = markerSeg?.centerX ?: 0f
     val markerCY = markerSeg?.centerY ?: 0f
-    var selectedMarker by remember { mutableStateOf<Pair<DoorMarker, Offset>?>(null) }
+    // Holds ONLY the tapped DoorMarker (not a captured screen offset) — its name bubble's screen
+    // position is recomputed live from state.pos each recomposition (see the overlay below), so the
+    // bubble tracks the marker as the player moves instead of freezing where it was tapped.
+    var selectedMarker by remember { mutableStateOf<DoorMarker?>(null) }
+    // Map panel size in px, captured from the Box (== the fillMaxSize Canvas) so the name-bubble
+    // overlay can run the same markerScreenPos transform the Canvas draw uses.
+    var mapBoxSize by remember { mutableStateOf(IntSize.Zero) }
     // Auto-dismiss the door-marker name bubble after DOOR_MARKER_POPUP_MS. Keyed on selectedMarker,
     // so tapping a DIFFERENT marker restarts the timer for it, and closing it (tap-elsewhere / re-tap)
     // cancels the pending dismiss (the null-key branch does nothing). Same LaunchedEffect+delay pattern
@@ -6016,6 +6021,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 .weight(1f)
                 .fillMaxWidth()
                 .mwPanel()
+                .onSizeChanged { mapBoxSize = it }
         ) {
         // Canvas fills the whole panel; labels float over it. A tap on a door marker shows its
         // destination name (and is reserved for richer per-marker info later); a tap anywhere else
@@ -6045,7 +6051,8 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                         if (hit != null) {
                             // Re-tapping the marker already shown toggles it closed; tapping a
                             // different one swaps (and the LaunchedEffect above restarts its 3s timer).
-                            selectedMarker = if (selectedMarker?.first == hit.first) null else hit
+                            val m = hit.first
+                            selectedMarker = if (selectedMarker == m) null else m
                         } else if (selectedMarker != null) {
                             // A name bubble is showing: this empty-map tap just dismisses it and is
                             // consumed — do NOT also open the world map. A subsequent tap opens it.
@@ -6151,7 +6158,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                         markerAngle, markerCX, markerCY, size.width, size.height)
                     if (p.x < -half || p.x > size.width + half || p.y < -half || p.y > size.height + half)
                         return@forEach
-                    val sel = selectedMarker?.first == m
+                    val sel = selectedMarker == m
                     val topLeft = Offset(p.x - half, p.y - half)
                     val sz = Size(half * 2f, half * 2f)
                     drawRect(color = SlotBg, topLeft = topLeft, size = sz)
@@ -6188,7 +6195,16 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         // offset{} lambda is a Density receiver so dp→px is available). Tapping it dismisses; tapping
         // elsewhere on the map clears it and opens the world map. This is the seed for the future
         // richer per-marker info popup.
-        selectedMarker?.let { (marker, pos) ->
+        // The anchor is recomputed EACH recomposition from the live state.pos via the SAME
+        // markerScreenPos transform the Canvas draw uses, so the bubble follows the marker as the
+        // player moves (rather than freezing at the tap-time screen position). state.pos updates on
+        // the fast tick, so the offset re-runs and tracks smoothly. Gated on a laid-out map size.
+        if (mapBoxSize.width > 0 && mapBoxSize.height > 0) selectedMarker?.let { marker ->
+            val pos = markerScreenPos(
+                marker.worldX, marker.worldY, state.pos.x, state.pos.y,
+                markerAngle, markerCX, markerCY,
+                mapBoxSize.width.toFloat(), mapBoxSize.height.toFloat()
+            )
             Box(
                 Modifier
                     .align(Alignment.TopStart)
@@ -6214,14 +6230,18 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         }
 
         // Cell name — bottom-centre overlay. Horizontal padding keeps it clear of
-        // the GEAR/SPELLS favourite groups in the bottom corners; truncates rather
-        // than overlapping.
+        // the GEAR/SPELLS favourite groups in the bottom corners. Up to TWO lines: because the
+        // Text is BottomCenter-anchored, a short name renders as one line in its current spot and
+        // a long one grows UPWARD into a second row (so more of e.g. "Seyda Neen, Census and
+        // Excise Office" is shown); anything past two lines still truncates with an ellipsis.
+        // textAlign centres both rows.
         Text(
             if (state.hasData) state.cell.ifEmpty { "Exterior" } else "—",
             color = Bone, fontSize = 16.sp, fontFamily = MwDisplay,
             fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 8.dp, start = 144.dp, end = 144.dp)

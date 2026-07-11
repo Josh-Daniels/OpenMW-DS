@@ -181,6 +181,12 @@ extern "C" void companionSpellBuyingCancel();
 extern "C" void companionSetFocusedText(const char* utf8);
 extern "C" void companionCancelTextInput();
 
+// Forces the top-screen map window into its maximized (fullscreen) rect (windowmanagerimp.cpp).
+// Called when the companion opens the map so it always shows fullscreen, regardless of the
+// persisted [Windows] map maximized flag — OpenMW silently resets that flag to false on any
+// map-window move/resize, so it can't be trusted. Idempotent (no-op when already maximized).
+extern "C" void companionForceMapMaximized();
+
 // Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
 // Quest completion status is NOT exposed to Lua in this build (types.Player.journal
 // carries only text entries — see the note in companion.lua), so it must be read
@@ -459,6 +465,21 @@ void drainCompanionCommands()
             // Cancel/discard: inject Escape to back out of the modal without committing.
             Log(Debug::Info) << "companion: cancelTextInput";
             companionCancelTextInput();
+        }
+        // Map open (CMP:openmap). Force the native map window fullscreen BEFORE forwarding to Lua,
+        // which does the actual open/close mode toggle via AddUiMode. The persisted [Windows] map
+        // maximized flag is unreliable (OpenMW resets it to false on any map-window move/resize),
+        // so trackWindow() may have sized the window small at load; companionForceMapMaximized()
+        // re-applies the maximized rect here (idempotent — no-op when already maximized). Doing it
+        // on the engine thread this frame resizes the still-hidden window before Lua's later
+        // AddUiMode makes it visible, so the map appears fullscreen with no shrink→grow flicker.
+        // On a close toggle it is a harmless no-op (the window is about to hide). The prefix still
+        // forwards to Lua (fall through into the generic handler below) for the mode toggle itself.
+        else if (cmd.rfind("CMP:openmap", 0) == 0)
+        {
+            Log(Debug::Info) << "companion: openmap (force map maximized)";
+            companionForceMapMaximized();
+            lua->handleConsoleCommand("Companion", cmd, MWWorld::Ptr());
         }
         else
         {

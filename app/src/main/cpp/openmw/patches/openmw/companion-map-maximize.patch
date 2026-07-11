@@ -1,0 +1,61 @@
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -3666,7 +3666,41 @@
+         window->setCoord(x, y, w, h);
+ 
+         settings.mIsMaximized.set(!settings.mIsMaximized.get());
++    }
++
++    void WindowManager::companionForceMapMaximized()
++    {
++        // Force the map window into its maximized (fullscreen) rect. toggleMaximized() FLIPS
++        // state, so an unconditional call would restore an already-fullscreen map back to the
++        // small floating rect -- guard on the current flag and only maximize when it is not
++        // already maximized (idempotent). Settings::windows().mMapMaximized is what
++        // trackWindow()/toggleMaximized()/onWindowChangeCoord() all read and write, so it is the
++        // authoritative current state of the map window. This lets the companion open the map
++        // fullscreen every time regardless of that persisted flag (OpenMW silently resets it to
++        // false on any map-window move/resize), without trusting or fighting the setting.
++        if (!mMap)
++            return;
++        if (Settings::windows().mMapMaximized)
++            return;
++        toggleMaximized(mMap);
++    }
++
++#ifdef __ANDROID__
++    // COMPANION: engine-thread bridge for the map-open command in drainCompanionCommands
++    // (androidmain.cpp). Forces the top-screen map window fullscreen before Lua's AddUiMode
++    // makes it visible, so it never opens in the small floating rect. extern "C" so the symbol
++    // is reachable without a header; downcasts the single concrete WindowManager to reach the
++    // member (companionForceMapMaximized is not on the MWBase interface). MyGUI is
++    // single-threaded, so this MUST run on the engine main thread (drainCompanionCommands does).
++    extern "C" void companionForceMapMaximized()
++    {
++        // getWindowManager() returns a Misc::NotNullPtr (never null) that converts to the base
++        // MWBase::WindowManager*; downcast to the single concrete MWGui::WindowManager to reach
++        // the member (same access pattern as androidmain.cpp).
++        MWBase::WindowManager* wm = MWBase::Environment::get().getWindowManager();
++        static_cast<WindowManager*>(wm)->companionForceMapMaximized();
+     }
++#endif
+ 
+     void WindowManager::onWindowChangeCoord(MyGUI::Window* window)
+     {
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -350,6 +350,14 @@
+ 
+         void pinWindow(MWGui::GuiWindow window) override;
+         void toggleMaximized(Layout* layout) override;
++
++        // COMPANION: force the map window into its maximized (fullscreen) rect, idempotently
++        // (no-op when it is already maximized, so it never shrinks a correct session). Called on
++        // the companion's map-open command so the map always opens fullscreen even though OpenMW
++        // silently resets the persisted [Windows] map maximized flag to false on any map-window
++        // move/resize (onWindowChangeCoord). Not on the MWBase interface -- reached from
++        // androidmain.cpp via the companionForceMapMaximized() bridge (downcast).
++        void companionForceMapMaximized();
+ 
+         /// Fade the screen in, over \a time seconds
+         void fadeScreenIn(const float time, bool clearQueue, float delay) override;
