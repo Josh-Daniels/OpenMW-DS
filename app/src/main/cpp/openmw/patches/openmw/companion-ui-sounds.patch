@@ -1,0 +1,99 @@
+--- a/apps/openmw/mwgui/tradewindow.cpp
++++ b/apps/openmw/mwgui/tradewindow.cpp
+@@ -951,6 +951,10 @@
+         if (!playerTradeModel)
+             return;
+ 
++        // COMPANION: the item being staged, captured before the move so we can play its "pick up"
++        // sound below (the DS bridge otherwise bypasses the native trade UI, which is silent).
++        MWWorld::Ptr soundItem;
++
+         if (side == "vendor")
+         {
+             // Player buys a vendor item: borrow it from the merchant to the player
+@@ -958,6 +962,7 @@
+             const int idx = companionFindIndex(mTradeModel, refId, /*borrowed=*/false);
+             if (idx < 0)
+                 return;
++            soundItem = mTradeModel->getItem(idx).mBase;
+             const std::size_t avail = mTradeModel->getItem(idx).mCount;
+             const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), avail);
+             playerTradeModel->borrowItemToUs(idx, mTradeModel, n);
+@@ -970,11 +975,18 @@
+             const int idx = companionFindIndex(playerTradeModel, refId, /*borrowed=*/false);
+             if (idx < 0)
+                 return;
++            soundItem = playerTradeModel->getItem(idx).mBase;
+             const std::size_t avail = playerTradeModel->getItem(idx).mCount;
+             const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), avail);
+             mTradeModel->borrowItemToUs(idx, playerTradeModel, n);
+         }
+ 
++        // Vanilla plays the item's up ("pick up") sound when an item is moved in/out of the
++        // trade offer, in EITHER direction (InventoryWindow::sellItem / TradeWindow::sellItem
++        // both use getUpSoundId). Material-accurate since we have the real item Ptr in hand.
++        if (!soundItem.isEmpty())
++            MWBase::Environment::get().getWindowManager()->playSound(soundItem.getClass().getUpSoundId(soundItem));
++
+         MWBase::Environment::get().getWindowManager()->getInventoryWindow()->updateItemView();
+         mItemView->update();
+         updateOffer();
+@@ -995,6 +1007,9 @@
+         if (!playerTradeModel)
+             return;
+ 
++        // COMPANION: the item being un-staged, captured before the move (see companionBorrow).
++        MWWorld::Ptr soundItem;
++
+         if (side == "vendor")
+         {
+             // Un-stage a bought vendor item: it sits (Type_Barter) in the PLAYER model,
+@@ -1002,6 +1017,7 @@
+             const int idx = companionFindIndex(playerTradeModel, refId, /*borrowed=*/true);
+             if (idx < 0)
+                 return;
++            soundItem = playerTradeModel->getItem(idx).mBase;
+             const std::size_t held = playerTradeModel->getItem(idx).mCount;
+             const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), held);
+             playerTradeModel->returnItemBorrowedToUs(idx, n);
+@@ -1014,12 +1030,17 @@
+             const int idx = companionFindIndex(mTradeModel, refId, /*borrowed=*/true);
+             if (idx < 0)
+                 return;
++            soundItem = mTradeModel->getItem(idx).mBase;
+             const std::size_t held = mTradeModel->getItem(idx).mCount;
+             const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), held);
+             mTradeModel->returnItemBorrowedToUs(idx, n);
+             playerTradeModel->returnItemBorrowedFromUs(idx, mTradeModel, n);
+         }
+ 
++        // Same up sound as companionBorrow (vanilla uses getUpSoundId for both directions).
++        if (!soundItem.isEmpty())
++            MWBase::Environment::get().getWindowManager()->playSound(soundItem.getClass().getUpSoundId(soundItem));
++
+         MWBase::Environment::get().getWindowManager()->getInventoryWindow()->updateItemView();
+         mItemView->update();
+         updateOffer();
+--- a/apps/openmw/mwlua/types/item.cpp
++++ b/apps/openmw/mwlua/types/item.cpp
+@@ -27,6 +27,20 @@
+ 
+         item["isCarriable"] = [](const Object& object) -> bool { return object.ptr().getClass().isItem(object.ptr()); };
+ 
++        // COMPANION: the vanilla "pick up" / "put down" UI sound ids for this item, material/type
++        // specific (e.g. "Item Armor Heavy Up", "Item Weapon Blunt Down"), exactly as
++        // Class::getUpSoundId/getDownSoundId resolve them per mwclass. Returned as the serialized
++        // RefId string so a script can pass it straight to ambient.playSound() (serializeText and
++        // playSound's deserializeText are case-insensitive inverses). The DS companion UI uses these
++        // to reproduce the native inventory/container/drop transfer sounds, which are otherwise
++        // bypassed by the Lua-side moveInto/split/setEquipment paths that never touch the native UI.
++        item["getUpSoundId"] = [](const Object& object) -> std::string {
++            return object.ptr().getClass().getUpSoundId(object.ptr()).serializeText();
++        };
++        item["getDownSoundId"] = [](const Object& object) -> std::string {
++            return object.ptr().getClass().getDownSoundId(object.ptr()).serializeText();
++        };
++
+         addItemDataBindings(item, context);
+     }
+ }

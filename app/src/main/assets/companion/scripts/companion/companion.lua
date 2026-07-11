@@ -830,6 +830,31 @@ local function containerInventory()
     return nil
 end
 
+-- Find a container item by its instance stack id (tostring(item.id)) — same identity scheme
+-- companion_global.findBySid uses, so the sound matches the exact stack being taken.
+local function containerItemBySid(sid)
+    local inv = containerInventory()
+    if not inv then return nil end
+    local ok, found = pcall(function()
+        for _, it in ipairs(inv:getAll()) do
+            if tostring(it.id) == sid then return it end
+        end
+        return nil
+    end)
+    if ok then return found end
+    return nil
+end
+
+-- First item in the open container (for Take All's one-sound-per-batch, matching vanilla
+-- container.cpp which plays only the first object's sound, not one per item).
+local function firstContainerItem()
+    local inv = containerInventory()
+    if not inv then return nil end
+    local ok, first = pcall(function() return inv:getAll()[1] end)
+    if ok then return first end
+    return nil
+end
+
 local function containerDisplayName(obj)
     local ok, rec = pcall(function() return obj.type.record(obj) end)
     if ok and rec and rec.name and rec.name ~= "" then return rec.name end
@@ -1232,12 +1257,20 @@ local function exportDoorMarkers()
     print('COMPANION_DOORMARKER_END:' .. #parts)
 end
 
--- Play a generic equip/unequip sound (the data path skips the engine's
--- normal equip sound, so we trigger one ourselves). Polish per-item later.
-local function playEquipSound(equipping)
-    local soundId = equipping and "Item Misc Up" or "Item Misc Down"
+-- Play the material/type-specific "pick up" (up) or "put down" (down) UI sound for an item,
+-- matching what the native inventory/container/barter windows play. The DS data paths
+-- (setEquipment / moveInto / split-teleport) bypass those native windows, which is where the
+-- sound normally fires, so we trigger it ourselves. The exact vanilla sound id (e.g.
+-- "Item Armor Heavy Up", "Item Weapon Blunt Down") comes from the native binding
+-- types.Item.getUpSoundId / getDownSoundId (added in companion-ui-sounds.patch), which returns
+-- Class::getUp/DownSoundId(item) — the same per-mwclass mapping vanilla uses. Returns "" if none.
+local function playItemSound(item, up)
+    if not item then return end
     local ok, err = pcall(function()
-        ambient.playSound(soundId)
+        local soundId = up and types.Item.getUpSoundId(item) or types.Item.getDownSoundId(item)
+        if soundId and soundId ~= "" then
+            ambient.playSound(soundId)
+        end
     end)
     if not ok then
         print("COMPANION_DEBUG: sound error: " .. tostring(err))
@@ -1315,24 +1348,26 @@ local function equipItem(arg)
     end
     equip[slot] = found
     types.Actor.setEquipment(self, equip)
-    playEquipSound(true)
+    playItemSound(found, true)
     print("COMPANION_DEBUG: equipped " .. arg .. " -> slot " .. slot)
 end
 
 local function unequipItem(arg)
     local equip = types.Actor.getEquipment(self)
     local changed = false
+    local unequipped = nil  -- the item removed, for its material-specific "put down" sound
     for slot, item in pairs(equip) do
         local sid = stackId(item)
         -- Match by instance id first; fall back to recordId for old clients.
         if sid == arg or (sid == "" and item.recordId == arg) then
+            unequipped = item
             equip[slot] = nil
             changed = true
         end
     end
     if changed then
         types.Actor.setEquipment(self, equip)
-        playEquipSound(false)
+        playItemSound(unequipped, false)
         print("COMPANION_DEBUG: unequipped " .. arg)
     else
         print("COMPANION_DEBUG: unequip - not worn: " .. arg)
@@ -1688,6 +1723,9 @@ local function dispatchCommand(command)
             -- because dt is 0 / frames don't advance while the container is open and idle, so a timed
             -- close never fired. The flag blocks a second take-all/dispose/take/put until we close.
             containerCloseAfterRefresh = true
+            -- One "pick up" sound per Take-All batch (vanilla container.cpp plays only the
+            -- first object's sound), captured now while the container still holds the items.
+            playItemSound(firstContainerItem(), true)
             print("COMPANION_DEBUG: container take all (await close)")
         end
         return
@@ -1710,6 +1748,7 @@ local function dispatchCommand(command)
             -- Same event-driven close as take-all (see container_take_all). Global sends
             -- CompanionContainerClose after queuing the transfer + corpse removal.
             containerCloseAfterRefresh = true
+            playItemSound(firstContainerItem(), true)  -- one up sound per batch (see take-all)
             print("COMPANION_DEBUG: container dispose (await close)")
         end
         return
@@ -1755,6 +1794,10 @@ local function dispatchCommand(command)
         if id then
             core.sendGlobalEvent('CompanionDropItem',
                 { actor = self.object, itemId = id, count = tonumber(countStr) })
+            -- Dropping to the world plays the item's material-specific "put down" (down) sound.
+            -- Resolve the same item the global drop resolves (inventory:find(id)); still present
+            -- here since the actual teleport is a deferred global action.
+            playItemSound(types.Actor.inventory(self):find(id), false)
             print("COMPANION_DEBUG: drop " .. id .. " x" .. countStr)
             exportInventory()
         end
@@ -1776,6 +1819,7 @@ local function dispatchCommand(command)
                 { container = containerObj, player = self.object, sid = sid,
                   count = tonumber(countStr), dir = 'take' })
             scheduleContainerRefresh()
+            playItemSound(containerItemBySid(sid), true)  -- material-specific "pick up" sound
             print("COMPANION_DEBUG: container take " .. sid .. " x" .. countStr)
         end
     elseif action == "container_put" then
@@ -1785,6 +1829,15 @@ local function dispatchCommand(command)
                 { container = containerObj, player = self.object, sid = sid,
                   count = tonumber(countStr), dir = 'put' })
             scheduleContainerRefresh()
+            -- Put into the container: the item is in the player's own inventory. Vanilla plays the
+            -- up ("pick up") sound for a container transfer in either direction, so match take.
+            do
+                local putItem = nil
+                for _, i in ipairs(types.Actor.inventory(self):getAll()) do
+                    if tostring(i.id) == sid then putItem = i; break end
+                end
+                playItemSound(putItem, true)
+            end
             print("COMPANION_DEBUG: container put " .. sid .. " x" .. countStr)
         end
     end
