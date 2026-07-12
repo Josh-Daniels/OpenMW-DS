@@ -607,7 +607,9 @@ object GameFilesPreferences {
 
     fun getWhatsNew(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
-            preferences[WHATS_NEW_KEY] != false
+            // Default OFF: the first-launch "Welcome to OpenMW-DS!" / Getting Started tutorial dialog
+            // is gated on this in MainActivity, so an unset key (fresh install) must NOT show it.
+            preferences[WHATS_NEW_KEY] == true
         }
     }
 
