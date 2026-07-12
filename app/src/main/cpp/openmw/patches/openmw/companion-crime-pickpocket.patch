@@ -1,0 +1,84 @@
+--- a/apps/openmw/mwgui/container.cpp
++++ b/apps/openmw/mwgui/container.cpp
+@@ -33,6 +33,14 @@
+ 
+ namespace MWGui
+ {
++    // COMPANION (OpenMW-DS): the single container/loot/pickpocket window instance (WindowManager owns
++    // exactly one, for its whole lifetime), captured in the ctor. Lets the DS take path
++    // (companion_global.lua) route a pickpocket take through the REAL native item model -- see
++    // companionPickpocketTake below.
++    namespace
++    {
++        ContainerWindow* gCompanionContainerWindow = nullptr;
++    }
+ 
+     ContainerWindow::ContainerWindow(DragAndDrop& dragAndDrop, ItemTransfer& itemTransfer)
+         : WindowBase("openmw_container_window.layout")
+@@ -64,6 +72,30 @@ namespace MWGui
+         mControllerButtons.mX = "#{Interface:TakeAll}";
+         mControllerButtons.mR3 = "#{Interface:Info}";
+         mControllerButtons.mL2 = "#{Interface:Inventory}";
++
++        gCompanionContainerWindow = this;
++    }
++
++    // COMPANION (OpenMW-DS): route a DS-side pickpocket take through the native item model's
++    // onTakeItem -- the exact vanilla per-take flow: Pickpocket::pick roll (value-scaled catch chance)
++    // -> on DETECT: commitCrime(OT_Pickpocket, victimAware) + set mPickpocketDetected + pop GM_Container;
++    // -> on SUCCESS: award Sneak XP + itemTaken(alarm=false) (flag stolen, no second crime). The DS UI
++    // moves items via Lua moveInto and never touches this window's onTakeItem, so all of that was
++    // bypassed. Setting mPickpocketDetected natively is also what stops the on-close finish() roll
++    // (companion-hide-container-on-hideui.patch Hunk 3) from DOUBLE-committing after a detected take.
++    // Returns true if the take is ALLOWED (the caller should transfer the item), false if DETECTED
++    // (deny the take; the model already committed the crime and popped the container mode, so the DS
++    // overlay closes via UiModeChanged). Guarded so it is inert unless a container mode is really open.
++    bool companionPickpocketTake(const MWWorld::Ptr& item, int count)
++    {
++        if (!gCompanionContainerWindow)
++            return true;
++        if (!MWBase::Environment::get().getWindowManager()->containsMode(GM_Container))
++            return true;
++        ItemModel* model = gCompanionContainerWindow->getModel();
++        if (!model)
++            return true;
++        return model->onTakeItem(item, count);
+     }
+ 
+     void ContainerWindow::onItemSelected(int index)
+--- a/apps/openmw/mwlua/types/player.cpp
++++ b/apps/openmw/mwlua/types/player.cpp
+@@ -17,6 +17,13 @@
+ #include "apps/openmw/mwworld/esmstore.hpp"
+ #include "apps/openmw/mwworld/globals.hpp"
+ #include "apps/openmw/mwworld/player.hpp"
++
++namespace MWGui
++{
++    // COMPANION (OpenMW-DS): runs the native container/pickpocket window's per-take flow for one item
++    // (container.cpp). Returns true if the take is allowed, false if a pickpocket pick roll detected it.
++    bool companionPickpocketTake(const MWWorld::Ptr& item, int count);
++}
+ 
+ namespace MWLua
+ {
+@@ -486,6 +493,19 @@
+                 containerPtr = container->ptrOrEmpty();
+             MWBase::Environment::get().getMechanicsManager()->itemTaken(
+                 o.ptr(), item.ptr(), containerPtr, count, alarm);
++        };
++        // COMPANION (OpenMW-DS): run the native container/pickpocket window's per-take flow for one
++        // item taken while pickpocketing (living NPC). Routes through the real PickpocketItemModel via
++        // container.cpp so the vanilla per-take Pickpocket::pick roll, Sneak XP, itemTaken(alarm=false)
++        // AND the mPickpocketDetected state all happen exactly as vanilla (the last stops the on-close
++        // finish() roll double-committing). Returns true = take allowed (caller transfers the item),
++        // false = detected (deny; the model already committed the crime + closed the container mode).
++        // Global-only. See companion_global.lua's pickpocket take handler.
++        player["_runStandardPickpocketTake"] = [](const Object& o, const Object& item, int count) -> bool {
++            verifyPlayer(o);
++            if (!o.isGObject())
++                throw std::runtime_error("Only global scripts can run a pickpocket take");
++            return MWGui::companionPickpocketTake(item.ptr(), count);
+         };
+ 
+         player["birthSigns"] = initBirthSignRecordBindings(context);

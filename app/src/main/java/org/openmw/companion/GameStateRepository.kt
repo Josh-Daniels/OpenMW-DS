@@ -96,6 +96,16 @@ object GameStateRepository {
     private val _navEvent = MutableStateFlow<NavEvent?>(null)
     val navEvent: StateFlow<NavEvent?> = _navEvent.asStateFlow()
 
+    // Transient crime-message toast (COMPANION_CRIME_MSG): text + a monotonic seq so an identical
+    // repeat message still re-fires the toast (a plain StateFlow would dedupe equal values). The DS
+    // shows a top-of-stack, auto-dismissing banner — the native message renders behind the looting/
+    // barter panels. Reset to null when it auto-dismisses.
+    private var crimeSeq = 0L
+    private val _crimeMessage = MutableStateFlow<Pair<String, Long>?>(null)
+    val crimeMessage: StateFlow<Pair<String, Long>?> = _crimeMessage.asStateFlow()
+
+    fun clearCrimeMessage() { _crimeMessage.value = null }
+
     // Bottom-screen text-input request. Non-null = a MyGUI EditBox has key focus (native
     // COMPANION_TEXT_INPUT_OPEN); the string is the field's current caption to pre-fill.
     // null = no field focused (COMPANION_TEXT_INPUT_CLOSED) → dismiss the panel + keyboard.
@@ -540,6 +550,10 @@ object GameStateRepository {
             // a fresh seq so repeats re-emit. Non-nav lines fall through to the state parsing below.
             trimmed.contains(LogParser.P_NAV) -> {
                 LogParser.parseNav(trimmed)?.let { factory -> _navEvent.value = factory(navSeq++) }
+            }
+            trimmed.contains(LogParser.P_CRIME_MSG) -> {
+                val text = trimmed.substring(trimmed.indexOf(LogParser.P_CRIME_MSG) + LogParser.P_CRIME_MSG.length).trim()
+                if (text.isNotEmpty()) _crimeMessage.value = text to crimeSeq++
             }
             trimmed.contains(LogParser.P_JOURNAL_START) -> {
                 journalBuffer = mutableListOf()

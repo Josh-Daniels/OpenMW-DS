@@ -591,6 +591,10 @@ fun CompanionScreen() {
             )
         }
 
+        // Crime-reported toast — top of the whole z-stack so it's visible even over the looting /
+        // barter panels (the native message renders behind them, bottom-center of the top screen).
+        CrimeToast()
+
         // Per-element Game UI mode. Each companion overlay is gated by its OWN element: when that
         // element is VANILLA it's suppressed so native OpenMW handles it; DS shows the companion
         // version. The tab UI (inventory/spells/stats/journal/HUD) works regardless.
@@ -1976,6 +1980,52 @@ object ItemInfoPopupState {
 }
 
 /**
+ * Top-of-stack "crime reported" toast, driven by GameStateRepository.crimeMessage (the native
+ * COMPANION_CRIME_MSG signal). Rendered above every other overlay (zIndex 30f) so it stays visible
+ * during looting/barter, where the native transient message is hidden behind the panel windows.
+ * Auto-dismisses after a few seconds (re-armed per message via the seq key); tap to dismiss early.
+ */
+@Composable
+private fun CrimeToast() {
+    // Gated by the "Crime alerts" Game UI element (DS = this toast; Vanilla = native message). The
+    // native side only emits COMPANION_CRIME_MSG when DS, so this is belt-and-suspenders (and hides an
+    // in-flight toast if the mode flips to Vanilla).
+    val crimeDs by UiPreferences.gameUiModeFlow("game_ui_crime").collectAsState()
+    if (crimeDs != GameUiMode.DS) return
+    val msg by GameStateRepository.crimeMessage.collectAsState()
+    val current = msg ?: return
+    LaunchedEffect(current.second) {
+        delay(4200)
+        GameStateRepository.clearCrimeMessage()
+    }
+    // Vertically centered with the HUD's top box (top = 12dp, height TOP_BOX_HEIGHT — the vitals bar
+    // band), horizontally centered, above every overlay (zIndex 30f).
+    Box(Modifier.fillMaxSize().zIndex(30f), contentAlignment = Alignment.TopCenter) {
+        Box(
+            Modifier.fillMaxWidth().padding(top = 12.dp).height(TOP_BOX_HEIGHT),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth(0.9f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xF2140D08))
+                    .border(1.dp, Color(0xFFC75C5C), RoundedCornerShape(4.dp))
+                    .clickable { GameStateRepository.clearCrimeMessage() }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("⚠", color = Color(0xFFC75C5C), fontSize = 16.sp, modifier = Modifier.padding(end = 8.dp))
+                Text(
+                    current.first,
+                    color = BoneBright, fontSize = 13.sp, fontFamily = MwBody, fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+/**
  * Full scrim (tap-to-dismiss) + the floating card. Hosted at the bottom CompanionScreen root for
  * bottom contexts, and inside LootingTopOverlay/BarterTopOverlay for SPLIT top-grid triggers, so the
  * popup renders on whichever screen the triggering item lives (and anchors in that screen's coords).
@@ -2904,7 +2954,11 @@ private fun ShelfDualPanel(
  *  quantity prompt) the caller supplies. */
 private fun InventoryItem.toShelfItem(worn: Boolean, onTap: () -> Unit): ShelfItem =
     ShelfItem(
-        id = stackId.ifEmpty { id },
+        // Record id (NOT stackId): ShelfItem.id feeds ItemInfoPopupState (R3 info request +
+        // anchor matching), and CMP:info needs the record id to resolve the item — same as
+        // barter's projection and classic-mode looting's InventoryItem.id. Using stackId here
+        // made shelf-mode looting's R3 popup show name-only with empty detail rows.
+        id = id,
         name = displayName(),
         category = category,
         icon = icon,

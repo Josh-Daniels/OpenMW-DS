@@ -78,10 +78,32 @@ local function onContainerTransfer(data)
         if data.hiddenSids then
             for _, sid in ipairs(data.hiddenSids) do hidden[tostring(sid)] = true end
         end
+        -- Crime handling per container type: plain container = theft check (Phase 1); living NPC =
+        -- pickpocket per-take roll (Phase 2); corpse (dead actor / dispose) = exempt.
+        local isPickpocket = types.Actor.objectIsInstance(container) and not types.Actor.isDead(container)
+        local isPlainContainer = types.Container.objectIsInstance(container)
         for _, item in ipairs(inv:getAll()) do
             local sid = tostring(item.id)
             if not (worn and worn[sid]) and not hidden[sid] then
-                pcall(function() item:moveInto(player) end)
+                if isPickpocket then
+                    -- Phase 2: per-item pick roll (value-scaled) via the native model. On DETECTION,
+                    -- STOP the whole Take-All immediately — vanilla ends the interaction at the first
+                    -- caught item (nothing after it is taken). The native model already committed the
+                    -- crime and popped the container mode (closing the DS overlay via UiModeChanged).
+                    local allowed = true
+                    pcall(function() allowed = types.Player._runStandardPickpocketTake(player, item, item.count or 1) end)
+                    if not allowed then break end
+                    pcall(function() item:moveInto(player) end)
+                else
+                    -- Phase 1: per-item container-theft check (crime value = count × itemValue, so it
+                    -- must be per-stack). Plain container only; a corpse is an Actor → skipped (exempt).
+                    if isPlainContainer then
+                        pcall(function()
+                            types.Player._runStandardItemTaken(player, item, container, item.count or 1, true)
+                        end)
+                    end
+                    pcall(function() item:moveInto(player) end)
+                end
             end
         end
         -- Dispose also removes the emptied corpse/container (like the native "Dispose
@@ -110,6 +132,25 @@ local function onContainerTransfer(data)
     if not item then return end
     local want = data.count or 1
     local total = item.count or 1
+    local take = math.min(want, total)
+    -- COMPANION: crime handling for a single TAKE. 'put' (your own item into the container) is never
+    -- a crime. Runs BEFORE the move (item still in the container).
+    if data.dir == 'take' then
+        if types.Actor.objectIsInstance(container) and not types.Actor.isDead(container) then
+            -- Phase 2: living NPC = pickpocket. Native per-take pick roll (value-scaled). On DETECTION,
+            -- deny this take and return — the item stays with the NPC; the native model already
+            -- committed OT_Pickpocket and popped the container mode (DS overlay closes via UiModeChanged).
+            local allowed = true
+            pcall(function() allowed = types.Player._runStandardPickpocketTake(player, item, take) end)
+            if not allowed then return end
+        elseif types.Container.objectIsInstance(container) then
+            -- Phase 1: plain-container theft (ownership + stolen-flag + commitCrime, alarm=true).
+            pcall(function()
+                types.Player._runStandardItemTaken(player, item, container, take, true)
+            end)
+        end
+        -- corpse (dead actor): vanilla-exempt, no crime.
+    end
     pcall(function()
         if want >= total then
             item:moveInto(dest)               -- move the whole stack

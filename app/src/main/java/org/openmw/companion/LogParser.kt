@@ -177,6 +177,10 @@ object LogParser {
     // (the trailing colon is just the log convention). P_NAV is the shared discriminator used by
     // GameStateRepository.onRawLine to route to parseNav(). None is a contains() substring of any
     // other (SLIDER_LEFT/RIGHT don't collide with LEFT/RIGHT since "SLIDER_" breaks the match).
+    // Crime message (native, windowmanagerimp.cpp bounty-increase edge). Tail = the resolved
+    // sCrimeMessage text; surfaced as a DS toast because the native message hides behind the
+    // looting/barter panel windows.
+    const val P_CRIME_MSG = "COMPANION_CRIME_MSG:"
     const val P_NAV = "COMPANION_NAV_"
     const val P_NAV_LEFT = "COMPANION_NAV_LEFT:"
     const val P_NAV_RIGHT = "COMPANION_NAV_RIGHT:"

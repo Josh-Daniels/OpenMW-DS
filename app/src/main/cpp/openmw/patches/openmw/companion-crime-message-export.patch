@@ -1,0 +1,40 @@
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -1151,6 +1151,12 @@
+         if (winCount > 1)
+             playSound(ESM::RefId::stringRefId("Menu Size"));
+     }
++
++#ifdef __ANDROID__
++    // COMPANION: defined in androidmain.cpp. True when the "Crime alerts" element is DS, so the native
++    // transient crime message is suppressed and COMPANION_CRIME_MSG is emitted for the DS toast instead.
++    extern "C" bool companionDsCrimeAlerts();
++#endif
+ 
+     void WindowManager::update(float frameDuration)
+     {
+@@ -1232,7 +1238,23 @@
+         if (currentBounty != mPlayerBounty)
+         {
+             if (mPlayerBounty >= 0 && currentBounty > mPlayerBounty)
+-                messageBox("#{sCrimeMessage}");
++            {
++                // COMPANION: the "Crime alerts" element. DS -> suppress the native transient message
++                // (it renders bottom-center of the TOP screen, hidden behind the DS looting/barter
++                // panel windows) and emit the resolved text so the companion shows a top-of-stack
++                // toast instead; Vanilla -> keep the native message. Fires on the same once-per-frame
++                // bounty-increase edge (runs even while GM_Container pauses the sim), so the toast
++                // appears at the right moment.
++#ifdef __ANDROID__
++                if (companionDsCrimeAlerts())
++                    Log(Debug::Info) << "COMPANION_CRIME_MSG:"
++                                     << MyGUI::LanguageManager::getInstance()
++                                            .replaceTags(MyGUI::UString("#{sCrimeMessage}"))
++                                            .asUTF8();
++                else
++#endif
++                    messageBox("#{sCrimeMessage}");
++            }
+ 
+             mPlayerBounty = currentBounty;
+         }

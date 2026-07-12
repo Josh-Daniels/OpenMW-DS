@@ -111,6 +111,10 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     GameUiElement("game_ui_enchanting", "Enchanting", pending = true),
     GameUiElement("game_ui_alchemy", "Alchemy", pending = true),
     GameUiElement("game_ui_restwait", "Rest / Wait"),
+    // Crime "reported" alert: DS = a top-of-stack toast on the companion screen; Vanilla = the native
+    // transient message (which renders bottom-center of the top screen, hidden behind DS panels).
+    // Non-pending: the native side (windowmanagerimp) already gates on companionDsCrimeAlerts().
+    GameUiElement("game_ui_crime", "Crime alerts"),
 )
 
 /**
@@ -354,10 +358,13 @@ object UiPreferences {
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
         when (mode) {
             // Both presets use Touch input (Game cursor off via mutual exclusion). All DS also drops
-            // the DS conversation onto the top screen (Conversation layout -> TOP).
+            // the DS conversation onto the top screen (Conversation layout -> TOP) and uses the Shelf
+            // item-list layout (the DS-native look; irrelevant under Vanilla, where the native windows
+            // render instead).
             GameUiMode.DS -> {
                 setTouchInput(context, true)
                 setConversationLocation(context, ConversationLocation.TOP)
+                setInventoryLayout(context, InventoryLayout.SHELF)
             }
             GameUiMode.VANILLA -> setTouchInput(context, true)  // was setGameCursor(true) — swapped so All Vanilla is touch-driven
         }

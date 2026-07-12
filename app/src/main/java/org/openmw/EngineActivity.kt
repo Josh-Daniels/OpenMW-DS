@@ -713,6 +713,7 @@ class EngineActivity : SDLActivity() {
         @JvmStatic external fun setCompanionDsEnchanting(on: Boolean)
         @JvmStatic external fun setCompanionDsAlchemy(on: Boolean)
         @JvmStatic external fun setCompanionDsRestWait(on: Boolean)
+        @JvmStatic external fun setCompanionDsCrimeAlerts(on: Boolean)
         // Dialogue-service windows (GM_SpellBuying / GM_Training) that push over GM_Dialogue.
         // Pending (locked VANILLA) until each gets a companion overlay, so these push false today.
         @JvmStatic external fun setCompanionDsSpellBuying(on: Boolean)
@@ -921,6 +922,7 @@ class EngineActivity : SDLActivity() {
             "game_ui_enchanting" to { on: Boolean -> setCompanionDsEnchanting(on) },
             "game_ui_alchemy" to { on: Boolean -> setCompanionDsAlchemy(on) },
             "game_ui_restwait" to { on: Boolean -> setCompanionDsRestWait(on) },
+            "game_ui_crime" to { on: Boolean -> setCompanionDsCrimeAlerts(on) },
             "game_ui_spellbuying" to { on: Boolean -> setCompanionDsSpellBuying(on) },
             "game_ui_training" to { on: Boolean -> setCompanionDsTraining(on) },
         )

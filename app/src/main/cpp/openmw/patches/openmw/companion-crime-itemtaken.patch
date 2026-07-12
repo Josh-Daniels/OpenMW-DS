@@ -1,0 +1,28 @@
+--- a/apps/openmw/mwlua/types/player.cpp
++++ b/apps/openmw/mwlua/types/player.cpp
+@@ -468,6 +468,25 @@ namespace MWLua
+             return MWBase::Environment::get().getMechanicsManager()->commitCrime(o.ptr(), victimObj,
+                 static_cast<MWBase::MechanicsManager::OffenseType>(type), factionId, arg, victimAware);
+         };
++        // COMPANION (OpenMW-DS): runs the exact native container-take crime path for one taken item:
++        // ownership check (isAllowedToUse/isOwned) -> flag the item stolen (mStolenItems, unconditional)
++        // -> conditional commitCrime(OT_Theft) with LOS/awareness witness detection + bounty. This is
++        // MechanicsManager::itemTaken, which vanilla invokes from ContainerWindow's take handlers
++        // (Container/InventoryItemModel::onTakeItem) but which the DS companion's Lua moveInto() take
++        // path never touches. Global-only (it mutates world crime state). Corpse-looting must be excluded
++        // by the CALLER (vanilla exempts dead actors before ever calling this); pass alarm=true for
++        // container theft (full detection), alarm=false for the pickpocket success path (flag only).
++        player["_runStandardItemTaken"] = [](const Object& o, const Object& item,
++                                              const sol::optional<Object>& container, int count, bool alarm) {
++            verifyPlayer(o);
++            if (!o.isGObject())
++                throw std::runtime_error("Only global scripts can flag stolen items");
++            MWWorld::Ptr containerPtr;
++            if (container.has_value())
++                containerPtr = container->ptrOrEmpty();
++            MWBase::Environment::get().getMechanicsManager()->itemTaken(
++                o.ptr(), item.ptr(), containerPtr, count, alarm);
++        };
+ 
+         player["birthSigns"] = initBirthSignRecordBindings(context);
+         player["getBirthSign"] = [](const Object& object) -> std::string {
