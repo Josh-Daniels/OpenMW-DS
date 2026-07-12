@@ -86,6 +86,7 @@ setting up Alpha3 specifically for the AYN Thor running Morrowind.
 ### Save Location
 - If you want to use your openMW saves. I found the save location to be:
 - /storage/emulated/0/Alpha3/saves. (consoles internal storage/Alpha3/saves)
+- I recommend using LocalSend to quickly transfer files between Mac/PC/Thor over Wi-Fi. 
 
 ### Mods
 - I haven't tested this with mods such as Tamriel Rebuilt yet. The minimap "should" work fine, but unsure about item icons.
