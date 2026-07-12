@@ -1,0 +1,92 @@
+--- a/apps/openmw/mwgui/windowbase.hpp
++++ b/apps/openmw/mwgui/windowbase.hpp
+@@ -86,6 +86,10 @@
+         virtual bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) { return true; }
+         virtual bool onControllerThumbstickEvent(const SDL_ControllerAxisEvent& arg) { return false; }
+         virtual void setActiveControllerWindow(bool active) { mActiveControllerWindow = active; }
++        // COMPANION: read the controller "active window" flag so the map-open fix can avoid a
++        // redundant reposition/sound when the map is already the active window (see
++        // WindowManager::companionTryActivateMap).
++        bool isActiveControllerWindow() const { return mActiveControllerWindow; }
+ 
+     protected:
+         virtual void onTitleDoubleClicked();
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -358,6 +358,16 @@
+         // move/resize (onWindowChangeCoord). Not on the MWBase interface -- reached from
+         // androidmain.cpp via the companionForceMapMaximized() bridge (downcast).
+         void companionForceMapMaximized();
++
++        // COMPANION: when GM_Inventory is the active mode and it is the companion's map-only view
++        // (AddUiMode windows={'Map'}), make the Map the active controller window so it is
++        // positioned on-screen. Fixes the map opening parked off-screen when pushGuiMode's
++        // decrement-then-cycle mode-entry logic skips setActiveControllerWindow (last native tab
++        // was Inventory). Returns true iff GM_Inventory is currently the active mode, so the caller
++        // (drainCompanionCommands, polling each frame because the opening AddUiMode is deferred) can
++        // consume its one-shot request. No-op / false when GM_Inventory is not open. Not on the
++        // MWBase interface -- reached from androidmain.cpp via the companionTryActivateMap() bridge.
++        bool companionTryActivateMap();
+ 
+         /// Fade the screen in, over \a time seconds
+         void fadeScreenIn(const float time, bool clearQueue, float delay) override;
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -2235,6 +2235,40 @@
+         if (Settings::windows().mMapMaximized)
+             return;
+         toggleMaximized(mMap);
++    }
++
++    bool WindowManager::companionTryActivateMap()
++    {
++        // The companion's map-open (AddUiMode windows={'Map'}) enters GM_Inventory, but the mode
++        // is opened via a DEFERRED Lua action, so it is not open yet when CMP:openmap is drained.
++        // The caller polls this every frame until it returns true. Return false while GM_Inventory
++        // is not the active mode so the caller keeps its one-shot request set and retries.
++        if (mGuiModes.empty() || mGuiModes.back() != GM_Inventory)
++            return false;
++
++        // Companion map-only signature: the Map window is visible and the other three inventory
++        // tabs are hidden (disabledByLua via the windows={'Map'} filter). A normal all-tabs native
++        // inventory open shows all four, so this is false there -- leaving vanilla's last-active-tab
++        // restore untouched. This also makes a stale request (e.g. a close toggle, or an open
++        // suppressed by the char-gen guard) harmless: the next all-tabs native open just consumes
++        // it without repositioning anything.
++        const bool mapOnly = mMap && mMap->isVisible()
++            && (!mInventoryWindow || !mInventoryWindow->isVisible())
++            && (!mSpellWindow || !mSpellWindow->isVisible())
++            && (!mStatsWindow || !mStatsWindow->isVisible());
++
++        // Force the Map to be the active controller window so MapWindow::setActiveControllerWindow
++        // repositions it on-screen (it parks the map off-screen at y=viewSize.height+1 while
++        // inactive). The vanilla decrement-then-cycle mode-entry logic in pushGuiMode skips this
++        // exactly when the stored tab was Inventory (index 1): the decrement 1->0 lands on the
++        // computed active index (0=Map) so its != guard sees no change and never calls
++        // setActiveControllerWindow -- leaving the map open-but-off-screen. Only act when the map is
++        // not ALREADY the active window, so the cases the cycle logic already handled correctly
++        // (last tab Map/Spells/Stats) don't get a redundant reposition + "Menu Size" sound.
++        if (mapOnly && Settings::gui().mControllerMenus && !mMap->isActiveControllerWindow())
++            setActiveControllerWindow(GM_Inventory, 0);
++
++        return true;
+     }
+ 
+ #ifdef __ANDROID__
+@@ -2252,6 +2286,16 @@
+         MWBase::WindowManager* wm = MWBase::Environment::get().getWindowManager();
+         static_cast<WindowManager*>(wm)->companionForceMapMaximized();
+     }
++
++    // COMPANION: engine-thread bridge polled from drainCompanionCommands (androidmain.cpp) after a
++    // CMP:openmap, until GM_Inventory is actually open, to make the companion's map-only view the
++    // active (on-screen) controller window. Returns true once GM_Inventory is the active mode so
++    // the caller can consume its one-shot pending flag. See companionTryActivateMap() above.
++    extern "C" bool companionTryActivateMap()
++    {
++        MWBase::WindowManager* wm = MWBase::Environment::get().getWindowManager();
++        return static_cast<WindowManager*>(wm)->companionTryActivateMap();
++    }
+ #endif
+ 
+     void WindowManager::onWindowChangeCoord(MyGUI::Window* window)

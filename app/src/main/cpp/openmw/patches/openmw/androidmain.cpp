@@ -136,6 +136,15 @@ static std::atomic<bool> g_companionQtySelectorOpen{ false };
 // std::atomic: written on a JNI thread, exchanged(false) on the input thread.
 static std::atomic<bool> g_companionResetAxes{ false };
 
+// One-shot request to make the top-screen map the ACTIVE (on-screen) controller window after a
+// CMP:openmap. The Lua AddUiMode that opens the map is DEFERRED, so GM_Inventory is not open yet
+// when CMP:openmap is drained -- set this here and let the per-frame poll in drainCompanionCommands
+// consume it once the mode is confirmed open (companionTryActivateMap()). Without it, the vanilla
+// decrement-then-cycle mode-entry logic skips setActiveControllerWindow when the last native tab was
+// Inventory, leaving the map open-but-parked-off-screen. std::atomic: written/read on the engine
+// thread only (drainCompanionCommands), atomic for consistency with the sibling flags.
+static std::atomic<bool> g_companionPendingMapActive{ false };
+
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
 // g_luaManagerPtr is set once, when the first COMPANION_STATS line arrives,
@@ -186,6 +195,13 @@ extern "C" void companionCancelTextInput();
 // persisted [Windows] map maximized flag — OpenMW silently resets that flag to false on any
 // map-window move/resize, so it can't be trusted. Idempotent (no-op when already maximized).
 extern "C" void companionForceMapMaximized();
+
+// Makes the top-screen map the ACTIVE (on-screen) controller window once GM_Inventory is open
+// (windowmanagerimp.cpp). Returns true iff GM_Inventory is currently the active mode -- so the
+// per-frame poll below can consume its one-shot g_companionPendingMapActive request the moment the
+// deferred map-open actually lands. Only repositions the map when it's the companion map-only view
+// and not already active (idempotent), so a stale request no-ops on a normal native inventory open.
+extern "C" bool companionTryActivateMap();
 
 // Exports the set of FINISHED (completed) quests as a streamed COMPANION block.
 // Quest completion status is NOT exposed to Lua in this build (types.Player.journal
@@ -278,6 +294,17 @@ void drainCompanionCommands()
 {
     MWBase::LuaManager* lua = g_luaManagerPtr.load(std::memory_order_acquire);
     if (!lua) return;
+
+    // Per-frame poll for the pending "make the map the active controller window" request set by
+    // CMP:openmap below. The Lua AddUiMode that opens the map is deferred, so GM_Inventory is not
+    // open yet when CMP:openmap is drained -- poll here (this runs BEFORE the queue-empty
+    // early-return, so it fires on every frame, not just frames that carry a command) and act once
+    // the mode is confirmed open. companionTryActivateMap() returns true as soon as GM_Inventory is
+    // the active mode, at which point we consume the request; it only repositions the map when it's
+    // the companion map-only view and not already active, so a stale request (close toggle /
+    // char-gen-suppressed open) harmlessly no-ops on the next all-tabs native inventory open.
+    if (g_companionPendingMapActive.load(std::memory_order_relaxed) && companionTryActivateMap())
+        g_companionPendingMapActive.store(false, std::memory_order_relaxed);
 
     std::deque<std::string> pending;
     {
@@ -479,6 +506,11 @@ void drainCompanionCommands()
         {
             Log(Debug::Info) << "companion: openmap (force map maximized)";
             companionForceMapMaximized();
+            // Request that the map become the active (on-screen) controller window once GM_Inventory
+            // actually opens (deferred via the Lua AddUiMode this command triggers). The per-frame
+            // poll at the top of this function consumes it; the map-only-signature guard there makes
+            // it safe on a close toggle or a char-gen-suppressed open (a later native open clears it).
+            g_companionPendingMapActive.store(true, std::memory_order_relaxed);
             lua->handleConsoleCommand("Companion", cmd, MWWorld::Ptr());
         }
         else
