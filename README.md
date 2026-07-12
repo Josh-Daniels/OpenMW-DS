@@ -66,28 +66,29 @@ setting up Alpha3 specifically for the AYN Thor running Morrowind.
 
 ### Settings up the game files.
 
-- Open the app and allow access to files.
-- Up the top of the home screen you will see something along the lines of (select game files), tap that.
-- Navigate to your Morrowind folder (NOT DATA FILES), use this folder.
-- Tap on settings gear on the right, then settings.cfg on left, go back to home page (not sure why, but this refreshes
-  the home page).
-- You should see the location of your Morrowind listed in the Data tab. Tap Content to check the esm's are there.
-- If you have mods now you may go to home, tap the add folder icon at the bottom of the screen, navigate to your data
-  files folder, tap "use this folder".
-- Check the content tab again to see if esm's and now mods are there too.
+- Open the app and allow access to manage all files. This is so the engine can reach the morrowind data.
+- Up the top of the home screen you will see something along the lines of (Select Games Files), tap that.
+- It will say "Morrowind.esm Not Found", tap yes.
+- Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
+- Now tap the add folder icon at the bottom of the screen, navigate to your data files folder, tap "use this folder".
+- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again.
+- You can now run the game by pressing the OpenMW-DS icon on the right.
+- If you have save games to add then run the game first, then close the app, and that should create the folder you need. See below for save location.
 
 ### Other Settings
 - Have a look through the Settings.cfg (left side menu) to enable or disable any settings you like.
 - I have already enabled controller by default.
+- I have disabled haptics by default because I found it to vibrate at random even when standing still.
 - I have changed some in game controller inputs for a better in game experience. You can change them back in game.
 - To disable "toggle sneak" go to the in game Settings > Scripts > OpenMW Controls > Toggle Sneak.
-
-These settings are optional but work well with OpenMW-DS.
+- I haven't changed any graphical settings from default, but I like to turn on shadows (runs fine on Thor Max).
 
 ### Save Location
-
 - If you want to use your openMW saves. I found the save location to be:
 - /storage/emulated/0/Alpha3/saves. (consoles internal storage/Alpha3/saves)
+
+### Mods
+- I haven't tested this with mods such as Tamriel Rebuilt yet. The minimap "should" work fine, but unsure about item icons.
 
 ---
 ## Credits

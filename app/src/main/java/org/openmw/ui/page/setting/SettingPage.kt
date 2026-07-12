@@ -378,7 +378,7 @@ fun ControlsSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
-    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
+    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = false)
     val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
 
     SettingSectionCard(
@@ -628,7 +628,7 @@ fun InGameSettings() {
     
     val isUIHidden by GameFilesPreferences.loadUIState(context).collectAsState(initial = false)
     val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(context).collectAsState(initial = true)
-    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = true)
+    val isVibrationOn by GameFilesPreferences.loadVibrationState(context).collectAsState(initial = false)
     val buttonGroupSwitch by GameFilesPreferences.getButtonGroupSwitch(context).collectAsState(initial = true)
     val controllerConnected = isControllerConnected(context)
     remember(context) { UiPreferences.init(context); true }

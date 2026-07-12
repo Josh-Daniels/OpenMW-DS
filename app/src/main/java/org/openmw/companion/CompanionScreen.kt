@@ -9991,15 +9991,13 @@ private fun OptionsSettingsList() {
         item { QuickSetRow() }
 
         // SCREEN LAYOUT: which screen each element is drawn on.
-        item { OptionsSectionHeader("Screen Layout") }
+        item { OptionsSectionHeader("DS Screen Layout") }
         // One cross-cutting switch (Classic grid / Shelf) for ALL two-panel item screens
         // (looting, pickpocket, barter). Sits above the per-element location rows.
         item { InventoryLayoutRow() }
         item { ConversationLocationRow() }
         item { LootingLocationRow() }
         item { BarteringLocationRow() }
-        item { TargetHealthLocationRow() }
-        item { PlayerCombatRow() }
         item { PersuasionLocationRow() }
         item { RepairLocationRow() }
         item { TravelLocationRow() }
@@ -10021,6 +10019,9 @@ private fun OptionsSettingsList() {
 
         // GAME UI: per-element DS/Vanilla.
         item { OptionsSectionHeader("Game UI") }
+        // Combat top-screen options sit at the top of this section.
+        item { TargetHealthLocationRow() }
+        item { PlayerCombatRow() }
         items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
 
         // VANILLA HUD: whether each native top-screen HUD element is shown.
@@ -10127,7 +10128,7 @@ private fun OptionsWelcomeBlock() {
         Spacer(Modifier.height(10.dp))
         Text(
             "An app designed for use with the AYN Thor. This bottom screen is your companion. It shows Morrowind's menus (inventory, magic, " +
-                "map, journal and stats) with touch. Tap Options below to set your layout and input before you start.",
+                "map, journal and stats) with touch. Tap Options below to set your layout. The options can also be accessed by pausing the game",
             color = Bone,
             fontSize = 18.sp,
             fontFamily = MwBody,
@@ -10135,10 +10136,8 @@ private fun OptionsWelcomeBlock() {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "New here? Open Options and start with “All Vanilla” for the closest-to-original experience, " +
-                    "then move individual pieces to DS as you like. " +
-            "I also recommend enabling touch input (in the Input section at the bottom).\n" +
-            "Want your old UI (health, minimap) back? See the Vanilla HUD section.",
+            "New here? Options are set to Vanilla by default but with touch screen enabled instead of mouse controls.\n" +
+            "Want your old UI (health, minimap) back? See the Vanilla HUD section.\n",
             color = BoneDim,
             fontSize = 17.sp,
             fontFamily = MwBody,
@@ -10267,7 +10266,14 @@ private fun GameUiRow(el: GameUiElement) {
 private fun InventoryLayoutRow() {
     val context = LocalContext.current
     val layout by UiPreferences.inventoryLayoutFlow().collectAsState()
-    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+    // The Classic/Shelf switch only affects the DS two-panel item screens (looting/pickpocket,
+    // barter). When every Game UI element is Vanilla, none of those overlays render, so the choice
+    // is meaningless — dim the row and swallow taps (same aggregate as QuickSetRow's [All Vanilla]).
+    val nonPending = remember { GAME_UI_ELEMENTS.filter { !it.pending } }
+    val modes = nonPending.map { UiPreferences.gameUiModeFlow(it.key).collectAsState().value }
+    val enabled = !(modes.isNotEmpty() && modes.all { it == GameUiMode.VANILLA })
+
+    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
         Text("Inventory Layout", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -10276,13 +10282,13 @@ private fun InventoryLayoutRow() {
                 label = "Classic",
                 active = layout == InventoryLayout.CLASSIC,
                 enabled = true
-            ) { UiPreferences.setInventoryLayout(context, InventoryLayout.CLASSIC) }
+            ) { if (enabled) UiPreferences.setInventoryLayout(context, InventoryLayout.CLASSIC) }
             OptionPill(
                 Modifier.weight(1f),
                 label = "Shelf",
                 active = layout == InventoryLayout.SHELF,
                 enabled = true
-            ) { UiPreferences.setInventoryLayout(context, InventoryLayout.SHELF) }
+            ) { if (enabled) UiPreferences.setInventoryLayout(context, InventoryLayout.SHELF) }
         }
     }
 }

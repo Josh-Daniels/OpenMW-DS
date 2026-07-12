@@ -334,7 +334,7 @@ object GameFilesPreferences {
 
     fun loadVibrationState(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
-            preferences[VIBRATION_STATE_KEY]?.toBoolean() ?: true
+            preferences[VIBRATION_STATE_KEY]?.toBoolean() ?: false  // haptics OFF by default
         }
     }
 
