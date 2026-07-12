@@ -32,6 +32,13 @@ enum class ConversationLocation { BOTTOM, SPLIT, TOP }
 enum class ScreenLocation { BOTTOM, SPLIT, TOP }
 
 /**
+ * How the two-panel item screens (looting/pickpocket, barter) render their item lists. CLASSIC =
+ * the tab-filtered icon grid; SHELF = category "shelves" (labelled horizontal rows) with a
+ * collapsible Equipped section. One switch drives ALL those contexts. Default CLASSIC.
+ */
+enum class InventoryLayout { CLASSIC, SHELF }
+
+/**
  * Where the combat target's health bar is drawn.
  * - [BOTTOM]: original behaviour — the bottom-screen HUD combat-target overlay.
  * - [TOP]: an additional top-centre overlay window on the top screen, shown while a combat
@@ -148,6 +155,7 @@ object UiPreferences {
     // switching to All DS / All Vanilla. Stored as "key=MODE,key=MODE,…" of non-pending elements.
     private const val GAME_UI_CUSTOM = "game_ui_custom"
     private const val CONVERSATION_LOCATION = "conversation_location"
+    private const val INVENTORY_LAYOUT = "inventory_layout"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
     // Training / spell-buying popup location (Bottom only for now; Top pending — same as Repair,
@@ -192,6 +200,10 @@ object UiPreferences {
     // init IS the fresh-install fallback: the load below passes null to getString and only overrides
     // when a value is actually stored, so there is no second default site.
     private val conversationLocationFlow = MutableStateFlow(ConversationLocation.TOP)
+
+    // Item-list layout for the two-panel screens (looting/pickpocket, barter): Classic grid vs
+    // Shelf. One switch, all those contexts. Default CLASSIC (the proven layout).
+    private val inventoryLayoutFlow = MutableStateFlow(InventoryLayout.CLASSIC)
 
     // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default SPLIT
     // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
@@ -267,6 +279,9 @@ object UiPreferences {
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
             ?.let { conversationLocationFlow.value = it }
+        p.getString(INVENTORY_LAYOUT, null)
+            ?.let { runCatching { InventoryLayout.valueOf(it) }.getOrNull() }
+            ?.let { inventoryLayoutFlow.value = it }
         p.getString(LOOTING_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
             ?.let { lootingLocationFlow.value = it }
@@ -412,6 +427,15 @@ object UiPreferences {
     fun setAlpha3Overlay(context: Context, shown: Boolean) {
         alpha3OverlayFlow.value = shown
         editor(context).putBoolean(ALPHA3_OVERLAY, shown).apply()
+    }
+
+    /** Item-list layout (CLASSIC grid / SHELF) for looting + barter — one shared switch. */
+    fun inventoryLayoutFlow(): StateFlow<InventoryLayout> = inventoryLayoutFlow.asStateFlow()
+
+    /** Set the inventory layout and persist. */
+    fun setInventoryLayout(context: Context, layout: InventoryLayout) {
+        inventoryLayoutFlow.value = layout
+        editor(context).putString(INVENTORY_LAYOUT, layout.name).apply()
     }
 
     /** Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). */

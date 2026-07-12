@@ -960,8 +960,20 @@ class EngineActivity : SDLActivity() {
             // narrows the controller-nav gate below (see anyServiceVanillaUpFlow / the navActive block).
             val anyServiceVanillaUp = anyServiceVanillaUpFlow()
 
-            wantConversationTop.combine(anyServiceVanillaUp) { show, serviceUp ->
-                show && !serviceUp
+            // Also step aside for a DS barter drawn on the TOP screen (SPLIT): its two shelf/grid
+            // panels sit as separate boxes with a transparent center gap that would otherwise reveal
+            // the conversation history behind them. Reappears when the barter session clears
+            // (COMPANION_BARTER_CLOSED → back to the conversation).
+            val barterTopActive = combine(
+                GameStateRepository.barterSession,
+                UiPreferences.gameUiModeFlow("game_ui_bartering"),
+                UiPreferences.barterLocationFlow(),
+            ) { session, mode, loc ->
+                session != null && mode == GameUiMode.DS && loc == ScreenLocation.SPLIT
+            }
+
+            combine(wantConversationTop, anyServiceVanillaUp, barterTopActive) { show, serviceUp, barterTop ->
+                show && !serviceUp && !barterTop
             }.distinctUntilChanged().collect { show ->
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()
             }

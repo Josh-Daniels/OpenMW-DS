@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -1102,7 +1104,9 @@ fun CombatTargetTopOverlay() {
             CombatBar(
                 ratio = target.health.ratio,
                 color = HealthCol,
-                centerText = "${(target.health.ratio * 100).roundToInt()}%"
+                centerText = "${(target.health.ratio * 100).roundToInt()}%",
+                // Match the player combat overlay's compact bar height.
+                height = 9.dp, textSize = 7.sp
             )
             Spacer(Modifier.height(3.dp))
             Text(
@@ -1131,16 +1135,20 @@ fun PlayerCombatTopOverlay() {
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.20f)
+                .fillMaxWidth(0.15f)
                 .padding(horizontal = 8.dp, vertical = 6.dp)
         ) {
             // No labels — the bar colours communicate which vital is which. The "cur/max" value
-            // rides INSIDE each bar.
-            CombatBar(ratio = state.health.ratio, color = HealthCol, centerText = dynValue(state.health))
-            Spacer(Modifier.height(4.dp))
-            CombatBar(ratio = state.magicka.ratio, color = MagickaCol, centerText = dynValue(state.magicka))
-            Spacer(Modifier.height(4.dp))
-            CombatBar(ratio = state.fatigue.ratio, color = FatigueCol, centerText = dynValue(state.fatigue))
+            // rides INSIDE each bar. Compact sizing: 9dp bars (half the target overlay's 18dp) with a
+            // 7sp value that still fits, at 15% screen width (25% narrower than before).
+            CombatBar(ratio = state.health.ratio, color = HealthCol, centerText = dynValue(state.health),
+                height = 9.dp, textSize = 7.sp)
+            Spacer(Modifier.height(3.dp))
+            CombatBar(ratio = state.magicka.ratio, color = MagickaCol, centerText = dynValue(state.magicka),
+                height = 9.dp, textSize = 7.sp)
+            Spacer(Modifier.height(3.dp))
+            CombatBar(ratio = state.fatigue.ratio, color = FatigueCol, centerText = dynValue(state.fatigue),
+                height = 9.dp, textSize = 7.sp)
         }
     }
 }
@@ -1148,14 +1156,21 @@ fun PlayerCombatTopOverlay() {
 /** "cur/max" for a [Dynamic], rounded — the value shown inside a player combat bar. */
 private fun dynValue(dyn: Dynamic): String = "${dyn.current.roundToInt()}/${dyn.max.roundToInt()}"
 
-/** A full-width 18dp stat bar (dark track, bronze border, [color] fill) for the combat overlays,
- *  with an optional [centerText] drawn centred INSIDE the bar (light, small, over the fill). */
+/** A full-width stat bar (dark track, bronze border, [color] fill) for the combat overlays, with an
+ *  optional [centerText] drawn centred INSIDE the bar (light, small, over the fill). [height] and
+ *  [textSize] default to the target-overlay sizing; the player-combat overlay passes smaller values. */
 @Composable
-private fun CombatBar(ratio: Float, color: Color, centerText: String? = null) {
+private fun CombatBar(
+    ratio: Float,
+    color: Color,
+    centerText: String? = null,
+    height: Dp = 18.dp,
+    textSize: TextUnit = 8.sp,
+) {
     Box(
         Modifier
             .fillMaxWidth()
-            .height(18.dp)
+            .height(height)
             .clip(RoundedCornerShape(2.dp))
             .background(Color(0xFF0E0B07))
             .border(1.dp, BronzeDark, RoundedCornerShape(2.dp)),
@@ -1172,7 +1187,7 @@ private fun CombatBar(ratio: Float, color: Color, centerText: String? = null) {
         if (centerText != null) {
             Text(
                 centerText,
-                color = Color.White, fontSize = 8.sp, fontFamily = MwData,
+                color = Color.White, fontSize = textSize, fontFamily = MwData,
                 fontWeight = FontWeight.Bold, maxLines = 1
             )
         }
@@ -2286,6 +2301,637 @@ private fun rememberLootNavFocus(
     return LootFocus(side, index)
 }
 
+// ============================ SHELF LAYOUT (shared, Phases 1-3) ============================
+// An alternate dual-panel layout for the two-panel item screens (looting/pickpocket now;
+// barter in Phase 2). Items are grouped into labelled horizontal "shelves" by category
+// instead of a tab-filtered grid, stacked vertically inside each panel, with a reserved
+// scroll gutter on the inner edge and a collapsible "Equipped" section pinned to the bottom
+// of the PLAYER panel only. A common [ShelfItem] view-model lets both InventoryItem (loot)
+// and BarterItem (barter) project in at the call site — the underlying data models and each
+// overlay's plumbing (session, optimistic updates) stay untouched. Gated per overlay by
+// UiPreferences.inventoryLayoutFlow() (the "Inventory Layout" options switch; default CLASSIC).
+
+/** Common per-item view-model both looting (InventoryItem) and barter (BarterItem) project into
+ *  so one ShelfColumn/ShelfCell renders every context. Carries display fields (icon/name/worn/
+ *  count) + the info-popup fields (id/name/enchant) + the tap action. Barter-only extras
+ *  ([price]/[selected]/[selectedCount]) default to inert, so looting cells render exactly as before. */
+private data class ShelfItem(
+    val id: String,
+    val name: String,
+    val category: String,
+    val icon: String,
+    val worn: Boolean,
+    val enchant: ItemEnchant?,
+    val count: Int,
+    val onTap: () -> Unit,
+    // Barter: per-unit price (null = no price line, e.g. looting) and offer-selection state.
+    val price: Int? = null,
+    val selected: Boolean = false,
+    val selectedCount: Int = 0,
+) {
+    val enchanted: Boolean get() = enchant != null
+}
+
+/** One labelled shelf: a category bucket's display name + its (alphabetised) items. */
+private data class ShelfRowData(val label: String, val items: List<ShelfItem>)
+
+/** A focusable nav row: a category shelf / the equipped strip (both carry [items]) OR the
+ *  equipped-section header (no items — [isEquippedHeader], Confirm toggles expand). */
+private data class ShelfNavRow(val items: List<ShelfItem>, val isEquippedHeader: Boolean = false)
+
+/** Current shelf-mode controller focus: which [side] (0 = player, 1 = other), which [row]
+ *  (index into that side's nav rows), and which [item] within that row. */
+private data class ShelfFocus(val side: Int, val row: Int, val item: Int)
+
+/** Map any item category string — fine (looting slot cats) OR coarse (barter cats) — to a
+ *  (rank, display-label) shelf bucket. Mirrors the INV_CATEGORIES buckets + itemCategoryRank
+ *  order so shelves read like the Classic tabs. */
+private fun shelfBucket(category: String): Pair<Int, String> = when (category) {
+    "weapon", "ammo" -> 0 to "Weapons"
+    "armor", "helmet", "cuirass", "left_pauldron", "right_pauldron", "greaves", "boots",
+        "left_gauntlet", "right_gauntlet", "shield" -> 1 to "Armor"
+    "apparel", "amulet", "left_ring", "shirt", "pants", "skirt", "robe", "clothing" -> 2 to "Apparel"
+    "consumable", "potion", "ingredient" -> 3 to "Consumables"
+    "book", "scroll" -> 4 to "Books"
+    "tools", "lockpick", "probe" -> 5 to "Tools"
+    else -> 6 to "Misc"
+}
+
+/** Group a flat item list into category shelves (bucket order, items alphabetised within). */
+private fun buildShelves(items: List<ShelfItem>): List<ShelfRowData> =
+    items.groupBy { shelfBucket(it.category) }
+        .entries
+        .sortedBy { it.key.first }
+        .map { (bucket, list) -> ShelfRowData(bucket.second, list.sortedBy { it.name.lowercase() }) }
+
+/** The player panel's focusable nav rows: category shelves, then the equipped header, then (when
+ *  [expanded]) the equipped items strip. The container panel just uses its category shelves. */
+private fun playerNavRows(shelves: List<ShelfRowData>, equipped: List<ShelfItem>, expanded: Boolean): List<ShelfNavRow> {
+    val rows = shelves.map { ShelfNavRow(it.items) }.toMutableList()
+    if (equipped.isNotEmpty()) {
+        rows += ShelfNavRow(emptyList(), isEquippedHeader = true)
+        if (expanded) rows += ShelfNavRow(equipped)
+    }
+    return rows
+}
+
+/**
+ * Shelf-mode controller navigation — a 2D model (row × item, per side) fit for ragged,
+ * variable-length shelves plus the collapsible equipped section, replacing the fixed-grid
+ * [rememberLootNavFocus]/[rememberBarterNavFocus] math for this layout. Context-neutral (serves
+ * looting AND barter):
+ *  - Up/Down move between rows (shelves + equipped header/items); Left/Right move within a row.
+ *  - L2/R2 switch side; Confirm taps the focused item (loot transfer / barter toggle), or toggles the
+ *    equipped section when on its header; Info = the item info popup.
+ *  - [onAction1] = X (looting: Take All / barter: Offer), [onAction2] = Y (looting: Dispose),
+ *    [onSlider] = left-stick step ±1 (barter gold), half-rate like [rememberBarterNavFocus].
+ * [playerRows]/[containerRows] already reflect the current equipped-expanded state, so a Confirm on
+ * the equipped header flips it via [setEquippedExpanded] and the rows recompute next frame.
+ */
+@Composable
+private fun rememberShelfNavFocus(
+    playerRows: List<ShelfNavRow>,
+    containerRows: List<ShelfNavRow>,
+    equippedExpanded: Boolean,
+    setEquippedExpanded: (Boolean) -> Unit,
+    infoOnTop: Boolean,
+    onAction1: () -> Unit = {},
+    onAction2: () -> Unit = {},
+    onSlider: (Int) -> Unit = {},
+): ShelfFocus {
+    var side by remember { mutableStateOf(if (containerRows.isNotEmpty()) 1 else 0) }
+    var row by remember { mutableStateOf(0) }
+    var item by remember { mutableStateOf(0) }
+
+    // Keep focus in range as rows/items change (items taken/put, equipped expand/collapse, side switch).
+    LaunchedEffect(playerRows, containerRows, side) {
+        val rows = if (side == 0) playerRows else containerRows
+        row = row.coerceIn(0, (rows.size - 1).coerceAtLeast(0))
+        val n = rows.getOrNull(row)?.items?.size ?: 0
+        item = item.coerceIn(0, (n - 1).coerceAtLeast(0))
+    }
+
+    val snap = rememberUpdatedState(playerRows to containerRows)
+    val expandState = rememberUpdatedState(equippedExpanded)
+    val setExpand = rememberUpdatedState(setEquippedExpanded)
+    val action1 = rememberUpdatedState(onAction1)
+    val action2 = rememberUpdatedState(onAction2)
+    val slider = rememberUpdatedState(onSlider)
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (matches barter)
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (ModalNav.open) return@collect
+            val (pRows, cRows) = snap.value
+            fun rowsFor(s: Int) = if (s == 0) pRows else cRows
+            fun curRows() = rowsFor(side)
+            fun clampRow() { row = row.coerceIn(0, (curRows().size - 1).coerceAtLeast(0)) }
+            fun clampItem() {
+                val n = curRows().getOrNull(row)?.items?.size ?: 0
+                item = item.coerceIn(0, (n - 1).coerceAtLeast(0))
+            }
+            when (ev) {
+                is NavEvent.Down -> if (row + 1 < curRows().size) { row++; clampItem() }
+                is NavEvent.Up -> if (row > 0) { row--; clampItem() }
+                is NavEvent.Right -> {
+                    val n = curRows().getOrNull(row)?.items?.size ?: 0
+                    if (item + 1 < n) item++
+                }
+                is NavEvent.Left -> if (item > 0) item--
+                is NavEvent.L2 -> { side = 0; clampRow(); clampItem() }
+                is NavEvent.R2 -> { side = 1; clampRow(); clampItem() }
+                is NavEvent.Confirm -> {
+                    val r = curRows().getOrNull(row) ?: return@collect
+                    if (r.isEquippedHeader) setExpand.value(!expandState.value)
+                    else r.items.getOrNull(item)?.onTap?.invoke()
+                }
+                is NavEvent.Action1 -> action1.value()
+                is NavEvent.Action2 -> action2.value()
+                is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) slider.value(-1)
+                is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) slider.value(1)
+                is NavEvent.Info -> curRows().getOrNull(row)?.items?.getOrNull(item)?.let {
+                    ItemInfoPopupState.toggle(it.id, it.name, it.enchant, onTop = infoOnTop)
+                }
+                else -> Unit
+            }
+            if (ItemInfoPopupState.isOpen) {
+                curRows().getOrNull(row)?.items?.getOrNull(item)?.let {
+                    ItemInfoPopupState.follow(it.id, it.name, it.enchant, onTop = infoOnTop)
+                }
+            }
+        }
+    }
+    return ShelfFocus(side, row, item)
+}
+
+/** Fixed-width reserved scroll gutter on a panel's inner edge. Always present (constant column
+ *  width whether or not the content scrolls); the thumb size/offset derive from real
+ *  [state] layout info (item-granularity), so it reflects the panel's vertical scroll. */
+@Composable
+private fun ShelfScrollGutter(state: LazyListState, modifier: Modifier = Modifier) {
+    val total = state.layoutInfo.totalItemsCount
+    val visible = state.layoutInfo.visibleItemsInfo.size
+    Box(
+        modifier
+            .width(6.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(3.dp))
+            .background(Color(0xFF0E0B07))
+    ) {
+        if (total > 0 && visible < total) {
+            // Thumb: fraction of items visible, offset by the first visible index (approximate but
+            // faithful enough at item granularity for these short lists).
+            val thumbFrac = (visible.toFloat() / total).coerceIn(0.12f, 1f)
+            val offsetFrac = (state.firstVisibleItemIndex.toFloat() / total).coerceIn(0f, 1f - thumbFrac)
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                val h = maxHeight
+                Box(
+                    Modifier
+                        .offset(y = h * offsetFrac)
+                        .fillMaxWidth()
+                        .height(h * thumbFrac)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(BronzeDark)
+                )
+            }
+        }
+    }
+}
+
+/** One item cell in a shelf: icon (enchant backdrop + worn bronze border, carried over from the
+ *  grid cell) with the name beneath, plus a controller-focus ring. Tap = [item].onTap. */
+@Composable
+private fun ShelfCell(item: ShelfItem, focused: Boolean) {
+    val iconBitmap = rememberItemIcon(item.icon)
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .width(54.dp)
+                .then(
+                    if (focused) Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(BronzeLight.copy(alpha = 0.15f))
+                        .border(2.dp, BronzeLight, RoundedCornerShape(4.dp))
+                    else Modifier
+                )
+                .clickable { item.onTap() }
+                .padding(2.dp)
+        ) {
+            // Icon box — worn/enchant decoration carried over from LootGridCell; barter's SELECTED
+            // (staged into the offer) adds the SlotWorn fill + a bright border + a green count badge,
+            // matching BarterGridCell so worn (border only) and selected still read distinctly.
+            val highlight = item.worn || item.selected
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(if (item.selected) SlotWorn else SlotBg)
+                    .border(
+                        BorderStroke(if (highlight) 2.dp else 1.dp, if (highlight) BronzeLight else BronzeDark),
+                        RoundedCornerShape(3.dp)
+                    )
+            ) {
+                EnchantBackdrop(item.enchanted)
+                if (iconBitmap != null) {
+                    Image(
+                        bitmap = iconBitmap,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(3.dp)
+                    )
+                }
+                if (item.selected && item.selectedCount > 1) {
+                    Text(
+                        "×${item.selectedCount}",
+                        color = BarterGreen, fontSize = 9.sp,
+                        fontFamily = MwData, fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .background(Color(0xCC0E0B07))
+                            .padding(horizontal = 2.dp)
+                    )
+                } else if (!item.selected && item.count > 1) {
+                    Text(
+                        "×${item.count}",
+                        color = BoneBright, fontSize = 9.sp,
+                        fontFamily = MwData, fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .background(Color(0xCC0E0B07))
+                            .padding(horizontal = 2.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                item.name,
+                color = if (item.worn || item.selected) BoneBright else Bone,
+                fontSize = 8.sp, fontFamily = MwBody,
+                textAlign = TextAlign.Center,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                lineHeight = 9.sp,
+                modifier = Modifier.width(54.dp)
+            )
+            // Per-unit barter price (null for looting → no line).
+            if (item.price != null) {
+                Text("${item.price}g", color = BoneDim, fontSize = 8.sp, fontFamily = MwData, maxLines = 1)
+            }
+        }
+    }
+}
+
+/** One labelled shelf: category label + a horizontal-scrolling row of [ShelfCell]s, with a
+ *  trailing chevron hint shown while more items exist off the right edge. [focusedItem] (-1 =
+ *  none) drives the cell highlight and scrolls that cell into view. Its own horizontal scroll
+ *  state is remembered per shelf slot (keyed by category by the caller's LazyColumn key), so it
+ *  survives optimistic take/put list mutation. */
+@Composable
+private fun CategoryShelf(shelf: ShelfRowData, focusedItem: Int) {
+    val hState = rememberLazyListState()
+    LaunchedEffect(focusedItem) {
+        if (focusedItem in shelf.items.indices) hState.animateScrollToItem(focusedItem)
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Text(
+            shelf.label,
+            color = BronzeLight, fontSize = 11.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp
+        )
+        Spacer(Modifier.height(2.dp))
+        Box(Modifier.fillMaxWidth()) {
+            LazyRow(
+                state = hState,
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // No item key: the same record id can legitimately appear twice within one barter
+                // panel (a player-owned item and a bought vendor copy of the same id), which would
+                // crash a keyed list. Index keys are fine — the per-shelf scroll state is keyed by
+                // category on the outer LazyColumn, not per cell.
+                itemsIndexed(shelf.items) { i, it ->
+                    ShelfCell(it, focused = i == focusedItem)
+                }
+            }
+            // Chevron hint: more items off the right edge.
+            if (hState.canScrollForward) {
+                Box(
+                    Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .background(
+                            androidx.compose.ui.graphics.Brush.horizontalGradient(
+                                listOf(Color.Transparent, SplitBoxBg)
+                            )
+                        )
+                        .padding(start = 10.dp, end = 1.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("›", color = BronzeLight, fontSize = 18.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+/** The player-side Equipped section, pinned to the bottom of the panel by layout. Collapsed by
+ *  default to a single "Equipped (N)" row + chevron; expands to a horizontal shelf of the worn
+ *  items. Its own dashed border sets it apart — there is NO divider above it. Player-side only.
+ *  [headerFocused] = the collapsed/expand header row is focused; [focusedItem] (-1 = none) is the
+ *  focused worn item when expanded. */
+@Composable
+private fun EquippedSection(
+    items: List<ShelfItem>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    headerFocused: Boolean,
+    focusedItem: Int,
+) {
+    val hState = rememberLazyListState()
+    LaunchedEffect(focusedItem) {
+        if (focusedItem in items.indices) hState.animateScrollToItem(focusedItem)
+    }
+    val dash = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 4f))
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp)
+            .drawBehind {
+                drawRoundRect(
+                    color = BronzeDark,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx(), pathEffect = dash),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx())
+                )
+            }
+            .padding(6.dp)
+    ) {
+        // Header row (tap toggles expand/collapse). Focus ring when the controller is on the header.
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .then(
+                    if (headerFocused) Modifier
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(BronzeLight.copy(alpha = 0.15f))
+                        .border(1.dp, BronzeLight, RoundedCornerShape(3.dp))
+                    else Modifier
+                )
+                .clickable { onToggle() }
+                .padding(horizontal = 4.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Equipped (${items.size})",
+                color = BoneMuted, fontSize = 11.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp
+            )
+            Spacer(Modifier.weight(1f))
+            Text(if (expanded) "▾" else "▸", color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay)
+        }
+        if (expanded) {
+            Spacer(Modifier.height(3.dp))
+            LazyRow(
+                state = hState,
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                itemsIndexed(items) { i, it ->
+                    ShelfCell(it, focused = i == focusedItem)
+                }
+            }
+        }
+    }
+}
+
+/** One shelf-layout panel (player or other side): a header row (name + role-specific info), a
+ *  vertically-scrolling stack of [CategoryShelf]s with a reserved [ShelfScrollGutter] on the inner
+ *  edge, and — player side only — the pinned [EquippedSection]. Nav rows are: category shelves
+ *  (0..n-1), then equipped header (n), then equipped items (n+1) when expanded; [focusedRow] (-1 =
+ *  this side unfocused) selects which, [focusedItem] the cell within it. */
+@Composable
+private fun ShelfColumn(
+    headerLeft: String,
+    headerRight: AnnotatedString,
+    shelves: List<ShelfRowData>,
+    equipped: List<ShelfItem>,
+    equippedExpanded: Boolean,
+    onToggleEquipped: () -> Unit,
+    emptyText: String,
+    gutterOnLeft: Boolean,
+    focusedRow: Int,
+    focusedItem: Int,
+    modifier: Modifier = Modifier,
+) {
+    val shelfCount = shelves.size
+    val listState = rememberLazyListState()
+    // Scroll the focused category shelf into view (equipped rows are pinned, always visible).
+    LaunchedEffect(focusedRow) {
+        if (focusedRow in 0 until shelfCount) listState.animateScrollToItem(focusedRow)
+    }
+    ScrollByNav(listState, active = focusedRow in 0 until shelfCount)
+
+    Column(modifier) {
+        // Header: name left, role-specific info right.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                headerLeft,
+                color = BronzeLight, fontSize = 13.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            Spacer(Modifier.weight(1f))
+            // Default color so a plain (unstyled) headerRight is legible on the dark panel; any
+            // SpanStyle colors in the AnnotatedString (gold amount, load-tinted weight) override it.
+            Text(headerRight, color = Bone, fontSize = 11.sp, fontFamily = MwData, maxLines = 1)
+        }
+        Spacer(Modifier.height(3.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
+        Spacer(Modifier.height(3.dp))
+
+        // Shelf stack + reserved gutter. weight(1f) so the equipped section pins below.
+        Row(Modifier.fillMaxWidth().weight(1f)) {
+            if (gutterOnLeft) {
+                ShelfScrollGutter(listState)
+                Spacer(Modifier.width(4.dp))
+            }
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                if (shelves.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
+                    }
+                } else {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                        items(shelves, key = { it.label }) { shelf ->
+                            val fi = if (focusedRow in 0 until shelfCount && shelves.getOrNull(focusedRow) === shelf)
+                                focusedItem else -1
+                            CategoryShelf(shelf, focusedItem = fi)
+                        }
+                    }
+                }
+            }
+            if (!gutterOnLeft) {
+                Spacer(Modifier.width(4.dp))
+                ShelfScrollGutter(listState)
+            }
+        }
+
+        // Player-side pinned equipped section (no divider above — its own border sets it apart).
+        if (equipped.isNotEmpty()) {
+            EquippedSection(
+                items = equipped,
+                expanded = equippedExpanded,
+                onToggle = onToggleEquipped,
+                headerFocused = focusedRow == shelfCount,
+                focusedItem = if (focusedRow == shelfCount + 1) focusedItem else -1,
+            )
+        }
+    }
+}
+
+// Width of the center divider strip between the two shelf panels, on the SPLIT (top) screen. Widened
+// from the original 18dp so each panel's shelf row fits a WHOLE number of icon cells instead of ~6.2
+// (a partial 7th peeking — the chevron already signals more off-screen). Each cell is ~58dp wide
+// (54dp + 4dp gap), so trimming ~0.2 cell per panel means ~+23dp of total divider; a further +8dp
+// swallows the last thin sliver (~an icon's bronze border) that still peeked, plus a couple px of
+// margin. ~4dp of trim per panel. Tune here if the fit is off.
+private val SHELF_CENTER_DIVIDER_WIDTH = 50.dp
+
+// The BOTTOM-screen shelf layout is narrower and doesn't need the whole-icon-fit widening — the two
+// panels read better closer together, so this is ~half the split width (the panels' separation).
+private val SHELF_CENTER_DIVIDER_WIDTH_BOTTOM = 25.dp
+
+/** The center divider between the two shelf panels: a distinct vertical strip with a small
+ *  circular badge marking the boundary. Shared across all shelf contexts for one visual language.
+ *  [width] is the split-screen default; the bottom layouts pass a narrower value. */
+@Composable
+private fun ShelfCenterDivider(width: Dp = SHELF_CENTER_DIVIDER_WIDTH) {
+    Box(
+        Modifier.fillMaxHeight().width(width),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(Modifier.width(2.dp).fillMaxHeight().background(BronzeDark))
+        Box(
+            Modifier
+                .size(16.dp)
+                .clip(CircleShape)
+                .background(SplitBoxBg)
+                .border(1.dp, Bronze, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(Modifier.size(5.dp).clip(CircleShape).background(BronzeLight))
+        }
+    }
+}
+
+/**
+ * Assembles the shelf-mode dual panel (player | center divider | other side) and owns the
+ * shelf-mode controller navigation. Screen-agnostic and context-neutral — used by both the bottom
+ * and split entry points of looting AND barter. Callers pass already-projected [ShelfItem] lists
+ * (worn player items separated into [playerEquipped]) plus the role headers and the generic actions
+ * ([onAction1] = X, [onAction2] = Y, [onSlider] = left-stick); this keeps each overlay's data
+ * plumbing untouched. [infoOnTop] targets the item-info popup at the screen the panel is composed on.
+ */
+@Composable
+private fun ShelfDualPanel(
+    playerHeaderLeft: String,
+    playerHeaderRight: AnnotatedString,
+    playerShelfItems: List<ShelfItem>,
+    playerEquipped: List<ShelfItem>,
+    otherHeaderLeft: String,
+    otherHeaderRight: AnnotatedString,
+    otherItems: List<ShelfItem>,
+    otherEmptyText: String,
+    infoOnTop: Boolean,
+    onAction1: () -> Unit = {},
+    onAction2: () -> Unit = {},
+    onSlider: (Int) -> Unit = {},
+    dividerWidth: Dp = SHELF_CENTER_DIVIDER_WIDTH,
+    modifier: Modifier = Modifier,
+) {
+    val playerShelves = remember(playerShelfItems) { buildShelves(playerShelfItems) }
+    val otherShelves = remember(otherItems) { buildShelves(otherItems) }
+    var equippedExpanded by remember { mutableStateOf(false) }
+
+    val playerRows = playerNavRows(playerShelves, playerEquipped, equippedExpanded)
+    val otherRows = otherShelves.map { ShelfNavRow(it.items) }
+
+    val focus = rememberShelfNavFocus(
+        playerRows = playerRows,
+        containerRows = otherRows,
+        equippedExpanded = equippedExpanded,
+        setEquippedExpanded = { equippedExpanded = it },
+        infoOnTop = infoOnTop,
+        onAction1 = onAction1,
+        onAction2 = onAction2,
+        onSlider = onSlider,
+    )
+
+    Row(modifier.fillMaxWidth()) {
+        ShelfColumn(
+            headerLeft = playerHeaderLeft,
+            headerRight = playerHeaderRight,
+            shelves = playerShelves,
+            equipped = playerEquipped,
+            equippedExpanded = equippedExpanded,
+            onToggleEquipped = { equippedExpanded = !equippedExpanded },
+            emptyText = "Empty",
+            gutterOnLeft = false, // player is the LEFT panel → gutter on its inner (right) edge
+            focusedRow = if (focus.side == 0) focus.row else -1,
+            focusedItem = focus.item,
+            modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
+        )
+        ShelfCenterDivider(dividerWidth)
+        ShelfColumn(
+            headerLeft = otherHeaderLeft,
+            headerRight = otherHeaderRight,
+            shelves = otherShelves,
+            equipped = emptyList(), // equipped section is player-side ONLY
+            equippedExpanded = false,
+            onToggleEquipped = {},
+            emptyText = otherEmptyText,
+            gutterOnLeft = true, // other is the RIGHT panel → gutter on its inner (left) edge
+            focusedRow = if (focus.side == 1) focus.row else -1,
+            focusedItem = focus.item,
+            modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
+        )
+    }
+}
+
+/** Project a looting [InventoryItem] into a [ShelfItem]. [onTap] runs the put/take (with the
+ *  quantity prompt) the caller supplies. */
+private fun InventoryItem.toShelfItem(worn: Boolean, onTap: () -> Unit): ShelfItem =
+    ShelfItem(
+        id = stackId.ifEmpty { id },
+        name = displayName(),
+        category = category,
+        icon = icon,
+        worn = worn,
+        enchant = enchant,
+        count = count,
+        onTap = onTap,
+    )
+
+/** Project a barter [BarterItem] into a [ShelfItem]. [onTap] toggles the offer selection; the
+ *  per-unit price + selection state ride along so the shelf cell renders them (worn = the item's own
+ *  equipped flag, so worn player gear pulls into the Equipped section like looting). */
+private fun BarterItem.toShelfItem(onTap: () -> Unit): ShelfItem =
+    ShelfItem(
+        id = id,
+        name = displayName(),
+        category = category,
+        icon = icon,
+        worn = worn,
+        enchant = enchant,
+        count = count,
+        onTap = onTap,
+        price = value,
+        selected = isSelected,
+        selectedCount = selectedCount,
+    )
+
 /**
  * Two-panel looting/pickpocketing overlay: the player's inventory on the left,
  * the container/corpse/NPC's contents on the right. Tapping a player item puts
@@ -2377,8 +3023,11 @@ private fun LootingOverlay(
     val containerSorted = remember(containerItems) {
         containerItems.sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
     }
-    // Controller focus (BOTTOM = two side-by-side lists → rows = 1).
-    val focus = rememberLootNavFocus(
+    // Controller focus (BOTTOM = two side-by-side lists → rows = 1). Classic mode only — the shelf
+    // layout runs its OWN nav (inside ShelfDualPanel); running both collectors would double-consume
+    // nav events. The "Inventory Layout" options switch (default CLASSIC) selects which.
+    val shelfMode = UiPreferences.inventoryLayoutFlow().collectAsState().value == InventoryLayout.SHELF
+    val focus = if (shelfMode) null else rememberLootNavFocus(
         playerSorted = playerSorted,
         containerSorted = containerSorted,
         rows = 1,
@@ -2427,8 +3076,36 @@ private fun LootingOverlay(
             )
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
-            // ---- Two equal columns: player | container ----
-            Row(Modifier.weight(1f).fillMaxWidth()) {
+            // ---- Item panels: Shelf (grouped shelves) or Classic (two side-by-side lists) ----
+            if (shelfMode) {
+                ShelfDualPanel(
+                    playerHeaderLeft = playerName,
+                    playerHeaderRight = goldWeightHeaderRight(playerGold, liveEncumbrance),
+                    playerShelfItems = playerItems.filter { !isWorn(it) }.map { itm ->
+                        itm.toShelfItem(worn = false) {
+                            QuantityRequestState.requestOrRun(itm.displayName(), itm.count, "Put") { n -> put(itm, n) }
+                        }
+                    },
+                    playerEquipped = playerItems.filter { isWorn(it) }.map { itm ->
+                        itm.toShelfItem(worn = true) {
+                            QuantityRequestState.requestOrRun(itm.displayName(), itm.count, "Put") { n -> put(itm, n) }
+                        }
+                    },
+                    otherHeaderLeft = session.containerName.ifBlank { "Container" },
+                    otherHeaderRight = AnnotatedString("${containerItems.size} items"),
+                    otherItems = containerItems.map { itm ->
+                        itm.toShelfItem(worn = false) {
+                            QuantityRequestState.requestOrRun(itm.displayName(), itm.count, "Take") { n -> take(itm, n) }
+                        }
+                    },
+                    otherEmptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
+                    infoOnTop = false,
+                    onAction1 = { takeAll() },
+                    onAction2 = { if (session.isCorpse) CompanionActions.containerDispose() },
+                    dividerWidth = SHELF_CENTER_DIVIDER_WIDTH_BOTTOM,
+                    modifier = Modifier.weight(1f).padding(8.dp)
+                )
+            } else Row(Modifier.weight(1f).fillMaxWidth()) {
                 LootColumn(
                     header = playerLootHeader(playerName, playerGold, liveEncumbrance),
                     legend = "tap to put · long press for more",
@@ -2436,7 +3113,7 @@ private fun LootingOverlay(
                     isPlayerSide = true,
                     isWorn = { isWorn(it) },
                     onTransfer = { it, n -> put(it, n) },
-                    focusedIndex = if (focus.side == 0) focus.index else -1,
+                    focusedIndex = if (focus!!.side == 0) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
                 // Dashed vertical divider between the two columns.
@@ -2459,7 +3136,7 @@ private fun LootingOverlay(
                     // Pickpocket: an empty visible list usually means your Sneak hid the
                     // items (not that the NPC is broke) — say so. Corpses/chests: "Empty".
                     emptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
-                    focusedIndex = if (focus.side == 1) focus.index else -1,
+                    focusedIndex = if (focus!!.side == 1) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -2531,6 +3208,22 @@ private fun playerLootHeader(name: String, gold: Int, enc: Dynamic): AnnotatedSt
         withStyle(SpanStyle(color = encumbranceColor(enc))) {
             append("${dynValue(enc)}kg")
         }
+    }
+
+/** Right-aligned header info for a player SHELF panel: "123g  145/200kg", gold on BronzeLight and
+ *  the weight tinted by load ([encumbranceColor]). Shared by looting AND barter (both show the
+ *  player's carried weight). The name rides the shelf header's left slot. */
+private fun goldWeightHeaderRight(gold: Int, enc: Dynamic): AnnotatedString =
+    buildAnnotatedString {
+        withStyle(SpanStyle(color = BronzeLight)) { append("${gold}g  ") }
+        withStyle(SpanStyle(color = encumbranceColor(enc))) { append("${dynValue(enc)}kg") }
+    }
+
+/** Right-aligned gold-only header (vendor/other side): "123g" on BronzeLight so the amount reads
+ *  clearly against the dark panel. */
+private fun goldHeaderRight(gold: Int): AnnotatedString =
+    buildAnnotatedString {
+        withStyle(SpanStyle(color = BronzeLight)) { append("${gold}g") }
     }
 
 /** One side of the looting overlay — header, legend, and a scrolling item list. [items] arrives
@@ -2933,7 +3626,9 @@ fun LootingTopOverlay() {
     val containerVisible = remember(containerItems, containerCat) { lootVisible(containerItems, containerCat) }
     // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X/Y fire here too even though
     // the Take All / Dispose buttons live on the bottom controls window — they're plain commands.
-    val focus = rememberLootNavFocus(
+    // Classic mode only — the shelf layout runs its own nav (ShelfDualPanel).
+    val shelfMode = UiPreferences.inventoryLayoutFlow().collectAsState().value == InventoryLayout.SHELF
+    val focus = if (shelfMode) null else rememberLootNavFocus(
         playerSorted = playerVisible,
         containerSorted = containerVisible,
         rows = 3,
@@ -2957,9 +3652,30 @@ fun LootingTopOverlay() {
             .padding(bottom = 12.dp),
         contentAlignment = Alignment.BottomCenter
     ) {
-        // Two separate boxed columns (player | container) with an 8dp gap — no outer panel,
-        // no divider line. 75% of the previous 0.9 height.
-        Row(
+        // Two separate boxed columns (player | container). Shelf mode replaces the two icon grids
+        // with the grouped-shelf dual panel; Classic keeps the tab+grid columns with an 8dp gap.
+        if (shelfMode) {
+            ShelfDualPanel(
+                playerHeaderLeft = playerName,
+                playerHeaderRight = goldWeightHeaderRight(playerGold, liveEncumbrance),
+                playerShelfItems = playerItems.filter { !isWorn(it) }.map { itm ->
+                    itm.toShelfItem(worn = false) { requestQty(itm.displayName(), itm.count, "Put") { n -> put(itm, n) } }
+                },
+                playerEquipped = playerItems.filter { isWorn(it) }.map { itm ->
+                    itm.toShelfItem(worn = true) { requestQty(itm.displayName(), itm.count, "Put") { n -> put(itm, n) } }
+                },
+                otherHeaderLeft = session.containerName.ifBlank { "Container" },
+                otherHeaderRight = AnnotatedString("${containerItems.size} items"),
+                otherItems = containerItems.map { itm ->
+                    itm.toShelfItem(worn = false) { requestQty(itm.displayName(), itm.count, "Take") { n -> take(itm, n) } }
+                },
+                otherEmptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
+                infoOnTop = true,
+                onAction1 = { takeAll() },
+                onAction2 = { if (session.isCorpse) CompanionActions.containerDispose() },
+                modifier = Modifier.fillMaxWidth(0.96f).fillMaxHeight(0.675f)
+            )
+        } else Row(
             modifier = Modifier
                 .fillMaxWidth(0.96f)
                 .fillMaxHeight(0.675f)
@@ -2975,7 +3691,7 @@ fun LootingTopOverlay() {
                 onSelectCategory = { playerCat = it },
                 onTransfer = { it, n -> put(it, n) },
                 onRequestQty = requestQty,
-                focusedIndex = if (focus.side == 0) focus.index else -1,
+                focusedIndex = if (focus!!.side == 0) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
             Spacer(Modifier.width(LOOT_SPLIT_COLUMN_GAP))
@@ -2990,7 +3706,7 @@ fun LootingTopOverlay() {
                 onSelectCategory = { containerCat = it },
                 onTransfer = { it, n -> take(it, n) },
                 onRequestQty = requestQty,
-                focusedIndex = if (focus.side == 1) focus.index else -1,
+                focusedIndex = if (focus!!.side == 1) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
         }
@@ -3306,10 +4022,13 @@ private fun QuantitySelector(
     // button jumps straight to the whole stack for dump-everything.
     var qty by remember(name, safeMax) { mutableStateOf(1) }
     fun set(v: Int) { qty = v.coerceIn(1, safeMax) }
+    // Single "jump to the whole stack" action, shared by the on-screen MAX button and the Y button.
+    fun setMax() { set(safeMax) }
     val showTens = safeMax > 10
 
     // Controller: while this selector is up it OWNS nav — mark it open so the grid/slider collectors
-    // underneath yield, and drive the quantity from the D-pad. D-pad up/right = +1, down/left = −1;
+    // underneath yield, and drive the quantity from the D-pad. D-pad up/down = ±10 (clamped: a single
+    // press lands on min(qty+10, max) / max(qty-10, 1)), left/right = ±1; Y = Max (whole stack);
     // A confirms; B cancels JUST the selector (native intercepts B → COMPANION_NAV_CANCEL while
     // companionQtySelectorOpen, instead of closing the whole overlay). Also pushes that open flag to
     // native so the B interception knows to fire; the counter guards against brief enter/exit overlap.
@@ -3327,8 +4046,11 @@ private fun QuantitySelector(
             if (ev == null || ev.seq <= lastSeq) return@collect
             lastSeq = ev.seq
             when (ev) {
-                is NavEvent.Up, is NavEvent.Right -> set(qty + 1)
-                is NavEvent.Down, is NavEvent.Left -> set(qty - 1)
+                is NavEvent.Up -> set(qty + 10)     // clamps to safeMax → a single press reaches max
+                is NavEvent.Down -> set(qty - 10)   // clamps to the floor of 1
+                is NavEvent.Right -> set(qty + 1)
+                is NavEvent.Left -> set(qty - 1)
+                is NavEvent.Action2 -> setMax()     // Y → whole stack (same as the MAX button)
                 is NavEvent.Confirm -> onConfirm(qty)
                 is NavEvent.Cancel -> onCancel()
                 else -> Unit
@@ -3389,19 +4111,30 @@ private fun QuantitySelector(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("of $safeMax", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
                 Spacer(Modifier.width(10.dp))
-                // Quick "Max" set — cheaper than tapping +10 up a big stack.
-                Text(
-                    "MAX",
-                    color = if (qty < safeMax) BronzeLight else BoneDim,
-                    fontSize = 12.sp,
-                    fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp,
+                // Quick "Max" set — cheaper than tapping +10 up a big stack. Also bound to the Y
+                // button; the [Y] hint follows the [X]/[B] hint style used by the overlay buttons.
+                Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(3.dp))
-                        .clickable { set(safeMax) }
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                )
+                        .clickable { setMax() }
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "MAX",
+                        color = if (qty < safeMax) BronzeLight else BoneDim,
+                        fontSize = 12.sp,
+                        fontFamily = MwDisplay,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        "[Y]",
+                        color = if (qty < safeMax) BoneDim else BoneDim.copy(alpha = 0.5f),
+                        fontSize = 10.sp, fontFamily = MwData
+                    )
+                }
             }
 
             Spacer(Modifier.height(18.dp))
@@ -4747,23 +5480,25 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
         else minOf(abs(session.merchantOffer), session.playerGold)).coerceAtLeast(0)
     val navSliderLo = if (navReceiving) 0 else -navSliderMax
     val navSliderHi = if (navReceiving) navSliderMax else 0
-    val focus = rememberBarterNavFocus(
+    // Offer + left-stick gold slider — shared by the Classic grid nav and the Shelf nav (below).
+    // Physical stick right always moves the slider visually rightward (toward max), matching the touch
+    // slider. Selling (balance positive) rightward = +gold; buying (negative, magnitude = cost)
+    // rightward = MORE negative → invert dir. Clamped to the touch-slider range; no-op at a bound.
+    val doOffer: () -> Unit = { if (offerEnabled) CompanionActions.barterOffer() }
+    val barterSlider: (Int) -> Unit = { dir ->
+        val delta = (if (navReceiving) dir else -dir) * goldStep
+        val next = (offerBalance + delta).coerceIn(navSliderLo, navSliderHi)
+        if (next != offerBalance) setBalance(next)
+    }
+    // Classic mode only — the shelf layout runs its own nav (ShelfDualPanel).
+    val shelfMode = UiPreferences.inventoryLayoutFlow().collectAsState().value == InventoryLayout.SHELF
+    val focus = if (shelfMode) null else rememberBarterNavFocus(
         visiblePlayer = visiblePlayer,
         visibleVendor = visibleVendor,
         rows = 1,
         onToggle = ::toggle,
-        onOffer = { if (offerEnabled) CompanionActions.barterOffer() },
-        // Physical stick right always moves the slider visually rightward (toward max), matching the
-        // touch slider. When selling (balance positive) rightward = +gold; when buying (balance
-        // negative, magnitude = cost) rightward = MORE negative → invert dir. Clamped to the touch-
-        // slider range; no-op at a bound. onSlider is recreated each recomposition
-        // (rememberUpdatedState'd in the collector), so offerBalance / setBalance / navReceiving here
-        // are always live-frame (unlike the SPLIT LaunchedEffect capture).
-        onSlider = { dir ->
-            val delta = (if (navReceiving) dir else -dir) * goldStep
-            val next = (offerBalance + delta).coerceIn(navSliderLo, navSliderHi)
-            if (next != offerBalance) setBalance(next)
-        },
+        onOffer = doOffer,
+        onSlider = barterSlider,
         onCycleCategory = { side, dir ->
             if (side == 0) playerCat = cycleBarterCat(playerItems, playerCat, dir)
             else vendorCat = cycleBarterCat(vendorItems, vendorCat, dir)
@@ -4806,8 +5541,26 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
             }
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
-            // ---- Two equal columns: player | vendor ----
-            Row(Modifier.weight(1f).fillMaxWidth()) {
+            // ---- Item panels: Shelf (grouped shelves) or Classic (two side-by-side lists) ----
+            // Player's carried weight — snapshot once (GM_Barter pauses the sim, like looting's enc).
+            val playerEnc = remember { GameStateRepository.state.value.encumbrance }
+            if (shelfMode) {
+                ShelfDualPanel(
+                    playerHeaderLeft = playerName,
+                    playerHeaderRight = goldWeightHeaderRight(session.playerGold, playerEnc),
+                    playerShelfItems = playerItems.filter { !it.worn }.map { itm -> itm.toShelfItem { toggle(itm) } },
+                    playerEquipped = playerItems.filter { it.worn }.map { itm -> itm.toShelfItem { toggle(itm) } },
+                    otherHeaderLeft = session.vendorName.ifBlank { "Merchant" },
+                    otherHeaderRight = goldHeaderRight(session.vendorGold),
+                    otherItems = vendorItems.map { itm -> itm.toShelfItem { toggle(itm) } },
+                    otherEmptyText = "Empty",
+                    infoOnTop = false,
+                    onAction1 = doOffer,
+                    onSlider = barterSlider,
+                    dividerWidth = SHELF_CENTER_DIVIDER_WIDTH_BOTTOM,
+                    modifier = Modifier.weight(1f).padding(8.dp)
+                )
+            } else Row(Modifier.weight(1f).fillMaxWidth()) {
                 BarterColumn(
                     header = "$playerName (${session.playerGold}g)",
                     items = playerItems,
@@ -4815,7 +5568,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     selectedCategory = playerCat,
                     onSelectCategory = { playerCat = it },
                     onToggle = ::toggle,
-                    focusedIndex = if (focus.side == 0) focus.index else -1,
+                    focusedIndex = if (focus!!.side == 0) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
                 // Dashed vertical divider.
@@ -4835,7 +5588,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     selectedCategory = vendorCat,
                     onSelectCategory = { vendorCat = it },
                     onToggle = ::toggle,
-                    focusedIndex = if (focus.side == 1) focus.index else -1,
+                    focusedIndex = if (focus!!.side == 1) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -5205,7 +5958,10 @@ fun BarterTopOverlay() {
     // offset state lives there — passing no-ops here avoids a top/bottom desync.
     val visiblePlayer = remember(playerCol, playerCat) { barterVisible(playerCol, playerCat, true) }
     val visibleVendor = remember(vendorCol, vendorCat) { barterVisible(vendorCol, vendorCat, false) }
-    val focus = rememberBarterNavFocus(
+    // Classic mode only — the shelf layout runs its own nav (ShelfDualPanel). Offer/slider stay
+    // owned by the bottom controls window either way.
+    val shelfMode = UiPreferences.inventoryLayoutFlow().collectAsState().value == InventoryLayout.SHELF
+    val focus = if (shelfMode) null else rememberBarterNavFocus(
         visiblePlayer = visiblePlayer,
         visibleVendor = visibleVendor,
         rows = 3,
@@ -5228,7 +5984,23 @@ fun BarterTopOverlay() {
     ) {
         // Two separate boxed columns (player | vendor) with an 8dp gap — no outer panel, no
         // divider. Same height as the looting overlay (0.675). Items MOVE across on tap.
-        Row(
+        // Player's carried weight — snapshot once (GM_Barter pauses the sim, like looting's enc).
+        val playerEnc = remember { GameStateRepository.state.value.encumbrance }
+        if (shelfMode) {
+            ShelfDualPanel(
+                playerHeaderLeft = playerName,
+                playerHeaderRight = goldWeightHeaderRight(session.playerGold, playerEnc),
+                playerShelfItems = playerCol.filter { !it.worn }.map { itm -> itm.toShelfItem { toggle(itm) } },
+                playerEquipped = playerCol.filter { it.worn }.map { itm -> itm.toShelfItem { toggle(itm) } },
+                otherHeaderLeft = session.vendorName.ifBlank { "Merchant" },
+                otherHeaderRight = goldHeaderRight(session.vendorGold),
+                otherItems = vendorCol.map { itm -> itm.toShelfItem { toggle(itm) } },
+                otherEmptyText = "Empty",
+                infoOnTop = true,
+                // Offer (X) + gold slider stay owned by the bottom controls window — no-op here.
+                modifier = Modifier.fillMaxWidth(0.96f).fillMaxHeight(0.675f)
+            )
+        } else Row(
             modifier = Modifier
                 .fillMaxWidth(0.96f)
                 .fillMaxHeight(0.675f)
@@ -5241,7 +6013,7 @@ fun BarterTopOverlay() {
                 selectedCategory = playerCat,
                 onSelectCategory = { playerCat = it },
                 onToggle = ::toggle,
-                focusedIndex = if (focus.side == 0) focus.index else -1,
+                focusedIndex = if (focus!!.side == 0) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
             Spacer(Modifier.width(BARTER_SPLIT_COLUMN_GAP))
@@ -5253,7 +6025,7 @@ fun BarterTopOverlay() {
                 selectedCategory = vendorCat,
                 onSelectCategory = { vendorCat = it },
                 onToggle = ::toggle,
-                focusedIndex = if (focus.side == 1) focus.index else -1,
+                focusedIndex = if (focus!!.side == 1) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
         }
@@ -9166,6 +9938,9 @@ private fun OptionsSettingsList() {
 
         // SCREEN LAYOUT: which screen each element is drawn on.
         item { OptionsSectionHeader("Screen Layout") }
+        // One cross-cutting switch (Classic grid / Shelf) for ALL two-panel item screens
+        // (looting, pickpocket, barter). Sits above the per-element location rows.
+        item { InventoryLayoutRow() }
         item { ConversationLocationRow() }
         item { LootingLocationRow() }
         item { BarteringLocationRow() }
@@ -9431,6 +10206,33 @@ private fun GameUiRow(el: GameUiElement) {
  *  TOP = full conversation on top (not yet implemented — selectable, behaves like SPLIT).
  *  Writes ConversationLocation to UiPreferences on every tap. Dimmed and inert when the
  *  Conversation Game UI element is Vanilla (native handles it, so there's no layout to pick). */
+/** The Inventory Layout row: a [Classic][Shelf] selector controlling how ALL two-panel item screens
+ *  (looting/pickpocket, barter) render their item lists. One switch, all those contexts. Always
+ *  enabled (not gated on any per-element DS/Vanilla mode). Default Classic. */
+@Composable
+private fun InventoryLayoutRow() {
+    val context = LocalContext.current
+    val layout by UiPreferences.inventoryLayoutFlow().collectAsState()
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Inventory Layout", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Classic",
+                active = layout == InventoryLayout.CLASSIC,
+                enabled = true
+            ) { UiPreferences.setInventoryLayout(context, InventoryLayout.CLASSIC) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Shelf",
+                active = layout == InventoryLayout.SHELF,
+                enabled = true
+            ) { UiPreferences.setInventoryLayout(context, InventoryLayout.SHELF) }
+        }
+    }
+}
+
 @Composable
 private fun ConversationLocationRow() {
     val context = LocalContext.current
