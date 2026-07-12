@@ -2154,13 +2154,23 @@ private fun InfoEffectRow(text: String, harmful: Boolean, iconPath: String?) {
 private data class LootFocus(val side: Int, val index: Int)
 
 /** The per-side visible looting list: filter by the selected category tab (an INV_CATEGORIES
- *  label, null = All), then sort by category then name. Shared by the SPLIT grid columns' display
- *  and the controller focus index so the D-pad index maps 1:1 to a visible cell. Mirrors
- *  [barterVisible]. */
-private fun lootVisible(items: List<InventoryItem>, categoryLabel: String?): List<InventoryItem> {
+ *  label, null = All), then sort. Pass [isWorn] on the PLAYER side to float worn (equipped) items to
+ *  the top ahead of everything else, with the existing [itemCategoryRank] + name order as the
+ *  secondary sort applied WITHIN the worn group and WITHIN the rest; the default `{ false }` (container
+ *  side / any other caller) leaves the order exactly as category+name — identical to before. Shared by
+ *  the SPLIT grid columns' display and the controller focus index so the D-pad index maps 1:1 to a
+ *  visible cell. Mirrors [barterVisible]. */
+private fun lootVisible(
+    items: List<InventoryItem>,
+    categoryLabel: String?,
+    isWorn: (InventoryItem) -> Boolean = { false }
+): List<InventoryItem> {
     val group = INV_CATEGORIES.find { it.label == categoryLabel }
     return items.filter { group == null || it.category in group.cats }
-        .sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+        .sortedWith(
+            compareByDescending<InventoryItem> { isWorn(it) }
+                .then(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+        )
 }
 
 /** Cycle a looting column's category filter by [dir] (-1 = previous, +1 = next) through
@@ -2356,11 +2366,12 @@ private fun LootingOverlay(
         CompanionActions.containerTakeAll()
     }
 
-    // Pre-sort both sides ONCE at the parent (worn-first player, alphabetical) — the single source
-    // of order shared by the columns' display and the controller focus index.
+    // Pre-sort both sides ONCE at the parent (worn-first player, then category+name) — the single
+    // source of order shared by the columns' display and the controller focus index.
     val playerSorted = remember(playerItems, wornIds) {
         playerItems.sortedWith(
-            compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
+            compareByDescending<InventoryItem> { isWorn(it) }
+                .then(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
         )
     }
     val containerSorted = remember(containerItems) {
@@ -2918,7 +2929,7 @@ fun LootingTopOverlay() {
 
     // The VISIBLE (category-filtered + sorted) lists — shared by the controller focus index; each
     // column re-derives the same via lootVisible for its display. Mirrors the barter overlay.
-    val playerVisible = remember(playerItems, playerCat) { lootVisible(playerItems, playerCat) }
+    val playerVisible = remember(playerItems, playerCat) { lootVisible(playerItems, playerCat) { isWorn(it) } }
     val containerVisible = remember(containerItems, containerCat) { lootVisible(containerItems, containerCat) }
     // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X/Y fire here too even though
     // the Take All / Dispose buttons live on the bottom controls window — they're plain commands.
@@ -3054,8 +3065,9 @@ private fun LootGridColumn(
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
         Spacer(Modifier.height(6.dp))
 
-        // Same filter+sort the controller focus index is computed against (lootVisible).
-        val visible = remember(items, selectedCategory) { lootVisible(items, selectedCategory) }
+        // Same filter+sort the controller focus index is computed against (lootVisible) — including the
+        // player-side worn-first float, so cell index maps 1:1 to the parent's focus index.
+        val visible = remember(items, selectedCategory) { lootVisible(items, selectedCategory) { isPlayerSide && isWorn(it) } }
         if (visible.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
@@ -4514,14 +4526,23 @@ private val BarterGreen = Color(0xFF7FBF7F)   // Offer / "player receives" (matc
 private val BarterRed = Color(0xFFC75C5C)     // "player pays" / rejected (matches effect red)
 private val BarterBlue = Color(0xFF6E93C9)    // Cancel
 
-/** The per-side visible barter list: filter by the selected category tab, then sort
- *  selected-first, worn-first (player), alphabetical. Shared by the columns' display and the
- *  controller focus index so the D-pad index maps 1:1 to a visible cell/row. */
-private fun barterVisible(items: List<BarterItem>, category: String?, isPlayerSide: Boolean): List<BarterItem> =
-    items.filter { category == null || it.category == category }
-        .sortedWith(
-            compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
-        )
+/** The per-side visible barter list: filter by the selected category tab, then sort. On the PLAYER
+ *  side, worn (equipped) items are floated to the top; the existing [itemCategoryRank] + name order is
+ *  the secondary sort, applied WITHIN the worn group and WITHIN the rest (a stable worn-first
+ *  partition, not a full re-sort). This worn-first float is a deliberate DS barter UX choice — vanilla
+ *  does NOT float equipped items in its own barter window — and is scoped to this barter list only: it
+ *  does not touch the shared category+name convention used by the inventory tab / looting. The merchant
+ *  side keeps plain category+name order (vendor items are never worn). Shared by both barter layouts
+ *  (BarterGridCell / BarterRow) and the controller focus index so the D-pad index maps 1:1 to a visible
+ *  cell/row. */
+private fun barterVisible(items: List<BarterItem>, category: String?, isPlayerSide: Boolean): List<BarterItem> {
+    val filtered = items.filter { category == null || it.category == category }
+    val byCategoryThenName = compareBy<BarterItem>({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
+    val comparator =
+        if (isPlayerSide) compareByDescending<BarterItem> { it.worn }.then(byCategoryThenName)
+        else byCategoryThenName
+    return filtered.sortedWith(comparator)
+}
 
 /** Current controller focus in the barter overlay: which [side] (0 = player/left,
  *  1 = vendor/right) and which [index] into that side's visible list. */
@@ -5399,13 +5420,18 @@ private fun BarterGridCell(
                 )
                 .padding(2.dp)
         ) {
+            // Worn (player-side, equipped) gets the same 2dp BronzeLight icon border the looting grid
+            // uses — a highlight around the icon, not a backdrop tint. Selected (staged into the offer)
+            // uses that same bright border PLUS the SlotWorn fill + count badge, so the two still read
+            // distinctly (worn = border only; selected = border + fill + badge).
+            val highlightIcon = selected || (isPlayerSide && item.worn)
             Box(
                 modifier = Modifier
                     .size(48.dp)
                     .clip(RoundedCornerShape(3.dp))
                     .background(if (selected) SlotWorn else SlotBg)
                     .border(
-                        BorderStroke(if (selected) 2.dp else 1.dp, if (selected) BronzeLight else BronzeDark),
+                        BorderStroke(if (highlightIcon) 2.dp else 1.dp, if (highlightIcon) BronzeLight else BronzeDark),
                         RoundedCornerShape(3.dp)
                     )
             ) {
