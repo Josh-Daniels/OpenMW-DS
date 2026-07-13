@@ -51,8 +51,7 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
 ## Installation
 
 - Download the APK from the Releases page
-- Enable "Install from unknown sources" on your device
-- Install the APK
+- Tap the downloaded APK to install the app. Follow prompt to allow installs from unknown sources if asked.
 - Launch the app and press Play
 - Follow the Alpha3 Setup Guide below.
 
