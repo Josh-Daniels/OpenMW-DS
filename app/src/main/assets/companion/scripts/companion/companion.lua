@@ -680,12 +680,21 @@ local function itemStats(item, cat)
         local WT = types.Weapon.TYPE
         local t = rec.type
         local key, mn, mx
-        if t == WT.BluntOneHand or t == WT.BluntTwoClose or t == WT.BluntTwoWide
+        -- Damage display mirrors the vanilla tooltip (mwclass/weapon.cpp), which keys on the weapon
+        -- CLASS, not the individual attack type: MELEE weapons show their primary attack (chop/slash/
+        -- thrust), but MARKSMAN weapons (bows/crossbows) + AMMO (arrows/bolts) store their damage in
+        -- CHOP with thrust=0 and show a single generic "Attack", and THROWN weapons show chop×2 (they're
+        -- both weapon and ammo). Using THRUST for marksman/thrown/ammo showed "THRUST 0-0".
+        if t == WT.MarksmanBow or t == WT.MarksmanCrossbow or t == WT.Arrow or t == WT.Bolt then
+            key, mn, mx = "DMG", rec.chopMinDamage, rec.chopMaxDamage
+        elseif t == WT.MarksmanThrown then
+            key = "DMG"
+            mn, mx = (rec.chopMinDamage or 0) * 2, (rec.chopMaxDamage or 0) * 2
+        elseif t == WT.SpearTwoWide then
+            key, mn, mx = "THRUST", rec.thrustMinDamage, rec.thrustMaxDamage
+        elseif t == WT.BluntOneHand or t == WT.BluntTwoClose or t == WT.BluntTwoWide
             or t == WT.AxeOneHand or t == WT.AxeTwoHand then
             key, mn, mx = "CHOP", rec.chopMinDamage, rec.chopMaxDamage
-        elseif t == WT.SpearTwoWide or t == WT.MarksmanBow or t == WT.MarksmanCrossbow
-            or t == WT.MarksmanThrown or t == WT.Arrow or t == WT.Bolt then
-            key, mn, mx = "THRUST", rec.thrustMinDamage, rec.thrustMaxDamage
         else
             key, mn, mx = "SLASH", rec.slashMinDamage, rec.slashMaxDamage
         end

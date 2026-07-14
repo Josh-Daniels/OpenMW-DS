@@ -310,6 +310,11 @@ private val INV_CATEGORIES = listOf(
     InvCategory("Misc",        setOf("misc", "carried_left")),
 )
 
+// Sentinel filter label (NOT an INV_CATEGORIES entry): shows only equipped items. Rendered as
+// the first sub-tab after "All". Kept distinct from the category labels so the selectedCategory
+// == EQUIPPED_FILTER check is unambiguous.
+private const val EQUIPPED_FILTER = "Equipped"
+
 // Vanilla-style category ordering (SortFilterItemModel::getTypeOrder) mapped onto BOTH the fine
 // inventory/container category strings (Lua itemCategory) AND the coarse barter category strings
 // (native companionBarterCategory), so every item list sorts by category then name like the menus.
@@ -7820,6 +7825,17 @@ private fun InventoryPanel(state: GameState) {
     val presentCategories = remember(state.inventory) {
         INV_CATEGORIES.filter { grp -> state.inventory.any { it.category in grp.cats } }
     }
+    val hasEquipped = remember(state.inventory, state.equipment) {
+        val wornIds = state.equipment.values.toSet()
+        state.inventory.any {
+            if (it.stackId.isNotEmpty()) wornIds.contains(it.stackId) else wornIds.contains(it.id)
+        }
+    }
+    // If the Equipped filter is active and the last equipped item comes off, fall back to All so
+    // the (now-hidden) tab doesn't leave a blank list selected.
+    LaunchedEffect(hasEquipped) {
+        if (!hasEquipped && selectedCategoryLabel == EQUIPPED_FILTER) selectedCategoryLabel = null
+    }
 
     Column(
         modifier = Modifier
@@ -7832,6 +7848,7 @@ private fun InventoryPanel(state: GameState) {
             CategorySubTabs(
                 categories = presentCategories,
                 selected = selectedCategoryLabel,
+                hasEquipped = hasEquipped,
                 onSelect = { selectedCategoryLabel = it }
             )
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
@@ -7962,6 +7979,7 @@ private fun EquippedChip(label: String) {
 private fun CategorySubTabs(
     categories: List<InvCategory>,
     selected: String?,
+    hasEquipped: Boolean,
     onSelect: (String?) -> Unit
 ) {
     Row(
@@ -7972,6 +7990,10 @@ private fun CategorySubTabs(
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         CategoryTab(label = "All", active = selected == null) { onSelect(null) }
+        // "Equipped" filter — first after All, only when something is equipped.
+        if (hasEquipped) {
+            CategoryTab(label = EQUIPPED_FILTER, active = selected == EQUIPPED_FILTER) { onSelect(EQUIPPED_FILTER) }
+        }
         categories.forEach { cat ->
             CategoryTab(label = cat.label, active = selected == cat.label) { onSelect(cat.label) }
         }
@@ -8001,7 +8023,11 @@ private fun CategoryTab(label: String, active: Boolean, onClick: () -> Unit) {
 @Composable
 private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) {
     val wornIds = remember(state.equipment) { state.equipment.values.toSet() }
+    val equippedFilter = selectedCategoryLabel == EQUIPPED_FILTER
     val selectedGroup = INV_CATEGORIES.find { it.label == selectedCategoryLabel }
+    // The bottom "Equipped" collapsible section (All view) starts collapsed, matching the barter
+    // menu's Equipped drop-down.
+    var equippedExpanded by remember { mutableStateOf(false) }
 
     if (state.inventory.isEmpty()) {
         EmptyPanel("No inventory recorded")
@@ -8014,36 +8040,118 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
         if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId)
         else wornIds.contains(item.id)
 
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
-        if (selectedGroup == null) {
-            INV_CATEGORIES.forEach { grp ->
-                val groupItems = state.inventory
-                    .filter { it.category in grp.cats }
-                    // Worn items first, then the rest alphabetically.
-                    .sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
-                if (groupItems.isNotEmpty()) {
-                    item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
+    val catNameSort = compareBy<InventoryItem>({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
+    val wornItems = remember(state.inventory, wornIds) {
+        state.inventory.filter { isWorn(it) }.sortedWith(catNameSort)
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        // Scrolling list (fills the space above the pinned Equipped section).
+        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp)) {
+            when {
+                // "Equipped" filter — a flat list of just the worn items, each with the highlight outline.
+                equippedFilter -> {
+                    items(wornItems, key = { "eqf_" + it.stackId.ifEmpty { it.id } }) { item ->
+                        ItemRow(item, worn = true, equippable = item.isEquippable(),
+                            usable = item.isUsable(), readable = item.isReadable(),
+                            highlight = true, iconBitmap = rememberItemIcon(item.icon))
+                    }
+                }
+                // "All" — category groups with the UNWORN items (worn items go in the pinned section below).
+                selectedGroup == null -> {
+                    INV_CATEGORIES.forEach { grp ->
+                        val groupItems = state.inventory
+                            .filter { it.category in grp.cats && !isWorn(it) }
+                            .sortedWith(catNameSort)
+                        if (groupItems.isNotEmpty()) {
+                            item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
+                            items(groupItems) { item ->
+                                ItemRow(item, worn = false, equippable = item.isEquippable(),
+                                    usable = item.isUsable(), readable = item.isReadable(),
+                                    iconBitmap = rememberItemIcon(item.icon))
+                            }
+                        }
+                    }
+                }
+                // Single category — that category's items, worn first; worn rows get the highlight.
+                else -> {
+                    val groupItems = state.inventory
+                        .filter { it.category in selectedGroup.cats }
+                        .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort))
                     items(groupItems) { item ->
                         val worn = isWorn(item)
                         ItemRow(item, worn, equippable = item.isEquippable(),
                             usable = item.isUsable(), readable = item.isReadable(),
-                            iconBitmap = rememberItemIcon(item.icon))
+                            highlight = worn, iconBitmap = rememberItemIcon(item.icon))
                     }
                 }
             }
-        } else {
-            val groupItems = state.inventory
-                .filter { it.category in selectedGroup.cats }
-                // Worn items first, then the rest alphabetically.
-                .sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
-            items(groupItems) { item ->
-                val worn = isWorn(item)
-                ItemRow(item, worn, equippable = item.isEquippable(),
-                    usable = item.isUsable(), readable = item.isReadable(),
-                    iconBitmap = rememberItemIcon(item.icon))
+            item { Spacer(Modifier.height(4.dp)) }
+        }
+
+        // Equipped drop-down — pinned to the bottom (always visible), dashed outline, matching the
+        // barter Equipped section. Only in the "All" view (the Equipped filter already shows just
+        // worn items; a single category shows its own worn items inline).
+        if (selectedGroup == null && !equippedFilter && wornItems.isNotEmpty()) {
+            InventoryEquippedSection(wornItems, equippedExpanded) { equippedExpanded = !equippedExpanded }
+        }
+    }
+}
+
+/** Pinned, dashed-outline "Equipped (N)" drop-down for the bottom of the inventory list — same
+ *  styling + always-at-the-bottom placement as the barter menu's [EquippedSection]. Collapsed by
+ *  default; when expanded, the worn rows scroll internally (capped height) so the section can't eat
+ *  the whole panel. */
+@Composable
+private fun InventoryEquippedSection(
+    items: List<InventoryItem>,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    val dash = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 4f))
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, start = 4.dp, end = 4.dp, bottom = 4.dp)
+            .drawBehind {
+                drawRoundRect(
+                    color = BronzeDark,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx(), pathEffect = dash),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx())
+                )
+            }
+            .padding(6.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggle() }
+                .padding(horizontal = 6.dp, vertical = 6.dp),   // taller button (~50% larger)
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Equipped (${items.size})",
+                color = BoneMuted, fontSize = 16.sp,            // ~50% larger font (was 11)
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp
+            )
+            Spacer(Modifier.weight(1f))
+            Text(if (expanded) "▾" else "▸", color = BronzeLight, fontSize = 18.sp, fontFamily = MwDisplay)
+        }
+        if (expanded) {
+            Spacer(Modifier.height(3.dp))
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 220.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                items.forEach { item ->
+                    ItemRow(item, worn = true, equippable = item.isEquippable(),
+                        usable = item.isUsable(), readable = item.isReadable(),
+                        highlight = true, iconBitmap = rememberItemIcon(item.icon))
+                }
             }
         }
-        item { Spacer(Modifier.height(4.dp)) }
     }
 }
 
@@ -8100,6 +8208,11 @@ private fun rememberItemIcon(iconPath: String): ImageBitmap? {
     return bitmap
 }
 
+/** Compact item weight for the inventory row: whole numbers drop the decimal (8.0 → "8"),
+ *  otherwise one decimal (0.5 → "0.5"). */
+private fun fmtWeight(w: Float): String =
+    if (w == w.toInt().toFloat()) w.toInt().toString() else String.format("%.1f", w)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ItemRow(
@@ -8108,6 +8221,7 @@ private fun ItemRow(
     equippable: Boolean,
     usable: Boolean = false,
     readable: Boolean,
+    highlight: Boolean = false,   // slight outline around equipped items (the Equipped section/filter)
     iconBitmap: ImageBitmap? = null
 ) {
     val context = LocalContext.current
@@ -8124,6 +8238,13 @@ private fun ItemRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .then(
+                        if (highlight) Modifier
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(BronzeLight.copy(alpha = 0.06f))
+                            .border(1.dp, BronzeLight, RoundedCornerShape(3.dp))
+                        else Modifier
+                    )
                     .combinedClickable(
                         onClick = {
                             val target = item.stackId.ifEmpty { item.id }
@@ -8159,6 +8280,20 @@ private fun ItemRow(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
+                    // Stack quantity badge on the icon corner (matches the loot/barter shelf cells).
+                    // Keeps the count visible even for WORN equippable stacks (e.g. equipped arrows),
+                    // where the trailing column shows the "WORN" tag instead of the count.
+                    if (item.count > 1) {
+                        Text(
+                            "×${item.count}",
+                            color = BoneBright, fontSize = 9.sp,
+                            fontFamily = MwData, fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .background(Color(0xCC0E0B07))
+                                .padding(horizontal = 2.dp)
+                        )
+                    }
                 }
                 Spacer(Modifier.width(10.dp))
                 // Name + (optional) favourite star share the flex column so the
@@ -8184,8 +8319,9 @@ private fun ItemRow(
                     }
                 }
                 // Trailing columns are fixed-width slots (empty when N/A) so the
-                // stat value, condition bar and worn/count tag always sit in the
-                // same horizontal position across every row.
+                // stat value, weight and condition bar always sit in the same
+                // horizontal position across every row (right-aligned; the flex
+                // name column pushes them to the right edge).
                 //
                 // Stat column: weapon damage / armor rating / etc.
                 Box(Modifier.width(66.dp), contentAlignment = Alignment.CenterEnd) {
@@ -8210,6 +8346,32 @@ private fun ItemRow(
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+                        }
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                // Weight column — same style as the stat column (value over a tiny label). Sits
+                // between the damage/armor value and the condition bar. Hidden for weightless items
+                // (gold = 0).
+                Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterEnd) {
+                    if (item.weight > 0f) {
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                fmtWeight(item.weight),
+                                color = BronzeLight,
+                                fontSize = 11.sp,
+                                fontFamily = MwData,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "WT",
+                                color = BoneDim,
+                                fontSize = 8.sp,
+                                fontFamily = MwBody,
+                                letterSpacing = 0.5.sp,
+                                maxLines = 1
+                            )
                         }
                     }
                 }
@@ -8244,26 +8406,9 @@ private fun ItemRow(
                         }
                     }
                 }
-                Spacer(Modifier.width(16.dp))
-                // Worn / count column — fixed slot, empty when neither applies.
-                Box(Modifier.width(46.dp), contentAlignment = Alignment.CenterEnd) {
-                    when {
-                        worn -> Text(
-                            "WORN",
-                            color = BronzeLight,
-                            fontSize = 10.sp,
-                            fontFamily = MwDisplay,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.8.sp
-                        )
-                        item.count > 1 -> Text(
-                            "x${item.count}",
-                            color = BoneDim,
-                            fontSize = 11.sp,
-                            fontFamily = MwData
-                        )
-                    }
-                }
+                // No "WORN" text column — equipped items are shown by the highlight outline + the
+                // bottom Equipped section, so the stat/weight/condition columns fill the space (the
+                // flex name column pushes them to the right edge, condition rightmost).
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
         }
