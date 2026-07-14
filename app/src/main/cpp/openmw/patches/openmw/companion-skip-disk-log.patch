@@ -1,0 +1,25 @@
+--- a/components/debug/debugging.cpp
++++ b/components/debug/debugging.cpp
+@@ -152,8 +152,20 @@
+                     size_t lineSize = 1;
+                     while (lineSize < msg.size() && msg[lineSize - 1] != '\n')
+                         lineSize++;
+-                    writeImpl(prefix, prefixSize, level);
+-                    writeImpl(msg.data(), lineSize, level);
++                    // OpenMW-DS: companion export lines (COMPANION_*) are delivered to the
++                    // app in-memory via logListener (the JNI push). Skip the DISK write
++                    // (writeImpl -> Tee -> openmw.log) for them so they never touch disk,
++                    // while still firing logListener below exactly as before. Narrow, cheap
++                    // prefix check -- every companion line begins with "COMPANION_"; msg
++                    // starts at the current line here, and starts_with fails on the first
++                    // byte for virtually all other lines, so normal engine diagnostics
++                    // (warnings/errors/Info) are unaffected and still reach openmw.log.
++                    const bool companionLine = msg.starts_with("COMPANION_");
++                    if (!companionLine)
++                    {
++                        writeImpl(prefix, prefixSize, level);
++                        writeImpl(msg.data(), lineSize, level);
++                    }
+                     if (logListener)
+                         logListener(
+                             level, std::string_view(prefix, prefixSize), std::string_view(msg.data(), lineSize));

@@ -21,8 +21,8 @@ data class InteriorSegment(
 )
 
 /**
- * The single source of truth for live game state. The LogReader writes to it;
- * any Compose UI (on either screen) reads from it. Being a plain object means
+ * The single source of truth for live game state. The native JNI push writes to it
+ * (via onJniLine); any Compose UI (on either screen) reads from it. Being a plain object means
  * it survives Activity/Service boundaries, which matters when we later move the
  * second-screen rendering into a foreground service.
  */
@@ -516,31 +516,16 @@ object GameStateRepository {
     private fun detailPayload(line: String, prefix: String): String =
         line.substring(line.indexOf(prefix) + prefix.length).trim()
 
-    // The same COMPANION_ lines arrive from BOTH the in-process JNI sink and the
-    // LogReader file-tail fallback (the engine still writes them to openmw.log). Most
-    // state is idempotent so double-processing was invisible — but dialogueHistory
-    // appends, so every topic response was added twice (greetings self-corrected via
-    // the NPC-clear that precedes them). Gate the tail: only let it through when the
-    // JNI sink has gone quiet, so each line is handled once while the sink is healthy,
-    // and the tail still takes over if the sink ever stalls.
-    // How long after the last JNI line the tail stays suppressed. STATS ticks every
-    // ~100ms so the sink keeps this fresh during play; 1.5s tolerates a brief stall.
-    private const val TAIL_FALLBACK_DELAY_MS = 1500L
-    @Volatile private var lastJniLineMs = 0L
-
-    /** In-process JNI sink (primary path, engine thread). Always processed. */
+    // Companion data arrives ONLY via the in-process JNI push (companion.lua's core.companionPush
+    // → androidmain.cpp companionPushLine → EngineActivity.onCompanionLine → onJniLine). Companion
+    // lines are no longer written to openmw.log at all, so there is no file-tail fallback anymore
+    // (the old LogReader path + its quiet-triggers-fallback suppression were retired once the disk
+    // write was eliminated). Each line is therefore delivered exactly once.
     fun onJniLine(line: String) {
-        lastJniLineMs = System.currentTimeMillis()
         onRawLine(line)
     }
 
-    /** Log-tail fallback (LogReader). Suppressed while the JNI sink is delivering. */
-    fun onTailLine(line: String) {
-        if (System.currentTimeMillis() - lastJniLineMs < TAIL_FALLBACK_DELAY_MS) return
-        onRawLine(line)
-    }
-
-    /** Called for every COMPANION_* log line (via onJniLine / onTailLine). */
+    /** Called for every COMPANION_* line (via onJniLine, the sole transport). */
     fun onRawLine(line: String) {
         val trimmed = line.trimEnd()
         if (trimmed.contains("COMPANION_DEBUG")) Log.d("CompanionRepo", trimmed)

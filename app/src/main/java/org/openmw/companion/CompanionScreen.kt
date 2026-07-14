@@ -441,17 +441,10 @@ fun CompanionScreen() {
     // Dismiss the item info popup when the tab changes so it never lingers over another screen.
     LaunchedEffect(tab) { ItemInfoPopupState.close() }
 
-    // Log-tail fallback: feeds GameStateRepository the same way the JNI sink does,
-    // so the UI works even if installCompanionSink() has a hiccup.
-    val scope = rememberCoroutineScope()
-    val logReader = remember {
-        LogReader("${Constants.USER_FILE_STORAGE}/config/openmw.log")
-    }
-    DisposableEffect(Unit) {
-        logReader.start(scope)
-        onDispose { logReader.stop() }
-    }
-
+    // Companion data arrives solely via the native JNI push (core.companionPush →
+    // companionPushLine → EngineActivity.onCompanionLine → GameStateRepository.onJniLine).
+    // There is no file-tail fallback: companion lines are no longer written to openmw.log at
+    // all (see the disk-logging elimination), so there is nothing on disk to tail.
     val context = LocalContext.current
     // Load the last-known character's favourites synchronously during composition
     // (not LaunchedEffect) so favourite pills show persisted content on the very
@@ -913,7 +906,11 @@ private fun DialogueConversationOverlay(
     panelAlignment: Alignment,
     panelWidthFraction: Float?,
     panelHeightFraction: Float?,
-    panelPadding: PaddingValues
+    panelPadding: PaddingValues,
+    // TOP mode: put the disposition bar in the name title bar (right side, ~aligned with the
+    // right column below) and shrink the Goodbye button, freeing vertical room in the shorter
+    // panel. false (BOTTOM) keeps the original layout (disposition at the top of the right column).
+    compactLayout: Boolean = false
 ) {
     // Persuasion popup open-state is a shared repo flow (the popup is hosted separately by its own
     // Screen Layout location). While open, the topic/service list here is dimmed + inert.
@@ -932,12 +929,36 @@ private fun DialogueConversationOverlay(
         ) {
             // ---- NPC name title bar (full width, window-title style) ----
             if (npcName.isNotEmpty()) {
-                Text(
-                    npcName,
-                    color = BronzeLight, fontSize = 14.sp,
-                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
-                )
+                if (compactLayout) {
+                    // Name on the left; disposition bar on the right (~35% width so it sits roughly
+                    // above the right column, same horizontal location it occupied there before).
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            npcName,
+                            color = BronzeLight, fontSize = 14.sp,
+                            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(0.65f)
+                        )
+                        if (disposition >= 0) {
+                            Box(Modifier.weight(0.35f).padding(start = 10.dp)) {
+                                DispositionBar(disposition)
+                            }
+                        } else {
+                            Spacer(Modifier.weight(0.35f))
+                        }
+                    }
+                } else {
+                    Text(
+                        npcName,
+                        color = BronzeLight, fontSize = 14.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                }
                 Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
             }
 
@@ -960,6 +981,10 @@ private fun DialogueConversationOverlay(
                     choicesActive = choices.isNotEmpty() || persuasionVisible,
                     interactive = choices.isEmpty() && !persuasionVisible,
                     onPersuadeTapped = { triggerPersuade() },
+                    // TOP compact: disposition now lives in the name bar (don't repeat it here);
+                    // the Goodbye button + topic rows tighten up, freeing vertical room for topics.
+                    showDisposition = !compactLayout,
+                    compact = compactLayout,
                     modifier = Modifier.weight(0.35f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -998,9 +1023,14 @@ fun ConversationHistoryOverlay() {
                 choices = choices, disposition = disposition,
                 persuadeAvailable = persuadeAvailable,
                 panelAlignment = Alignment.BottomCenter,
-                panelWidthFraction = 0.83f,   // ~10% wider than the SPLIT history box (0.75)
-                panelHeightFraction = 0.70f,  // taller than the previous 0.55
-                panelPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp)
+                // Full width within the 12dp padding → sides sit the same 12dp from the screen edge
+                // as the bottom does (null = fillMaxWidth, no centred fraction).
+                panelWidthFraction = null,
+                panelHeightFraction = 0.48f,  // ~60% of the old 0.70, then +15% to fit more topics
+                panelPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                // TOP compact layout: disposition moves into the name bar and the Goodbye button
+                // shrinks, reclaiming vertical space for topics in the shorter panel.
+                compactLayout = true
             )
         }
         return
@@ -1220,6 +1250,11 @@ private fun DialogueRightColumn(
     interactive: Boolean,
     onPersuadeTapped: () -> Unit,
     rowFontSize: TextUnit = 13.sp,
+    // TOP compact layout: the caller renders the disposition bar in the name bar instead (so skip
+    // it here); tighten the topic-row padding and match the Goodbye font to the topics font, to fit
+    // more topic rows in the shorter panel.
+    showDisposition: Boolean = true,
+    compact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     // Per-topic read-status flags (name -> 0/Specific/Exhausted) for colouring the topic rows,
@@ -1333,9 +1368,10 @@ private fun DialogueRightColumn(
     }
 
     Column(modifier) {
-        // 1. Disposition bar (fixed at the top). Hidden when unknown (< 0, e.g. a creature).
+        // 1. Disposition bar (fixed at the top). Hidden when unknown (< 0, e.g. a creature), and
+        //    skipped entirely in compact/TOP mode where it's drawn in the name bar instead.
         //    A small divider below it stays put (outside the LazyColumn) while topics scroll.
-        if (disposition >= 0) {
+        if (showDisposition && disposition >= 0) {
             DispositionBar(disposition)
             Spacer(Modifier.height(6.dp))
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
@@ -1360,6 +1396,8 @@ private fun DialogueRightColumn(
                     dimmed = choicesActive,
                     fontSize = rowFontSize,
                     focused = index == focusIndex,
+                    // Tighter rows in compact/TOP mode so more topics fit.
+                    verticalPadding = if (compact) 7.dp else 9.dp,
                     // Only the below-divider topic rows carry the read-status colour; the service
                     // block (Persuade/Barter/…/Beds) stays the normal colour. Service rows below the
                     // divider aren't in the flags map either, so they resolve to 0.
@@ -1370,19 +1408,22 @@ private fun DialogueRightColumn(
             }
         }
 
-        // 6. Goodbye (pinned to the bottom of the column).
+        // 6. Goodbye (pinned to the bottom of the column). In compact/TOP mode the Goodbye font
+        //    matches the topics font (rowFontSize) and the padding is a tight 4.5dp (half the prior
+        //    9dp) so the button takes minimal vertical room; the smaller font keeps it legible.
         Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(BronzeDark.copy(alpha = 0.2f))
                 .clickable { if (interactive) CompanionActions.dialogueGoodbye() }
-                .padding(vertical = 10.dp),
+                .padding(vertical = if (compact) 4.5.dp else 10.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 "GOODBYE",
-                color = if (choicesActive) BoneDim else BronzeLight, fontSize = 14.sp,
+                color = if (choicesActive) BoneDim else BronzeLight,
+                fontSize = if (compact) rowFontSize else 14.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                 letterSpacing = 2.sp
             )
@@ -1401,6 +1442,7 @@ private fun DialogueOptionRow(
     dimmed: Boolean = false,
     fontSize: TextUnit = 13.sp,
     focused: Boolean = false,
+    verticalPadding: Dp = 9.dp,
     // "color topic" read-status (0 none, 1 Specific-unheard, 2 Exhausted-read) — 0 for service/choice
     // rows. Colours a topic like the native list: BronzeLight = new/unheard, BoneDim = already read.
     topicFlag: Int = 0,
@@ -1427,7 +1469,7 @@ private fun DialogueOptionRow(
                 else -> Bone
             },
             fontSize = fontSize, fontFamily = MwBody,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 4.dp)
+            modifier = Modifier.fillMaxWidth().padding(vertical = verticalPadding, horizontal = 4.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
     }

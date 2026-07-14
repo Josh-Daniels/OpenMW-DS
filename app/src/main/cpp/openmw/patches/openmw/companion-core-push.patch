@@ -1,0 +1,32 @@
+--- a/apps/openmw/mwlua/corebindings.cpp
++++ b/apps/openmw/mwlua/corebindings.cpp
+@@ -31,6 +31,13 @@
+ #include "stats.hpp"
+ #include "weatherbindings.hpp"
+ 
++#ifdef __ANDROID__
++// OpenMW-DS: defined in apps/openmw/androidmain.cpp. Pushes a companion export line straight
++// to Kotlin (GameStateRepository) via JNI, bypassing Log()/print() so companion data never
++// gets written to openmw.log on disk. Backs the core.companionPush binding below.
++extern "C" void companionPushLine(const char* s);
++#endif
++
+ namespace MWLua
+ {
+     static sol::table initContentFilesBindings(sol::state_view& lua)
+@@ -90,6 +97,15 @@
+                     return ESM::RefId(ESM::FormId{ index, int(i) }).serializeText();
+             throw std::runtime_error("Content file not found: " + std::string(contentFile));
+         };
++#ifdef __ANDROID__
++        // OpenMW-DS: direct companion->Kotlin transport that BYPASSES Log()/print(), so
++        // companion export lines are never written to openmw.log on disk (they used to ride
++        // print()->Log(Info)->the engine's file sink). companionPushLine delivers the string
++        // straight into the in-memory GameStateRepository via JNI; nothing is written to any
++        // file. Registered in every context (the companion PLAYER script calls it). No-op on
++        // the desktop build (the extern is Android-only). See androidmain.cpp companionPushLine.
++        api["companionPush"] = [](std::string_view s) { companionPushLine(std::string(s).c_str()); };
++#endif
+         if (context.mType != Context::Load)
+         {
+             api["quit"] = [lua = context.mLua]() {

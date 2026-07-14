@@ -521,6 +521,48 @@ void drainCompanionCommands()
     }
 }
 
+// Shared companion->Kotlin forward path. Caches the LuaManager once Lua is provably
+// running, then pushes the line straight into Kotlin (GameStateRepository) via the static
+// onCompanionLine JNI method. Called from BOTH:
+//   (1) the engine log listener below — companion data that still rides print()/Log(), and
+//   (2) the core.companionPush Lua binding (see the corebindings companionPush patch) —
+//       companion data that BYPASSES Log()/print() so it never touches openmw.log on disk.
+// Runs on the engine thread in both cases. No-op until installCompanionSink has resolved
+// g_companionMethod (guarded), so an early call is safely dropped.
+static void companionForwardLine(std::string_view msg)
+{
+    // Cache LuaManager once Lua is provably running (first stats export). Keyed on
+    // COMPANION_STATS, which is the first/most-frequent export and now arrives via
+    // companionPush — but this helper serves both paths, so the caching is path-agnostic.
+    if (!g_luaManagerPtr.load(std::memory_order_relaxed)
+            && msg.find("COMPANION_STATS") != std::string_view::npos) {
+        MWBase::LuaManager* lm = MWBase::Environment::get().getLuaManager();
+        g_luaManagerPtr.store(lm, std::memory_order_release);
+    }
+
+    if (g_companionMethod == nullptr) return;
+    if (msg.find("COMPANION_") == std::string_view::npos) return;
+
+    JNIEnv* e = nullptr;
+    g_companionVm->AttachCurrentThread(&e, nullptr);
+    jstring s = e->NewStringUTF(std::string(msg).c_str());
+    if (s) {
+        e->CallStaticVoidMethod(g_companionClass, g_companionMethod, s);
+        e->DeleteLocalRef(s);
+    }
+}
+
+// Lua-callable (core.companionPush) direct push. Declared extern "C" so
+// apps/openmw/mwlua/corebindings.cpp can call it without including this translation unit
+// (mirrors how dialogue.cpp exposes its companion bridges to this file). This is the whole
+// point of the disk-logging elimination: companion export lines reach Kotlin WITHOUT going
+// through Log()/print(), so they are never written to openmw.log.
+extern "C" void companionPushLine(const char* s)
+{
+    if (s != nullptr)
+        companionForwardLine(std::string_view(s));
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*/)
 {
@@ -536,24 +578,12 @@ Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*
                                                    "(Z)V");
     env->DeleteLocalRef(cls);
 
+    // Companion lines that still ride print()/Log() (everything not yet migrated to
+    // companionPush) reach Kotlin through this listener. Once every exporter uses
+    // companionPush, this listener carries no COMPANION_ traffic — but it stays installed
+    // (harmless; also the desktop DebugWindow path upstream relies on the same hook).
     Debug::setLogListener([](Debug::Level, std::string_view /*prefix*/, std::string_view msg) {
-        // Cache LuaManager once Lua is provably running (first stats export).
-        if (!g_luaManagerPtr.load(std::memory_order_relaxed)
-                && msg.find("COMPANION_STATS") != std::string_view::npos) {
-            MWBase::LuaManager* lm = MWBase::Environment::get().getLuaManager();
-            g_luaManagerPtr.store(lm, std::memory_order_release);
-        }
-
-        if (g_companionMethod == nullptr) return;
-        if (msg.find("COMPANION_") == std::string_view::npos) return;
-
-        JNIEnv* e = nullptr;
-        g_companionVm->AttachCurrentThread(&e, nullptr);
-        jstring s = e->NewStringUTF(std::string(msg).c_str());
-        if (s) {
-            e->CallStaticVoidMethod(g_companionClass, g_companionMethod, s);
-            e->DeleteLocalRef(s);
-        }
+        companionForwardLine(msg);
     });
 }
 

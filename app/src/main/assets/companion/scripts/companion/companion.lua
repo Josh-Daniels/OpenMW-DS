@@ -62,6 +62,23 @@ end
 
 -- ===== Exporters (outbounD) =====
 
+-- All companion output goes straight to Kotlin (GameStateRepository) via the native
+-- core.companionPush binding (androidmain.cpp companionPushLine → the onCompanionLine JNI
+-- method), NOT through print()/Log(). This is the whole point of the disk-logging change:
+-- companion lines never get written to openmw.log (print() → Log(Info) → the engine's file
+-- sink used to write + flush every line to disk). Kotlin receives each line identically to
+-- the old path, one line per call, so streamed exports (START/ITEM/END) are unchanged.
+-- Single choke point so a future fallback/heartbeat decision (Phase 3) only touches here.
+local function emit(line)
+    core.companionPush(line)
+end
+
+-- Change-detection: only emit (→ JNI → parse) when the line actually changed.
+-- Same pattern as exportCharacter/exportContainer/etc. During genuinely static play
+-- (standing still, full stats) this skips the whole 10 Hz emit; movement/regen still
+-- re-emit promptly because pos/rotZ/stat values are in the string.
+local lastStatsStr = nil
+
 local function exportStats()
     local health = types.Actor.stats.dynamic.health(self)
     local magicka = types.Actor.stats.dynamic.magicka(self)
@@ -95,7 +112,7 @@ local function exportStats()
     pcall(function() encumbrance = types.Actor.getEncumbrance(self) end)
     pcall(function() capacity = types.Actor.getCapacity(self) end)
 
-    print(string.format(
+    local line = string.format(
         'COMPANION_STATS:{"health":{"current":%.1f,"max":%.1f},"magicka":{"current":%.1f,"max":%.1f},"fatigue":{"current":%.1f,"max":%.1f},"cell":"%s","pos":{"x":%.1f,"y":%.1f,"z":%.1f},"cellExt":%s,"cellGX":%d,"cellGY":%d,"rotZ":%.5f,"gold":%d,"encumbrance":%.1f,"capacity":%.1f}',
         health.current, health.base,
         magicka.current, magicka.base,
@@ -106,8 +123,13 @@ local function exportStats()
         gx, gy,
         rotZ,
         gold, encumbrance, capacity
-    ))
+    )
+    if line == lastStatsStr then return end
+    lastStatsStr = line
+    emit(line)
 end
+
+local lastSpellsStr = nil
 
 local function exportSpells()
     local parts = {}
@@ -172,21 +194,30 @@ local function exportSpells()
         end
     end
 
-    print('COMPANION_SPELLS:[' .. table.concat(parts, ',') .. ']')
+    local line = 'COMPANION_SPELLS:[' .. table.concat(parts, ',') .. ']'
+    if line == lastSpellsStr then return end
+    lastSpellsStr = line
+    emit(line)
 end
 
+local lastSelectedSpellStr = nil
+
 local function exportSelectedSpell()
+    local line
     local spell = types.Actor.getSelectedSpell(self)
     if spell then
-        print('COMPANION_SELECTED_SPELL:"' .. jsonEscape(spell.id) .. '"')
-        return
+        line = 'COMPANION_SELECTED_SPELL:"' .. jsonEscape(spell.id) .. '"'
+    else
+        local item = types.Actor.getSelectedEnchantedItem(self)
+        if item then
+            line = 'COMPANION_SELECTED_SPELL:"' .. jsonEscape(item.recordId) .. '"'
+        else
+            line = 'COMPANION_SELECTED_SPELL:null'
+        end
     end
-    local item = types.Actor.getSelectedEnchantedItem(self)
-    if item then
-        print('COMPANION_SELECTED_SPELL:"' .. jsonEscape(item.recordId) .. '"')
-        return
-    end
-    print('COMPANION_SELECTED_SPELL:null')
+    if line == lastSelectedSpellStr then return end
+    lastSelectedSpellStr = line
+    emit(line)
 end
 
 local function itemCategory(item)
@@ -310,7 +341,7 @@ local function exportActiveEffects()
     local str = table.concat(parts, ',')
     if str == lastActiveEffectsStr then return end
     lastActiveEffectsStr = str
-    print('COMPANION_ACTIVE_EFFECTS:['..str..']')
+    emit('COMPANION_ACTIVE_EFFECTS:['..str..']')
 end
 
 -- Character header, attributes and skills for the Stats screen.
@@ -399,7 +430,7 @@ local function exportCharacter()
 
     if str == lastCharacterStr then return end
     lastCharacterStr = str
-    print('COMPANION_CHARACTER:' .. str)
+    emit('COMPANION_CHARACTER:' .. str)
 end
 
 -- Description / metadata for the tappable Stats popups. Verified against the
@@ -598,9 +629,9 @@ local function exportCharacterDetail()
     if blob == lastCharacterDetailStr then return end
     lastCharacterDetailStr = blob
 
-    print('COMPANION_CHARDETAIL_START:' .. #all)
-    for _, l in ipairs(all) do print(l) end
-    print('COMPANION_CHARDETAIL_END:' .. #all)
+    emit('COMPANION_CHARDETAIL_START:' .. #all)
+    for _, l in ipairs(all) do emit(l) end
+    emit('COMPANION_CHARDETAIL_END:' .. #all)
 end
 
 -- Display name of the first parameter of a MagicEffectWithParams entry.
@@ -766,13 +797,28 @@ local function itemJson(item)
         jsonEscape(statVal), jsonEscape(statKey), condField, enchantJson(item))
 end
 
+local lastInventoryStr = nil
+
 local function exportInventory()
     local all = types.Actor.inventory(self):getAll()
-    print('COMPANION_INVENTORY_START:' .. #all)
+    -- Build the itemJson batch ONCE, change-detect against the last emit, and skip the
+    -- whole streamed export (START/ITEM*/END) when nothing changed. itemJson carries
+    -- id/sid/count/cat/condition/enchant/weight/etc., so any add/remove/quantity/identity/
+    -- condition change alters the batch. Same pattern as exportContainer (lastContainerJson).
+    -- Highest-value change-detect: skips the per-item JSON build + ~N JNI calls per tick on
+    -- the engine thread, not just the log write.
+    local parts = {}
     for _, item in ipairs(all) do
-        print('COMPANION_INVENTORY_ITEM:' .. itemJson(item))
+        parts[#parts + 1] = itemJson(item)
     end
-    print('COMPANION_INVENTORY_END:' .. #all)
+    local batch = table.concat(parts, '\n')
+    if batch == lastInventoryStr then return end
+    lastInventoryStr = batch
+    emit('COMPANION_INVENTORY_START:' .. #all)
+    for _, p in ipairs(parts) do
+        emit('COMPANION_INVENTORY_ITEM:' .. p)
+    end
+    emit('COMPANION_INVENTORY_END:' .. #all)
 end
 
 -- ===== Container / looting =====
@@ -946,14 +992,16 @@ local function exportContainer(force)
     -- be corrupted by a stale/partial buffer left behind if an END was ever dropped.
     -- `force` now only bypasses change-detection (the first open); refreshes remain
     -- change-detected so an unchanged container still prints nothing.
-    print(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s,"pickpocket":%s}',
+    emit(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s,"pickpocket":%s}',
         jsonEscape(containerDisplayName(containerObj)), tostring(containerIsCorpse),
         tostring(containerIsPickpocket)))
     for _, item in ipairs(shown) do
-        print('COMPANION_CONTAINER_ITEM:' .. itemJson(item))
+        emit('COMPANION_CONTAINER_ITEM:' .. itemJson(item))
     end
-    print('COMPANION_CONTAINER_END:' .. #shown)
+    emit('COMPANION_CONTAINER_END:' .. #shown)
 end
+
+local lastEquipmentStr = nil
 
 local function exportEquipment()
     local parts = {}
@@ -966,7 +1014,10 @@ local function exportEquipment()
         table.insert(parts, string.format(
             '"%s":"%s"', slotName, jsonEscape(slotVal)))
     end
-    print('COMPANION_EQUIPMENT:{' .. table.concat(parts, ',') .. '}')
+    local line = 'COMPANION_EQUIPMENT:{' .. table.concat(parts, ',') .. '}'
+    if line == lastEquipmentStr then return end
+    lastEquipmentStr = line
+    emit(line)
 end
 
 -- Lazy per-questId lookup from core.dialogue.journal.records.
@@ -1013,7 +1064,7 @@ local function exportJournal()
         if count == journalExportedCount then return end
         journalExportedCount = count
 
-        print('COMPANION_JOURNAL_START:' .. count)
+        emit('COMPANION_JOURNAL_START:' .. count)
         for i = 1, count do
             -- Protect each entry individually so one bad entry can't abort the whole export.
             local ok2, err2 = pcall(function()
@@ -1021,19 +1072,19 @@ local function exportJournal()
                 if not e then return end
                 local qid = tostring(e.questId or "")
                 local name = getQuestName(qid)
-                print(string.format(
+                emit(string.format(
                     'COMPANION_JOURNAL_ENTRY:{"q":"%s","n":"%s","t":"%s","d":%d,"m":%d,"dom":%d}',
                     jsonEscape(qid), jsonEscape(name), jsonEscape(e.text or ""),
                     e.day or 0, e.month or 0, e.dayOfMonth or 0))
             end)
             if not ok2 then
-                print("COMPANION_DEBUG: entry " .. i .. " err=" .. tostring(err2))
+                emit("COMPANION_DEBUG: entry " .. i .. " err=" .. tostring(err2))
             end
         end
-        print('COMPANION_JOURNAL_END:' .. count)
+        emit('COMPANION_JOURNAL_END:' .. count)
     end)
     if not ok then
-        print("COMPANION_DEBUG: journal error: " .. tostring(err))
+        emit("COMPANION_DEBUG: journal error: " .. tostring(err))
     end
 end
 
@@ -1104,7 +1155,7 @@ local function exportTarget()
     -- Change-detection: only print when the target or its health changed.
     if str == lastTargetStr then return end
     lastTargetStr = str
-    print('COMPANION_TARGET:' .. str)
+    emit('COMPANION_TARGET:' .. str)
 end
 
 -- Priority of the three ways the bar's target gets set (highest first):
@@ -1214,7 +1265,7 @@ local function exportPlayerStatus()
         reputation, bounty, table.concat(factionParts, ','))
     if str == lastPlayerStatusStr then return end
     lastPlayerStatusStr = str
-    print('COMPANION_PLAYER_STATUS:' .. str)
+    emit('COMPANION_PLAYER_STATUS:' .. str)
 end
 
 -- Door markers for the companion minimap: the teleport doors near the player (interior doors,
@@ -1250,11 +1301,11 @@ local function exportDoorMarkers()
     local joined = table.concat(parts, '|')
     if joined == lastDoorMarkersStr then return end
     lastDoorMarkersStr = joined
-    print('COMPANION_DOORMARKER_START:' .. #parts)
+    emit('COMPANION_DOORMARKER_START:' .. #parts)
     for _, p in ipairs(parts) do
-        print('COMPANION_DOORMARKER_ITEM:' .. p)
+        emit('COMPANION_DOORMARKER_ITEM:' .. p)
     end
-    print('COMPANION_DOORMARKER_END:' .. #parts)
+    emit('COMPANION_DOORMARKER_END:' .. #parts)
 end
 
 -- Play the material/type-specific "pick up" (up) or "put down" (down) UI sound for an item,
@@ -1273,7 +1324,7 @@ local function playItemSound(item, up)
         end
     end)
     if not ok then
-        print("COMPANION_DEBUG: sound error: " .. tostring(err))
+        emit("COMPANION_DEBUG: sound error: " .. tostring(err))
     end
 end
 
@@ -1337,19 +1388,19 @@ local function equipItem(arg)
         found = types.Actor.inventory(self):find(arg)
     end
     if not found then
-        print("COMPANION_DEBUG: equip - not found: " .. arg)
+        emit("COMPANION_DEBUG: equip - not found: " .. arg)
         return
     end
     local equip = types.Actor.getEquipment(self)
     local slot = slotForItem(found, equip)
     if slot == nil then
-        print("COMPANION_DEBUG: equip - no slot for: " .. arg)
+        emit("COMPANION_DEBUG: equip - no slot for: " .. arg)
         return
     end
     equip[slot] = found
     types.Actor.setEquipment(self, equip)
     playItemSound(found, true)
-    print("COMPANION_DEBUG: equipped " .. arg .. " -> slot " .. slot)
+    emit("COMPANION_DEBUG: equipped " .. arg .. " -> slot " .. slot)
 end
 
 local function unequipItem(arg)
@@ -1368,9 +1419,9 @@ local function unequipItem(arg)
     if changed then
         types.Actor.setEquipment(self, equip)
         playItemSound(unequipped, false)
-        print("COMPANION_DEBUG: unequipped " .. arg)
+        emit("COMPANION_DEBUG: unequipped " .. arg)
     else
-        print("COMPANION_DEBUG: unequip - not worn: " .. arg)
+        emit("COMPANION_DEBUG: unequip - not worn: " .. arg)
     end
 end
 
@@ -1389,11 +1440,11 @@ local function useItem(arg)
     end
     if not found then found = types.Actor.inventory(self):find(arg) end
     if not found then
-        print("COMPANION_DEBUG: use - not found: " .. arg)
+        emit("COMPANION_DEBUG: use - not found: " .. arg)
         return
     end
     core.sendGlobalEvent('UseItem', { object = found, actor = self.object })
-    print("COMPANION_DEBUG: use " .. arg)
+    emit("COMPANION_DEBUG: use " .. arg)
 end
 
 -- ===== On-demand item / spell info (CMP:info) =====
@@ -1557,7 +1608,7 @@ end
 local function exportInfo(arg)
     local kind, id = string.match(arg, "^(%a+):(.+)$")
     if not kind or not id then
-        print("COMPANION_DEBUG: info - bad arg: " .. tostring(arg))
+        emit("COMPANION_DEBUG: info - bad arg: " .. tostring(arg))
         return
     end
 
@@ -1565,7 +1616,7 @@ local function exportInfo(arg)
 
     if kind == "spell" then
         local rec = core.magic.spells.records[id]
-        if not rec then print("COMPANION_DEBUG: info - spell not found: " .. id); return end
+        if not rec then emit("COMPANION_DEBUG: info - spell not found: " .. id); return end
         name = (rec.name and rec.name ~= "" and rec.name) or id
         addRow(rows, "Magicka Cost", fmtNum(rec.cost))
         pcall(function()
@@ -1603,7 +1654,7 @@ local function exportInfo(arg)
                 if ok and r then rec = r; foundType = ty; break end
             end
         end
-        if not rec then print("COMPANION_DEBUG: info - no record: " .. id); return end
+        if not rec then emit("COMPANION_DEBUG: info - no record: " .. id); return end
         local function isType(ty) return foundType == ty or (item ~= nil and ty.objectIsInstance(item)) end
         name = (rec.name and rec.name ~= "" and rec.name) or id
 
@@ -1668,11 +1719,11 @@ local function exportInfo(arg)
         addRow(rows, "Weight", weightStr)
         addRow(rows, "Value", fmtNum(rec.value))
     else
-        print("COMPANION_DEBUG: info - unknown kind: " .. tostring(kind))
+        emit("COMPANION_DEBUG: info - unknown kind: " .. tostring(kind))
         return
     end
 
-    print(string.format('COMPANION_INFO:{"name":"%s","rows":[%s],"effects":[%s]}',
+    emit(string.format('COMPANION_INFO:{"name":"%s","rows":[%s],"effects":[%s]}',
         jsonEscape(name), table.concat(rows, ','), table.concat(effects, ',')))
 end
 
@@ -1726,14 +1777,14 @@ local function dispatchCommand(command)
             -- One "pick up" sound per Take-All batch (vanilla container.cpp plays only the
             -- first object's sound), captured now while the container still holds the items.
             playItemSound(firstContainerItem(), true)
-            print("COMPANION_DEBUG: container take all (await close)")
+            emit("COMPANION_DEBUG: container take all (await close)")
         end
         return
     end
     if payload == "container_close" then
         -- close the container window without taking anything
         pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Container) end)
-        print("COMPANION_DEBUG: container close")
+        emit("COMPANION_DEBUG: container close")
         return
     end
     if payload == "container_dispose" then
@@ -1749,7 +1800,7 @@ local function dispatchCommand(command)
             -- CompanionContainerClose after queuing the transfer + corpse removal.
             containerCloseAfterRefresh = true
             playItemSound(firstContainerItem(), true)  -- one up sound per batch (see take-all)
-            print("COMPANION_DEBUG: container dispose (await close)")
+            emit("COMPANION_DEBUG: container dispose (await close)")
         end
         return
     end
@@ -1761,7 +1812,7 @@ local function dispatchCommand(command)
         if spell then
             types.Actor.setSelectedSpell(self, spell)
             ambient.playSound("Menu Click")
-            print("COMPANION_DEBUG: selected spell " .. arg)
+            emit("COMPANION_DEBUG: selected spell " .. arg)
         else
             local item = types.Actor.inventory(self):find(arg)
             -- Scrolls AND cast-on-use enchanted items (rings/amulets/etc.) both
@@ -1769,9 +1820,9 @@ local function dispatchCommand(command)
             if item and itemEnchantId(item) ~= nil then
                 types.Actor.setSelectedEnchantedItem(self, item)
                 ambient.playSound("Menu Click")
-                print("COMPANION_DEBUG: selected enchanted item " .. arg)
+                emit("COMPANION_DEBUG: selected enchanted item " .. arg)
             else
-                print("COMPANION_DEBUG: spell/enchanted item not found: " .. arg)
+                emit("COMPANION_DEBUG: spell/enchanted item not found: " .. arg)
             end
         end
         exportSelectedSpell()
@@ -1798,16 +1849,16 @@ local function dispatchCommand(command)
             -- Resolve the same item the global drop resolves (inventory:find(id)); still present
             -- here since the actual teleport is a deferred global action.
             playItemSound(types.Actor.inventory(self):find(id), false)
-            print("COMPANION_DEBUG: drop " .. id .. " x" .. countStr)
+            emit("COMPANION_DEBUG: drop " .. id .. " x" .. countStr)
             exportInventory()
         end
     elseif action == "read" then
         local item = types.Actor.inventory(self):find(arg)
         if item and types.Book.objectIsInstance(item) then
             self:sendEvent('AddUiMode', { mode = 'Book', target = item })
-            print("COMPANION_DEBUG: reading " .. arg)
+            emit("COMPANION_DEBUG: reading " .. arg)
         else
-            print("COMPANION_DEBUG: read - book not found: " .. arg)
+            emit("COMPANION_DEBUG: read - book not found: " .. arg)
         end
     elseif action == "info" then
         exportInfo(arg)
@@ -1820,7 +1871,7 @@ local function dispatchCommand(command)
                   count = tonumber(countStr), dir = 'take' })
             scheduleContainerRefresh()
             playItemSound(containerItemBySid(sid), true)  -- material-specific "pick up" sound
-            print("COMPANION_DEBUG: container take " .. sid .. " x" .. countStr)
+            emit("COMPANION_DEBUG: container take " .. sid .. " x" .. countStr)
         end
     elseif action == "container_put" then
         local sid, countStr = string.match(arg, "^(.+)|(%d+)$")
@@ -1838,7 +1889,7 @@ local function dispatchCommand(command)
                 end
                 playItemSound(putItem, true)
             end
-            print("COMPANION_DEBUG: container put " .. sid .. " x" .. countStr)
+            emit("COMPANION_DEBUG: container put " .. sid .. " x" .. countStr)
         end
     end
 end
@@ -1857,9 +1908,9 @@ local function onUiModeChanged(data)
     pcall(function()
         local MM = interfaces.UI.MODE.MainMenu
         if data.newMode == MM then
-            print('COMPANION_PAUSE_MENU_OPEN:')
+            emit('COMPANION_PAUSE_MENU_OPEN:')
         elseif data.oldMode == MM and data.newMode ~= MM then
-            print('COMPANION_PAUSE_MENU_CLOSED:')
+            emit('COMPANION_PAUSE_MENU_CLOSED:')
         end
     end)
 
@@ -1892,7 +1943,7 @@ local function onUiModeChanged(data)
         lastContainerJson = nil
         containerReexportTicks = 0
         containerCloseAfterRefresh = false
-        print('COMPANION_CONTAINER_CLOSED:')
+        emit('COMPANION_CONTAINER_CLOSED:')
     end
 end
 
@@ -1960,7 +2011,7 @@ local function onActive()
     -- can't fire while idle in the pause menu, and CLOSED-when-already-closed
     -- is a no-op on the Kotlin side. (A tracking boolean would not survive the
     -- load — clear() destroys this script instance, so locals reset.)
-    print('COMPANION_PAUSE_MENU_CLOSED:')
+    emit('COMPANION_PAUSE_MENU_CLOSED:')
 end
 
 -- Global-script callback: the bulk transfer (take-all / dispose) has been queued in
