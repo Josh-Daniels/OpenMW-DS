@@ -321,24 +321,20 @@ void drainCompanionCommands()
         if (cmd.rfind("CMPDLG:topic:", 0) == 0)
         {
             std::string arg = cmd.substr(sizeof("CMPDLG:topic:") - 1);
-            Log(Debug::Info) << "companion: selectTopic " << arg;
             companionDialogueSelectEntry(arg.c_str());
         }
         else if (cmd.rfind("CMPDLG:service:", 0) == 0)
         {
             std::string arg = cmd.substr(sizeof("CMPDLG:service:") - 1);
-            Log(Debug::Info) << "companion: activateService " << arg;
             companionDialogueSelectEntry(arg.c_str());
         }
         else if (cmd.rfind("CMPDLG:choice:", 0) == 0)
         {
             const int id = std::atoi(cmd.c_str() + (sizeof("CMPDLG:choice:") - 1));
-            Log(Debug::Info) << "companion: selectChoice " << id;
             companionDialogueChoice(id);
         }
         else if (cmd.rfind("CMPDLG:goodbye", 0) == 0)
         {
-            Log(Debug::Info) << "companion: goodbye";
             companionDialogueGoodbye();
         }
         else if (cmd.rfind("CMPDLG:persuade:", 0) == 0)
@@ -346,7 +342,6 @@ void drainCompanionCommands()
             // Persuasion is driven from the bottom-screen popup; the native modal is
             // never shown. type 0..5 = Admire/Intimidate/Taunt/Bribe10/Bribe100/Bribe1000.
             const int type = std::atoi(cmd.c_str() + (sizeof("CMPDLG:persuade:") - 1));
-            Log(Debug::Info) << "companion: persuade " << type;
             companionPersuade(type);
         }
         else if (cmd.rfind("CMP:questStatus", 0) == 0)
@@ -377,8 +372,6 @@ void drainCompanionCommands()
                 const int count = std::atoi(arg.substr(0, p1).c_str());
                 const std::string side = arg.substr(p1 + 1, p2 - p1 - 1);
                 const std::string refId = arg.substr(p2 + 1);
-                Log(Debug::Info) << "companion: barter " << (isBorrow ? "borrow " : "return ") << count << " "
-                                 << side << " " << refId;
                 if (isBorrow)
                     companionBarterBorrow(side.c_str(), refId.c_str(), count);
                 else
@@ -388,17 +381,14 @@ void drainCompanionCommands()
         else if (cmd.rfind("CMP:barter_gold ", 0) == 0)
         {
             const int extra = std::atoi(cmd.c_str() + (sizeof("CMP:barter_gold ") - 1));
-            Log(Debug::Info) << "companion: barter gold " << extra;
             companionBarterSetGold(extra);
         }
         else if (cmd.rfind("CMP:barter_offer", 0) == 0)
         {
-            Log(Debug::Info) << "companion: barter offer";
             companionBarterOffer();
         }
         else if (cmd.rfind("CMP:barter_cancel", 0) == 0)
         {
-            Log(Debug::Info) << "companion: barter cancel";
             companionBarterCancel();
         }
         // Merchant repair (CMP:repair_*) is driven natively — repair prices come from
@@ -407,17 +397,14 @@ void drainCompanionCommands()
         else if (cmd.rfind("CMP:repair_item ", 0) == 0)
         {
             const int index = std::atoi(cmd.c_str() + (sizeof("CMP:repair_item ") - 1));
-            Log(Debug::Info) << "companion: repair item " << index;
             companionRepairItem(index);
         }
         else if (cmd.rfind("CMP:repair_all", 0) == 0)
         {
-            Log(Debug::Info) << "companion: repair all";
             companionRepairAll();
         }
         else if (cmd.rfind("CMP:repair_cancel", 0) == 0)
         {
-            Log(Debug::Info) << "companion: repair cancel";
             companionRepairCancel();
         }
         // Travel (CMP:travel_*) is driven natively — the merchant-adjusted price
@@ -426,13 +413,11 @@ void drainCompanionCommands()
         // reach. See companion-travel-export.patch. Check _cancel before the space-arg _go form.
         else if (cmd.rfind("CMP:travel_cancel", 0) == 0)
         {
-            Log(Debug::Info) << "companion: travel cancel";
             companionTravelCancel();
         }
         else if (cmd.rfind("CMP:travel_go ", 0) == 0)
         {
             const int index = std::atoi(cmd.c_str() + (sizeof("CMP:travel_go ") - 1));
-            Log(Debug::Info) << "companion: travel go " << index;
             companionTravelGo(index);
         }
         // Rest/wait (CMP:sleep*) is driven natively — the canRest flags, the fade + progress
@@ -441,13 +426,11 @@ void drainCompanionCommands()
         // companion-restwait-export.patch. Check _cancel before the space-arg form.
         else if (cmd.rfind("CMP:sleep_cancel", 0) == 0)
         {
-            Log(Debug::Info) << "companion: sleep cancel";
             companionSleepCancel();
         }
         else if (cmd.rfind("CMP:sleep ", 0) == 0)
         {
             const int hours = std::atoi(cmd.c_str() + (sizeof("CMP:sleep ") - 1));
-            Log(Debug::Info) << "companion: sleep " << hours;
             companionSleep(hours);
         }
         // Training (CMP:training_*) is driven natively — the best-3 skill selection, iTrainingMod
@@ -456,13 +439,11 @@ void drainCompanionCommands()
         // companion-trainingwindow-open-signal.patch. Check _cancel before the colon-arg form.
         else if (cmd.rfind("CMP:training_cancel", 0) == 0)
         {
-            Log(Debug::Info) << "companion: training cancel";
             companionTrainingCancel();
         }
         else if (cmd.rfind("CMP:training_train:", 0) == 0)
         {
             const int index = std::atoi(cmd.c_str() + (sizeof("CMP:training_train:") - 1));
-            Log(Debug::Info) << "companion: training train " << index;
             companionTrainSkill(index);
         }
         // Spell buying (CMP:spellbuying_*) is driven natively — the spell-cost formula, getBarterOffer
@@ -470,13 +451,11 @@ void drainCompanionCommands()
         // companion-spellbuyingwindow-open-signal.patch. Check _cancel before the colon-arg form.
         else if (cmd.rfind("CMP:spellbuying_cancel", 0) == 0)
         {
-            Log(Debug::Info) << "companion: spellbuying cancel";
             companionSpellBuyingCancel();
         }
         else if (cmd.rfind("CMP:spellbuying_buy:", 0) == 0)
         {
             const int index = std::atoi(cmd.c_str() + (sizeof("CMP:spellbuying_buy:") - 1));
-            Log(Debug::Info) << "companion: spellbuying buy " << index;
             companionBuySpell(index);
         }
         // Text input (CMPTEXT:set:<text>) is driven natively — the focused MyGUI EditBox
@@ -485,13 +464,11 @@ void drainCompanionCommands()
         else if (cmd.rfind("CMPTEXT:set:", 0) == 0)
         {
             std::string text = cmd.substr(sizeof("CMPTEXT:set:") - 1);
-            Log(Debug::Info) << "companion: setText (" << text.size() << " chars)";
             companionSetFocusedText(text.c_str());
         }
         else if (cmd.rfind("CMPTEXT:cancel", 0) == 0)
         {
             // Cancel/discard: inject Escape to back out of the modal without committing.
-            Log(Debug::Info) << "companion: cancelTextInput";
             companionCancelTextInput();
         }
         // Map open (CMP:openmap). Force the native map window fullscreen BEFORE forwarding to Lua,
@@ -505,7 +482,6 @@ void drainCompanionCommands()
         // forwards to Lua (fall through into the generic handler below) for the mode toggle itself.
         else if (cmd.rfind("CMP:openmap", 0) == 0)
         {
-            Log(Debug::Info) << "companion: openmap (force map maximized)";
             companionForceMapMaximized();
             // Request that the map become the active (on-screen) controller window once GM_Inventory
             // actually opens (deferred via the Lua AddUiMode this command triggers). The per-frame
@@ -900,8 +876,6 @@ Java_org_openmw_EngineActivity_exportIconToPng(
     const char* iconPath   = env->GetStringUTFChars(jIconPath,   nullptr);
     const char* outputPath = env->GetStringUTFChars(jOutputPath, nullptr);
 
-    Log(Debug::Info) << "exportIconToPng: '" << iconPath << "' -> '" << outputPath << "'";
-
     try {
         VFS::Path::Normalized normalized(iconPath);
         osg::ref_ptr<osg::Image> image = rs->getImageManager()->getImage(normalized);
@@ -911,11 +885,6 @@ Java_org_openmw_EngineActivity_exportIconToPng(
             env->ReleaseStringUTFChars(jOutputPath, outputPath);
             return;
         }
-
-        Log(Debug::Info) << "exportIconToPng: loaded '" << iconPath << "' "
-            << image->s() << "x" << image->t()
-            << " compressed=" << (image->isCompressed() ? 1 : 0)
-            << " pixelFormat=0x" << std::hex << image->getPixelFormat() << std::dec;
 
         if (image->isCompressed()) {
             // DXT/S3TC compressed — the PNG writer can't handle these. Decompress
@@ -933,16 +902,12 @@ Java_org_openmw_EngineActivity_exportIconToPng(
                     for (int r = 0; r < image->r(); ++r)
                         rgba->setColor(image->getColor(s, t, r), s, t, r);
             image = rgba;
-            Log(Debug::Info) << "exportIconToPng: decompressed '" << iconPath
-                << "' to RGBA";
         }
 
         bool ok = osgDB::writeImageFile(*image, outputPath);
         if (!ok) {
             Log(Debug::Warning) << "exportIconToPng: writeImageFile returned false for '"
                 << outputPath << "' (pixelFormat=0x" << std::hex << image->getPixelFormat() << ")";
-        } else {
-            Log(Debug::Info) << "exportIconToPng: wrote '" << outputPath << "'";
         }
     } catch (const std::exception& e) {
         Log(Debug::Error) << "exportIconToPng '" << iconPath << "': " << e.what();

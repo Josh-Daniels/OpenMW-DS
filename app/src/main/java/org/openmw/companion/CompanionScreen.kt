@@ -2449,12 +2449,21 @@ private fun shelfBucket(category: String): Pair<Int, String> = when (category) {
     else -> 6 to "Misc"
 }
 
-/** Group a flat item list into category shelves (bucket order, items alphabetised within). */
+/** Group a flat item list into category shelves (bucket order; within a shelf, selected items
+ *  first, then alphabetical). Floating selected-first is what pulls a just-moved barter item to
+ *  the FRONT of its category shelf — a bought item joining the player's side, or a sold item
+ *  joining the vendor's side — so the move is obvious. Inert for looting (its items are never
+ *  selected), which stays plain alphabetical. */
 private fun buildShelves(items: List<ShelfItem>): List<ShelfRowData> =
     items.groupBy { shelfBucket(it.category) }
         .entries
         .sortedBy { it.key.first }
-        .map { (bucket, list) -> ShelfRowData(bucket.second, list.sortedBy { it.name.lowercase() }) }
+        .map { (bucket, list) ->
+            ShelfRowData(
+                bucket.second,
+                list.sortedWith(compareByDescending<ShelfItem> { it.selected }.thenBy { it.name.lowercase() })
+            )
+        }
 
 /** The player panel's focusable nav rows: category shelves, then the equipped header, then (when
  *  [expanded]) the equipped items strip. The container panel just uses its category shelves. */
