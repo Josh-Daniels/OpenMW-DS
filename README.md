@@ -49,7 +49,15 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
 
 ---
 ## Installation
+### Upgrading from Alpha3
+This app is based on Alpha3 and I've had reports you can't install this along-side it. The below instructions are for upgrading from Alpha3, but note you would be deleting Alpha3 and it's default settings completely. Next update I'll try to have this app completely separated to allow both installed. 
+- Back up your saves: copy Internalstorage/Alpha3/saves/ to somewhere safe (I'd just copy to downloads folder for now)
+- Uninstall Alpha3. 
+- Delete the Internalstorage/Alpha3/ folder (Note, this will delete any saved settings in the alpha3 app)
+- Install OpenMW-DS and complete the Alpha3 Setup Guide.
+- Restore your saves into the new Alpha3/saves/ folder afterward.
 
+### First time install
 - Download the APK from the Releases page
 - Tap the downloaded APK to install the app. Follow prompt to allow installs from unknown sources if asked.
 - Launch the app and press Play
