@@ -49,23 +49,25 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
 
 ---
 ## Installation (updated for v0.7.5)
-### Upgrading from Alpha3 or previous OpenMW-DS versions.
+You will first need a copy of Morrowind on the device. Best downloaded from a PC then transferred to the Thor. You will need the entire Morrowind folder, not just the Data Files folder.
+
+### Upgrading from Alpha3 or older OpenMW-DS versions (v.0.7.0 or older).
 - Download the APK from Releases page and install the app. 
 - The app will recognise you have had a previous version of this app, or alpha3 installed and offer to copy your saves.
-- Copy your saves if you like
-- Copy your alpha3 settings if you like. These are items found in the settings.cfg (like "prevent merchant equipping", and graphics settings). I recommend not doing this if you want a native OpenMW-DS experience. You can change the settings later anyway.
-- Select your Morrowind folder when prompted.
-  - It will say "Morrowind.esm Not Found", tap yes.
-  - Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
-- Select your Data Files (inside Morrowind Folder) when prompted to add your mods.
-  - Navigate to your Morrowind > Data Files folder, then tap "Use this folder"
+  - Copy your saves if you like.
+  - Copy your alpha3 settings if you like. These are items found in the settings.cfg (like "prevent merchant equipping", and graphics settings). I recommend not doing this if you want a native OpenMW-DS experience. You can change the settings later anyway.
+  - Select your Morrowind folder when prompted.
+    - It will say "Morrowind.esm Not Found", tap yes.
+    - Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
+  - Select your Data Files (inside Morrowind Folder) when prompted to add your mods.
+    - Navigate to your Morrowind > Data Files folder, then tap "Use this folder"
 - Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again.
 - You can now run the game by pressing the OpenMW-DS icon on the right.
 
 ### First time install
 - Download the APK from the Releases page
 - Tap the downloaded APK to install the app. Follow prompt to allow installs from unknown sources if asked.
-- Launch the app and press Play
+- Launch the app.
 - Select your Morrowind folder when prompted.
   - It will say "Morrowind.esm Not Found", tap yes.
   - Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
@@ -78,9 +80,9 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
 ## Setup Guide
 
 OpenMW-DS is its own app (installs alongside Alpha3, doesn't replace it). It's a fork of Alpha3, so it inherits Alpha3's
-launcher, game-file management and device configuration — but it runs as a standalone app, not on top of Alpha3.
+launcher, game-file management and device configuration; but it runs as a standalone app, not on top of Alpha3.
 
-> I did not create Alpha3, these are just the steps I take to get OpenMW running [Credits](#credits).
+> I did not create Alpha3 [Credits](#credits).
 
 ### Settings
 - Have a look through the Settings.cfg (left side menu) to enable or disable any settings you like.
@@ -115,7 +117,7 @@ launcher, game-file management and device configuration — but it runs as a sta
   Alpha3's OpenMW-specific improvements build on the Sisah2 lineage above.
 
 ---
-# Building from Source
+# Building from Source (For Developers)
 
 ## Prerequisites
 
