@@ -79,8 +79,7 @@ You will first need a copy of Morrowind on the device. Best downloaded from a PC
 ---
 ## Setup Guide
 
-OpenMW-DS is its own app (installs alongside Alpha3, doesn't replace it). It's a fork of Alpha3, so it inherits Alpha3's
-launcher, game-file management and device configuration; but it runs as a standalone app, not on top of Alpha3.
+OpenMW-DS is its own app (you can have alpha 3 installed separately if you like, this no longer replaces it). It's a fork of Alpha3, so it inherits Alpha3's launcher, game-file management and device configuration; but it runs as a standalone app, with its own files, not on top of Alpha3.
 
 > I did not create Alpha3 [Credits](#credits).
 
