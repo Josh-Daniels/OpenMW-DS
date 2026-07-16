@@ -33,7 +33,7 @@ int initSpdLog(JNIEnv* env) {
         auto android_sink = std::make_shared<spdlog::sinks::android_sink_mt>(LOG_TAG);
 
         // file sink (save to file)
-        std::string logPath = g_java->getExternalStoragePath(env) + "/Alpha3/config/native_crash.log";
+        std::string logPath = g_java->getExternalStoragePath(env) + "/OpenMW-DS/config/native_crash.log";
         auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath);
 
         std::vector<spdlog::sink_ptr> sinks { android_sink, file_sink };

@@ -104,6 +104,7 @@ import androidx.compose.ui.unit.TextUnit
 // Splash image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
+import org.openmw.BuildConfig
 import org.openmw.R
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.delay
@@ -10228,6 +10229,20 @@ private fun OptionsSettingsList() {
         item { OptionsSectionHeader("Input") }
         item { TouchInputRow() }
         item { GameCursorRow() }
+
+        // Quiet release-version footer (diagnostic/reference; `v` prefix added here).
+        item {
+            Text(
+                text = "OpenMW-DS v${BuildConfig.RELEASE_VERSION}",
+                color = BoneDim,
+                fontSize = 10.sp,
+                fontFamily = MwBody,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 14.dp, bottom = 4.dp)
+            )
+        }
     }
 }
 
@@ -10315,7 +10330,7 @@ private fun OptionsPopup(onDismiss: () -> Unit) {
 private fun OptionsWelcomeBlock() {
     Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
         Text(
-            "Welcome to OpenMW-DS",
+            "Under sun and sky, outlander. We greet you warmly.",
             color = BronzeLight,
             fontSize = 26.sp,
             fontFamily = MwDisplay,

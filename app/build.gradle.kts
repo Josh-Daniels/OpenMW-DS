@@ -70,7 +70,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.alpha3.launcher"
+        applicationId = "org.openmw.ds"
         minSdk = 26
 
         //noinspection OldTargetApi
@@ -81,6 +81,11 @@ android {
         }.standardOutput.asText.get().trim()
 
         buildConfigField("int", "RANDOMIZER", "${Random().nextInt(999).let { if (it < 0) -it else it }}")
+
+        // Human-readable release label, separate from the git-hash `versionName` (which
+        // stays as-is for crash-report precision). Bump this manually per release. Stored
+        // WITHOUT a `v` prefix — display contexts add `v` at render time.
+        buildConfigField("String", "RELEASE_VERSION", "\"0.7.5\"")
 
         ndk {
             //noinspection ChromeOsAbiSupport

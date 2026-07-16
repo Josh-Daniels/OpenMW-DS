@@ -4,6 +4,7 @@ package org.openmw
 
 // For OpenMW-DS
 import android.app.Presentation
+import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
@@ -139,6 +140,13 @@ class EngineActivity : SDLActivity() {
 
     // For OpenMW-DS
     private var companionPresentation: Presentation? = null
+    // True while the companion Presentation is currently hidden by us (see
+    // updateCompanionForWindowState). Our own flag because Dialog.hide() does NOT clear
+    // isShowing(), so we can't rely on it to detect the state.
+    private var companionHiddenForShrink = false
+    // True while the app has been backgrounded (home gesture / recents / app switch) — the
+    // PRIMARY reason we hide the companion. Set in onStop, cleared in onStart.
+    private var companionBackgrounded = false
 
     // Full-screen options/display-settings overlay on the bottom-screen Presentation,
     // shown while the in-game pause/options menu is open.
@@ -205,6 +213,94 @@ class EngineActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars(this) // fix sometimes systemBars will show again
+    }
+
+    // OpenMW-DS: the companion lives on a SEPARATE physical display with no automatic tie to
+    // this activity's foreground/window state, so it would otherwise keep showing on the
+    // bottom screen after the user has left the app. Two independent triggers hide/show it:
+    //
+    //  (1) PRIMARY — backgrounding via onStop/onStart. The reported case is the standard
+    //      Android home gesture (swipe up), which BACKGROUNDS the whole app (returns the top
+    //      screen to the launcher) WITHOUT changing the window size / multi-window state.
+    //      We use onStop (not onPause): onStop fires only once the activity is genuinely no
+    //      longer visible, so a transient interruption that merely pauses us — pulling down
+    //      the notification shade, a system dialog — does NOT hide the companion (no flicker).
+    //      onStart is the mirror (activity becoming visible again).
+    //
+    //  (2) BELT-AND-SUSPENDERS — onMultiWindowModeChanged / onConfigurationChanged, for
+    //      genuine freeform/desktop windowing if the Thor ever does it. These never fire for
+    //      the home gesture, so they're harmless here; kept in case real multi-window resize
+    //      happens separately.
+    //
+    // SDLActivity overrides all four callbacks (it pauses/resumes the native render thread),
+    // so every override below calls super first.
+    override fun onStop() {
+        super.onStop()
+        companionBackgrounded = true
+        updateCompanionForWindowState("onStop")
+    }
+
+    override fun onStart() {
+        super.onStart()
+        companionBackgrounded = false
+        updateCompanionForWindowState("onStart")
+    }
+
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
+        updateCompanionForWindowState("onMultiWindowModeChanged=$isInMultiWindowMode")
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        // Keep SDLActivity's own handling (it resizes the top-screen game surface).
+        super.onConfigurationChanged(newConfig)
+        updateCompanionForWindowState("onConfigurationChanged")
+    }
+
+    /**
+     * Reconcile the companion Presentation's visibility with the app's current state: hide
+     * it while the app is backgrounded OR the game window is shrunk, show it otherwise.
+     * Idempotent + guarded: no-ops if the Presentation isn't created yet, and never crashes
+     * startup/shutdown (fire-and-forget).
+     */
+    private fun updateCompanionForWindowState(reason: String) {
+        val presentation = companionPresentation ?: return
+        val shouldHide = companionBackgrounded || isGameWindowShrunk()
+        try {
+            if (shouldHide && !companionHiddenForShrink) {
+                presentation.hide()
+                companionHiddenForShrink = true
+                Log.d(TAG, "Companion hidden via $reason")
+            } else if (!shouldHide && companionHiddenForShrink) {
+                presentation.show()
+                companionHiddenForShrink = false
+                Log.d(TAG, "Companion re-shown via $reason")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "updateCompanionForWindowState failed (ignored)", e)
+        }
+    }
+
+    /**
+     * Shrunk = Android reports multi-window, OR (backstop, API 30+) the activity window is
+     * meaningfully smaller than the display's full-screen bounds — the case an OEM
+     * freeform-float gesture can produce without setting isInMultiWindowMode.
+     */
+    private fun isGameWindowShrunk(): Boolean {
+        if (isInMultiWindowMode) return true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val current = windowManager.currentWindowMetrics.bounds
+                val max = windowManager.maximumWindowMetrics.bounds
+                // Small slack for insets/rounding so a full-screen window isn't misread.
+                if (current.width() < max.width() - 8 || current.height() < max.height() - 8) {
+                    return true
+                }
+            } catch (e: Throwable) {
+                // Metrics unavailable — fall back to the multi-window flag only.
+            }
+        }
+        return false
     }
 
     override fun onDestroy() {
@@ -823,6 +919,9 @@ class EngineActivity : SDLActivity() {
             presentation.show()
             companionPresentation = presentation
             Log.d(TAG, "Second-screen: companion UI shown on display ${displays[0].displayId}")
+            // If we happened to launch while already in multi-window, hide it immediately.
+            companionHiddenForShrink = false
+            updateCompanionForWindowState("startCompanionScreen")
         }.onFailure {
             Log.e(TAG, "Second-screen: show() failed", it)
         }

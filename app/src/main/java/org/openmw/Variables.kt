@@ -29,7 +29,7 @@ object Constants {
     var VERSION_STAMP = ""
     var CRASH_FILE = ""
     var INTERNAL_CRASH_FILE = ""
-    val CACHE_DIR = Environment.getExternalStorageDirectory().toString() + "/Alpha3/OpenMW/CACHE"
+    val CACHE_DIR = Environment.getExternalStorageDirectory().toString() + "/OpenMW-DS/OpenMW/CACHE"
 }
 
 @HiltAndroidApp
@@ -40,7 +40,7 @@ class MyApp : Application() {
         app = this
 
         // Set up global paths
-        Constants.USER_FILE_STORAGE = Environment.getExternalStorageDirectory().toString() + "/Alpha3"
+        Constants.USER_FILE_STORAGE = Environment.getExternalStorageDirectory().toString() + "/OpenMW-DS"
         Constants.SECOND_USER_FILE_STORAGE = applicationContext.getExternalFilesDir(null)?.absolutePath ?: ""
         Constants.USER_CONFIG = "${Constants.USER_FILE_STORAGE}/config"
         Constants.USER_RESOURCES = "${Constants.USER_FILE_STORAGE}/resources"

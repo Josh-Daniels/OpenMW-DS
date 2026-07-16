@@ -82,8 +82,10 @@ private val lightScheme = lightColorScheme(
 )
 
 private val darkScheme = darkColorScheme(
-    primary = primaryDark,
-    onPrimary = onPrimaryDark,
+    // Accent recolored from the old blue to the OpenMW-DS light orange — this drives the
+    // tab-bar text, settings icon tints, indicators and every other colorScheme.primary use.
+    primary = SetupOrange,
+    onPrimary = SetupOnOrange,
     primaryContainer = primaryContainerDark,
     onPrimaryContainer = onPrimaryContainerDark,
     secondary = secondaryDark,

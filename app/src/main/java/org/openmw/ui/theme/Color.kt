@@ -1,6 +1,15 @@
 package org.openmw.ui.theme
 import androidx.compose.ui.graphics.Color
 
+// OpenMW-DS accent — a light orange, replacing the old blue primary. Used as the theme
+// `primary` (tab-bar text, settings icons, indicators) and as the setup-button fill.
+val SetupOrange = Color(0xFFEDA95B)
+val SetupOnOrange = Color(0xFF2B1E10)
+
+// Selection/highlight accent — a nice light blue, replacing the old bright-green accents
+// (settings left-column selected item, the Play button over the logo).
+val AccentLightBlue = Color(0xFF8AB4F8)
+
 val Purple80 = Color(0xFFD0BCFF)
 val PurpleGrey80 = Color(0xFFCCC2DC)
 val Pink80 = Color(0xFFEFB8C8)

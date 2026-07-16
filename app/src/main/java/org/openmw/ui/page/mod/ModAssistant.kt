@@ -94,6 +94,7 @@ import org.openmw.modDownloader.SSOHome
 import org.openmw.ui.controls.UIStateManager.customColor
 import org.openmw.ui.controls.UIStateManager.transparentBlack
 import org.openmw.ui.navigation.LocalModAssistantViewModel
+import org.openmw.ui.theme.AccentLightBlue
 import org.openmw.ui.page.setting.ControlsInsert
 import org.openmw.ui.page.setting.DevInsert
 import org.openmw.ui.page.setting.FeaturesSwitches
@@ -249,7 +250,8 @@ private fun ModTabRow(
 @Composable
 fun ModValuesList(
     modValues: List<ModValue>,
-    viewModel: ModAssistantViewModel = LocalModAssistantViewModel.current
+    viewModel: ModAssistantViewModel = LocalModAssistantViewModel.current,
+    header: @Composable () -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedTabIndex by viewModel.selectedTabIndex
@@ -327,6 +329,10 @@ fun ModValuesList(
         ) {
             ModTabRow()
         }
+
+        // First-launch setup buttons (game/data files, Alpha3 copy) sit just below the
+        // mod-category tab bar.
+        header()
 
         AnimatedVisibility(
             visible = showDialog,
@@ -1147,7 +1153,7 @@ fun LandscapeSettings(isNewFeatureEnabledChecked: Boolean) {
             ) {
                 Text(
                     text = stringResource(R.string.launcher_settings),
-                    color = if (switches) Color.Green else Color.White
+                    color = if (switches) AccentLightBlue else Color.White
                 )
             }
             Button(
@@ -1161,7 +1167,7 @@ fun LandscapeSettings(isNewFeatureEnabledChecked: Boolean) {
             ) {
                 Text(
                     text = stringResource(R.string.settings_cfg),
-                    color = if (iniValues) Color.Green else Color.White
+                    color = if (iniValues) AccentLightBlue else Color.White
                 )
             }
             Button(
@@ -1175,7 +1181,7 @@ fun LandscapeSettings(isNewFeatureEnabledChecked: Boolean) {
             ) {
                 Text(
                     text = stringResource(R.string.controls),
-                    color = if (controls) Color.Green else Color.White
+                    color = if (controls) AccentLightBlue else Color.White
                 )
             }
             if (newFeatureEnabledChecked) {
@@ -1190,7 +1196,7 @@ fun LandscapeSettings(isNewFeatureEnabledChecked: Boolean) {
                 ) {
                     Text(
                         text = stringResource(R.string.developer_menu),
-                        color = if (dev) Color.Green else Color.White
+                        color = if (dev) AccentLightBlue else Color.White
                     )
                 }
             }

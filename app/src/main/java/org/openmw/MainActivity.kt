@@ -36,6 +36,7 @@ import org.openmw.modDownloader.ModListManager
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.navigation.RootNav
 import org.openmw.ui.theme.OpenMWTheme
+import org.openmw.ui.view.AlphaMigrationFirstLaunch
 import org.openmw.ui.view.MoeDialog
 import org.openmw.ui.view.currentDeviceRealSize
 import org.openmw.ui.view.updateResolutionInConfig
@@ -144,6 +145,7 @@ class MainActivity : ComponentActivity() {
                         }
                         RootNav()
                         MoeDialog()
+                        AlphaMigrationFirstLaunch()
                     }
                 }
             }

@@ -21,6 +21,7 @@ import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.InternalCoroutinesApi
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.transparentBlack
+import org.openmw.ui.theme.AccentLightBlue
 import org.openmw.ui.navigation.MainPageDestination
 import org.openmw.ui.navigation.MainPageNav
 import org.openmw.ui.view.MyFloatingActionButton
@@ -68,7 +69,7 @@ fun MainScreen(
                                         .align(Alignment.BottomEnd)
                                         .size(28.dp)
                                         .offset(x = 8.dp, y = 8.dp),
-                                    tint = colorResource(R.color.green_500)
+                                    tint = AccentLightBlue
                                 )
                             }
                         }

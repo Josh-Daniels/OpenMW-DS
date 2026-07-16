@@ -48,41 +48,41 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
     - https://www.gog.com/en/game/the_elder_scrolls_iii_morrowind_goty_edition
 
 ---
-## Installation
-### Upgrading from Alpha3
-This app is based on Alpha3 and I've had reports you can't install this along-side it. The below instructions are for upgrading from Alpha3, but note you would be deleting Alpha3 and it's default settings completely. Next update I'll try to have this app completely separated to allow both installed. 
-- Back up your saves: copy Internalstorage/Alpha3/saves/ to somewhere safe (I'd just copy to downloads folder for now)
-- Uninstall Alpha3. 
-- Delete the Internalstorage/Alpha3/ folder (Note, this will delete any saved settings in the alpha3 app)
-- Install OpenMW-DS and complete the Alpha3 Setup Guide.
-- Restore your saves into the new Alpha3/saves/ folder afterward.
+## Installation (updated for v0.7.5)
+### Upgrading from Alpha3 or previous OpenMW-DS versions.
+- Download the APK from Releases page and install the app. 
+- The app will recognise you have had a previous version of this app, or alpha3 installed and offer to copy your saves.
+- Copy your saves if you like
+- Copy your alpha3 settings if you like. These are items found in the settings.cfg (like "prevent merchant equipping", and graphics settings). I recommend not doing this if you want a native OpenMW-DS experience. You can change the settings later anyway.
+- Select your Morrowind folder when prompted.
+  - It will say "Morrowind.esm Not Found", tap yes.
+  - Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
+- Select your Data Files (inside Morrowind Folder) when prompted to add your mods.
+  - Navigate to your Morrowind > Data Files folder, then tap "Use this folder"
+- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again.
+- You can now run the game by pressing the OpenMW-DS icon on the right.
 
 ### First time install
 - Download the APK from the Releases page
 - Tap the downloaded APK to install the app. Follow prompt to allow installs from unknown sources if asked.
 - Launch the app and press Play
-- Follow the Alpha3 Setup Guide below.
+- Select your Morrowind folder when prompted.
+  - It will say "Morrowind.esm Not Found", tap yes.
+  - Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
+- Select your Data Files (inside Morrowind Folder) when prompted to add your mods.
+  - Navigate to your Morrowind > Data Files folder, then tap "Use this folder"
+- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again.
+- You can now run the game by pressing the OpenMW-DS icon on the right.
 
 ---
-## Alpha3 Setup Guide
+## Setup Guide
 
-OpenMW-DS runs on top of Alpha3, which handles game file management and device configuration. These instructions cover
-setting up Alpha3 specifically for the AYN Thor running Morrowind.
+OpenMW-DS is its own app (installs alongside Alpha3, doesn't replace it). It's a fork of Alpha3, so it inherits Alpha3's
+launcher, game-file management and device configuration — but it runs as a standalone app, not on top of Alpha3.
 
 > I did not create Alpha3, these are just the steps I take to get OpenMW running [Credits](#credits).
 
-### Settings up the game files.
-
-- Open the app and allow access to manage all files. This is so the engine can reach the morrowind data.
-- Up the top of the home screen you will see something along the lines of (Select Games Files), tap that.
-- It will say "Morrowind.esm Not Found", tap yes.
-- Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
-- Now tap the add folder icon at the bottom of the screen, navigate to your data files folder, tap "use this folder".
-- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again.
-- You can now run the game by pressing the OpenMW-DS icon on the right.
-- If you have save games to add then run the game first, then close the app, and that should create the folder you need. See below for save location.
-
-### Other Settings
+### Settings
 - Have a look through the Settings.cfg (left side menu) to enable or disable any settings you like.
 - I have already enabled controller by default.
 - I have disabled haptics by default because I found it to vibrate at random even when standing still.
@@ -91,8 +91,8 @@ setting up Alpha3 specifically for the AYN Thor running Morrowind.
 - I haven't changed any graphical settings from default, but I like to turn on shadows (runs fine on Thor Max).
 
 ### Save Location
-- If you want to use your openMW saves. I found the save location to be:
-- /storage/emulated/0/Alpha3/saves. (consoles internal storage/Alpha3/saves)
+- If you want to use your openMW saves. I the save location is:
+- /storage/emulated/0/OpenMW-DS/saves. (consoles internal storage/OpenMW-DS/saves)
 - I recommend using LocalSend to quickly transfer files between Mac/PC/Thor over Wi-Fi. 
 
 ### Mods
@@ -183,8 +183,8 @@ adb install -r -t app/build/outputs/apk/debug/app-debug.apk
 For changes to the Lua companion mod only, you can skip the full build and push directly to the device:
 
 ```bash
-adb push app/src/main/assets/companion/scripts/companion/ \
-  /storage/emulated/0/Alpha3/OpenMW/Mods/companion/scripts/companion/
+adb push app/src/main/assets/companion/scripts/companion/. \
+  /storage/emulated/0/OpenMW-DS/OpenMW/Mods/companion/scripts/companion/
 ```
 
 ## Native library pinning
@@ -202,9 +202,9 @@ the Linux toolchain produces compatible binaries.
 To simulate a fresh user install:
 
 ```bash
-adb shell am force-stop com.alpha3.launcher
-adb uninstall com.alpha3.launcher
-adb shell rm -rf /storage/emulated/0/Alpha3/
-adb shell rm -rf /storage/emulated/0/Android/data/com.alpha3.launcher/
+adb shell am force-stop org.openmw.ds
+adb uninstall org.openmw.ds
+adb shell rm -rf /storage/emulated/0/OpenMW-DS/
+adb shell rm -rf /storage/emulated/0/Android/data/org.openmw.ds/
 adb install app/build/outputs/apk/release/app-release.apk
 ```

@@ -53,7 +53,7 @@
      void WindowManager::onKeyFocusChanged(MyGUI::Widget* widget)
      {
          bool capturesInput = false;
-@@ -1884,6 +1923,26 @@
+@@ -1884,6 +1923,31 @@
                  capturesInput = widget->castType<MyGUI::EditBox>(false);
          }
  
@@ -66,6 +66,11 @@
 +        {
 +            MyGUI::EditBox* edit
 +                = (capturesInput && widget) ? widget->castType<MyGUI::EditBox>(false) : nullptr;
++            // COMPANION: display-only EditBoxes (main-menu version label, console output,
++            // controller hints, …) are marked read-only/static — not real input fields.
++            // Don't treat them as text input, else tapping one opens the DS keyboard.
++            if (edit && (edit->getEditReadOnly() || edit->getEditStatic()))
++                edit = nullptr;
 +            if (edit != gCompanionTextInput)
 +            {
 +                gCompanionTextInput = edit;

@@ -123,6 +123,11 @@ class UserManageAssets(val context: Context) {
         copyIfNotExists("libopenmw/openmw/settings.fallback.cfg", Constants.SETTINGS_FILE)
         UserManageAssets(context).installUQMResourceFiles()
         org.openmw.fragments.onFirstLaunch(context)
+
+        // General-purpose app identity/version marker (write-only; fire-and-forget).
+        // Independent of the Alpha3 migration feature. Runs each launch so it always
+        // reflects the current app + version. Never fails startup.
+        IdentityMarker.write(context)
     }
 
     fun resourcePrepare() {

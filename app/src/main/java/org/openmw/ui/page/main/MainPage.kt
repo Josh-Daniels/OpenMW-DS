@@ -91,6 +91,8 @@ import org.openmw.utils.FileBrowserMode
 import org.openmw.utils.FileBrowserPopup
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.readCodeGroup
+import org.openmw.ui.view.AlphaMigrationButtons
+import org.openmw.ui.view.SetupButton
 import org.openmw.utils.MToast
 import org.openmw.utils.UqmDownloads
 import org.openmw.utils.getLayoutType
@@ -142,33 +144,6 @@ fun MainPage(
         Scaffold(
             modifier = modifier,
             containerColor = Color.Transparent,
-            floatingActionButton = {
-                AnimatedVisibility(
-                    visible = modAssistantViewModel.selectedTabIndex.intValue == 0,
-                    enter = scaleIn(
-                        initialScale = 0.0f,
-                        animationSpec = tween(durationMillis = 300),
-                        transformOrigin = TransformOrigin.Center
-                    ) + fadeIn(animationSpec = tween(300)),
-                    exit = scaleOut(
-                        targetScale = 0.0f,
-                        animationSpec = tween(durationMillis = 300),
-                        transformOrigin = TransformOrigin.Center
-                    ) + fadeOut(animationSpec = tween(300))
-                ) {
-                    // show add Mods folder button
-                    FloatingActionButton(
-                        onClick = {
-                            modAssistantViewModel.showFileBrowser.value = true
-                            MToast(stringRes(R.string.add_mod))
-                        },
-                        containerColor = FloatingActionButtonDefaults.containerColor.copy(alpha = 0.7f)
-                    ) {
-                        Icon(Icons.Outlined.CreateNewFolder, contentDescription = "Add Mods folder")
-                    }
-                }
-            },
-            floatingActionButtonPosition = FabPosition.Center,
             topBar = {
                 if (layoutType == NavigationSuiteType.NavigationBar) {
                     MyTopBar(context)
@@ -189,10 +164,34 @@ fun MainPage(
                 ) {
                     when (codeGroupOption) {
                         "OpenMW" -> {
-                            if (savedPath.isNullOrEmpty() || savedPath == "Game Files: ") {
-                                OpenMW()
-                            }
-                            ModValuesList(modValues)
+                            // The consistent first-launch setup group renders in ModValuesList's
+                            // `header`, i.e. directly BELOW the mod-category tab bar. Order:
+                            // 1) game files  2) data files  3) copy saves  4) copy settings —
+                            // each keeps its own show/hide gate.
+                            ModValuesList(
+                                modValues = modValues,
+                                header = {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        if (savedPath.isNullOrEmpty() || savedPath == "Game Files: ") {
+                                            OpenMW()
+                                        }
+                                        // Data files (promoted from the old bottom FAB — same trigger + gate).
+                                        if (modAssistantViewModel.selectedTabIndex.intValue == 0) {
+                                            SetupButton(
+                                                text = stringRes(R.string.select_data_files),
+                                                onClick = {
+                                                    modAssistantViewModel.showFileBrowser.value = true
+                                                    MToast(stringRes(R.string.add_mod))
+                                                }
+                                            )
+                                        }
+                                        AlphaMigrationButtons()
+                                    }
+                                }
+                            )
                         }
                         "UQM" -> {
                             UqmDownloads()
@@ -325,55 +324,25 @@ fun OpenMW(
     var showFileBrowser by viewModel.showFileBrowser
     var selectedFolderPath by remember { mutableStateOf<String?>(null) }
     var persistedPath by viewModel.persistedPath
-    val infiniteTransition = rememberInfiniteTransition(label = "")
     var lastProcessedFolder by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
 
-    val pulse by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(
-                durationMillis = 500
-            ),
-            repeatMode = RepeatMode.Reverse
-        ), label = ""
-    )
-
     Column {
-        Button(
+        SetupButton(
+            text = if (savedPath.isNullOrEmpty() || savedPath == "Game Files:  ") {
+                stringRes(R.string.select_games_files)
+            } else {
+                "${stringRes(R.string.game_files)}$savedPath"
+            },
             onClick = {
                 customCFG = true
                 viewModel.selectMorrowWindFolder(
                     context = context
                 )
             },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 4.dp, bottom = 4.dp)
-                .height(56.dp)
-                .let {
-                    if (savedPath.isNullOrEmpty() || savedPath == "Game Files: ") {
-                        it.graphicsLayer(scaleX = pulse, scaleY = pulse)
-                    } else {
-                        it
-                    }
-                },
-            shape = RectangleShape,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = transparentBlack
-            )
-        ) {
-            Text(
-                text = if (savedPath.isNullOrEmpty() || savedPath == "Game Files:  ") {
-                    stringRes(R.string.select_games_files)
-                } else {
-                    "${stringRes(R.string.game_files)}$savedPath"
-                },
-                color = Color.White
-            )
-        }
+            flashing = savedPath.isNullOrEmpty() || savedPath == "Game Files: ",
+        )
 
         LaunchedEffect(selectedFolderPath) {
             selectedFolderPath?.let { path ->
