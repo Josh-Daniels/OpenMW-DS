@@ -8569,6 +8569,12 @@ private fun MagicPanel(state: GameState) {
             val enchantedItems = remember(state.spells, sel) {
                 state.spells.filter { it.isItem }.sortedWith(bySelectionThenName)
             }
+            // Scroll/enchanted-item rows carry an ITEM recordId, not a spell id, so their Info
+            // must go through the item path (CMP:info item:) and can show the enchant section
+            // instantly from the matching inventory entry — same as InventoryPanel's Info.
+            val enchantByRecordId = remember(state.inventory) {
+                state.inventory.associate { it.id to it.enchant }
+            }
 
             // Category filter tabs — only present (non-empty) categories get a tab.
             // ALL is always shown. Mirrors InventoryPanel's CategorySubTabs pattern.
@@ -8658,7 +8664,9 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = false,
-                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
+                                onInfo = {
+                                    ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
+                                },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -8676,7 +8684,9 @@ private fun MagicPanel(state: GameState) {
                                 selected = spell.id == sel,
                                 charge = spell.charge,
                                 maxCharge = spell.maxCharge,
-                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
+                                onInfo = {
+                                    ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
+                                },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
