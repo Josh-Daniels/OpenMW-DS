@@ -56,6 +56,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.ScrollableState
@@ -455,6 +456,34 @@ private fun Modifier.mwPanel(): Modifier = this
     .clip(RoundedCornerShape(3.dp))
     .background(StonePanel)
     .border(2.dp, Bronze, RoundedCornerShape(3.dp))
+
+/** Index-cycle a category order list, wrapping. dir +1 = next, -1 = previous; a missing current
+ *  starts from index 0. Shared by every swipe/shoulder category switch. */
+private fun <T> cycleValue(order: List<T>, current: T, dir: Int): T {
+    if (order.isEmpty()) return current
+    val i = order.indexOf(current).let { if (it < 0) 0 else it }
+    return order[((i + dir) % order.size + order.size) % order.size]
+}
+
+/** Horizontal swipe that cycles a filter category: swipe LEFT → next (dir +1), swipe RIGHT →
+ *  previous (dir -1). Fires once per gesture past a small threshold. It's orthogonal to vertical
+ *  list scrolling (a horizontal-only detector), and a nested horizontal scroller — an icon grid or
+ *  an overflowing tab row — consumes drags that start on it first, so this fires on the list body /
+ *  non-scrolling areas without fighting them. [key] must include the current selection (and anything
+ *  else [onCycle] reads) so the gesture re-captures fresh state on change. */
+private fun Modifier.categorySwipe(key: Any?, onCycle: (dir: Int) -> Unit): Modifier =
+    this.pointerInput(key) {
+        val thresholdPx = 40.dp.toPx()
+        var total = 0f
+        detectHorizontalDragGestures(
+            onDragStart = { total = 0f },
+            onHorizontalDrag = { _, dx -> total += dx },
+            onDragEnd = {
+                if (total <= -thresholdPx) onCycle(1)
+                else if (total >= thresholdPx) onCycle(-1)
+            }
+        )
+    }
 
 @Composable
 fun CompanionScreen() {
@@ -7999,6 +8028,13 @@ private fun InventoryPanel(state: GameState) {
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         EquippedStrip(state)
+        // Ordered filter tabs (All, [Equipped], then present categories) for swipe-cycling — same
+        // order CategorySubTabs renders.
+        val invTabOrder = buildList<String?> {
+            add(null)
+            if (hasEquipped) add(EQUIPPED_FILTER)
+            presentCategories.forEach { add(it.label) }
+        }
         Column(Modifier.weight(1f).mwPanel()) {
             CategorySubTabs(
                 categories = presentCategories,
@@ -8007,7 +8043,12 @@ private fun InventoryPanel(state: GameState) {
                 onSelect = { selectedCategoryLabel = it }
             )
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
-            Box(Modifier.weight(1f)) {
+            // Swipe left/right across the list body to cycle the filter category.
+            Box(
+                Modifier.weight(1f).categorySwipe(selectedCategoryLabel) { dir ->
+                    selectedCategoryLabel = cycleValue(invTabOrder, selectedCategoryLabel, dir)
+                }
+            ) {
                 InventoryItemList(state, selectedCategoryLabel)
             }
         }
@@ -8803,8 +8844,15 @@ private fun MagicPanel(state: GameState) {
             // Section headers only in the "ALL" view; a single-category tab is self-labelling.
             val showHeaders = selectedMagicTab == "ALL"
 
-            // Tabs + list live in one mwPanel box, matching InventoryPanel.
-            Column(Modifier.weight(1f).mwPanel()) {
+            // Ordered tabs (ALL + present categories) for swipe-cycling.
+            val magicTabOrder = remember(presentMagicTabs) { listOf("ALL") + presentMagicTabs }
+            // Tabs + list live in one mwPanel box, matching InventoryPanel. Swipe left/right across
+            // the list body cycles the category.
+            Column(
+                Modifier.weight(1f).mwPanel().categorySwipe(selectedMagicTab) { dir ->
+                    selectedMagicTab = cycleValue(magicTabOrder, selectedMagicTab, dir)
+                }
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
