@@ -324,7 +324,10 @@ data class SpellForSale(
     val spellName: String,
     val school: String,
     val cost: Int,
-    val known: Boolean
+    val known: Boolean,
+    // Spell record id (RefId serializeText) — used to request COMPANION_INFO via CMP:info spell:<id>
+    // for the R3/long-press detail popup. "" for old 5-field export lines (backward compatible).
+    val id: String = ""
 )
 
 /**

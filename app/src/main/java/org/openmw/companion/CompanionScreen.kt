@@ -267,8 +267,24 @@ private const val MINIMAP_CROP_FRACTION = 0.25f
 // mirrors the Training overlay's dwell consts. A tap elsewhere / re-tapping it closes it sooner.
 private const val DOOR_MARKER_POPUP_MS = 3000L
 
+// How long a tapped HUD equipped weapon/spell name label stays before auto-dismissing (ms).
+// Mirrors DOOR_MARKER_POPUP_MS (tweakable); re-tapping the icon toggle-closes it sooner.
+private const val EQUIP_NAME_POPUP_MS = 3000L
+
 private val FAV_SLOT_WIDTH  = 132.dp
 private val FAV_SLOT_HEIGHT = 34.dp
+// Mis-tap tuning (HUD favourite quick-slots):
+//  B — vertical gap between the two stacked slots (was 4dp; widened so a between-tap has room).
+private val FAV_SLOT_SPACING = 10.dp
+//  Label ("FAV. GEAR"/"FAV. SPELLS") gap above the first slot — kept tighter than the inter-slot
+//  gap (~40% of it) so the caption sits close to the boxes it labels.
+private val FAV_LABEL_GAP = 4.dp
+//  C — per-slot tap-target extension applied OUTWARD ONLY (top slot upward, bottom slot downward),
+//      so near-misses register on the intended slot without extending into the gap between them.
+private val FAV_SLOT_HIT_EXTEND = 8.dp
+//  A — extra tap-catch margin around each fav group; taps here (and in the label / inter-slot gap)
+//      become no-ops instead of falling through to the map canvas and opening the world map.
+private val FAV_GROUP_MARGIN = 6.dp
 
 private enum class Tab(val label: String) {
     INVENTORY("Inventory"), MAGIC("Spells"), HUD("HUD"), STATS("Stats"), JOURNAL("Journal")
@@ -1683,6 +1699,12 @@ private fun rememberListNavFocus(
     onConfirm: (Int) -> Unit,
     onAction1: (() -> Unit)? = null,
     onCancel: (() -> Unit)? = null,
+    // R3 (NavEvent.Info) on the focused row — e.g. open the item/spell info popup. Null = ignore R3.
+    onInfo: ((Int) -> Unit)? = null,
+    // Called with the new focus index whenever D-pad moves focus. Called SYNCHRONOUSLY in the nav
+    // collector (before recomposition) so an open info popup can follow to the newly focused row and
+    // its anchor gets re-reported during the ensuing layout pass — mirrors the barter grid's follow.
+    onFocusChanged: ((Int) -> Unit)? = null,
 ): Int {
     var index by remember { mutableStateOf(0) }
     LaunchedEffect(itemCount) {
@@ -1693,6 +1715,8 @@ private fun rememberListNavFocus(
     val confirmState = rememberUpdatedState(onConfirm)
     val action1State = rememberUpdatedState(onAction1)
     val cancelState = rememberUpdatedState(onCancel)
+    val infoState = rememberUpdatedState(onInfo)
+    val focusChangedState = rememberUpdatedState(onFocusChanged)
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         GameStateRepository.navEvent.collect { ev ->
@@ -1703,14 +1727,18 @@ private fun rememberListNavFocus(
             // The "next"/"prev" events depend on the axis: horizontal → Right/Left, else Down/Up.
             val isNext = if (horizontal) ev is NavEvent.Right else ev is NavEvent.Down
             val isPrev = if (horizontal) ev is NavEvent.Left else ev is NavEvent.Up
+            val before = index
             when {
                 isNext -> if (n > 0) index = (index + 1) % n
                 isPrev -> if (n > 0) index = (index - 1 + n) % n
                 ev is NavEvent.Confirm -> if (n > 0) confirmState.value(index)
                 ev is NavEvent.Action1 -> action1State.value?.invoke()
                 ev is NavEvent.Cancel -> cancelState.value?.invoke()
+                ev is NavEvent.Info -> if (n > 0) infoState.value?.invoke(index)
                 else -> Unit
             }
+            // Focus moved → let the caller follow (e.g. an open info popup) before recomposition.
+            if (index != before) focusChangedState.value?.invoke(index)
         }
     }
     return if (itemCount > 0) index.coerceIn(0, itemCount - 1) else -1
@@ -2007,9 +2035,9 @@ object ItemInfoPopupState {
         if (targetId == id) close() else open(id, name, ench, isSpell, onTop)
     }
 
-    /** D-pad focus moved while open → follow to the newly focused item (don't dismiss). */
-    fun follow(id: String, name: String, ench: ItemEnchant?, onTop: Boolean = false) {
-        if (isOpen && id != targetId) open(id, name, ench, onTop = onTop)
+    /** D-pad focus moved while open → follow to the newly focused item/spell (don't dismiss). */
+    fun follow(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
+        if (isOpen && id != targetId) open(id, name, ench, isSpell = isSpell, onTop = onTop)
     }
 
     fun close() {
@@ -4932,6 +4960,8 @@ private fun TrainingRow(
  */
 @Composable
 private fun SpellBuyingOverlay(session: SpellBuyingSession) {
+    // Close any open spell-info popup when the buying session ends (overlay leaves composition).
+    DisposableEffect(Unit) { onDispose { ItemInfoPopupState.close() } }
     // Bottom vs Split from the spell-buying layout pref (Top pending → falls back to the bottom card).
     val splitMode = UiPreferences.spellBuyingLocationFlow().collectAsState().value == ScreenLocation.SPLIT
     val rowFontSize = if (splitMode) SPLIT_ROW_FONT_SIZE else 14.sp
@@ -4972,6 +5002,22 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
                         if (!sp.known) CompanionActions.buySpell(sp.index)
                     }
                 },
+                // R3 → toggle the info popup for the focused spell (same idea as barter items).
+                onInfo = { i ->
+                    session.spells.getOrNull(i)?.let { sp ->
+                        ItemInfoPopupState.toggle(sp.id, sp.spellName, null, isSpell = true)
+                    }
+                },
+                // D-pad focus moved → if the info popup is open, follow to the newly focused spell.
+                // Done here (synchronously, before recomposition) so the new row re-reports its anchor
+                // in the ensuing layout pass — otherwise the popup would blank out (see barter parity).
+                onFocusChanged = { i ->
+                    if (ItemInfoPopupState.isOpen) {
+                        session.spells.getOrNull(i)?.let { sp ->
+                            ItemInfoPopupState.follow(sp.id, sp.spellName, null, isSpell = true)
+                        }
+                    }
+                },
             )
             val listState = rememberLazyListState()
             LaunchedEffect(focusIndex) {
@@ -4989,7 +5035,8 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
                             affordable = spell.cost <= session.playerGold,
                             nameFontSize = rowFontSize,
                             focused = i == focusIndex,
-                            onBuy = { if (!spell.known) CompanionActions.buySpell(spell.index) }
+                            onBuy = { if (!spell.known) CompanionActions.buySpell(spell.index) },
+                            onInfo = { ItemInfoPopupState.open(spell.id, spell.spellName, null, isSpell = true) }
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
                     }
@@ -5016,16 +5063,21 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
 }
 
 /** One spell-for-sale row: name (flex) + school beneath + cost. Known spells are dimmed with
- *  "Already known" + "—" and non-tappable; unaffordable spells show a red cost but stay tappable
- *  (the native window rejects the purchase silently — the red cost is the only signal). */
+ *  "Already known" + "—" and non-tappable-to-buy; unaffordable spells show a red cost but stay tappable
+ *  (the native window rejects the purchase silently — the red cost is the only signal). Long-press (or
+ *  R3 on the focused row) opens the spell info popup — same idea as barter items. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SpellForSaleRow(
     spell: SpellForSale,
     affordable: Boolean,
     nameFontSize: TextUnit = 14.sp,
     focused: Boolean = false,
-    onBuy: () -> Unit
+    onBuy: () -> Unit,
+    onInfo: () -> Unit = {}
 ) {
+    // Report bounds so the info popup can anchor beside this row (same pattern as ItemRow/SpellRow).
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(spell.id, it.boundsInRoot()) }) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -5033,7 +5085,8 @@ private fun SpellForSaleRow(
                 if (focused) Modifier.background(BronzeLight.copy(alpha = 0.12f)).border(2.dp, BronzeLight)
                 else Modifier
             )
-            .then(if (!spell.known) Modifier.clickable { onBuy() } else Modifier)
+            // Tap buys (no-op for known via onBuy's own guard); long-press opens info for ANY spell.
+            .combinedClickable(onClick = onBuy, onLongClick = onInfo)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -5064,6 +5117,7 @@ private fun SpellForSaleRow(
             textAlign = TextAlign.End,
             modifier = Modifier.width(60.dp)
         )
+    }
     }
 }
 
@@ -6915,6 +6969,22 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     var showWeaponName by remember { mutableStateOf(false) }
     var showSpellName by remember { mutableStateOf(false) }
 
+    // Auto-dismiss the equipped weapon/spell name labels after EQUIP_NAME_POPUP_MS, mirroring the
+    // door-marker bubble. Keyed on the flag, so opening (re)starts the timer and a re-tap that
+    // toggle-closes it cancels the timer.
+    LaunchedEffect(showWeaponName) {
+        if (showWeaponName) {
+            delay(EQUIP_NAME_POPUP_MS)
+            showWeaponName = false
+        }
+    }
+    LaunchedEffect(showSpellName) {
+        if (showSpellName) {
+            delay(EQUIP_NAME_POPUP_MS)
+            showSpellName = false
+        }
+    }
+
     // Laid out like Inventory/Spells: a fixed-height top box (the vitals bar) at 12dp from the
     // top, a 6dp gap, then the map box filling the rest to the tab bar — so all three tabs' boxes
     // line up. The map still fills its own box, so the crop math and overlays are unaffected.
@@ -7165,13 +7235,16 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             onToggle = { showWeaponName = !showWeaponName }
         )
 
-        // Spell — top-right icon box, mirror of the weapon group.
+        // Spell — top-right icon box, mirror of the weapon group. A cast-on-use enchanted item in
+        // the spell slot shows its enchantment charge as a small meter on the icon.
         EquippedCornerIcon(
             modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp, top = 6.dp),
             label = "SPELL",
             iconPath = spellIcon,
             showName = showSpellName,
-            onToggle = { showSpellName = !showSpellName }
+            onToggle = { showSpellName = !showSpellName },
+            charge = selectedSpellEntry?.charge ?: 0,
+            maxCharge = selectedSpellEntry?.maxCharge ?: 0
         )
 
         // Sneak indicator — vanilla stealth icon (sneaking && undetected), shown just
@@ -7216,11 +7289,20 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             )
         }
 
-        // Gear favourites — bottom-right, stacked vertically
+        // Gear favourites — bottom-right, stacked vertically. Wrapped in a tap-catcher (A) whose
+        // FAV_GROUP_MARGIN extends the swallow area a few dp around the group (the outer 2dp + the 6dp
+        // margin keeps the visible group at its original 8dp from the corner). Un-handled taps here —
+        // the label, the inter-slot gap, and just around/below the slots — become no-ops instead of
+        // falling through to the map canvas below and opening the world map.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 2.dp, bottom = 2.dp)
+                .pointerInput(Unit) { detectTapGestures {} }
+                .padding(FAV_GROUP_MARGIN)
+        ) {
         Column(
-            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp),
-            horizontalAlignment = Alignment.End,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalAlignment = Alignment.End
         ) {
             Text(
                 "FAV. GEAR",
@@ -7229,7 +7311,9 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 fontFamily = MwDisplay,
                 letterSpacing = 1.sp
             )
+            Spacer(Modifier.height(FAV_LABEL_GAP))
             repeat(2) { idx ->
+                if (idx > 0) Spacer(Modifier.height(FAV_SLOT_SPACING))
                 val slot = favs.gear.getOrNull(idx)
                 val slotItem = slot?.let { s -> state.inventory.find { it.id == s.id } }
                 val slotWorn = slot != null && (
@@ -7242,6 +7326,9 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     slot = slot,
                     borderColor = BronzeLight,
                     equipped = slotWorn,
+                    // C: extend the tap target outward only — top slot (idx 0) up, bottom slot down.
+                    hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    hitPadBottom = if (idx == 1) FAV_SLOT_HIT_EXTEND else 0.dp,
                     menuItems = { s, dismiss ->
                         val item = state.inventory.find { it.id == s.id }
                         val readable = item?.category == "book" || item?.category == "scroll"
@@ -7306,12 +7393,18 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 }
             }
         }
+        }
 
-        // Magic favourites — bottom-left, stacked vertically
-        Column(
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        // Magic favourites — bottom-left, stacked vertically. Wrapped in the same tap-catcher (A)
+        // + margin so near-miss taps around the group don't open the map. See the gear group above.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 2.dp, bottom = 2.dp)
+                .pointerInput(Unit) { detectTapGestures {} }
+                .padding(FAV_GROUP_MARGIN)
         ) {
+        Column {
             Text(
                 "FAV. SPELLS",
                 color = BoneDim,
@@ -7319,13 +7412,18 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 fontFamily = MwDisplay,
                 letterSpacing = 1.sp
             )
+            Spacer(Modifier.height(FAV_LABEL_GAP))
             repeat(2) { idx ->
+                if (idx > 0) Spacer(Modifier.height(FAV_SLOT_SPACING))
                 val slot = favs.magic.getOrNull(idx)
                 val slotSelected = slot != null && state.selectedSpell == slot.id
                 FavSlotView(
                     slot = slot,
                     borderColor = BronzeLight,
                     equipped = slotSelected,
+                    // C: extend the tap target outward only — top slot (idx 0) up, bottom slot down.
+                    hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    hitPadBottom = if (idx == 1) FAV_SLOT_HIT_EXTEND else 0.dp,
                     menuItems = { s, dismiss ->
                         val colors = MenuDefaults.itemColors(textColor = Bone)
                         DropdownMenuItem(
@@ -7343,6 +7441,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     slot?.let { CompanionActions.selectSpell(it.id) }
                 }
             }
+        }
         }
 
         // Combat target — top-centre, in the gap between the WEAPON and SPELL
@@ -7421,6 +7520,10 @@ private fun EquippedCornerIcon(
     iconPath: String,
     showName: Boolean,
     onToggle: () -> Unit,
+    // Enchantment charge for a cast-on-use item equipped to the SPELL slot; maxCharge = 0 → no bar.
+    // Drawn as a thin meter across the bottom of the icon, same colours as the spells-tab charge bar.
+    charge: Int = 0,
+    maxCharge: Int = 0,
 ) {
     val icon = rememberItemIcon(iconPath)
     Column(
@@ -7450,6 +7553,28 @@ private fun EquippedCornerIcon(
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.size(40.dp)
                 )
+            }
+            // Enchantment charge meter, overlaid across the bottom edge of the icon (spells-tab style).
+            if (maxCharge > 0) {
+                val ratio = (charge.toFloat() / maxCharge).coerceIn(0f, 1f)
+                val fillColor = if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 2.dp, vertical = 2.dp)
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(Color(0xFF0E0B07))
+                        .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(ratio)
+                            .fillMaxHeight()
+                            .background(fillColor)
+                    )
+                }
             }
         }
     }
@@ -7515,6 +7640,13 @@ private fun CornerNameLabel(name: String, alignEnd: Boolean, modifier: Modifier)
             letterSpacing = 1.sp
         )
         Spacer(Modifier.height(4.dp))
+        // The panel wraps its content, but a Text that WRAPS to two lines otherwise reports the full
+        // max width (leaving empty space beside right-aligned text). Measure the widest actual laid-out
+        // line and constrain the Text to it, so the panel hugs the text tightly on both one and two
+        // lines. Re-measures per name; converges in one extra layout (constraining to the widest line
+        // keeps the same line breaks).
+        val density = LocalDensity.current
+        var lineWidth by remember(name) { mutableStateOf<Dp?>(null) }
         // 40dp-tall band matching the icon box; centre the label within it.
         Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
             Box(
@@ -7530,9 +7662,20 @@ private fun CornerNameLabel(name: String, alignEnd: Boolean, modifier: Modifier)
                     color = Bone,
                     fontSize = 9.sp,
                     fontFamily = MwBody,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = if (alignEnd) TextAlign.End else TextAlign.Start,
+                    modifier = lineWidth?.let { Modifier.width(it) } ?: Modifier,
+                    onTextLayout = { result ->
+                        var widest = 0f
+                        for (i in 0 until result.lineCount) {
+                            widest = maxOf(widest, result.getLineRight(i) - result.getLineLeft(i))
+                        }
+                        val w = with(density) { widest.toDp() }
+                        if (lineWidth == null || kotlin.math.abs((lineWidth!! - w).value) > 0.5f) {
+                            lineWidth = w
+                        }
+                    }
                 )
             }
         }
@@ -7720,6 +7863,10 @@ private fun FavSlotView(
     slot: FavSlot?,
     borderColor: Color,
     equipped: Boolean = false,
+    // C: outward-only tap-target extension (transparent). hitPadTop enlarges the touch area upward
+    // (used by the top slot), hitPadBottom downward (bottom slot). The visual box is unchanged.
+    hitPadTop: Dp = 0.dp,
+    hitPadBottom: Dp = 0.dp,
     menuItems: (@Composable ColumnScope.(slot: FavSlot, dismiss: () -> Unit) -> Unit)? = null,
     onClick: () -> Unit
 ) {
@@ -7742,20 +7889,13 @@ private fun FavSlotView(
         if (DropdownState.closeRequest > 0) menuOpen = false
     }
 
-    Box(
-        modifier = Modifier
-            .width(FAV_SLOT_WIDTH)
-            .height(FAV_SLOT_HEIGHT)
-    ) {
+    // Wrapper: wraps the (hit-extended) slot and anchors the dropdown menu.
+    Box {
+        // Tap target = the visual slot PLUS the outward transparent extension. The clickable is on
+        // this box and the extension padding is INSIDE it, so the hit area includes the extension; it
+        // only grows away from the neighbour slot (never into the gap), so no ambiguous middle spot.
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .clip(RoundedCornerShape(4.dp))
-                .background(bgColor)
-                .then(
-                    if (!isEmpty) Modifier.border(1.dp, slotBorder, RoundedCornerShape(4.dp))
-                    else Modifier
-                )
                 .combinedClickable(
                     enabled = !isEmpty,
                     onClick = { onClick() },
@@ -7764,19 +7904,47 @@ private fun FavSlotView(
                             menuSlot = slot; menuOpen = true; DropdownState.open()
                         }
                     }
-                ),
-            contentAlignment = Alignment.Center
+                )
+                .padding(top = hitPadTop, bottom = hitPadBottom)
         ) {
-            Text(
-                text = slot?.name ?: "Empty",
-                color = textColor.copy(alpha = alpha),
-                fontSize = 11.sp,
-                fontFamily = MwBody,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 6.dp)
-            )
+            // Visual slot box — exact FAV_SLOT_WIDTH x FAV_SLOT_HEIGHT, look unchanged.
+            Box(
+                modifier = Modifier
+                    .width(FAV_SLOT_WIDTH)
+                    .height(FAV_SLOT_HEIGHT)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(bgColor)
+                    .then(
+                        if (!isEmpty) Modifier.border(1.dp, slotBorder, RoundedCornerShape(4.dp))
+                        else Modifier
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = slot?.name ?: "Empty",
+                    color = textColor.copy(alpha = alpha),
+                    fontSize = 11.sp,
+                    fontFamily = MwBody,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 6.dp)
+                )
+                // Dashed border for empty slots drawn as Canvas overlay (avoids clip-halving issue)
+                if (isEmpty) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawRoundRect(
+                            color = borderColor.copy(alpha = alpha),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                width = 1.dp.toPx(),
+                                pathEffect = androidx.compose.ui.graphics.PathEffect
+                                    .dashPathEffect(floatArrayOf(6f, 4f))
+                            ),
+                            cornerRadius = CornerRadius(4.dp.toPx())
+                        )
+                    }
+                }
+            }
         }
         if (menuItems != null) {
             DropdownMenu(
@@ -7799,20 +7967,6 @@ private fun FavSlotView(
                     Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
                     menuItems(s) { menuOpen = false; DropdownState.closeAll() }
                 }
-            }
-        }
-        // Dashed border for empty slots drawn as Canvas overlay (avoids clip-halving issue)
-        if (isEmpty) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                drawRoundRect(
-                    color = borderColor.copy(alpha = alpha),
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(
-                        width = 1.dp.toPx(),
-                        pathEffect = androidx.compose.ui.graphics.PathEffect
-                            .dashPathEffect(floatArrayOf(6f, 4f))
-                    ),
-                    cornerRadius = CornerRadius(4.dp.toPx())
-                )
             }
         }
     }
@@ -8045,6 +8199,12 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
     val wornItems = remember(state.inventory, wornIds) {
         state.inventory.filter { isWorn(it) }.sortedWith(catNameSort)
     }
+    // Enchantment charge for cast-on-use items, sourced from the SPELLS export (the only place
+    // per-item charge is carried — those items appear in the magic "Enchanted Items" section).
+    // id -> (charge, maxCharge). Rendered in the condition column (those items have no durability).
+    val chargeById = remember(state.spells) {
+        state.spells.filter { it.maxCharge > 0 }.associate { it.id to (it.charge to it.maxCharge) }
+    }
 
     Column(Modifier.fillMaxSize()) {
         // Scrolling list (fills the space above the pinned Equipped section).
@@ -8055,7 +8215,8 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                     items(wornItems, key = { "eqf_" + it.stackId.ifEmpty { it.id } }) { item ->
                         ItemRow(item, worn = true, equippable = item.isEquippable(),
                             usable = item.isUsable(), readable = item.isReadable(),
-                            highlight = true, iconBitmap = rememberItemIcon(item.icon))
+                            highlight = true, iconBitmap = rememberItemIcon(item.icon),
+                            enchantCharge = chargeById[item.id])
                     }
                 }
                 // "All" — category groups with the UNWORN items (worn items go in the pinned section below).
@@ -8069,7 +8230,8 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                             items(groupItems) { item ->
                                 ItemRow(item, worn = false, equippable = item.isEquippable(),
                                     usable = item.isUsable(), readable = item.isReadable(),
-                                    iconBitmap = rememberItemIcon(item.icon))
+                                    iconBitmap = rememberItemIcon(item.icon),
+                                    enchantCharge = chargeById[item.id])
                             }
                         }
                     }
@@ -8083,7 +8245,8 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
                         val worn = isWorn(item)
                         ItemRow(item, worn, equippable = item.isEquippable(),
                             usable = item.isUsable(), readable = item.isReadable(),
-                            highlight = worn, iconBitmap = rememberItemIcon(item.icon))
+                            highlight = worn, iconBitmap = rememberItemIcon(item.icon),
+                            enchantCharge = chargeById[item.id])
                     }
                 }
             }
@@ -8094,7 +8257,7 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
         // barter Equipped section. Only in the "All" view (the Equipped filter already shows just
         // worn items; a single category shows its own worn items inline).
         if (selectedGroup == null && !equippedFilter && wornItems.isNotEmpty()) {
-            InventoryEquippedSection(wornItems, equippedExpanded) { equippedExpanded = !equippedExpanded }
+            InventoryEquippedSection(wornItems, chargeById, equippedExpanded) { equippedExpanded = !equippedExpanded }
         }
     }
 }
@@ -8106,6 +8269,7 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
 @Composable
 private fun InventoryEquippedSection(
     items: List<InventoryItem>,
+    chargeById: Map<String, Pair<Int, Int>>,
     expanded: Boolean,
     onToggle: () -> Unit
 ) {
@@ -8149,7 +8313,8 @@ private fun InventoryEquippedSection(
                 items.forEach { item ->
                     ItemRow(item, worn = true, equippable = item.isEquippable(),
                         usable = item.isUsable(), readable = item.isReadable(),
-                        highlight = true, iconBitmap = rememberItemIcon(item.icon))
+                        highlight = true, iconBitmap = rememberItemIcon(item.icon),
+                        enchantCharge = chargeById[item.id])
                 }
             }
         }
@@ -8223,7 +8388,10 @@ private fun ItemRow(
     usable: Boolean = false,
     readable: Boolean,
     highlight: Boolean = false,   // slight outline around equipped items (the Equipped section/filter)
-    iconBitmap: ImageBitmap? = null
+    iconBitmap: ImageBitmap? = null,
+    // (charge, maxCharge) for a cast-on-use enchanted item; null = not charge-bearing. Shown in the
+    // condition column (those items have no durability). Same bar style as the spells tab.
+    enchantCharge: Pair<Int, Int>? = null
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
@@ -8377,32 +8545,66 @@ private fun ItemRow(
                     }
                 }
                 Spacer(Modifier.width(16.dp))
-                // Condition column.
+                // Condition column — OR, for a cast-on-use enchanted item (which has no durability),
+                // its enchantment charge in the same slot. Same bar style as the spells tab; charge
+                // takes priority when present (those items report no condition, so no real conflict).
                 Box(Modifier.width(50.dp), contentAlignment = Alignment.Center) {
-                    if (item.cond != null) {
-                        val fillColor = if (item.cond >= 0.5f) BronzeLight else Color(0xFFC75C5C)
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                "COND",
-                                color = BoneDim,
-                                fontSize = 7.sp,
-                                fontFamily = MwBody,
-                                letterSpacing = 0.5.sp
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(4.dp)
-                                    .clip(RoundedCornerShape(1.dp))
-                                    .background(Color(0xFF0E0B07))
-                                    .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
-                            ) {
-                                Box(
-                                    Modifier
-                                        .fillMaxWidth(item.cond.coerceIn(0f, 1f))
-                                        .fillMaxHeight()
-                                        .background(fillColor)
+                    val chargePair = enchantCharge?.takeIf { it.second > 0 }
+                    when {
+                        chargePair != null -> {
+                            val (cur, max) = chargePair
+                            val ratio = (cur.toFloat() / max).coerceIn(0f, 1f)
+                            val fillColor = if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    "CHARGE",
+                                    color = BoneDim,
+                                    fontSize = 7.sp,
+                                    fontFamily = MwBody,
+                                    letterSpacing = 0.5.sp
                                 )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                        .clip(RoundedCornerShape(1.dp))
+                                        .background(Color(0xFF0E0B07))
+                                        .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .fillMaxWidth(ratio)
+                                            .fillMaxHeight()
+                                            .background(fillColor)
+                                    )
+                                }
+                            }
+                        }
+                        item.cond != null -> {
+                            val fillColor = if (item.cond >= 0.5f) BronzeLight else Color(0xFFC75C5C)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    "COND",
+                                    color = BoneDim,
+                                    fontSize = 7.sp,
+                                    fontFamily = MwBody,
+                                    letterSpacing = 0.5.sp
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                        .clip(RoundedCornerShape(1.dp))
+                                        .background(Color(0xFF0E0B07))
+                                        .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .fillMaxWidth(item.cond.coerceIn(0f, 1f))
+                                            .fillMaxHeight()
+                                            .background(fillColor)
+                                    )
+                                }
                             }
                         }
                     }

@@ -179,7 +179,7 @@ getBarterOffer/getSpellSchool (native-only). Added July 2026.
 +
 +            Log(Debug::Info) << "COMPANION_SPELLBUYING_SPELL:" << i << "|"
 +                             << companionSpellBuyingSanitize(spell->mName) << "|"
-+                             << companionSpellBuyingSanitize(school) << "|" << price << "|" << (known ? 1 : 0);
++                             << companionSpellBuyingSanitize(school) << "|" << price << "|" << (known ? 1 : 0) << "|" << spell->mId.serializeText();
 +            mCompanionSpellIds.push_back(spell->mId);
 +        }
 +        Log(Debug::Info) << "COMPANION_SPELLBUYING_END";

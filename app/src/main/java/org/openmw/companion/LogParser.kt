@@ -499,8 +499,10 @@ object LogParser {
     }
 
     /**
-     * A single COMPANION_SPELLBUYING_SPELL payload: index|spellName|school|cost|known(1/0).
-     * Pipe-delimited (the engine sanitizes '|' out of name/school) → exactly 5 fields.
+     * A single COMPANION_SPELLBUYING_SPELL payload: index|spellName|school|cost|known(1/0)|id.
+     * Pipe-delimited (the engine sanitizes '|' out of name/school) → 5 or 6 fields. The trailing
+     * spell record id (field 6) was added for the info popup; older 5-field lines still parse
+     * (id defaults to "").
      */
     fun parseSpellForSale(payload: String): SpellForSale? = try {
         val parts = payload.split('|')
@@ -510,7 +512,8 @@ object LogParser {
             spellName = parts[1],
             school = parts[2],
             cost = parts[3].trim().toInt(),
-            known = parts[4].trim() == "1"
+            known = parts[4].trim() == "1",
+            id = parts.getOrNull(5) ?: ""
         )
     } catch (e: Exception) {
         null
