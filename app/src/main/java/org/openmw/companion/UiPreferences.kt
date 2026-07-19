@@ -39,6 +39,15 @@ enum class ScreenLocation { BOTTOM, SPLIT, TOP }
 enum class InventoryLayout { CLASSIC, SHELF }
 
 /**
+ * Density of the single-panel Spells tab list. DELIBERATELY separate from [InventoryLayout]
+ * (Classic/Shelf), which governs the two-panel looting/bartering screens — different part of
+ * the UI, different concept.
+ * - [STANDARD]: original 40dp-icon rows (default; nothing changes for existing users).
+ * - [COMPACT]: ~half-size icons + shorter rows so more spells fit on screen at once.
+ */
+enum class SpellsListStyle { STANDARD, COMPACT }
+
+/**
  * Where the combat target's health bar is drawn.
  * - [BOTTOM]: original behaviour — the bottom-screen HUD combat-target overlay.
  * - [TOP]: an additional top-centre overlay window on the top screen, shown while a combat
@@ -160,6 +169,7 @@ object UiPreferences {
     private const val GAME_UI_CUSTOM = "game_ui_custom"
     private const val CONVERSATION_LOCATION = "conversation_location"
     private const val INVENTORY_LAYOUT = "inventory_layout"
+    private const val SPELLS_LIST_STYLE = "spells_list_style"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
     // Training / spell-buying popup location (Bottom only for now; Top pending — same as Repair,
@@ -208,6 +218,10 @@ object UiPreferences {
     // Item-list layout for the two-panel screens (looting/pickpocket, barter): Classic grid vs
     // Shelf. One switch, all those contexts. Default CLASSIC (the proven layout).
     private val inventoryLayoutFlow = MutableStateFlow(InventoryLayout.CLASSIC)
+
+    // Density of the single-panel Spells tab (Standard / Compact). Default STANDARD (unchanged for
+    // existing users). Unrelated to inventoryLayoutFlow above.
+    private val spellsListStyleFlow = MutableStateFlow(SpellsListStyle.STANDARD)
 
     // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default SPLIT
     // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
@@ -286,6 +300,9 @@ object UiPreferences {
         p.getString(INVENTORY_LAYOUT, null)
             ?.let { runCatching { InventoryLayout.valueOf(it) }.getOrNull() }
             ?.let { inventoryLayoutFlow.value = it }
+        p.getString(SPELLS_LIST_STYLE, null)
+            ?.let { runCatching { SpellsListStyle.valueOf(it) }.getOrNull() }
+            ?.let { spellsListStyleFlow.value = it }
         p.getString(LOOTING_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
             ?.let { lootingLocationFlow.value = it }
@@ -443,6 +460,15 @@ object UiPreferences {
     fun setInventoryLayout(context: Context, layout: InventoryLayout) {
         inventoryLayoutFlow.value = layout
         editor(context).putString(INVENTORY_LAYOUT, layout.name).apply()
+    }
+
+    /** Density of the single-panel Spells tab (Standard / Compact). */
+    fun spellsListStyleFlow(): StateFlow<SpellsListStyle> = spellsListStyleFlow.asStateFlow()
+
+    /** Set the Spells tab density and persist. */
+    fun setSpellsListStyle(context: Context, style: SpellsListStyle) {
+        spellsListStyleFlow.value = style
+        editor(context).putString(SPELLS_LIST_STYLE, style.name).apply()
     }
 
     /** Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). */

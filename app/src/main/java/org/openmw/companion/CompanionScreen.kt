@@ -8918,6 +8918,8 @@ private fun SpellSectionHeader(title: String) {
 @Composable
 private fun MagicPanel(state: GameState) {
     val sel = state.selectedSpell
+    val compact by UiPreferences.spellsListStyleFlow().collectAsState()
+    val compactRows = compact == SpellsListStyle.COMPACT
 
     Column(
         modifier = Modifier
@@ -9052,6 +9054,7 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
+                                compact = compactRows,
                                 onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -9068,6 +9071,7 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
+                                compact = compactRows,
                                 onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -9084,6 +9088,7 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = false,
+                                compact = compactRows,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -9104,6 +9109,7 @@ private fun MagicPanel(state: GameState) {
                                 selected = spell.id == sel,
                                 charge = spell.charge,
                                 maxCharge = spell.maxCharge,
+                                compact = compactRows,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -9126,6 +9132,7 @@ private fun SpellRow(
     selected: Boolean = false,
     charge: Int = 0,
     maxCharge: Int = 0,
+    compact: Boolean = false,
     onInfo: (() -> Unit)? = null,
     iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
@@ -9137,16 +9144,34 @@ private fun SpellRow(
     }
     val favs by FavouritesRepository.state.collectAsState()
     val isFav = favs.magic.any { it?.id == spellId }
+    // Compact = smaller icon + shorter rows so more spells fit; everything that scales with the
+    // icon (name font, charge text, the icon-to-name gap) shrinks to match. The compact icon is
+    // ~3/4 of standard (halfway between the first pass's 20dp and the original 40dp).
+    val iconSize = if (compact) 30.dp else 40.dp
+    val rowVerticalPad = if (compact) 6.dp else 11.dp
+    val iconGap = if (compact) 9.dp else 10.dp
+    val nameFont = if (compact) 13.sp else 14.sp
+    val smallLabelFont = if (compact) 9.sp else 10.sp
+    val chargeBarHeight = if (compact) 3.dp else 4.dp
     Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(spellId, it.boundsInRoot()) }) {
         Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // Equipped/selected spell gets the same highlight as a worn item in the
+                    // inventory tab: faint fill + BronzeLight outline (in place of an "EQUIPPED" tag).
+                    .then(
+                        if (selected) Modifier
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(BronzeLight.copy(alpha = 0.06f))
+                            .border(1.dp, BronzeLight, RoundedCornerShape(3.dp))
+                        else Modifier
+                    )
                     .combinedClickable(
                         onClick = onTap,
                         onLongClick = { menuOpen = true; DropdownState.open() }
                     )
-                    .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
+                    .padding(start = 14.dp, end = 10.dp, top = rowVerticalPad, bottom = rowVerticalPad),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Icon box (leftmost). Placeholder empty slot until the icon
@@ -9154,7 +9179,7 @@ private fun SpellRow(
                 // passing iconBitmap non-null at the call site.
                 Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(iconSize)
                         .clip(RoundedCornerShape(2.dp))
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
@@ -9168,7 +9193,7 @@ private fun SpellRow(
                         )
                     }
                 }
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(iconGap))
                 // Text colours mirror the inventory worn/unworn styling: the
                 // equipped spell is the brighter BoneBright (like a worn item)
                 // with an "EQUIPPED" tag, rather than a bronze/bold highlight.
@@ -9180,7 +9205,7 @@ private fun SpellRow(
                 ) {
                     Text(
                         title, color = if (selected) BoneBright else BoneMuted,
-                        fontSize = 14.sp, fontFamily = MwBody,
+                        fontSize = nameFont, fontFamily = MwBody,
                         fontWeight = FontWeight.Normal,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
@@ -9201,13 +9226,13 @@ private fun SpellRow(
                     ) {
                         Text(
                             "$charge/$maxCharge",
-                            color = BronzeLight, fontSize = 10.sp, fontFamily = MwData,
+                            color = BronzeLight, fontSize = smallLabelFont, fontFamily = MwData,
                             maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(4.dp)
+                                .height(chargeBarHeight)
                                 .clip(RoundedCornerShape(1.dp))
                                 .background(Color(0xFF0E0B07))
                                 .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
@@ -9220,16 +9245,6 @@ private fun SpellRow(
                             )
                         }
                     }
-                }
-                if (selected) {
-                    Text(
-                        "EQUIPPED",
-                        color = BronzeLight,
-                        fontSize = 10.sp,
-                        fontFamily = MwDisplay,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.8.sp
-                    )
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
@@ -10660,6 +10675,12 @@ private fun OptionsSettingsList() {
         item { TouchInputRow() }
         item { GameCursorRow() }
 
+        // COMPANION TABS: density/appearance of the bottom-screen companion tabs. Kept in its own
+        // section — deliberately NOT near the "DS Screen Layout" Inventory Layout (Classic/Shelf)
+        // row, which governs a different (two-panel looting/barter) screen.
+        item { OptionsSectionHeader("Companion Tabs") }
+        item { SpellsListStyleRow() }
+
         // Quiet release-version footer (diagnostic/reference; `v` prefix added here).
         item {
             Text(
@@ -10930,6 +10951,33 @@ private fun InventoryLayoutRow() {
                 active = layout == InventoryLayout.SHELF,
                 enabled = true
             ) { if (enabled) UiPreferences.setInventoryLayout(context, InventoryLayout.SHELF) }
+        }
+    }
+}
+
+// Density of the single-panel Spells tab (Standard / Compact). Distinct from InventoryLayoutRow
+// (Classic/Shelf) — a different part of the UI — and lives in the "Companion Tabs" section.
+@Composable
+private fun SpellsListStyleRow() {
+    val context = LocalContext.current
+    val style by UiPreferences.spellsListStyleFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Spells Display", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Standard",
+                active = style == SpellsListStyle.STANDARD,
+                enabled = true
+            ) { UiPreferences.setSpellsListStyle(context, SpellsListStyle.STANDARD) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Compact",
+                active = style == SpellsListStyle.COMPACT,
+                enabled = true
+            ) { UiPreferences.setSpellsListStyle(context, SpellsListStyle.COMPACT) }
         }
     }
 }
