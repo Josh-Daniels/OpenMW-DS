@@ -151,6 +151,26 @@ local function onContainerTransfer(data)
         end
         -- corpse (dead actor): vanilla-exempt, no crime.
     end
+    -- COMPANION: vanilla container-put restrictions (organic / capacity / weight) as an
+    -- authoritative backstop — the player script already gates puts and shows feedback, but a
+    -- stray 'put' event must never bypass the rule. Container-only (Actors have no put gate).
+    -- Mirrors ContainerItemModel::onDropItem: organic OR capacity<=0 OR would-overflow → skip.
+    if data.dir == 'put' and types.Container.objectIsInstance(container) then
+        local organic = false
+        pcall(function() organic = types.Container.record(container).isOrganic end)
+        local capacity = 0
+        pcall(function() capacity = types.Container.getCapacity(container) end)
+        local encumbrance = 0
+        pcall(function() encumbrance = types.Container.getEncumbrance(container) end)
+        local itemWeight = 0
+        pcall(function()
+            local rec = item.type.record(item)
+            itemWeight = (rec and rec.weight) or 0
+        end)
+        if organic or capacity <= 0 or (encumbrance + itemWeight * take) > capacity then
+            return   -- blocked; do not move
+        end
+    end
     pcall(function()
         if want >= total then
             item:moveInto(dest)               -- move the whole stack

@@ -1,0 +1,125 @@
+Companion (bottom-screen barter) — per-instance item identity (Bug 2).
+
+Layered on companion-barter-export.patch. That patch exported both "id" and "sid"
+as the plain record id, so two same-record stacks (e.g. one worn Bonemold Boot +
+one unworn) were indistinguishable, and companionFindIndex resolved a borrow/return
+by record id — returning the FIRST match in the model's sort order, which (ItemStack
+type ascending: Barter < Equipped < Normal) is the EQUIPPED stack. Selling the
+unequipped copy therefore sold the equipped one.
+
+Fix: give every physical stack object a session-stable per-instance handle
+"<refId>#<ordinal>", stored in gCompanionSid keyed on the stable LiveCellRefBase*
+(GM_Barter pauses the sim; staging only re-categorizes an item's ItemStack type
+without changing its object, so the handle survives every borrow/return with NO
+re-export). It is emitted as the "sid" field (BarterItem.stackId on the Kotlin
+side, which the DS now sends in CMP:barter_borrow/return), and companionFindIndex
+matches on it instead of the record id. A split stack's remainder + staged half
+share one object → one sid; the existing borrowed (Type_Barter) filter disambiguates
+them. Populated once per session in companionExportOpen; the map is cleared there so
+ordinals restart per merchant.
+diff --git a/apps/openmw/mwgui/tradewindow.cpp b/apps/openmw/mwgui/tradewindow.cpp
+--- a/apps/openmw/mwgui/tradewindow.cpp
++++ b/apps/openmw/mwgui/tradewindow.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include <algorithm>
+ #include <sstream>
++#include <unordered_map>
+ 
+ #include <components/esm3/loadalch.hpp>
+ #include <components/esm3/loadarmo.hpp>
+@@ -68,6 +69,19 @@
+     int gCompanionLastBarterDisposition = -1;
+     std::string gCompanionLastBarterOffer;
+ 
++    // Companion (Bug 2 — per-instance item identity). Maps each physical stack object
++    // (its stable LiveCellRefBase*) to a session-stable "<refId>#<ordinal>" handle. Two
++    // same-record stacks (e.g. one worn Bonemold Boot + one unworn) get DISTINCT handles,
++    // so the DS UI can select — and the engine can sell/return — the EXACT one the player
++    // tapped (previously both id and sid were the plain record id, so companionFindIndex
++    // always matched the first-sorted stack, which is the equipped one). The key is stable
++    // for the whole barter session: GM_Barter pauses the sim, staging only re-categorizes an
++    // item between Type_Normal/Equipped/Barter WITHOUT changing its object (borrowImpl copies
++    // the ItemStack but keeps the same mBase), and nothing is created/destroyed until the
++    // offer commits — so the handle survives every borrow/return with no re-export needed.
++    // Populated once per session in companionExportOpen; read back by companionFindIndex.
++    std::unordered_map<const void*, std::string> gCompanionSid;
++
+     // JSON-escape a string for a COMPANION_BARTER_* payload. Inventory icon paths
+     // contain backslashes and item names can contain quotes, so both must be escaped.
+     std::string companionJsonEscape(std::string_view s)
+@@ -770,6 +784,10 @@
+         const bool buying = (side == "vendor");
+         const VFS::Manager* const vfs = MWBase::Environment::get().getResourceSystem()->getVFS();
+         const std::size_t itemCount = model->getItemCount();
++        // Per-instance sid (Bug 2): counts occurrences of each refId on THIS side so duplicate
++        // stacks get distinct "<refId>#<ordinal>" handles. Local (per-side) — the command carries
++        // the side, so resolve is side-scoped and vendor/player ordinals never collide.
++        std::unordered_map<std::string, int> refOrdinal;
+         for (std::size_t i = 0; i < itemCount; ++i)
+         {
+             const ItemStack& item = model->getItem(static_cast<int>(i));
+@@ -787,6 +805,18 @@
+             // still comes from getBarterOffer via updateOffer() → COMPANION_BARTER_OFFER.
+             const int unitValue = base.getClass().getValue(base);
+             const std::string refId = base.getCellRef().getRefId().serializeText();
++            // Per-instance handle (Bug 2): reuse this physical stack's already-assigned sid, or mint
++            // a fresh "<refId>#<ordinal>". Keyed on the stable object pointer so it survives later
++            // staging (Type_Normal/Equipped → Type_Barter) with no re-export. See gCompanionSid.
++            const void* const sidKey = base.getBase();
++            std::string sid;
++            if (const auto found = gCompanionSid.find(sidKey); found != gCompanionSid.end())
++                sid = found->second;
++            else
++            {
++                sid = refId + "#" + std::to_string(refOrdinal[refId]++);
++                gCompanionSid[sidKey] = sid;
++            }
+             const std::string name{ base.getClass().getName(base) };
+             std::string icon;
+             const std::string_view rawIcon = base.getClass().getInventoryIcon(base);
+@@ -856,7 +886,7 @@
+             std::ostringstream out;
+             out << "COMPANION_BARTER_ITEM:{\"side\":\"" << side << "\""
+                 << ",\"id\":\"" << companionJsonEscape(refId) << "\""
+-                << ",\"sid\":\"" << companionJsonEscape(refId) << "\""
++                << ",\"sid\":\"" << companionJsonEscape(sid) << "\""
+                 << ",\"name\":\"" << companionJsonEscape(name) << "\""
+                 << ",\"count\":" << stackCount
+                 << ",\"value\":" << unitValue
+@@ -872,6 +902,11 @@
+     {
+         if (!mTradeModel || mPtr.isEmpty())
+             return;
++        // Fresh session: drop the previous merchant's per-instance sid assignments so ordinals
++        // restart. Repopulated below by companionExportModelItems (Bug 2). This is the only
++        // populate point — companionExportOpen runs once per merchant (from setPtr), never
++        // after a borrow/return, so the handles stay stable for the whole session.
++        gCompanionSid.clear();
+         MWWorld::Ptr player = MWMechanics::getPlayer();
+         const int playerGold
+             = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
+@@ -921,7 +956,10 @@
+         Log(Debug::Info) << "COMPANION_BARTER_OFFER:" << payload;
+     }
+ 
+-    int TradeWindow::companionFindIndex(TradeItemModel* model, const std::string& refId, bool borrowed)
++    // `sid` is the DS-supplied PER-INSTANCE handle ("<refId>#<ordinal>", = BarterItem.stackId),
++    // NOT a bare record id — Bug 2. Matching it (via gCompanionSid) instead of the record id is what
++    // makes selling the unequipped copy of a duplicate actually sell THAT copy, not the equipped one.
++    int TradeWindow::companionFindIndex(TradeItemModel* model, const std::string& sid, bool borrowed)
+     {
+         if (!model)
+             return -1;
+@@ -936,7 +974,10 @@
+             const bool isBorrowed = (item.mType == ItemStack::Type_Barter);
+             if (isBorrowed != borrowed)
+                 continue;
+-            if (item.mBase.getCellRef().getRefId().serializeText() == refId)
++            // A split stack's remainder + its staged half share one object → one sid; the
++            // borrowed filter above already picked the right half, so a sid match here is exact.
++            const auto found = gCompanionSid.find(item.mBase.getBase());
++            if (found != gCompanionSid.end() && found->second == sid)
+                 return static_cast<int>(i);
+         }
+         return -1;

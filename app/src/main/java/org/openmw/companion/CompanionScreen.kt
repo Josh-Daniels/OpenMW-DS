@@ -2046,27 +2046,37 @@ object ItemInfoPopupState {
     // true = the trigger came from a SPLIT top-screen grid cell, so the popup must render in the
     // top overlay (LootingTopOverlay/BarterTopOverlay), not the bottom CompanionScreen root.
     var onTopScreen by mutableStateOf(false)
+    // true = the popup was opened via R3 / D-pad (it tracks the controller focus cursor), so the
+    // reactive FollowFocusedInfoPopup may re-point it when focus moves for a non-nav reason (item
+    // taken/sold, list re-sort). A touch long-press opens it PINNED to a specific item (false), and
+    // the reactive path leaves it alone. See FollowFocusedInfoPopup + Bug 1.
+    var focusLinked by mutableStateOf(false)
     val isOpen get() = targetId != null
 
-    fun open(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
+    fun open(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false,
+             focusLinked: Boolean = false) {
         if (id.isBlank()) return
         targetId = id
         this.name = name
         enchant = ench
         anchor = null
         onTopScreen = onTop
+        this.focusLinked = focusLinked
         GameStateRepository.dismissItemInfo()      // clear stale rows so the previous item's don't flash
         if (isSpell) CompanionActions.requestSpellInfo(id) else CompanionActions.requestItemInfo(id)
     }
 
-    /** Long-press / R3 on the SAME item toggles the popup; a different item re-targets. */
+    /** R3 / D-pad Info on the SAME item toggles the popup; a different item re-targets. Always
+     *  focus-linked — the only callers are the nav collectors (the focus cursor drives it). */
     fun toggle(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
-        if (targetId == id) close() else open(id, name, ench, isSpell, onTop)
+        if (targetId == id) close() else open(id, name, ench, isSpell, onTop, focusLinked = true)
     }
 
-    /** D-pad focus moved while open → follow to the newly focused item/spell (don't dismiss). */
+    /** Focus moved while open → follow to the newly focused item/spell (don't dismiss). Called BOTH
+     *  synchronously from the nav collectors (D-pad moves) AND reactively (FollowFocusedInfoPopup)
+     *  when focus changes for a non-nav reason; either way the popup stays focus-linked. */
     fun follow(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
-        if (isOpen && id != targetId) open(id, name, ench, isSpell = isSpell, onTop = onTop)
+        if (isOpen && id != targetId) open(id, name, ench, isSpell = isSpell, onTop = onTop, focusLinked = true)
     }
 
     fun close() {
@@ -2075,12 +2085,41 @@ object ItemInfoPopupState {
         enchant = null
         anchor = null
         onTopScreen = false
+        focusLinked = false
         GameStateRepository.dismissItemInfo()
     }
 
     /** A row reports its current bounds; only the active target's anchor is tracked (survives scroll). */
     fun reportAnchor(id: String, r: Rect) {
         if (targetId == id) anchor = r
+    }
+}
+
+/** The item currently under the controller focus cursor, projected to what the info popup needs
+ *  (record id for CMP:info + the local name/enchant). Built at the FollowFocusedInfoPopup call site
+ *  from the overlay's live (post-mutation) list, so a change here == focus effectively moved. */
+private class InfoTarget(val id: String, val name: String, val enchant: ItemEnchant?)
+
+/**
+ * Bug-1 fix — keep the item info popup pointed at the CURRENTLY focused item even when focus
+ * changes for a NON-nav reason: an item vanishing after a take/sell (the list shrinks and the fixed
+ * focus index now points at a different item) or a re-sort moving it (barter's selected-first
+ * float). The nav collectors already follow on D-pad moves — synchronously, re-reporting the anchor
+ * before layout — so this reactive path is the SECOND mechanism, covering every other cause; both
+ * share ItemInfoPopupState.follow(). One shared helper for looting + barter (classic + shelf).
+ *
+ * Acts only on a FOCUS-LINKED popup (opened via R3 / D-pad, i.e. tracking the focus cursor). A popup
+ * opened by a touch long-press is pinned to its specific item and left untouched. When [focused]
+ * resolves to null (the focused side emptied), the popup CLOSES rather than showing stale content.
+ * Keyed on the focused item's record id, so it re-runs whenever the resolved focus target changes.
+ */
+@Composable
+private fun FollowFocusedInfoPopup(focused: InfoTarget?, onTop: Boolean) {
+    LaunchedEffect(focused?.id) {
+        if (!ItemInfoPopupState.isOpen || !ItemInfoPopupState.focusLinked) return@LaunchedEffect
+        val f = focused
+        if (f == null) ItemInfoPopupState.close()
+        else ItemInfoPopupState.follow(f.id, f.name, f.enchant, onTop = onTop)
     }
 }
 
@@ -3033,6 +3072,15 @@ private fun ShelfDualPanel(
         onSlider = onSlider,
     )
 
+    // Bug 1: keep a focus-linked info popup on the focused shelf cell when a take/sell removes an
+    // item or a re-sort moves it under the fixed focus (side/row/item). Same reactive mechanism the
+    // classic grids use; the shelf nav collector still follows synchronously on D-pad moves.
+    run {
+        val rows = if (focus.side == 0) playerRows else otherRows
+        val focusedItem = rows.getOrNull(focus.row)?.items?.getOrNull(focus.item)
+        FollowFocusedInfoPopup(focusedItem?.let { InfoTarget(it.id, it.name, it.enchant) }, onTop = infoOnTop)
+    }
+
     Row(modifier.fillMaxWidth()) {
         ShelfColumn(
             headerLeft = playerHeaderLeft,
@@ -3100,6 +3148,49 @@ private fun BarterItem.toShelfItem(onTap: () -> Unit): ShelfItem =
         selectedCount = selectedCount,
     )
 
+/** Client-side mirror of vanilla `ContainerItemModel::onDropItem` (PUT direction ONLY): returns the
+ *  vanilla GMST message to show — blocking the put — or null to allow. Only genuine containers are
+ *  gated (`capacity < 0` sentinel = corpse/NPC → always allowed). [containerWeight] = the container's
+ *  current contents weight (summed from the optimistic list). Order + messages mirror the engine and
+ *  the Lua authoritative guard exactly: organic → sContentsMessage2; capacity ≤ 0 → sContentsMessage3;
+ *  contents + incoming weight > capacity → sContentsMessage3. Take is NEVER gated by this. */
+private fun containerPutBlock(
+    session: ContainerSession,
+    containerWeight: Float,
+    item: InventoryItem,
+    count: Int,
+    msgs: LogParser.PutMessages
+): String? {
+    if (session.isOrganic) return msgs.organic.ifBlank { "This is an organic container and cannot hold items." }
+    if (session.capacity < 0f) return null                          // corpse / NPC → unrestricted
+    val full = { msgs.full.ifBlank { "The container is full." } }
+    if (session.capacity <= 0f) return full()                       // no capacity
+    if (containerWeight + item.weight * count > session.capacity) return full()  // too heavy
+    return null
+}
+
+/** Brief auto-dismissing restriction banner (top-centre, non-blocking) — the shared shape used by
+ *  barter's "vendor won't buy that" and looting's container-put blocks. Renders nothing when null. */
+@Composable
+private fun RestrictionBanner(message: String?) {
+    message?.let { msg ->
+        Box(
+            modifier = Modifier.fillMaxSize().padding(top = 24.dp),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Text(
+                msg,
+                color = BoneBright, fontSize = 13.sp, fontFamily = MwBody, textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xF01A1206))
+                    .border(1.dp, BarterRed, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+    }
+}
+
 /**
  * Two-panel looting/pickpocketing overlay: the player's inventory on the left,
  * the container/corpse/NPC's contents on the right. Tapping a player item puts
@@ -3146,6 +3237,18 @@ private fun LootingOverlay(
     var containerItems by remember { mutableStateOf(session.items) }
     var playerItems by remember { mutableStateOf(playerInventory) }
 
+    // Container-put restriction banner (organic / capacity / weight — vanilla parity). putMsgs = the
+    // vanilla GMST strings; putBlocked = the Lua backstop signal (fires only if a blocked put ever
+    // slips past the client-side gate in put() below).
+    val putMsgs by GameStateRepository.putMessages.collectAsState()
+    val putBlocked by GameStateRepository.putBlocked.collectAsState()
+    var restrictionBanner by remember { mutableStateOf<String?>(null) }
+    var bannerNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(bannerNonce) { if (restrictionBanner != null) { delay(2200); restrictionBanner = null } }
+    LaunchedEffect(putBlocked) {
+        putBlocked?.let { restrictionBanner = it.first; bannerNonce++; GameStateRepository.clearPutBlocked() }
+    }
+
     val playerGold = playerItems.firstOrNull { it.id.equals("gold_001", ignoreCase = true) }?.count ?: 0
     // Optimistic encumbrance: anchor on the real value at open (playerEncumbrance), then add/subtract
     // moved item weight per take/put/takeAll so the header updates live while GM_Container has the
@@ -3164,6 +3267,11 @@ private fun LootingOverlay(
         CompanionActions.containerTake(item.stackId.ifEmpty { item.id }, n)
     }
     fun put(item: InventoryItem, n: Int) {
+        // Vanilla container-put gate (organic / capacity / weight): block + banner, no move/command.
+        val containerWeight = containerItems.sumOf { it.weight.toDouble() * it.count }.toFloat()
+        containerPutBlock(session, containerWeight, item, n, putMsgs)?.let {
+            restrictionBanner = it; bannerNonce++; return
+        }
         val (p, c) = moveOptimistic(playerItems, containerItems, item, n)
         playerItems = p; containerItems = c
         encDelta -= item.weight * n
@@ -3208,6 +3316,14 @@ private fun LootingOverlay(
         onTakeAll = { takeAll() },
         onDispose = { CompanionActions.containerDispose() },
     )
+
+    // Bug 1: keep a focus-linked info popup on the CURRENTLY focused item when a take/put shrinks
+    // the list under the fixed focus index (the nav collector only follows on D-pad moves). Classic
+    // nav only — shelf mode runs its own follow inside ShelfDualPanel.
+    if (!shelfMode) {
+        val focusedItem = focus?.let { (if (it.side == 0) playerSorted else containerSorted).getOrNull(it.index) }
+        FollowFocusedInfoPopup(focusedItem?.let { InfoTarget(it.id, it.displayName(), it.enchant) }, onTop = false)
+    }
 
     Box(
         modifier = Modifier
@@ -3354,6 +3470,9 @@ private fun LootingOverlay(
                     .pointerInput(Unit) { detectTapGestures { DropdownState.closeAll() } }
             )
         }
+
+        // Vanilla container-put restriction feedback (organic / full / too heavy).
+        RestrictionBanner(restrictionBanner)
     }
 }
 
@@ -3763,6 +3882,17 @@ fun LootingTopOverlay() {
         else action(1)
     }
 
+    // Container-put restriction banner (organic / capacity / weight — vanilla parity), rendered on
+    // THIS top screen. Mirrors the bottom overlay.
+    val putMsgs by GameStateRepository.putMessages.collectAsState()
+    val putBlocked by GameStateRepository.putBlocked.collectAsState()
+    var restrictionBanner by remember { mutableStateOf<String?>(null) }
+    var bannerNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(bannerNonce) { if (restrictionBanner != null) { delay(2200); restrictionBanner = null } }
+    LaunchedEffect(putBlocked) {
+        putBlocked?.let { restrictionBanner = it.first; bannerNonce++; GameStateRepository.clearPutBlocked() }
+    }
+
     fun take(item: InventoryItem, n: Int) {
         val (c, p) = moveOptimistic(containerItems, playerItems, item, n)
         containerItems = c; playerItems = p
@@ -3770,6 +3900,11 @@ fun LootingTopOverlay() {
         CompanionActions.containerTake(item.stackId.ifEmpty { item.id }, n)
     }
     fun put(item: InventoryItem, n: Int) {
+        // Vanilla container-put gate (organic / capacity / weight): block + banner, no move/command.
+        val containerWeight = containerItems.sumOf { it.weight.toDouble() * it.count }.toFloat()
+        containerPutBlock(session, containerWeight, item, n, putMsgs)?.let {
+            restrictionBanner = it; bannerNonce++; return
+        }
         val (p, c) = moveOptimistic(playerItems, containerItems, item, n)
         playerItems = p; containerItems = c
         encDelta -= item.weight * n
@@ -3811,6 +3946,13 @@ fun LootingTopOverlay() {
             else containerCat = cycleLootCat(containerItems, containerCat, dir)
         },
     )
+
+    // Bug 1: keep a focus-linked info popup (rendered on THIS top screen) on the focused item when a
+    // take/put shrinks the list under the fixed focus index. Classic nav only (shelf runs its own).
+    if (!shelfMode) {
+        val focusedItem = focus?.let { (if (it.side == 0) playerVisible else containerVisible).getOrNull(it.index) }
+        FollowFocusedInfoPopup(focusedItem?.let { InfoTarget(it.id, it.displayName(), it.enchant) }, onTop = true)
+    }
 
     Box(
         modifier = Modifier
@@ -3905,6 +4047,9 @@ fun LootingTopOverlay() {
         if (ItemInfoPopupState.isOpen && ItemInfoPopupState.onTopScreen) {
             ItemInfoPopupHost()
         }
+
+        // Vanilla container-put restriction feedback (organic / full / too heavy).
+        RestrictionBanner(restrictionBanner)
     }
 }
 
@@ -5631,20 +5776,27 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
         else -> "Offer"
     }
 
-    fun mutate(side: BarterSide, id: String, transform: (BarterItem) -> BarterItem) {
-        if (side == BarterSide.VENDOR) vendorItems = vendorItems.map { if (it.id == id) transform(it) else it }
-        else playerItems = playerItems.map { if (it.id == id) transform(it) else it }
+    // Bug 2: match/transfer by the PER-INSTANCE stackId, NOT the record id. Two same-record stacks
+    // (e.g. one worn Bonemold Boot + one unworn) share id but have distinct stackIds, so keying by
+    // id marked BOTH selected and let the engine sell the wrong (equipped) copy. stackId now carries
+    // a genuine per-instance handle end-to-end (see companion-barter-export.patch). ifEmpty{id} keeps
+    // an old engine (no sid) working, degrading to the previous by-record behaviour.
+    fun barterKey(it: BarterItem) = it.stackId.ifEmpty { it.id }
+    fun mutate(side: BarterSide, sid: String, transform: (BarterItem) -> BarterItem) {
+        if (side == BarterSide.VENDOR) vendorItems = vendorItems.map { if (barterKey(it) == sid) transform(it) else it }
+        else playerItems = playerItems.map { if (barterKey(it) == sid) transform(it) else it }
     }
 
     fun toggle(item: BarterItem) {
+        val sid = barterKey(item)
         if (item.isSelected) {
-            mutate(item.side, item.id) { it.copy(isSelected = false, selectedCount = 0) }
-            CompanionActions.barterReturn(item.side, item.id, item.selectedCount)
+            mutate(item.side, sid) { it.copy(isSelected = false, selectedCount = 0) }
+            CompanionActions.barterReturn(item.side, sid, item.selectedCount)
         } else {
             // Stack > 1 → ask "how many?" via the shared QuantitySelector (20f, above this).
             QuantityRequestState.requestOrRun(item.displayName(), item.count, "Select") { n ->
-                mutate(item.side, item.id) { it.copy(isSelected = true, selectedCount = n) }
-                CompanionActions.barterBorrow(item.side, item.id, n)
+                mutate(item.side, sid) { it.copy(isSelected = true, selectedCount = n) }
+                CompanionActions.barterBorrow(item.side, sid, n)
             }
         }
     }
@@ -5698,6 +5850,13 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
             else vendorCat = cycleBarterCat(vendorItems, vendorCat, dir)
         },
     )
+
+    // Bug 1: keep a focus-linked info popup on the focused item when selecting an item re-sorts the
+    // list (selected-first float) under the fixed focus index. Classic nav only (shelf runs its own).
+    if (!shelfMode) {
+        val focusedItem = focus?.let { (if (it.side == 0) visiblePlayer else visibleVendor).getOrNull(it.index) }
+        FollowFocusedInfoPopup(focusedItem?.let { InfoTarget(it.id, it.displayName(), it.enchant) }, onTop = false)
+    }
 
     Box(
         modifier = Modifier
@@ -6081,21 +6240,25 @@ fun BarterTopOverlay() {
         }
     }
 
+    // Bug 2: identify a stack by its PER-INSTANCE stackId (not the record id), so two same-record
+    // stacks (one worn, one not) are distinct entries and the tapped one is the one that moves +
+    // gets sold. ifEmpty{id} keeps an old engine (no sid) working. See companion-barter-export.patch.
+    fun barterKey(it: BarterItem) = it.stackId.ifEmpty { it.id }
     // Move `n` of `item` from `source` column to `dest` column, setting the destination copy's
-    // staged flag. Reduces/removes the matched entry in source (matched by id+side+isSelected) and
-    // merges into (or appends) a same-(id, side, selected) entry in dest — so moving 1 of a stack
-    // of 5 leaves a ×4 remainder behind. Mirrors looting's moveOptimistic for BarterItem. Returns
-    // (newSource, newDest).
+    // staged flag. Reduces/removes the matched entry in source (matched by stackId+side+isSelected)
+    // and merges into (or appends) a same-(stackId, side, selected) entry in dest — so moving 1 of a
+    // stack of 5 leaves a ×4 remainder behind. Mirrors looting's moveOptimistic for BarterItem.
+    // Returns (newSource, newDest).
     fun moveBarter(
         source: List<BarterItem>, dest: List<BarterItem>, item: BarterItem, n: Int, selected: Boolean
     ): Pair<List<BarterItem>, List<BarterItem>> {
         val moved = n.coerceIn(1, item.count)
         val newSource = source.mapNotNull { e ->
-            if (e.id == item.id && e.side == item.side && e.isSelected == item.isSelected) {
+            if (barterKey(e) == barterKey(item) && e.side == item.side && e.isSelected == item.isSelected) {
                 if (e.count > moved) e.copy(count = e.count - moved) else null
             } else e
         }
-        val idx = dest.indexOfFirst { it.id == item.id && it.side == item.side && it.isSelected == selected }
+        val idx = dest.indexOfFirst { barterKey(it) == barterKey(item) && it.side == item.side && it.isSelected == selected }
         val newDest = if (idx >= 0) {
             dest.mapIndexed { i, e ->
                 if (i == idx) e.copy(count = e.count + moved, selectedCount = if (selected) e.count + moved else 0) else e
@@ -6117,7 +6280,7 @@ fun BarterTopOverlay() {
             val (s, d) = moveBarter(vendorCol, playerCol, item, n, selected = true)
             vendorCol = s; playerCol = d
         }
-        CompanionActions.barterBorrow(item.side, item.id, n.coerceIn(1, item.count))
+        CompanionActions.barterBorrow(item.side, barterKey(item), n.coerceIn(1, item.count))
     }
 
     // Un-stage: move a staged item back to its HOME column (whole amount) and return it to the
@@ -6132,7 +6295,7 @@ fun BarterTopOverlay() {
             val (s, d) = moveBarter(playerCol, vendorCol, item, amount, selected = false)
             playerCol = s; vendorCol = d
         }
-        CompanionActions.barterReturn(item.side, item.id, amount)
+        CompanionActions.barterReturn(item.side, barterKey(item), amount)
     }
 
     fun toggle(item: BarterItem) {
@@ -6167,6 +6330,13 @@ fun BarterTopOverlay() {
             else vendorCat = cycleBarterCat(vendorCol, vendorCat, dir)
         },
     )
+
+    // Bug 1: keep a focus-linked info popup (rendered on THIS top screen) on the focused item when
+    // selecting re-sorts the list under the fixed focus index. Classic nav only (shelf runs its own).
+    if (!shelfMode) {
+        val focusedItem = focus?.let { (if (it.side == 0) visiblePlayer else visibleVendor).getOrNull(it.index) }
+        FollowFocusedInfoPopup(focusedItem?.let { InfoTarget(it.id, it.displayName(), it.enchant) }, onTop = true)
+    }
 
     Box(
         modifier = Modifier

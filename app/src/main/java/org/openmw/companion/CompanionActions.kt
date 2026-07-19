@@ -77,14 +77,16 @@ object CompanionActions {
 
     // Barter (bottom-screen) — handled NATIVELY in drainCompanionCommands, NOT Lua (the
     // merchant Ptr, gold pool, mercantile-adjusted prices and haggle all live in the C++
-    // TradeWindow). borrow/return wire format is "<count>|<side>|<refId>": count leads and
-    // refId is the tail because refIds contain spaces (but no '|'). The engine re-exports
-    // COMPANION_BARTER_OFFER after each, reconciling the authoritative balance.
-    fun barterBorrow(side: BarterSide, refId: String, count: Int = 1) =
-        runCommand("CMP:barter_borrow $count|${side.wire}|$refId")
+    // TradeWindow). borrow/return wire format is "<count>|<side>|<sid>": count leads and the
+    // PER-INSTANCE sid (BarterItem.stackId — "<refId>#<ordinal>", may contain spaces but no '|')
+    // is the tail. sid (not the bare record id) is what disambiguates two same-record stacks, e.g.
+    // a worn vs. unworn copy (Bug 2). The engine re-exports COMPANION_BARTER_OFFER after each,
+    // reconciling the authoritative balance.
+    fun barterBorrow(side: BarterSide, sid: String, count: Int = 1) =
+        runCommand("CMP:barter_borrow $count|${side.wire}|$sid")
 
-    fun barterReturn(side: BarterSide, refId: String, count: Int = 1) =
-        runCommand("CMP:barter_return $count|${side.wire}|$refId")
+    fun barterReturn(side: BarterSide, sid: String, count: Int = 1) =
+        runCommand("CMP:barter_return $count|${side.wire}|$sid")
 
     // Manual extra-gold offset (the +/- gold row); may be negative.
     fun barterSetExtraGold(extra: Int) = runCommand("CMP:barter_gold $extra")

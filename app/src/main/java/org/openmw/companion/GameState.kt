@@ -124,7 +124,15 @@ data class ContainerSession(
     val isPickpocket: Boolean = false,
     val items: List<InventoryItem> = emptyList(),
     /** True while a session is active; the overlay AND-gates this with Hide UI. */
-    val isVisible: Boolean = true
+    val isVisible: Boolean = true,
+    /** Vanilla container-put restrictions (mirror `ContainerItemModel::onDropItem`), gating only
+     *  the PUT direction and only for genuine ESM::Container targets. `isOrganic` = the record's
+     *  Organic flag (no items may be placed). `capacity` = the container's weight limit
+     *  (`mBase.mWeight`); **-1 = no limit / not a container** (corpse/NPC — puts unrestricted).
+     *  A put is blocked when organic, or capacity in [0..) and current-contents-weight +
+     *  incoming-weight would exceed it. Added Jul 2026. */
+    val isOrganic: Boolean = false,
+    val capacity: Float = -1f
 )
 
 /** Which side of a barter transaction an item belongs to. */

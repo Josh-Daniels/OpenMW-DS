@@ -916,6 +916,45 @@ local function containerDisplayName(obj)
     return tostring(obj.recordId)
 end
 
+-- Replicate vanilla's ContainerItemModel::onDropItem gate for PUTTING an item INTO a
+-- container: block (with the matching vanilla GMST message) when the target is an ORGANIC
+-- container, has no capacity, or would overflow its weight capacity. Order + messages mirror
+-- the engine exactly: organic -> sContentsMessage2; capacity <= 0 -> sContentsMessage3;
+-- current-contents-weight + incoming-weight > capacity -> sContentsMessage3. Only genuine
+-- ESM::Container targets are gated — corpses/living NPCs (Actors) have NO put restriction
+-- (vanilla `return true`s early for non-containers). capacity = the container record weight
+-- limit (types.Container.getCapacity = mBase.mWeight); encumbrance = current contents weight
+-- (types.Container.getEncumbrance = store weight). Returns the resolved message to show +
+-- block, or nil to allow. This is the authoritative Lua backstop; Kotlin also gates
+-- client-side (so no command normally reaches here when blocked). Take is never gated.
+local function containerPutBlockMessage(item, count)
+    if not (containerObj and types.Container.objectIsInstance(containerObj)) then
+        return nil                                   -- corpse / NPC / none → puts unrestricted
+    end
+    local organic = false
+    pcall(function() organic = types.Container.record(containerObj).isOrganic end)
+    if organic then return core.getGMST('sContentsMessage2') end
+    local capacity = 0
+    pcall(function() capacity = types.Container.getCapacity(containerObj) end)
+    if capacity <= 0 then return core.getGMST('sContentsMessage3') end
+    local encumbrance = 0
+    pcall(function() encumbrance = types.Container.getEncumbrance(containerObj) end)
+    local itemWeight = 0
+    pcall(function()
+        local rec = item.type.record(item)
+        itemWeight = (rec and rec.weight) or 0
+    end)
+    if encumbrance + itemWeight * (count or 1) > capacity then
+        return core.getGMST('sContentsMessage3')     -- too heavy (vanilla nextafter slack ≈ strict >)
+    end
+    return nil
+end
+
+-- One-time export of the two vanilla GMST strings the Kotlin banner needs for the client-side
+-- put gate (organic = sContentsMessage2, capacity/weight = sContentsMessage3). Static, so
+-- emit once per session (first container open), guarded by this flag.
+local companionGmstExported = false
+
 -- Emit the container's item list. announce=true prints COMPANION_CONTAINER_OPEN first
 -- (new session header: name + isCorpse). Re-emits (announce=false) are change-detected
 -- against the last batch so an unchanged container prints nothing. Streamed one item
@@ -1001,9 +1040,23 @@ local function exportContainer(force)
     -- be corrupted by a stale/partial buffer left behind if an END was ever dropped.
     -- `force` now only bypasses change-detection (the first open); refreshes remain
     -- change-detected so an unchanged container still prints nothing.
-    emit(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s,"pickpocket":%s}',
+    -- One-time: ship the vanilla GMST strings the Kotlin put-gate banner uses (static).
+    if not companionGmstExported then
+        companionGmstExported = true
+        emit(string.format('COMPANION_GMST:{"putOrganic":"%s","putFull":"%s"}',
+            jsonEscape(core.getGMST('sContentsMessage2')), jsonEscape(core.getGMST('sContentsMessage3'))))
+    end
+    -- Put-restriction data for the client-side gate: organic flag + weight capacity (mBase.mWeight).
+    -- Container-only (Actors have no put restriction) → organic=false, capacity=-1 (sentinel = no
+    -- limit) for corpses/NPCs so the Kotlin gate skips them.
+    local organic, capacity = false, -1
+    if types.Container.objectIsInstance(containerObj) then
+        pcall(function() organic = types.Container.record(containerObj).isOrganic end)
+        pcall(function() capacity = types.Container.getCapacity(containerObj) end)
+    end
+    emit(string.format('COMPANION_CONTAINER_OPEN:{"name":"%s","isCorpse":%s,"pickpocket":%s,"organic":%s,"capacity":%s}',
         jsonEscape(containerDisplayName(containerObj)), tostring(containerIsCorpse),
-        tostring(containerIsPickpocket)))
+        tostring(containerIsPickpocket), tostring(organic), tostring(capacity)))
     for _, item in ipairs(shown) do
         emit('COMPANION_CONTAINER_ITEM:' .. itemJson(item))
     end
@@ -1885,17 +1938,24 @@ local function dispatchCommand(command)
     elseif action == "container_put" then
         local sid, countStr = string.match(arg, "^(.+)|(%d+)$")
         if sid and containerObj and not containerCloseAfterRefresh then
-            core.sendGlobalEvent('CompanionContainerTransfer',
-                { container = containerObj, player = self.object, sid = sid,
-                  count = tonumber(countStr), dir = 'put' })
-            scheduleContainerRefresh()
-            -- Put into the container: the item is in the player's own inventory. Vanilla plays the
-            -- up ("pick up") sound for a container transfer in either direction, so match take.
-            do
-                local putItem = nil
-                for _, i in ipairs(types.Actor.inventory(self):getAll()) do
-                    if tostring(i.id) == sid then putItem = i; break end
-                end
+            -- The item is in the player's own inventory (needed for the sound AND the capacity check).
+            local putItem = nil
+            for _, i in ipairs(types.Actor.inventory(self):getAll()) do
+                if tostring(i.id) == sid then putItem = i; break end
+            end
+            local wantCount = tonumber(countStr) or 1
+            -- Vanilla container-put gate (organic / capacity / weight) — authoritative backstop.
+            -- Kotlin gates client-side too (so normally no blocked put reaches here); if one does,
+            -- emit the vanilla message for the banner and DO NOT transfer. Take is never gated.
+            local blockMsg = putItem and containerPutBlockMessage(putItem, wantCount) or nil
+            if blockMsg then
+                emit('COMPANION_PUT_BLOCKED:' .. blockMsg)
+            else
+                core.sendGlobalEvent('CompanionContainerTransfer',
+                    { container = containerObj, player = self.object, sid = sid,
+                      count = wantCount, dir = 'put' })
+                scheduleContainerRefresh()
+                -- Vanilla plays the up ("pick up") sound for a container transfer in either direction.
                 playItemSound(putItem, true)
             end
             emit("COMPANION_DEBUG: container put " .. sid .. " x" .. countStr)

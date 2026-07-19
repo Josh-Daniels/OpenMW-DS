@@ -28,6 +28,9 @@ object LogParser {
     const val P_CONTAINER_ITEM = "COMPANION_CONTAINER_ITEM:"
     const val P_CONTAINER_END = "COMPANION_CONTAINER_END"
     const val P_CONTAINER_CLOSED = "COMPANION_CONTAINER_CLOSED"
+    // One-shot vanilla put-restriction GMST strings; + the Lua backstop's "put blocked" signal.
+    const val P_GMST = "COMPANION_GMST:"
+    const val P_PUT_BLOCKED = "COMPANION_PUT_BLOCKED:"
 
     // Barter session (native GM_Barter TradeWindow, streamed one small line each).
     // OPEN{vendor,vendorGold,playerGold} → ITEM{side,id,sid,name,count,value,cat,icon,worn}*
@@ -378,16 +381,33 @@ object LogParser {
         null
     }
 
-    /** Header from a COMPANION_CONTAINER_OPEN line (name + corpse/pickpocket flags). */
-    data class ContainerHeader(val name: String, val isCorpse: Boolean, val isPickpocket: Boolean)
+    /** Header from a COMPANION_CONTAINER_OPEN line (name + corpse/pickpocket flags + put-gate data).
+     *  `capacity` = -1 (default) means no limit / not a container (older Lua omits it). */
+    data class ContainerHeader(
+        val name: String, val isCorpse: Boolean, val isPickpocket: Boolean,
+        val isOrganic: Boolean = false, val capacity: Float = -1f
+    )
 
     fun parseContainerOpen(json: String): ContainerHeader? = try {
         val o = JSONObject(json)
         ContainerHeader(
             o.optString("name", ""),
             o.optBoolean("isCorpse", false),
-            o.optBoolean("pickpocket", false)
+            o.optBoolean("pickpocket", false),
+            o.optBoolean("organic", false),
+            o.optDouble("capacity", -1.0).toFloat()
         )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** The two vanilla put-restriction GMST strings (COMPANION_GMST, one-shot): `putOrganic` =
+     *  sContentsMessage2, `putFull` = sContentsMessage3. Backs the loot put-blocked banner text. */
+    data class PutMessages(val organic: String, val full: String)
+
+    fun parseGmst(json: String): PutMessages? = try {
+        val o = JSONObject(json)
+        PutMessages(o.optString("putOrganic", ""), o.optString("putFull", ""))
     } catch (e: Exception) {
         null
     }

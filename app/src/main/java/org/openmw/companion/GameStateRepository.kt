@@ -269,6 +269,19 @@ object GameStateRepository {
     private var containerName: String = ""
     private var containerIsCorpse: Boolean = false
     private var containerIsPickpocket: Boolean = false
+    private var containerIsOrganic: Boolean = false
+    private var containerCapacity: Float = -1f
+
+    // Vanilla put-restriction GMST strings (COMPANION_GMST, one-shot) for the loot put-blocked
+    // banner; both empty until the first container opens.
+    private val _putMessages = MutableStateFlow(LogParser.PutMessages("", ""))
+    val putMessages: StateFlow<LogParser.PutMessages> = _putMessages.asStateFlow()
+    // Backstop signal: the Lua guard blocked a put that slipped past the client-side gate. Text +
+    // monotonic seq so an identical repeat re-fires the banner (a plain StateFlow would dedupe).
+    private var putBlockedSeq = 0L
+    private val _putBlocked = MutableStateFlow<Pair<String, Long>?>(null)
+    val putBlocked: StateFlow<Pair<String, Long>?> = _putBlocked.asStateFlow()
+    fun clearPutBlocked() { _putBlocked.value = null }
 
     // --- Barter session (COMPANION_BARTER_*) ---
     // null = not bartering. OPEN sets the header + starts vendor/player item buffers;
@@ -652,13 +665,16 @@ object GameStateRepository {
                     containerName = it.name
                     containerIsCorpse = it.isCorpse
                     containerIsPickpocket = it.isPickpocket
+                    containerIsOrganic = it.isOrganic
+                    containerCapacity = it.capacity
                 }
                 containerBuffer = mutableListOf()
             }
             trimmed.contains(LogParser.P_CONTAINER_END) -> {
                 val buf = containerBuffer ?: mutableListOf()
                 _containerSession.value = ContainerSession(
-                    containerName, containerIsCorpse, containerIsPickpocket, buf.toList(), isVisible = true
+                    containerName, containerIsCorpse, containerIsPickpocket, buf.toList(),
+                    isVisible = true, isOrganic = containerIsOrganic, capacity = containerCapacity
                 )
                 containerBuffer = null
             }
@@ -667,7 +683,17 @@ object GameStateRepository {
                 containerName = ""
                 containerIsCorpse = false
                 containerIsPickpocket = false
+                containerIsOrganic = false
+                containerCapacity = -1f
                 _containerSession.value = null
+            }
+            trimmed.contains(LogParser.P_GMST) -> {
+                val idx = trimmed.indexOf(LogParser.P_GMST) + LogParser.P_GMST.length
+                LogParser.parseGmst(trimmed.substring(idx).trim())?.let { _putMessages.value = it }
+            }
+            trimmed.contains(LogParser.P_PUT_BLOCKED) -> {
+                val msg = trimmed.substring(trimmed.indexOf(LogParser.P_PUT_BLOCKED) + LogParser.P_PUT_BLOCKED.length).trim()
+                if (msg.isNotEmpty()) _putBlocked.value = msg to putBlockedSeq++
             }
             // Native text-input focus. CLOSED checked before OPEN (neither string contains
             // the other, but keep the dismiss path first). OPEN carries the field's current

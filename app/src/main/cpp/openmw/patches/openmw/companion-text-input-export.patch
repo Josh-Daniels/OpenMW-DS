@@ -1,14 +1,15 @@
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
-@@ -9,6 +9,7 @@
+@@ -9,6 +9,8 @@
  #include <osgViewer/Viewer>
  
  #include <MyGUI_ClipboardManager.h>
 +#include <MyGUI_EditBox.h>
++#include <components/widgets/numericeditbox.hpp>
  #include <MyGUI_FactoryManager.h>
  #include <MyGUI_InputManager.h>
  #include <MyGUI_LanguageManager.h>
-@@ -1872,6 +1873,44 @@
+@@ -1872,6 +1874,44 @@
          onKeyFocusChanged(widget);
      }
  
@@ -53,7 +54,7 @@
      void WindowManager::onKeyFocusChanged(MyGUI::Widget* widget)
      {
          bool capturesInput = false;
-@@ -1884,6 +1923,31 @@
+@@ -1884,6 +1924,38 @@
                  capturesInput = widget->castType<MyGUI::EditBox>(false);
          }
  
@@ -70,6 +71,13 @@
 +            // controller hints, …) are marked read-only/static — not real input fields.
 +            // Don't treat them as text input, else tapping one opens the DS keyboard.
 +            if (edit && (edit->getEditReadOnly() || edit->getEditStatic()))
++                edit = nullptr;
++            // COMPANION: numeric spinner fields (CountDialog stack count, barter running-total,
++            // alchemy brew count) are NumericEditBox — the DS keyboard is non-functional for them
++            // (setCaption() never fires eventEditTextChange, so the value/slider never sync, and the
++            // dialogs read the slider at confirm anyway). Suppress the keyboard; the slider + the
++            // controller D-pad remain the working controls. Genuine text fields are plain EditBox.
++            if (edit && edit->castType<Gui::NumericEditBox>(false))
 +                edit = nullptr;
 +            if (edit != gCompanionTextInput)
 +            {
