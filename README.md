@@ -48,10 +48,17 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
     - https://www.gog.com/en/game/the_elder_scrolls_iii_morrowind_goty_edition
 
 ---
-## Installation (updated for v0.7.5 or newer)
+## Installation (updated for v0.7.5 or higher)
 You will first need a copy of Morrowind on the device. Best downloaded from a PC then transferred to the Thor. You will need the entire Morrowind folder, not just the Data Files folder.
 
-### Upgrading from Alpha3 or older OpenMW-DS versions (v.0.7.0 or older).
+### Upgrading from OpenMW-DS versions 0.7.5 or newer.
+- Download the APK from Releases page and install the app. 
+- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again. If still not showing, follow the first time install guide below.
+- No need to copy your alpha3 saves or settings if the option is there, unless those saves are newer than your OpenMW-DS saves.
+- You can now run the game by pressing the OpenMW-DS icon on the right.
+
+
+### Upgrading from OpenMW-DS versions .0.7.0 or older, or Alpha 3.
 - Download the APK from Releases page and install the app. 
 - The app will recognise you have had a previous version of this app, or alpha3 installed and offer to copy your saves.
   - Copy your saves if you like.
