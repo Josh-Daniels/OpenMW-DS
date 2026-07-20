@@ -48,7 +48,7 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
     - https://www.gog.com/en/game/the_elder_scrolls_iii_morrowind_goty_edition
 
 ---
-## Installation (updated for v0.7.5)
+## Installation (updated for v0.7.5 or newer)
 You will first need a copy of Morrowind on the device. Best downloaded from a PC then transferred to the Thor. You will need the entire Morrowind folder, not just the Data Files folder.
 
 ### Upgrading from Alpha3 or older OpenMW-DS versions (v.0.7.0 or older).
