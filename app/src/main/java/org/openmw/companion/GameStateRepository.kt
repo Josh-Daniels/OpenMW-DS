@@ -258,6 +258,11 @@ object GameStateRepository {
     // the engine's 4096-byte stdout flush and arrive truncated (see companion.lua).
     private var inventoryBuffer: MutableList<InventoryItem>? = null
 
+    // Accumulates spells across SPELLS_START / SPELLS_ITEM / SPELLS_END lines — streamed per-spell
+    // for the same 4096-byte reason as inventory (a mage's list plus the added per-spell stats can
+    // exceed one flush).
+    private var spellsBuffer: MutableList<SpellEntry>? = null
+
     // --- Looting/pickpocketing container session (COMPANION_CONTAINER_*) ---
     // null = no container open. OPEN sets the header (name/isCorpse) and starts a
     // fresh item buffer; ITEM/END stream the contents (re-emitted on every change,
@@ -645,6 +650,24 @@ object GameStateRepository {
                     _state.update { it.copy(inventory = buf.toList()) }
                 }
                 inventoryBuffer = null
+            }
+            // Spells stream (SPELLS_ITEM checked first — most frequent — then START/END).
+            // "COMPANION_SPELLS:" (old single-line prefix) is NOT a substring of these (the char
+            // after SPELLS is '_' here, ':' there), so the legacy parseLine path can't collide.
+            trimmed.contains(LogParser.P_SPELLS_ITEM) -> {
+                spellsBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_SPELLS_ITEM) + LogParser.P_SPELLS_ITEM.length
+                    LogParser.parseSpellItem(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_SPELLS_START) -> {
+                spellsBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_SPELLS_END) -> {
+                spellsBuffer?.let { buf ->
+                    _state.update { it.copy(spells = buf.toList()) }
+                }
+                spellsBuffer = null
             }
             trimmed.contains(LogParser.P_INFO) -> {
                 val idx = trimmed.indexOf(LogParser.P_INFO) + LogParser.P_INFO.length

@@ -16,6 +16,9 @@ object LogParser {
     private const val TAG = "CompanionParser"
     private const val P_STATS = "COMPANION_STATS:"
     private const val P_SPELLS = "COMPANION_SPELLS:"
+    const val P_SPELLS_START = "COMPANION_SPELLS_START"
+    const val P_SPELLS_ITEM = "COMPANION_SPELLS_ITEM:"
+    const val P_SPELLS_END = "COMPANION_SPELLS_END"
     private const val P_SELECTED_SPELL = "COMPANION_SELECTED_SPELL:"
     private const val P_INVENTORY = "COMPANION_INVENTORY:"
     const val P_INVENTORY_START = "COMPANION_INVENTORY_START"
@@ -262,19 +265,28 @@ object LogParser {
 
     private fun parseSpells(json: String): List<SpellEntry> {
         val arr = JSONArray(json)
-        return (0 until arr.length()).map { i ->
-            val o = arr.getJSONObject(i)
-            SpellEntry(
-                id = o.getString("id"),
-                name = o.optString("name", ""),
-                type = o.optString("type", "spell"),
-                icon = o.optString("icon", ""),
-                isItem = o.optBoolean("isItem", false),
-                charge = o.optInt("charge", 0),
-                maxCharge = o.optInt("maxCharge", 0)
-            )
-        }
+        return (0 until arr.length()).map { i -> spellFromJson(arr.getJSONObject(i)) }
     }
+
+    /** Parses a single COMPANION_SPELLS_ITEM payload. Null if malformed. */
+    fun parseSpellItem(payload: String): SpellEntry? = try {
+        spellFromJson(JSONObject(payload))
+    } catch (e: Exception) {
+        Log.w(TAG, "Bad spell item: $payload", e); null
+    }
+
+    private fun spellFromJson(o: JSONObject): SpellEntry = SpellEntry(
+        id = o.getString("id"),
+        name = o.optString("name", ""),
+        type = o.optString("type", "spell"),
+        icon = o.optString("icon", ""),
+        isItem = o.optBoolean("isItem", false),
+        charge = o.optInt("charge", 0),
+        maxCharge = o.optInt("maxCharge", 0),
+        effect = o.optString("effect", ""),
+        school = o.optString("school", ""),
+        cost = o.optInt("cost", 0)
+    )
 
     private fun after(line: String, prefix: String): String {
         val i = line.indexOf(prefix)

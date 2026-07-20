@@ -85,7 +85,7 @@ android {
         // Human-readable release label, separate from the git-hash `versionName` (which
         // stays as-is for crash-report precision). Bump this manually per release. Stored
         // WITHOUT a `v` prefix — display contexts add `v` at render time.
-        buildConfigField("String", "RELEASE_VERSION", "\"0.7.6\"")
+        buildConfigField("String", "RELEASE_VERSION", "\"0.8.0\"")
 
         ndk {
             //noinspection ChromeOsAbiSupport

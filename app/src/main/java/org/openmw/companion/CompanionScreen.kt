@@ -8175,6 +8175,10 @@ private fun FavSlotView(
 
 @Composable
 private fun InventoryPanel(state: GameState) {
+    val tabStyle by UiPreferences.inventoryTabStyleFlow().collectAsState()
+    val cards = tabStyle == InventoryTabStyle.CARDS
+    val hideEquippedBar by UiPreferences.hideEquippedBarFlow().collectAsState()
+    val showEquippedInList by UiPreferences.showEquippedInListFlow().collectAsState()
     var selectedCategoryLabel by remember { mutableStateOf<String?>(null) }
     val presentCategories = remember(state.inventory) {
         INV_CATEGORIES.filter { grp -> state.inventory.any { it.category in grp.cats } }
@@ -8219,7 +8223,7 @@ private fun InventoryPanel(state: GameState) {
                     selectedCategoryLabel = cycleValue(invTabOrder, selectedCategoryLabel, dir)
                 }
             ) {
-                InventoryItemList(state, selectedCategoryLabel)
+                InventoryItemList(state, selectedCategoryLabel, cards, hideEquippedBar, showEquippedInList)
             }
         }
     }
@@ -8387,7 +8391,13 @@ private fun CategoryTab(label: String, active: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) {
+private fun InventoryItemList(
+    state: GameState,
+    selectedCategoryLabel: String?,
+    cards: Boolean,
+    hideEquippedBar: Boolean,
+    showEquippedInList: Boolean
+) {
     val wornIds = remember(state.equipment) { state.equipment.values.toSet() }
     val equippedFilter = selectedCategoryLabel == EQUIPPED_FILTER
     val selectedGroup = INV_CATEGORIES.find { it.label == selectedCategoryLabel }
@@ -8406,8 +8416,17 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
         if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId)
         else wornIds.contains(item.id)
 
-    val catNameSort = compareBy<InventoryItem>({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
-    val wornItems = remember(state.inventory, wornIds) {
+    // Favourited (gear) record ids — favourites float to the TOP of their category section.
+    val favs by FavouritesRepository.state.collectAsState()
+    val favIds = remember(favs) { favs.gear.mapNotNull { it?.id }.toSet() }
+
+    // Sort within a section: category rank, then favourite-first, then name. Every list/grid path
+    // below builds on this (the worn-first paths prepend a worn tier), so favourites rise to the top
+    // of each category everywhere.
+    val catNameSort = compareBy<InventoryItem> { itemCategoryRank(it.category) }
+        .thenByDescending { it.id in favIds }
+        .thenBy { it.displayName().lowercase() }
+    val wornItems = remember(state.inventory, wornIds, favIds) {
         state.inventory.filter { isWorn(it) }.sortedWith(catNameSort)
     }
     // Enchantment charge for cast-on-use items, sourced from the SPELLS export (the only place
@@ -8418,58 +8437,138 @@ private fun InventoryItemList(state: GameState, selectedCategoryLabel: String?) 
     }
 
     Column(Modifier.fillMaxSize()) {
-        // Scrolling list (fills the space above the pinned Equipped section).
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp)) {
-            when {
-                // "Equipped" filter — a flat list of just the worn items, each with the highlight outline.
-                equippedFilter -> {
-                    items(wornItems, key = { "eqf_" + it.stackId.ifEmpty { it.id } }) { item ->
-                        ItemRow(item, worn = true, equippable = item.isEquippable(),
-                            usable = item.isUsable(), readable = item.isReadable(),
-                            highlight = true, iconBitmap = rememberItemIcon(item.icon),
-                            enchantCharge = chargeById[item.id])
+        if (cards) {
+            // CARDS: a fixed-row horizontal grid, filled column-major (top-to-bottom then
+            // left-to-right) using the SAME canonical sort. The "All" view flattens the categories
+            // into one sorted sequence (the sort already groups categories) — no per-category headers
+            // (they don't fit a fixed-row horizontal grid); worn items move to the pinned section.
+            val gridItems = when {
+                equippedFilter -> wornItems
+                // "All": worn items are listed inline only when the user opts in (showEquippedInList),
+                // and then float to the FRONT (worn-first, like the container player-inventory view);
+                // otherwise they're reached via the bar and/or the Equipped tab.
+                selectedGroup == null ->
+                    state.inventory.filter { showEquippedInList || !isWorn(it) }
+                        .sortedWith(
+                            if (showEquippedInList)
+                                compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort)
+                            else catNameSort
+                        )
+                else ->
+                    state.inventory.filter { it.category in selectedGroup.cats }
+                        .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort))
+            }
+            ItemCardGrid(
+                items = gridItems,
+                isWorn = { isWorn(it) },
+                forceHighlight = equippedFilter,
+                chargeById = chargeById,
+                // Hiding the Equipped bar frees vertical room — use it for an extra row (5 vs 4).
+                rows = if (hideEquippedBar) INV_CARD_ROWS + 1 else INV_CARD_ROWS,
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
+            )
+        } else {
+            // LIST: full-width rows, category section headers in the "All" view (unchanged).
+            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp)) {
+                when {
+                    // "Equipped" filter — a flat list of just the worn items, each with the highlight outline.
+                    equippedFilter -> {
+                        items(wornItems, key = { "eqf_" + it.stackId.ifEmpty { it.id } }) { item ->
+                            ItemRow(item, worn = true, equippable = item.isEquippable(),
+                                usable = item.isUsable(), readable = item.isReadable(),
+                                highlight = true, iconBitmap = rememberItemIcon(item.icon),
+                                enchantCharge = chargeById[item.id])
+                        }
                     }
-                }
-                // "All" — category groups with the UNWORN items (worn items go in the pinned section below).
-                selectedGroup == null -> {
-                    INV_CATEGORIES.forEach { grp ->
-                        val groupItems = state.inventory
-                            .filter { it.category in grp.cats && !isWorn(it) }
-                            .sortedWith(catNameSort)
-                        if (groupItems.isNotEmpty()) {
-                            item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
-                            items(groupItems) { item ->
-                                ItemRow(item, worn = false, equippable = item.isEquippable(),
-                                    usable = item.isUsable(), readable = item.isReadable(),
-                                    iconBitmap = rememberItemIcon(item.icon),
-                                    enchantCharge = chargeById[item.id])
+                    // "All" — category groups. Worn items are listed inline (highlighted) only when the
+                    // user opts in (showEquippedInList); otherwise only the UNWORN items appear here and
+                    // worn items are reached via the bar / Equipped tab. When showEquippedInList is off
+                    // every item here is unworn → worn/highlight are false, identical to the original.
+                    selectedGroup == null -> {
+                        INV_CATEGORIES.forEach { grp ->
+                            val groupItems = state.inventory
+                                .filter { it.category in grp.cats && (showEquippedInList || !isWorn(it)) }
+                                // Worn items float to the front of their category group when shown inline.
+                                .sortedWith(
+                                    if (showEquippedInList)
+                                        compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort)
+                                    else catNameSort
+                                )
+                            if (groupItems.isNotEmpty()) {
+                                item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
+                                items(groupItems) { item ->
+                                    val worn = isWorn(item)
+                                    ItemRow(item, worn = worn, equippable = item.isEquippable(),
+                                        usable = item.isUsable(), readable = item.isReadable(),
+                                        highlight = worn, iconBitmap = rememberItemIcon(item.icon),
+                                        enchantCharge = chargeById[item.id])
+                                }
                             }
                         }
                     }
-                }
-                // Single category — that category's items, worn first; worn rows get the highlight.
-                else -> {
-                    val groupItems = state.inventory
-                        .filter { it.category in selectedGroup.cats }
-                        .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort))
-                    items(groupItems) { item ->
-                        val worn = isWorn(item)
-                        ItemRow(item, worn, equippable = item.isEquippable(),
-                            usable = item.isUsable(), readable = item.isReadable(),
-                            highlight = worn, iconBitmap = rememberItemIcon(item.icon),
-                            enchantCharge = chargeById[item.id])
+                    // Single category — that category's items, worn first; worn rows get the highlight.
+                    else -> {
+                        val groupItems = state.inventory
+                            .filter { it.category in selectedGroup.cats }
+                            .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort))
+                        items(groupItems) { item ->
+                            val worn = isWorn(item)
+                            ItemRow(item, worn, equippable = item.isEquippable(),
+                                usable = item.isUsable(), readable = item.isReadable(),
+                                highlight = worn, iconBitmap = rememberItemIcon(item.icon),
+                                enchantCharge = chargeById[item.id])
+                        }
                     }
                 }
+                item { Spacer(Modifier.height(4.dp)) }
             }
-            item { Spacer(Modifier.height(4.dp)) }
         }
 
         // Equipped drop-down — pinned to the bottom (always visible), dashed outline, matching the
         // barter Equipped section. Only in the "All" view (the Equipped filter already shows just
-        // worn items; a single category shows its own worn items inline).
-        if (selectedGroup == null && !equippedFilter && wornItems.isNotEmpty()) {
-            InventoryEquippedSection(wornItems, chargeById, equippedExpanded) { equippedExpanded = !equippedExpanded }
+        // worn items; a single category shows its own worn items inline). Renders its worn items as
+        // cards or rows to match the active layout. Suppressed entirely when the user hides the bar
+        // (worn items are then reachable via the Equipped tab, or inline if that option is on).
+        if (!hideEquippedBar && selectedGroup == null && !equippedFilter && wornItems.isNotEmpty()) {
+            InventoryEquippedSection(wornItems, chargeById, equippedExpanded, cards) { equippedExpanded = !equippedExpanded }
         }
+    }
+}
+
+/** A fixed-row horizontal grid of condensed [ItemCard]s + the shared [HorizontalGridScrollbar]. Fill
+ *  order is column-major (top-to-bottom, then left-to-right) — same as the SPLIT loot/barter grids —
+ *  so the caller's canonical sort reads down each column. [modifier] must bound the height (the main
+ *  list passes weight(1f); the equipped section passes a fixed height). */
+@Composable
+private fun ItemCardGrid(
+    items: List<InventoryItem>,
+    isWorn: (InventoryItem) -> Boolean,
+    forceHighlight: Boolean,
+    chargeById: Map<String, Pair<Int, Int>>,
+    rows: Int = INV_CARD_ROWS,
+    modifier: Modifier = Modifier
+) {
+    val gridState = rememberLazyGridState()
+    Column(modifier) {
+        LazyHorizontalGrid(
+            state = gridState,
+            rows = GridCells.Fixed(rows),
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            gridItemsIndexed(items) { _, item ->
+                val worn = isWorn(item)
+                ItemCard(
+                    item, worn = worn, equippable = item.isEquippable(),
+                    usable = item.isUsable(), readable = item.isReadable(),
+                    highlight = forceHighlight || worn,
+                    iconBitmap = rememberItemIcon(item.icon),
+                    enchantCharge = chargeById[item.id]
+                )
+            }
+        }
+        HorizontalGridScrollbar(gridState, Modifier.padding(top = 4.dp))
     }
 }
 
@@ -8482,13 +8581,19 @@ private fun InventoryEquippedSection(
     items: List<InventoryItem>,
     chargeById: Map<String, Pair<Int, Int>>,
     expanded: Boolean,
+    cards: Boolean,
     onToggle: () -> Unit
 ) {
     val dash = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 4f))
+    // Cards mode uses HALF the bar's vertical padding, freeing height for the (fixed-row) grid so
+    // cards render slightly larger; List mode keeps the original padding.
+    val outerV = if (cards) 2.dp else 4.dp
+    val innerV = if (cards) 3.dp else 6.dp
+    val barV = if (cards) 3.dp else 6.dp
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(top = 4.dp, start = 4.dp, end = 4.dp, bottom = 4.dp)
+            .padding(top = outerV, start = 4.dp, end = 4.dp, bottom = outerV)
             .drawBehind {
                 drawRoundRect(
                     color = BronzeDark,
@@ -8496,13 +8601,13 @@ private fun InventoryEquippedSection(
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx())
                 )
             }
-            .padding(6.dp)
+            .padding(horizontal = 6.dp, vertical = innerV)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { onToggle() }
-                .padding(horizontal = 6.dp, vertical = 6.dp),   // taller button (~50% larger)
+                .padding(horizontal = 6.dp, vertical = barV),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -8515,17 +8620,33 @@ private fun InventoryEquippedSection(
         }
         if (expanded) {
             Spacer(Modifier.height(3.dp))
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 220.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                items.forEach { item ->
-                    ItemRow(item, worn = true, equippable = item.isEquippable(),
-                        usable = item.isUsable(), readable = item.isReadable(),
-                        highlight = true, iconBitmap = rememberItemIcon(item.icon),
-                        enchantCharge = chargeById[item.id])
+            if (cards) {
+                // Same condensed-card grid as the main list, bounded to the worn item count (up to
+                // the full row height) so the section stays compact.
+                val rows = items.size.coerceIn(1, INV_CARD_ROWS)
+                ItemCardGrid(
+                    items = items,
+                    isWorn = { true },
+                    forceHighlight = true,
+                    chargeById = chargeById,
+                    rows = rows,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(INV_CARD_HEIGHT * rows + 6.dp * (rows - 1) + 12.dp)
+                )
+            } else {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    items.forEach { item ->
+                        ItemRow(item, worn = true, equippable = item.isEquippable(),
+                            usable = item.isUsable(), readable = item.isReadable(),
+                            highlight = true, iconBitmap = rememberItemIcon(item.icon),
+                            enchantCharge = chargeById[item.id])
+                    }
                 }
             }
         }
@@ -8590,6 +8711,335 @@ private fun rememberItemIcon(iconPath: String): ImageBitmap? {
 private fun fmtWeight(w: Float): String =
     if (w == w.toInt().toFloat()) w.toInt().toString() else String.format("%.1f", w)
 
+/* ---- Shared inventory-item building blocks ---- */
+// These are the exact stat/icon/menu widgets lifted verbatim out of ItemRow so the new Cards
+// layout renders every stat identically to the List. Called from BOTH ItemRow (List — output
+// unchanged) and ItemCard (Cards). Only the size/width params differ between call sites.
+
+/** Icon box (icon + enchant backdrop + ×N count badge), lifted from ItemRow. */
+@Composable
+private fun ItemIconBox(
+    item: InventoryItem,
+    iconBitmap: ImageBitmap?,
+    size: Dp = 40.dp,
+    badgeFontSize: TextUnit = 9.sp
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(2.dp))
+            .background(SlotBg)
+            .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+    ) {
+        EnchantBackdrop(item.enchant != null)
+        if (iconBitmap != null) {
+            Image(
+                bitmap = iconBitmap,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        // Stack quantity badge on the icon corner (matches the loot/barter shelf cells).
+        if (item.count > 1) {
+            Text(
+                "×${item.count}",
+                color = BoneBright, fontSize = badgeFontSize,
+                fontFamily = MwData, fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .background(Color(0xCC0E0B07))
+                    .padding(horizontal = 2.dp)
+            )
+        }
+    }
+}
+
+/** Stat column (weapon damage / armor rating / etc.), lifted from ItemRow.
+ *  [width] null → wrap content (Cards); a fixed Dp → the List's aligned fixed-width slot.
+ *  [cardStyle] false (List) → value over a tiny key, right-aligned. [cardStyle] true (Cards) → the
+ *  KEY on top and the value below, centred under it (matches the COND/CHARGE label-over-bar style). */
+@Composable
+private fun ItemStatColumn(statVal: String, statKey: String, width: Dp? = 66.dp, cardStyle: Boolean = false) {
+    Box(
+        if (width != null) Modifier.width(width) else Modifier,
+        contentAlignment = if (cardStyle) Alignment.Center else Alignment.CenterEnd
+    ) {
+        if (statVal.isNotEmpty()) {
+            if (cardStyle) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (statKey.isNotEmpty()) {
+                        Text(
+                            statKey,
+                            color = BoneDim,
+                            fontSize = 8.sp,
+                            fontFamily = MwBody,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        statVal,
+                        color = BronzeLight,
+                        fontSize = 11.sp,
+                        fontFamily = MwData,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else {
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        statVal,
+                        color = BronzeLight,
+                        fontSize = 11.sp,
+                        fontFamily = MwData,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (statKey.isNotEmpty()) {
+                        Text(
+                            statKey,
+                            color = BoneDim,
+                            fontSize = 8.sp,
+                            fontFamily = MwBody,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Weight column, lifted from ItemRow. Hidden for weightless items (gold = 0).
+ *  [width] null → wrap content (Cards); a fixed Dp → the List's aligned fixed-width slot.
+ *  [cardStyle] false (List) → value over "WT", right-aligned. [cardStyle] true (Cards) → "WT" on top
+ *  and the value below, centred under it. */
+@Composable
+private fun ItemWeightColumn(weight: Float, width: Dp? = 44.dp, cardStyle: Boolean = false) {
+    Box(
+        if (width != null) Modifier.width(width) else Modifier,
+        contentAlignment = if (cardStyle) Alignment.Center else Alignment.CenterEnd
+    ) {
+        if (weight > 0f) {
+            if (cardStyle) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "WT",
+                        color = BoneDim,
+                        fontSize = 8.sp,
+                        fontFamily = MwBody,
+                        letterSpacing = 0.5.sp,
+                        maxLines = 1
+                    )
+                    Text(
+                        fmtWeight(weight),
+                        color = BronzeLight,
+                        fontSize = 11.sp,
+                        fontFamily = MwData,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else {
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        fmtWeight(weight),
+                        color = BronzeLight,
+                        fontSize = 11.sp,
+                        fontFamily = MwData,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "WT",
+                        color = BoneDim,
+                        fontSize = 8.sp,
+                        fontFamily = MwBody,
+                        letterSpacing = 0.5.sp,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Condition OR (for a cast-on-use enchanted item) charge column — same bar widget, lifted from
+ *  ItemRow. Charge takes priority when present (those items have no durability, so no conflict). */
+@Composable
+private fun ItemConditionColumn(cond: Float?, enchantCharge: Pair<Int, Int>?, width: Dp = 50.dp) {
+    Box(Modifier.width(width), contentAlignment = Alignment.Center) {
+        val chargePair = enchantCharge?.takeIf { it.second > 0 }
+        when {
+            chargePair != null -> {
+                val (cur, max) = chargePair
+                val ratio = (cur.toFloat() / max).coerceIn(0f, 1f)
+                val fillColor = if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "CHARGE",
+                        color = BoneDim,
+                        fontSize = 7.sp,
+                        fontFamily = MwBody,
+                        letterSpacing = 0.5.sp
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(1.dp))
+                            .background(Color(0xFF0E0B07))
+                            .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(ratio)
+                                .fillMaxHeight()
+                                .background(fillColor)
+                        )
+                    }
+                }
+            }
+            cond != null -> {
+                val fillColor = if (cond >= 0.5f) BronzeLight else Color(0xFFC75C5C)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "COND",
+                        color = BoneDim,
+                        fontSize = 7.sp,
+                        fontFamily = MwBody,
+                        letterSpacing = 0.5.sp
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(1.dp))
+                            .background(Color(0xFF0E0B07))
+                            .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(cond.coerceIn(0f, 1f))
+                                .fillMaxHeight()
+                                .background(fillColor)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The primary tap action for an inventory item (read / use / equip / unequip). Shared by the
+ *  List row and the Cards cell so a tap behaves identically in both. */
+private fun itemPrimaryAction(
+    item: InventoryItem,
+    worn: Boolean,
+    equippable: Boolean,
+    usable: Boolean,
+    readable: Boolean
+) {
+    val target = item.stackId.ifEmpty { item.id }
+    when {
+        readable -> CompanionActions.readItem(item.id)
+        usable -> CompanionActions.useItem(item.id)
+        equippable && worn -> CompanionActions.unequipItem(target)
+        equippable -> CompanionActions.equipItem(target)
+    }
+}
+
+/** The long-press context menu for an inventory item (Equip/Unequip, Read, Use, Info, Drop,
+ *  Favourite), lifted verbatim from ItemRow so List and Cards share one identical menu. */
+@Composable
+private fun ItemContextMenu(
+    item: InventoryItem,
+    worn: Boolean,
+    equippable: Boolean,
+    usable: Boolean,
+    readable: Boolean,
+    expanded: Boolean,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val label = item.displayName()
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = { onDismiss() },
+        properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+        containerColor = StonePanel,
+        shadowElevation = 0.dp,
+        border = BorderStroke(1.dp, Bronze),
+        shape = RoundedCornerShape(3.dp)
+    ) {
+        Text(
+            label,
+            color = BronzeLight,
+            fontSize = 12.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+        )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+        val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
+        if (worn || equippable) {
+            DropdownMenuItem(
+                text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = {
+                    onDismiss()
+                    val target = item.stackId.ifEmpty { item.id }
+                    if (worn) CompanionActions.unequipItem(target)
+                    else CompanionActions.equipItem(target)
+                },
+                colors = menuItemColors
+            )
+        }
+        if (readable) {
+            DropdownMenuItem(
+                text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { onDismiss(); CompanionActions.readItem(item.id) },
+                colors = menuItemColors
+            )
+        }
+        if (usable) {
+            DropdownMenuItem(
+                text = { Text(item.useVerb(), fontFamily = MwBody, fontSize = 13.sp) },
+                onClick = { onDismiss(); CompanionActions.useItem(item.id) },
+                colors = menuItemColors
+            )
+        }
+        DropdownMenuItem(
+            text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
+            onClick = { onDismiss(); ItemInfoPopupState.open(item.id, item.name, item.enchant) },
+            colors = menuItemColors
+        )
+        DropdownMenuItem(
+            text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
+            onClick = {
+                onDismiss()
+                // count > 1 → ask how many; count == 1 drops immediately.
+                QuantityRequestState.requestOrRun(label, item.count, "Drop") { n ->
+                    CompanionActions.dropItem(item.id, n)
+                }
+            },
+            colors = menuItemColors
+        )
+        // Add to favourites / Unfavourite / replace-slot picker.
+        FavouriteMenuItems(
+            context = context,
+            isGear = true,
+            itemId = item.id,
+            makeSlot = { FavSlot(item.id, label) },
+            onDone = { onDismiss() }
+        )
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ItemRow(
@@ -8604,7 +9054,6 @@ private fun ItemRow(
     // condition column (those items have no durability). Same bar style as the spells tab.
     enchantCharge: Pair<Int, Int>? = null
 ) {
-    val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     LaunchedEffect(DropdownState.closeRequest) {
         if (DropdownState.closeRequest > 0) menuOpen = false
@@ -8626,15 +9075,7 @@ private fun ItemRow(
                         else Modifier
                     )
                     .combinedClickable(
-                        onClick = {
-                            val target = item.stackId.ifEmpty { item.id }
-                            when {
-                                readable -> CompanionActions.readItem(item.id)
-                                usable -> CompanionActions.useItem(item.id)
-                                equippable && worn -> CompanionActions.unequipItem(target)
-                                equippable -> CompanionActions.equipItem(target)
-                            }
-                        },
+                        onClick = { itemPrimaryAction(item, worn, equippable, usable, readable) },
                         onLongClick = { menuOpen = true; DropdownState.open() }
                     )
                     .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
@@ -8644,37 +9085,7 @@ private fun ItemRow(
                 // Icon box (leftmost). Placeholder empty slot until the icon
                 // pipeline loads real DDS textures; drop in a real bitmap by
                 // passing iconBitmap non-null at the call site.
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(SlotBg)
-                        .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
-                ) {
-                    EnchantBackdrop(item.enchant != null)
-                    if (iconBitmap != null) {
-                        Image(
-                            bitmap = iconBitmap,
-                            contentDescription = null,
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    // Stack quantity badge on the icon corner (matches the loot/barter shelf cells).
-                    // Keeps the count visible even for WORN equippable stacks (e.g. equipped arrows),
-                    // where the trailing column shows the "WORN" tag instead of the count.
-                    if (item.count > 1) {
-                        Text(
-                            "×${item.count}",
-                            color = BoneBright, fontSize = 9.sp,
-                            fontFamily = MwData, fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .background(Color(0xCC0E0B07))
-                                .padding(horizontal = 2.dp)
-                        )
-                    }
-                }
+                ItemIconBox(item, iconBitmap)
                 Spacer(Modifier.width(10.dp))
                 // Name + (optional) favourite star share the flex column so the
                 // name truncates before the star, and the star stays a standalone
@@ -8698,205 +9109,148 @@ private fun ItemRow(
                         FavStar()
                     }
                 }
-                // Trailing columns are fixed-width slots (empty when N/A) so the
-                // stat value, weight and condition bar always sit in the same
-                // horizontal position across every row (right-aligned; the flex
-                // name column pushes them to the right edge).
-                //
-                // Stat column: weapon damage / armor rating / etc.
-                Box(Modifier.width(66.dp), contentAlignment = Alignment.CenterEnd) {
-                    if (item.statVal.isNotEmpty()) {
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                item.statVal,
-                                color = BronzeLight,
-                                fontSize = 11.sp,
-                                fontFamily = MwData,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (item.statKey.isNotEmpty()) {
-                                Text(
-                                    item.statKey,
-                                    color = BoneDim,
-                                    fontSize = 8.sp,
-                                    fontFamily = MwBody,
-                                    letterSpacing = 0.5.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                    }
-                }
+                // Trailing columns are fixed-width slots (empty when N/A) so the stat value, weight
+                // and condition bar always sit in the same horizontal position across every row
+                // (right-aligned; the flex name column pushes them to the right edge).
+                ItemStatColumn(item.statVal, item.statKey)
                 Spacer(Modifier.width(12.dp))
-                // Weight column — same style as the stat column (value over a tiny label). Sits
-                // between the damage/armor value and the condition bar. Hidden for weightless items
-                // (gold = 0).
-                Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterEnd) {
-                    if (item.weight > 0f) {
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                fmtWeight(item.weight),
-                                color = BronzeLight,
-                                fontSize = 11.sp,
-                                fontFamily = MwData,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                "WT",
-                                color = BoneDim,
-                                fontSize = 8.sp,
-                                fontFamily = MwBody,
-                                letterSpacing = 0.5.sp,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                }
+                ItemWeightColumn(item.weight)
                 Spacer(Modifier.width(16.dp))
-                // Condition column — OR, for a cast-on-use enchanted item (which has no durability),
-                // its enchantment charge in the same slot. Same bar style as the spells tab; charge
-                // takes priority when present (those items report no condition, so no real conflict).
-                Box(Modifier.width(50.dp), contentAlignment = Alignment.Center) {
-                    val chargePair = enchantCharge?.takeIf { it.second > 0 }
-                    when {
-                        chargePair != null -> {
-                            val (cur, max) = chargePair
-                            val ratio = (cur.toFloat() / max).coerceIn(0f, 1f)
-                            val fillColor = if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C)
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    "CHARGE",
-                                    color = BoneDim,
-                                    fontSize = 7.sp,
-                                    fontFamily = MwBody,
-                                    letterSpacing = 0.5.sp
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(4.dp)
-                                        .clip(RoundedCornerShape(1.dp))
-                                        .background(Color(0xFF0E0B07))
-                                        .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
-                                ) {
-                                    Box(
-                                        Modifier
-                                            .fillMaxWidth(ratio)
-                                            .fillMaxHeight()
-                                            .background(fillColor)
-                                    )
-                                }
-                            }
-                        }
-                        item.cond != null -> {
-                            val fillColor = if (item.cond >= 0.5f) BronzeLight else Color(0xFFC75C5C)
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    "COND",
-                                    color = BoneDim,
-                                    fontSize = 7.sp,
-                                    fontFamily = MwBody,
-                                    letterSpacing = 0.5.sp
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(4.dp)
-                                        .clip(RoundedCornerShape(1.dp))
-                                        .background(Color(0xFF0E0B07))
-                                        .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
-                                ) {
-                                    Box(
-                                        Modifier
-                                            .fillMaxWidth(item.cond.coerceIn(0f, 1f))
-                                            .fillMaxHeight()
-                                            .background(fillColor)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
+                ItemConditionColumn(item.cond, enchantCharge)
                 // No "WORN" text column — equipped items are shown by the highlight outline + the
-                // bottom Equipped section, so the stat/weight/condition columns fill the space (the
-                // flex name column pushes them to the right edge, condition rightmost).
+                // bottom Equipped section, so the stat/weight/condition columns fill the space.
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
         }
 
-        DropdownMenu(
+        ItemContextMenu(
+            item = item, worn = worn, equippable = equippable, usable = usable, readable = readable,
             expanded = menuOpen,
-            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-            containerColor = StonePanel,
-            shadowElevation = 0.dp,
-            border = BorderStroke(1.dp, Bronze),
-            shape = RoundedCornerShape(3.dp)
+            onDismiss = { menuOpen = false; DropdownState.closeAll() }
+        )
+    }
+}
+
+/* ---- Inventory Cards layout (condensed card grid, horizontal scroll) ---- */
+
+// Card grid geometry, tuned for the 1240×1080 / 3.92" bottom screen (~473×412 dp, density ~2.62):
+// a fixed 4-row horizontal grid renders wide+short cards ~2 columns wide (see the confirmed density
+// math). The FIXED row count (over the grid's bounded height) is what keeps every card a uniform
+// height regardless of name/stat content — each card fills its evenly-divided grid cell. Width is
+// fixed so ~2 columns show at once. INV_CARD_HEIGHT is the per-card height target used only to size
+// the (bounded-height) equipped-section grid.
+private val INV_CARD_WIDTH = 214.dp
+private val INV_CARD_HEIGHT = 54.dp
+private const val INV_CARD_ROWS = 4
+// Fixed widths for the card's stat cluster (right-aligned), so weight + condition/charge always sit
+// in the same spot and the stat/effect column (widest; long effect names truncate) is left of them.
+private val INV_CARD_STAT_W = 74.dp
+private val INV_CARD_WT_W = 30.dp
+private val INV_CARD_COND_W = 42.dp
+
+/** A single-line item name that shrinks 13sp → 11sp before ellipsis-truncating, staying within the
+ *  card's fixed name width. Mirrors the CornerNameLabel onTextLayout measure trick: render at the
+ *  larger size, and if it overflows, drop to the smaller size (which then ellipsis-truncates). */
+@Composable
+private fun AutoShrinkItemName(text: String, color: Color, modifier: Modifier = Modifier) {
+    // Two-stage: try 13sp; on visual overflow, fall back to 11sp (still single-line, ellipsis).
+    var shrink by remember(text) { mutableStateOf(false) }
+    Text(
+        text,
+        color = color,
+        fontSize = if (shrink) 11.sp else 13.sp,
+        fontFamily = MwBody,
+        fontWeight = FontWeight.Normal,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        onTextLayout = { result ->
+            // Only step down once (13 → 11); at 11sp we keep the ellipsis rather than shrinking further.
+            if (!shrink && result.hasVisualOverflow) shrink = true
+        },
+        modifier = modifier
+    )
+}
+
+/** One condensed inventory card: icon on the left, name over a compact stat row on the right. Reuses
+ *  the exact List stat/menu widgets (ItemIconBox / ItemStatColumn / ItemWeightColumn /
+ *  ItemConditionColumn / ItemContextMenu) — same data, same visuals, repackaged. Fixed size so the
+ *  grid stays uniform. Tap / long-press behave identically to [ItemRow]. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ItemCard(
+    item: InventoryItem,
+    worn: Boolean,
+    equippable: Boolean,
+    usable: Boolean = false,
+    readable: Boolean,
+    highlight: Boolean = false,
+    iconBitmap: ImageBitmap? = null,
+    enchantCharge: Pair<Int, Int>? = null
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+    val favs by FavouritesRepository.state.collectAsState()
+    val isFav = favs.gear.any { it?.id == item.id }
+
+    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
+        Row(
+            modifier = Modifier
+                .width(INV_CARD_WIDTH)
+                // Height comes from the grid's fixed-row division (uniform across all cards); fill it.
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(3.dp))
+                // Equipped items get the same faint fill + BronzeLight outline as the List highlight;
+                // otherwise a plain slot panel so cards read as discrete tiles.
+                .background(if (highlight) BronzeLight.copy(alpha = 0.06f) else StoneDark)
+                .border(1.dp, if (highlight) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
+                .combinedClickable(
+                    onClick = { itemPrimaryAction(item, worn, equippable, usable, readable) },
+                    onLongClick = { menuOpen = true; DropdownState.open() }
+                )
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                label,
-                color = BronzeLight,
-                fontSize = 12.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-            )
-            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
-            val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
-            if (worn || equippable) {
-                DropdownMenuItem(
-                    text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = {
-                        menuOpen = false; DropdownState.closeAll()
-                        val target = item.stackId.ifEmpty { item.id }
-                        if (worn) CompanionActions.unequipItem(target)
-                        else CompanionActions.equipItem(target)
-                    },
-                    colors = menuItemColors
+            ItemIconBox(item, iconBitmap, size = 34.dp, badgeFontSize = 8.sp)
+            Spacer(Modifier.width(6.dp))
+            // Right side: name over a compact stat row. The favourite star is a corner overlay (below)
+            // rather than inline, so it never steals width from the name.
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                AutoShrinkItemName(
+                    item.displayName(),
+                    color = if (worn) BoneBright else BoneMuted,
+                    modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(Modifier.height(2.dp))
+                // Compact stat row: the same stat / condition-charge / weight widgets as the List, in
+                // cardStyle (label on TOP, value centred beneath). FIXED widths + right-aligned so every
+                // section sits in the SAME position on every card regardless of which are populated or
+                // how long an effect name is. WEIGHT is far right (every item has weight), condition/
+                // charge next, then the stat/effect column (widest, long effect names ellipsis-truncate
+                // within it). Empty sections still occupy their slot, keeping the others aligned.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    ItemStatColumn(item.statVal, item.statKey, width = INV_CARD_STAT_W, cardStyle = true)
+                    ItemConditionColumn(item.cond, enchantCharge, width = INV_CARD_COND_W)
+                    ItemWeightColumn(item.weight, width = INV_CARD_WT_W, cardStyle = true)
+                }
             }
-            if (readable) {
-                DropdownMenuItem(
-                    text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.readItem(item.id) },
-                    colors = menuItemColors
-                )
-            }
-            if (usable) {
-                DropdownMenuItem(
-                    text = { Text(item.useVerb(), fontFamily = MwBody, fontSize = 13.sp) },
-                    onClick = { menuOpen = false; DropdownState.closeAll(); CompanionActions.useItem(item.id) },
-                    colors = menuItemColors
-                )
-            }
-            DropdownMenuItem(
-                text = { Text("Info", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { menuOpen = false; DropdownState.closeAll(); ItemInfoPopupState.open(item.id, item.name, item.enchant) },
-                colors = menuItemColors
-            )
-            DropdownMenuItem(
-                text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = {
-                    menuOpen = false; DropdownState.closeAll()
-                    // count > 1 → ask how many; count == 1 drops immediately.
-                    QuantityRequestState.requestOrRun(label, item.count, "Drop") { n ->
-                        CompanionActions.dropItem(item.id, n)
-                    }
-                },
-                colors = menuItemColors
-            )
-            // Add to favourites / Unfavourite / replace-slot picker.
-            FavouriteMenuItems(
-                context = context,
-                isGear = true,
-                itemId = item.id,
-                makeSlot = { FavSlot(item.id, label) },
-                onDone = { menuOpen = false; DropdownState.closeAll() }
-            )
         }
+
+        // Favourite star, top-right corner of the card box (overlay, not inline with the name).
+        if (isFav) {
+            Box(Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 3.dp)) { FavStar() }
+        }
+
+        ItemContextMenu(
+            item = item, worn = worn, equippable = equippable, usable = usable, readable = readable,
+            expanded = menuOpen,
+            onDismiss = { menuOpen = false; DropdownState.closeAll() }
+        )
     }
 }
 
@@ -8918,8 +9272,7 @@ private fun SpellSectionHeader(title: String) {
 @Composable
 private fun MagicPanel(state: GameState) {
     val sel = state.selectedSpell
-    val compact by UiPreferences.spellsListStyleFlow().collectAsState()
-    val compactRows = compact == SpellsListStyle.COMPACT
+    // The spell list is always the compact layout now (the Standard/Compact toggle was removed).
 
     Column(
         modifier = Modifier
@@ -9054,7 +9407,9 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
-                                compact = compactRows,
+                                effect = spell.effect,
+                                school = spell.school,
+                                cost = spell.cost,
                                 onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -9071,7 +9426,9 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
-                                compact = compactRows,
+                                effect = spell.effect,
+                                school = spell.school,
+                                cost = spell.cost,
                                 onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -9088,7 +9445,7 @@ private fun MagicPanel(state: GameState) {
                                 spellId = spell.id,
                                 title = spell.displayName(),
                                 selected = false,
-                                compact = compactRows,
+                                effect = spell.effect,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -9109,7 +9466,7 @@ private fun MagicPanel(state: GameState) {
                                 selected = spell.id == sel,
                                 charge = spell.charge,
                                 maxCharge = spell.maxCharge,
-                                compact = compactRows,
+                                effect = spell.effect,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -9132,7 +9489,9 @@ private fun SpellRow(
     selected: Boolean = false,
     charge: Int = 0,
     maxCharge: Int = 0,
-    compact: Boolean = false,
+    effect: String = "",
+    school: String = "",
+    cost: Int = 0,
     onInfo: (() -> Unit)? = null,
     iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
@@ -9144,15 +9503,12 @@ private fun SpellRow(
     }
     val favs by FavouritesRepository.state.collectAsState()
     val isFav = favs.magic.any { it?.id == spellId }
-    // Compact = smaller icon + shorter rows so more spells fit; everything that scales with the
-    // icon (name font, charge text, the icon-to-name gap) shrinks to match. The compact icon is
-    // ~3/4 of standard (halfway between the first pass's 20dp and the original 40dp).
-    val iconSize = if (compact) 30.dp else 40.dp
-    val rowVerticalPad = if (compact) 6.dp else 11.dp
-    val iconGap = if (compact) 9.dp else 10.dp
-    val nameFont = if (compact) 13.sp else 14.sp
-    val smallLabelFont = if (compact) 9.sp else 10.sp
-    val chargeBarHeight = if (compact) 3.dp else 4.dp
+    // Compact spell-list sizing is the only version now (smaller icon + shorter rows so more spells
+    // fit). The former "Standard" values are kept in comments in case the toggle is ever restored.
+    val iconSize = 30.dp        // Standard: 40.dp
+    val rowVerticalPad = 6.dp   // Standard: 11.dp
+    val iconGap = 9.dp          // Standard: 10.dp
+    val nameFont = 13.sp        // Standard: 14.sp
     Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(spellId, it.boundsInRoot()) }) {
         Column {
             Row(
@@ -9199,55 +9555,63 @@ private fun SpellRow(
                 // with an "EQUIPPED" tag, rather than a bronze/bold highlight.
                 // Name + (optional) favourite star share the flex column so the
                 // name truncates before the star; the star is a standalone Icon.
-                Row(
-                    modifier = Modifier.weight(1f).padding(end = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        title, color = if (selected) BoneBright else BoneMuted,
-                        fontSize = nameFont, fontFamily = MwBody,
-                        fontWeight = FontWeight.Normal,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    if (isFav) {
-                        Spacer(Modifier.width(4.dp))
-                        FavStar()
-                    }
-                }
-                // Charge column (enchanted items only) — current / capacity with
-                // a thin bar, mirroring the inventory condition column.
+                // Name column (narrower — weight 1 — so the stat cluster, especially EFFECT, has more
+                // room). The favourite star is a top-right corner overlay (added below), not inline,
+                // mirroring the inventory cards.
+                Text(
+                    title, color = if (selected) BoneBright else BoneMuted,
+                    fontSize = nameFont, fontFamily = MwBody,
+                    fontWeight = FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(end = 8.dp)
+                )
+                // Stat cluster, left→right: CHARGE/COST, SCHOOL, EFFECT. Titles on TOP with the value
+                // beneath (cardStyle, matching the inventory cards). Charge/cost + school are fixed-
+                // width and shown ONLY when present; EFFECT is the flexible right-most column (weight)
+                // so it gets the most room and STRETCHES to absorb whatever the missing sections free
+                // up (e.g. a scroll, which has only an effect). Weight/value are deliberately excluded.
                 if (maxCharge > 0) {
-                    val ratio = (charge.toFloat() / maxCharge).coerceIn(0f, 1f)
-                    val fillColor = if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C)
-                    Column(
-                        modifier = Modifier.width(56.dp).padding(end = 8.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            "$charge/$maxCharge",
-                            color = BronzeLight, fontSize = smallLabelFont, fontFamily = MwData,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(chargeBarHeight)
-                                .clip(RoundedCornerShape(1.dp))
-                                .background(Color(0xFF0E0B07))
-                                .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
-                        ) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth(ratio)
-                                    .fillMaxHeight()
-                                    .background(fillColor)
+                    ItemConditionColumn(cond = null, enchantCharge = charge to maxCharge, width = 40.dp)
+                    Spacer(Modifier.width(6.dp))
+                } else if (cost > 0) {
+                    ItemStatColumn(cost.toString(), "COST", width = 40.dp, cardStyle = true)
+                    Spacer(Modifier.width(6.dp))
+                }
+                if (school.isNotEmpty()) {
+                    ItemStatColumn(
+                        school.replaceFirstChar { it.uppercase() }, "SCHOOL", width = 66.dp, cardStyle = true
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                // EFFECT: the flexible right-most column. The description is now the fuller
+                // "Frost Damage 25pts for 1s (touch)" form, so — unlike the single-line stat columns —
+                // its value wraps to TWO lines (proportional font, centred) to fit; the "EFFECT" title
+                // stays on top. Given the widest weight so it gets the most room and stretches when
+                // school/cost are absent.
+                Box(Modifier.weight(1.6f), contentAlignment = Alignment.Center) {
+                    if (effect.isNotEmpty()) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "EFFECT",
+                                color = BoneDim, fontSize = 8.sp, fontFamily = MwBody,
+                                letterSpacing = 0.5.sp, maxLines = 1
+                            )
+                            Text(
+                                effect,
+                                color = BronzeLight, fontSize = 10.sp, fontFamily = MwBody,
+                                textAlign = TextAlign.Center, lineHeight = 11.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+        }
+        // Favourite star, top-right corner of the spell box (overlay, not inline with the name) —
+        // same treatment as the inventory cards.
+        if (isFav) {
+            Box(Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 3.dp)) { FavStar() }
         }
         DropdownMenu(
             expanded = menuOpen,
@@ -10679,7 +11043,11 @@ private fun OptionsSettingsList() {
         // section — deliberately NOT near the "DS Screen Layout" Inventory Layout (Classic/Shelf)
         // row, which governs a different (two-panel looting/barter) screen.
         item { OptionsSectionHeader("Companion Tabs") }
-        item { SpellsListStyleRow() }
+        item { InventoryTabStyleRow() }
+        item { EquippedBarRow() }
+        item { EquippedInListRow() }
+        // "Spells Display" (Standard / Compact) removed — the compact spell list is now the only
+        // version. The old SpellsListStyleRow composable is commented out below for reference.
 
         // Quiet release-version footer (diagnostic/reference; `v` prefix added here).
         item {
@@ -10955,8 +11323,91 @@ private fun InventoryLayoutRow() {
     }
 }
 
-// Density of the single-panel Spells tab (Standard / Compact). Distinct from InventoryLayoutRow
-// (Classic/Shelf) — a different part of the UI — and lives in the "Companion Tabs" section.
+// Layout of the single-panel Inventory tab (List / Cards). Distinct from InventoryLayoutRow
+// (Classic/Shelf, for looting/bartering) — a different part of the UI — and lives in the
+// "Companion Tabs" section.
+@Composable
+private fun InventoryTabStyleRow() {
+    val context = LocalContext.current
+    val style by UiPreferences.inventoryTabStyleFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Inventory Tab Style", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "List",
+                active = style == InventoryTabStyle.LIST,
+                enabled = true
+            ) { UiPreferences.setInventoryTabStyle(context, InventoryTabStyle.LIST) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Cards",
+                active = style == InventoryTabStyle.CARDS,
+                enabled = true
+            ) { UiPreferences.setInventoryTabStyle(context, InventoryTabStyle.CARDS) }
+        }
+    }
+}
+
+// Whether the pinned "Equipped (N)" bar at the bottom of the Inventory tab is shown or hidden.
+// Hiding it frees space for an extra row of items (worn items then show inline). "Companion Tabs".
+@Composable
+private fun EquippedBarRow() {
+    val context = LocalContext.current
+    val hidden by UiPreferences.hideEquippedBarFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Equipped Bar", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Show",
+                active = !hidden,
+                enabled = true
+            ) { UiPreferences.setHideEquippedBar(context, false) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Hide",
+                active = hidden,
+                enabled = true
+            ) { UiPreferences.setHideEquippedBar(context, true) }
+        }
+    }
+}
+
+// Whether worn items are also listed inline in the Inventory "All" view (independent of the bar).
+// When Hidden, equipped items are reached only via the Equipped tab (top) or the bar (if shown).
+@Composable
+private fun EquippedInListRow() {
+    val context = LocalContext.current
+    val show by UiPreferences.showEquippedInListFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Equipped in List", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Show",
+                active = show,
+                enabled = true
+            ) { UiPreferences.setShowEquippedInList(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Hide",
+                active = !show,
+                enabled = true
+            ) { UiPreferences.setShowEquippedInList(context, false) }
+        }
+    }
+}
+
+// Density of the single-panel Spells tab (Standard / Compact) — REMOVED: the compact spell list is
+// now the only version, so this options row is no longer shown. Kept commented for reference.
+/*
 @Composable
 private fun SpellsListStyleRow() {
     val context = LocalContext.current
@@ -10981,6 +11432,7 @@ private fun SpellsListStyleRow() {
         }
     }
 }
+*/
 
 @Composable
 private fun ConversationLocationRow() {

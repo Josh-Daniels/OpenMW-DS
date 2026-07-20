@@ -3,6 +3,7 @@ package org.openmw.ui.view
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -16,8 +17,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -155,7 +159,16 @@ fun AlphaMigrationFirstLaunch() {
 
     var step by remember {
         mutableStateOf(
-            if (AlphaMigration.oldFolderExists() && !AlphaMigration.wasPrompted(context)) {
+            // Auto-fire the guided sequence ONLY for a genuinely fresh setup: the old /Alpha3/
+            // folder is present, we haven't prompted yet, AND there are no real OpenMW-DS saves
+            // already on the device. hasExistingSaves() reads EXTERNAL storage (survives reinstall),
+            // so a returning player whose internal migration_prompted flag was wiped by a reinstall
+            // is NOT force-prompted — they see the passive banner + the always-available home
+            // buttons instead (see AlphaMigrationButtons).
+            if (AlphaMigration.oldFolderExists() &&
+                !AlphaMigration.wasPrompted(context) &&
+                !AlphaMigration.hasExistingSaves()
+            ) {
                 MigStep.SAVES
             } else {
                 MigStep.DONE
@@ -292,6 +305,20 @@ fun AlphaMigrationButtons() {
     var confirmSettings by remember { mutableStateOf(false) }
 
     Column {
+        // Passive, non-blocking note for the "old Alpha3 folder still around AND the user already
+        // has real OpenMW-DS saves" case — informs without forcing the modal popup sequence (which
+        // is suppressed for this case). The buttons below stay fully available for the rare genuine
+        // need (e.g. a second character never migrated).
+        if (AlphaMigration.hasExistingSaves()) {
+            Text(
+                text = "You already have OpenMW-DS saves — you likely don't need to transfer " +
+                    "from Alpha3, but the option is here if you need it.",
+                color = Color(0xFFBCAF96),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(0.7f).padding(vertical = 6.dp),
+            )
+        }
         SetupButton(
             text = "Copy saves from Alpha3",
             onClick = { confirmSaves = true },

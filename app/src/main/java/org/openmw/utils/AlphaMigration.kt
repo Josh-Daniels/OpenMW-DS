@@ -37,6 +37,27 @@ object AlphaMigration {
     /** True when an old Alpha3 (or pre-split OpenMW-DS v0.7.0) folder is present. */
     fun oldFolderExists(): Boolean = oldFolderRoot().isDirectory
 
+    /**
+     * True when this device already has a REAL OpenMW-DS setup — at least one actual save file in
+     * our own saves dir ([Constants.USER_SAVES] = `/OpenMW-DS/saves/`).
+     *
+     * This is the reliable "the user already has genuine progress" signal: saves live on EXTERNAL
+     * storage and survive an uninstall+reinstall / signature-mismatch fresh install / app-data
+     * clear — all of which DO wipe [wasPrompted]'s internal flag. So a returning player who hits a
+     * reinstall event should NOT be force-shown the first-launch migration popup just because the
+     * internal flag reset. We require a character folder containing an actual `.omwsave` (an empty
+     * or leftover `saves/` dir does not count).
+     */
+    fun hasExistingSaves(): Boolean {
+        val saves = File(Constants.USER_SAVES)
+        if (!saves.isDirectory) return false
+        val charDirs = saves.listFiles { f -> f.isDirectory } ?: return false
+        return charDirs.any { dir ->
+            dir.listFiles { f -> f.isFile && f.name.endsWith(".omwsave", ignoreCase = true) }
+                ?.isNotEmpty() == true
+        }
+    }
+
     // ---- one-shot first-launch prompt gate ----
 
     fun wasPrompted(context: Context): Boolean =

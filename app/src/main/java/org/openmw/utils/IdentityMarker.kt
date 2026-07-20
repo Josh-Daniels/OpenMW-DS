@@ -44,7 +44,7 @@ object IdentityMarker {
             val json = buildString {
                 append("{\n")
                 append("  \"app\": \"${context.packageName}\",\n")
-                // Human release label (e.g. "0.7.5"), distinct from the git-hash versionName.
+                // Human release label (e.g. "0.8.0"), distinct from the git-hash versionName.
                 append("  \"release\": \"${BuildConfig.RELEASE_VERSION}\",\n")
                 append("  \"versionName\": \"${BuildConfig.VERSION_NAME}\",\n")
                 append("  \"versionCode\": ${BuildConfig.VERSION_CODE},\n")

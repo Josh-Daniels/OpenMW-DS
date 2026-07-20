@@ -57,7 +57,13 @@ data class SpellEntry(
     // list, but split into its own "Enchanted Items" section via this flag.
     val isItem: Boolean = false,
     val charge: Int = 0,        // current enchantment charge
-    val maxCharge: Int = 0      // enchantment charge capacity (0 = not an item)
+    val maxCharge: Int = 0,     // enchantment charge capacity (0 = not an item)
+    // Extra display stats for the spell row (added July 2026). effect = first-effect name (all
+    // types); school + cost = governing school + magicka cost (learned spells/powers only —
+    // scrolls/enchanted items leave them empty/0).
+    val effect: String = "",
+    val school: String = "",
+    val cost: Int = 0
 )
 
 data class ActiveEffect(

@@ -38,14 +38,19 @@ enum class ScreenLocation { BOTTOM, SPLIT, TOP }
  */
 enum class InventoryLayout { CLASSIC, SHELF }
 
+// Spells tab density (Standard / Compact) — REMOVED: the compact spell list is now the only
+// version, so this enum + its pref plumbing (below) are commented out. Kept for reference.
+// enum class SpellsListStyle { STANDARD, COMPACT }
+//   STANDARD = original 40dp-icon rows; COMPACT = smaller icon + shorter rows (now always used).
+
 /**
- * Density of the single-panel Spells tab list. DELIBERATELY separate from [InventoryLayout]
- * (Classic/Shelf), which governs the two-panel looting/bartering screens — different part of
- * the UI, different concept.
- * - [STANDARD]: original 40dp-icon rows (default; nothing changes for existing users).
- * - [COMPACT]: ~half-size icons + shorter rows so more spells fit on screen at once.
+ * Layout of the single-panel Inventory TAB. DELIBERATELY separate from [InventoryLayout]
+ * (Classic/Shelf, which governs the two-panel looting/bartering screens) — different part of the UI.
+ * - [LIST]: original full-width row list (default; nothing changes for existing users).
+ * - [CARDS]: wide/short condensed cards in a fixed-row grid, filled top-to-bottom then left-to-right,
+ *   with horizontal scroll for more items.
  */
-enum class SpellsListStyle { STANDARD, COMPACT }
+enum class InventoryTabStyle { LIST, CARDS }
 
 /**
  * Where the combat target's health bar is drawn.
@@ -169,7 +174,10 @@ object UiPreferences {
     private const val GAME_UI_CUSTOM = "game_ui_custom"
     private const val CONVERSATION_LOCATION = "conversation_location"
     private const val INVENTORY_LAYOUT = "inventory_layout"
-    private const val SPELLS_LIST_STYLE = "spells_list_style"
+    // private const val SPELLS_LIST_STYLE = "spells_list_style"  // removed (compact-only)
+    private const val INVENTORY_TAB_STYLE = "inventory_tab_style"
+    private const val HIDE_EQUIPPED_BAR = "hide_equipped_bar"
+    private const val SHOW_EQUIPPED_IN_LIST = "show_equipped_in_list"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
     // Training / spell-buying popup location (Bottom only for now; Top pending — same as Repair,
@@ -219,9 +227,22 @@ object UiPreferences {
     // Shelf. One switch, all those contexts. Default CLASSIC (the proven layout).
     private val inventoryLayoutFlow = MutableStateFlow(InventoryLayout.CLASSIC)
 
-    // Density of the single-panel Spells tab (Standard / Compact). Default STANDARD (unchanged for
-    // existing users). Unrelated to inventoryLayoutFlow above.
-    private val spellsListStyleFlow = MutableStateFlow(SpellsListStyle.STANDARD)
+    // Spells tab density flow — removed (compact-only). Kept commented for reference.
+    // private val spellsListStyleFlow = MutableStateFlow(SpellsListStyle.STANDARD)
+
+    // Layout of the single-panel Inventory tab (List / Cards). Default CARDS. Unrelated to
+    // inventoryLayoutFlow (Classic/Shelf) above.
+    private val inventoryTabStyleFlow = MutableStateFlow(InventoryTabStyle.CARDS)
+
+    // Whether the pinned "Equipped (N)" drop-down bar at the bottom of the Inventory tab is hidden
+    // (freeing space for an extra row of items). Default true (hidden) — worn items show inline
+    // (showEquippedInList default true) and via the Equipped tab.
+    private val hideEquippedBarFlow = MutableStateFlow(true)
+
+    // Whether equipped (worn) items are ALSO shown inline in the Inventory "All" list. Independent of
+    // the bar: worn items are always reachable via the "Equipped" filter tab and/or the bar. Default
+    // true (worn items listed inline, floated to the front of their section).
+    private val showEquippedInListFlow = MutableStateFlow(true)
 
     // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default SPLIT
     // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
@@ -300,9 +321,15 @@ object UiPreferences {
         p.getString(INVENTORY_LAYOUT, null)
             ?.let { runCatching { InventoryLayout.valueOf(it) }.getOrNull() }
             ?.let { inventoryLayoutFlow.value = it }
-        p.getString(SPELLS_LIST_STYLE, null)
-            ?.let { runCatching { SpellsListStyle.valueOf(it) }.getOrNull() }
-            ?.let { spellsListStyleFlow.value = it }
+        // Spells tab density load — removed (compact-only):
+        // p.getString(SPELLS_LIST_STYLE, null)
+        //     ?.let { runCatching { SpellsListStyle.valueOf(it) }.getOrNull() }
+        //     ?.let { spellsListStyleFlow.value = it }
+        p.getString(INVENTORY_TAB_STYLE, null)
+            ?.let { runCatching { InventoryTabStyle.valueOf(it) }.getOrNull() }
+            ?.let { inventoryTabStyleFlow.value = it }
+        hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
+        showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
         p.getString(LOOTING_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
             ?.let { lootingLocationFlow.value = it }
@@ -462,13 +489,38 @@ object UiPreferences {
         editor(context).putString(INVENTORY_LAYOUT, layout.name).apply()
     }
 
-    /** Density of the single-panel Spells tab (Standard / Compact). */
-    fun spellsListStyleFlow(): StateFlow<SpellsListStyle> = spellsListStyleFlow.asStateFlow()
+    // Spells tab density accessor + setter — removed (compact-only). Kept commented for reference.
+    // fun spellsListStyleFlow(): StateFlow<SpellsListStyle> = spellsListStyleFlow.asStateFlow()
+    // fun setSpellsListStyle(context: Context, style: SpellsListStyle) {
+    //     spellsListStyleFlow.value = style
+    //     editor(context).putString(SPELLS_LIST_STYLE, style.name).apply()
+    // }
 
-    /** Set the Spells tab density and persist. */
-    fun setSpellsListStyle(context: Context, style: SpellsListStyle) {
-        spellsListStyleFlow.value = style
-        editor(context).putString(SPELLS_LIST_STYLE, style.name).apply()
+    /** Layout of the single-panel Inventory tab (List / Cards). */
+    fun inventoryTabStyleFlow(): StateFlow<InventoryTabStyle> = inventoryTabStyleFlow.asStateFlow()
+
+    /** Set the Inventory tab layout and persist. */
+    fun setInventoryTabStyle(context: Context, style: InventoryTabStyle) {
+        inventoryTabStyleFlow.value = style
+        editor(context).putString(INVENTORY_TAB_STYLE, style.name).apply()
+    }
+
+    /** Whether the pinned "Equipped (N)" bar at the bottom of the Inventory tab is hidden. */
+    fun hideEquippedBarFlow(): StateFlow<Boolean> = hideEquippedBarFlow.asStateFlow()
+
+    /** Set whether the Equipped bar is hidden and persist. */
+    fun setHideEquippedBar(context: Context, hide: Boolean) {
+        hideEquippedBarFlow.value = hide
+        editor(context).putBoolean(HIDE_EQUIPPED_BAR, hide).apply()
+    }
+
+    /** Whether worn items are also shown inline in the Inventory "All" list. */
+    fun showEquippedInListFlow(): StateFlow<Boolean> = showEquippedInListFlow.asStateFlow()
+
+    /** Set whether worn items show inline in the Inventory list and persist. */
+    fun setShowEquippedInList(context: Context, show: Boolean) {
+        showEquippedInListFlow.value = show
+        editor(context).putBoolean(SHOW_EQUIPPED_IN_LIST, show).apply()
     }
 
     /** Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). */

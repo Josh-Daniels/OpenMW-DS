@@ -131,6 +131,51 @@ end
 
 local lastSpellsStr = nil
 
+-- First-effect DESCRIPTION + school for a spell/enchantment effects list (effects[1]). The
+-- description is the fuller "<name> <mag>pts for <dur>s (<range>)" form (e.g. "Frost Damage 25pts
+-- for 1s (touch)"), not just the effect name. Either return may be "" when unavailable. Defined
+-- here (before exportSpells) so it's visible to it; the magnitude/duration/range formatting mirrors
+-- formatEffect (which is defined later in the file and so can't be referenced from here).
+local function firstEffectInfo(effects)
+    local text, school = "", ""
+    pcall(function()
+        local e1 = effects and effects[1]
+        if not e1 then return end
+        local name = ""
+        if e1.effect and e1.effect.name and e1.effect.name ~= "" then name = e1.effect.name end
+        local mrec = core.magic.effects.records[e1.id]
+        if mrec then
+            if name == "" and mrec.name and mrec.name ~= "" then name = mrec.name end
+            if mrec.school and mrec.school ~= "" then school = tostring(mrec.school) end
+        end
+        -- Affected attribute/skill suffix (e.g. "Fortify Attribute Strength").
+        local function cap(s) s = tostring(s); return s:sub(1, 1):upper() .. s:sub(2) end
+        if e1.affectedAttribute then name = name .. " " .. cap(e1.affectedAttribute) end
+        if e1.affectedSkill then name = name .. " " .. cap(e1.affectedSkill) end
+        text = name
+        -- Magnitude (omitted for no-magnitude effects like Water Walking where both are 0).
+        local mn = math.floor((e1.magnitudeMin or 0) + 0.5)
+        local mx = math.floor((e1.magnitudeMax or 0) + 0.5)
+        if mn > 0 or mx > 0 then
+            if mn == mx then text = string.format("%s %dpts", text, mn)
+            else text = string.format("%s %d-%dpts", text, mn, mx) end
+        end
+        -- Duration.
+        local dur = math.floor((e1.duration or 0) + 0.5)
+        if dur > 0 then text = text .. string.format(" for %ds", dur) end
+        -- Range.
+        local R = core.magic.RANGE
+        local rn = nil
+        if R then
+            if e1.range == R.Self then rn = "self"
+            elseif e1.range == R.Touch then rn = "touch"
+            elseif e1.range == R.Target then rn = "target" end
+        end
+        if rn then text = text .. " (" .. rn .. ")" end
+    end)
+    return text, school
+end
+
 local function exportSpells()
     local parts = {}
 
@@ -148,19 +193,30 @@ local function exportSpells()
                     icon = effs[1].effect.icon or ""
                 end
             end)
+            -- Extra stats for the spell row: first-effect name, school, magicka cost.
+            local effName, school = firstEffectInfo(rec and rec.effects)
+            local cost = 0
+            pcall(function() cost = math.floor((rec.cost or 0) + 0.5) end)
             table.insert(parts, string.format(
-                '{"id":"%s","name":"%s","type":"%s","icon":"%s"}',
-                jsonEscape(spell.id), jsonEscape(nm), typeStr, jsonEscape(icon)))
+                '{"id":"%s","name":"%s","type":"%s","icon":"%s","effect":"%s","school":"%s","cost":%d}',
+                jsonEscape(spell.id), jsonEscape(nm), typeStr, jsonEscape(icon),
+                jsonEscape(effName), jsonEscape(school), cost))
         end
     end
 
     for _, item in ipairs(types.Actor.inventory(self):getAll(types.Book)) do
         local rec = types.Book.record(item)
         if rec.isScroll and rec.enchant and rec.enchant ~= "" then
+            -- Scrolls: effect only (no magicka cost / school — they're items, not learned spells).
+            local effName = ""
+            pcall(function()
+                local ench = core.magic.enchantments.records[rec.enchant]
+                if ench then effName = firstEffectInfo(ench.effects) end
+            end)
             table.insert(parts, string.format(
-                '{"id":"%s","name":"%s","type":"scroll","icon":"%s"}',
+                '{"id":"%s","name":"%s","type":"scroll","icon":"%s","effect":"%s"}',
                 jsonEscape(item.recordId), jsonEscape(itemName(item)),
-                jsonEscape(rec.icon or "")))
+                jsonEscape(rec.icon or ""), jsonEscape(effName)))
         end
     end
 
@@ -185,19 +241,27 @@ local function exportSpells()
                 end)
                 local rec = item.type.record(item)
                 local icon = (rec and rec.icon) or ""
+                -- Enchanted items: effect + charge (already exported); no cost/school.
+                local effName = firstEffectInfo(ench.effects)
                 table.insert(parts, string.format(
-                    '{"id":"%s","name":"%s","type":"scroll","icon":"%s","isItem":true,"charge":%d,"maxCharge":%d}',
+                    '{"id":"%s","name":"%s","type":"scroll","icon":"%s","isItem":true,"charge":%d,"maxCharge":%d,"effect":"%s"}',
                     jsonEscape(item.recordId), jsonEscape(itemName(item)),
                     jsonEscape(icon),
-                    math.floor(charge + 0.5), math.floor(maxCharge + 0.5)))
+                    math.floor(charge + 0.5), math.floor(maxCharge + 0.5), jsonEscape(effName)))
             end
         end
     end
 
-    local line = 'COMPANION_SPELLS:[' .. table.concat(parts, ',') .. ']'
-    if line == lastSpellsStr then return end
-    lastSpellsStr = line
-    emit(line)
+    -- Streamed START / ITEM* / END (one small line each) instead of a single array line: the
+    -- spell list can grow unbounded (a mage with many spells), and the added per-spell stats
+    -- pushed the single line toward the 4096-byte stdout-flush truncation limit. Change-detected
+    -- on the joined signature so an unchanged tick emits nothing.
+    local sig = table.concat(parts, ',')
+    if sig == lastSpellsStr then return end
+    lastSpellsStr = sig
+    emit('COMPANION_SPELLS_START')
+    for _, p in ipairs(parts) do emit('COMPANION_SPELLS_ITEM:' .. p) end
+    emit('COMPANION_SPELLS_END')
 end
 
 local lastSelectedSpellStr = nil
@@ -703,10 +767,9 @@ local function itemStats(item, cat)
         return string.format("%d-%d", mn, mx), key, condRatio(rec.health)
     elseif types.Armor.objectIsInstance(item) then
         return string.format("%d", math.floor((rec.baseArmor or 0) + 0.5)), "ARMOR", condRatio(rec.health)
-    elseif cat == "lockpick" then
-        return string.format("Q%.1f", rec.quality or 0), "PICK", condRatio(rec.maxCondition)
-    elseif cat == "probe" then
-        return string.format("Q%.1f", rec.quality or 0), "PROBE", condRatio(rec.maxCondition)
+    elseif cat == "lockpick" or cat == "probe" then
+        -- No quality stat for lockpicks/probes (not gameplay-relevant); keep the uses-left bar.
+        return "", "", condRatio(rec.maxCondition)
     elseif cat == "potion" then
         local eff = rec.effects and rec.effects[1]
         if eff then
