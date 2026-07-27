@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Point
+import android.hardware.display.DisplayManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
@@ -16,6 +17,7 @@ import android.os.StatFs
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.system.Os
+import android.view.Display
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.compose.animation.core.*
@@ -474,22 +476,99 @@ fun enableLogcat() {
     processBuilder.start()
 }
 
+/**
+ * Writes the game's render resolution into `settings.cfg`.
+ *
+ * AUTHORITATIVE: every existing `resolution x`/`resolution y` line is overwritten, not
+ * just the shipped `= 0` sentinel. The old sentinel-only behaviour meant the very first
+ * launch permanently decided the value — so a first launch that landed on the companion
+ * (bottom) display baked that display's size in, and nothing could ever re-detect it.
+ * Overwriting unconditionally makes each launch self-correcting, which also repairs
+ * devices already stuck on a wrong value. Callers gate this on the user's
+ * `AVOID_RESOLUTION_INSERTION` preference; pass the TOP screen's size (see
+ * [topScreenRealSize]), never the calling window's.
+ */
 fun updateResolutionInConfig(width: Int, height: Int) {
+    if (width <= 0 || height <= 0) return
+
     // Ensure the larger value is assigned to width
     val (adjustedWidth, adjustedHeight) = if (width > height) width to height else height to width
 
     val file = File(Constants.SETTINGS_FILE)
-    val lines = file.readLines().map { line ->
+    if (!file.exists()) return
+
+    val original = file.readLines()
+    var sawX = false
+    var sawY = false
+    val lines = original.map { line ->
+        val key = line.trimStart()
         when {
             // Update lines based on the adjusted width and height
-            line.startsWith("# Width recommended for your device") -> "# Width recommended for your device = $adjustedWidth"
-            line.startsWith("# Height recommended for your device") -> "# Height recommended for your device = $adjustedHeight"
-            line.startsWith("resolution y = 0") -> "resolution y = $adjustedHeight"
-            line.startsWith("resolution x = 0") -> "resolution x = $adjustedWidth"
+            key.startsWith("# Width recommended for your device") -> "# Width recommended for your device = $adjustedWidth"
+            key.startsWith("# Height recommended for your device") -> "# Height recommended for your device = $adjustedHeight"
+            key.startsWith("resolution y =") -> { sawY = true; "resolution y = $adjustedHeight" }
+            key.startsWith("resolution x =") -> { sawX = true; "resolution x = $adjustedWidth" }
             else -> line
         }
+    }.toMutableList()
+
+    // The engine rewrites settings.cfg on shutdown and can drop a key entirely; re-add
+    // any missing one so the write stays authoritative.
+    if (!sawX || !sawY) {
+        var videoIndex = lines.indexOfFirst { it.trim().equals("[Video]", ignoreCase = true) }
+        if (videoIndex < 0) {
+            lines.add("[Video]")
+            videoIndex = lines.lastIndex
+        }
+        if (!sawY) lines.add(videoIndex + 1, "resolution y = $adjustedHeight")
+        if (!sawX) lines.add(videoIndex + 1, "resolution x = $adjustedWidth")
     }
-    file.writeText(lines.joinToString("\n"))
+
+    if (lines != original) {
+        file.writeText(lines.joinToString("\n"))
+    }
+}
+
+/**
+ * Real pixel size of the TOP screen ([Display.DEFAULT_DISPLAY]), independent of whichever
+ * physical display the calling Activity happens to be running on.
+ *
+ * Deliberately SEPARATE from [currentDeviceRealSize], which reports the caller's own
+ * window and is what the touch-coordinate mapping in the Dynamic* controls wants. The
+ * game always renders on the top screen, so resolution detection must be pinned to
+ * display 0 — otherwise a first launch placed on the companion (bottom) display detects
+ * 1240x1080 and `SDLSurface.setFixedSize` then forces the render target to that. Mirrors
+ * the explicit display lookup in `EngineActivity.startCompanionScreen()`.
+ */
+fun Context.topScreenRealSize(): Pair<Int, Int> {
+    val display = (getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+        ?.getDisplay(Display.DEFAULT_DISPLAY)
+
+    if (display != null) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val bounds = createDisplayContext(display)
+                    .createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+                    .getSystemService(WindowManager::class.java)
+                    .maximumWindowMetrics
+                    .bounds
+                if (bounds.width() > 0 && bounds.height() > 0) {
+                    return Pair(bounds.width(), bounds.height())
+                }
+            } catch (_: Throwable) {
+                // Fall through to the display-metrics path below.
+            }
+        }
+
+        val size = Point()
+        @Suppress("DEPRECATION")
+        display.getRealSize(size)
+        if (size.x > 0 && size.y > 0) return Pair(size.x, size.y)
+    }
+
+    // Last resort only: this display is what the old (buggy) detection always used.
+    val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    return windowManager.currentDeviceRealSize()
 }
 
 fun WindowManager.currentDeviceRealSize(): Pair<Int, Int> {

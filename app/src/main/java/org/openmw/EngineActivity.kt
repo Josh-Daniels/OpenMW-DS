@@ -129,6 +129,7 @@ import org.openmw.utils.GameFilesPreferences.getENVLine
 import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
 import org.openmw.utils.GameFilesPreferences.readAngle
 import org.openmw.utils.GameFilesPreferences.readSPIRV
+import org.openmw.utils.topScreenLaunchOptions
 import kotlin.math.roundToInt
 
 @Suppress("DEPRECATION")
@@ -569,7 +570,9 @@ class EngineActivity : SDLActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     private fun navigateToMain() {
         val intent = Intent(this, MainActivity::class.java)
-        startActivity(intent)
+        // Pin to the top screen — otherwise the launcher inherits whatever display this
+        // activity is on, and a wrong-display game hands the launcher the same mistake.
+        startActivity(intent, topScreenLaunchOptions())
         finish()
     }
 

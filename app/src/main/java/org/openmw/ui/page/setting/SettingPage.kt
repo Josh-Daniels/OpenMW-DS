@@ -113,6 +113,7 @@ import org.openmw.utils.UserManageAssets
 import org.openmw.utils.getLayoutType
 import org.openmw.utils.startGame
 import org.openmw.utils.stringRes
+import org.openmw.utils.topScreenLaunchOptions
 import java.io.File
 
 @InternalCoroutinesApi
@@ -639,7 +640,10 @@ fun InGameSettings() {
                 onClick = {
                     launchedActivity = false
                     configureControls = false
-                    context.startActivity(Intent(context, MainActivity::class.java))
+                    context.startActivity(
+                        Intent(context, MainActivity::class.java),
+                        topScreenLaunchOptions()
+                    )
                 },
                 modifier = Modifier
                     .fillMaxWidth()

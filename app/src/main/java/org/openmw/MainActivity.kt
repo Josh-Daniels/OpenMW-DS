@@ -5,8 +5,9 @@ import android.content.Intent
 import android.hardware.input.InputManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
+import android.view.Display
 import android.view.InputDevice.SOURCE_GAMEPAD
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -29,6 +30,7 @@ import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openmw.modDownloader.ModDatabase
@@ -38,7 +40,7 @@ import org.openmw.ui.navigation.RootNav
 import org.openmw.ui.theme.OpenMWTheme
 import org.openmw.ui.view.AlphaMigrationFirstLaunch
 import org.openmw.ui.view.MoeDialog
-import org.openmw.ui.view.currentDeviceRealSize
+import org.openmw.ui.view.topScreenRealSize
 import org.openmw.ui.view.updateResolutionInConfig
 import org.openmw.utils.CaptureCrash
 import org.openmw.utils.ConfigFileObserver
@@ -50,6 +52,7 @@ import org.openmw.utils.MyAlertDialog
 import org.openmw.utils.PermissionHelper
 import org.openmw.utils.PermissionHelper.getManageExternalStoragePermission
 import org.openmw.utils.UserManageAssets
+import org.openmw.utils.topScreenLaunchOptions
 
 @InternalCoroutinesApi
 @ExperimentalMaterial3Api
@@ -64,6 +67,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        // Must run before any setup: this instance may be about to finish itself.
+        if (relaunchOnTopScreenIfNeeded()) return
+
         CaptureCrash.initialize(this)
         Thread.setDefaultUncaughtExceptionHandler(CaptureCrash())
 
@@ -76,6 +82,47 @@ class MainActivity : ComponentActivity() {
                 proceedWithNextSteps()
             }
         }
+    }
+
+    /**
+     * Moves this Activity to the TOP screen if Android placed it anywhere else, and reports
+     * whether it did (in which case this instance is finishing — the caller must bail out).
+     *
+     * The launcher-icon tap is issued by the OS, not by us, so it can't be pinned at a call
+     * site the way [topScreenLaunchOptions] pins ours: the bottom screen runs its own
+     * persistent SecondaryDisplayLauncher, and a tap there lands MainActivity on display 4.
+     * Play then inherits that display and the game renders on the bottom screen underneath
+     * the companion Presentation. A task also keeps its display across recents-resume, so
+     * without this the wrong-display state persists until the app is killed. Covers the
+     * system-delivered USB_DEVICE_ATTACHED launch too, since it runs unconditionally.
+     */
+    private fun relaunchOnTopScreenIfNeeded(): Boolean {
+        // Already corrected once — never bounce again, whatever the OS did with our request.
+        // Without this guard, a device that ignored setLaunchDisplayId would relaunch forever.
+        if (intent?.getBooleanExtra(EXTRA_DISPLAY_CORRECTED, false) == true) return false
+
+        val currentDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.displayId
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager?.defaultDisplay?.displayId
+        } ?: return false
+
+        if (currentDisplayId == Display.DEFAULT_DISPLAY) return false
+
+        Log.w(TAG, "Launched on display $currentDisplayId; relaunching on the top screen")
+
+        // Copy the original intent so a system-delivered action/extras survive the bounce.
+        // NEW_TASK|CLEAR_TASK is what actually moves us: a task keeps its display, so
+        // reusing the existing one would land us right back on the wrong screen.
+        val corrected = Intent(intent ?: Intent(this, MainActivity::class.java)).apply {
+            setClass(this@MainActivity, MainActivity::class.java)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            putExtra(EXTRA_DISPLAY_CORRECTED, true)
+        }
+        startActivity(corrected, topScreenLaunchOptions())
+        finish()
+        return true
     }
 
     @Suppress("OVERRIDE_DEPRECATION")
@@ -99,8 +146,19 @@ class MainActivity : ComponentActivity() {
                 UserManageAssets(applicationContext).onFirstLaunch()
             }
 
-            val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-            val (width, height) = windowManager.currentDeviceRealSize()
+            // Pin the game's render resolution to the TOP screen, once per launch.
+            // Must NOT use this Activity's own window metrics: MainActivity can be placed
+            // on the companion (bottom) display, and SDLSurface force-sizes the render
+            // target to whatever ends up in settings.cfg. Runs here rather than in the
+            // composition so it can't re-fire on every recomposition.
+            val (topWidth, topHeight) = topScreenRealSize()
+            withContext(Dispatchers.IO) {
+                val avoidInsertion =
+                    GameFilesPreferences.readResolutionInsertion(this@MainActivity).first()
+                if (!avoidInsertion) {
+                    updateResolutionInConfig(topWidth, topHeight)
+                }
+            }
 
             setContent {
                 OpenMWTheme(
@@ -133,12 +191,7 @@ class MainActivity : ComponentActivity() {
                         }
 
                         val showDialog = remember { mutableStateOf(true) }
-                        val avoidInsertion by GameFilesPreferences.readResolutionInsertion(this@MainActivity).collectAsState(initial = false)
                         val whatsNew by GameFilesPreferences.getWhatsNew(this@MainActivity).collectAsState(initial = false)
-
-                        if (!avoidInsertion) {
-                            updateResolutionInConfig(width, height)
-                        }
 
                         if (whatsNew) {
                             MyAlertDialog(showDialog = showDialog)
@@ -157,6 +210,11 @@ class MainActivity : ComponentActivity() {
         uiScope.cancel()
         super.onDestroy()
         // Process.killProcess(Process.myPid())
+    }
+
+    private companion object {
+        const val TAG = "MainActivity"
+        const val EXTRA_DISPLAY_CORRECTED = "org.openmw.DISPLAY_CORRECTED"
     }
 }
 
