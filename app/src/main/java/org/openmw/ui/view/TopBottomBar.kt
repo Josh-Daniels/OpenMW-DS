@@ -136,42 +136,13 @@ fun MyFloatingActionButton() {
     FloatingActionButton(
         onClick = {
             coroutineScope.launch {
-                UIStateManager.configureControls = false
-                launchedActivity = true
-                if (codeGroupOption == "OpenMW") {
-                    if (!bypassGameCheck) {
-                        val uri = savedPath
-                        if (uri != null) {
-                            val morrowindEsm = File(uri, "Morrowind.esm")
-                            val morrowindEsmFallback = File(uri, "/Data Files/Morrowind.esm")
-                            if (morrowindEsm.exists() || morrowindEsmFallback.exists()) {
-                                isCopyingResources = true // Start copying
-                                withContext(Dispatchers.Default) {
-                                    UserManageAssets(context).resourcePrepare()
-                                }
-                                isCopyingResources = false // Copying complete
-                                editMode = false
-                                isAppLoggingEnabled = false
-                                context.startGame()
-                            } else {
-                                MToast(stringRes(R.string.morrowind_folder_not_found_tip))
-                            }
-                        }
-                    } else {
-                        isCopyingResources = true // Start copying
-                        withContext(Dispatchers.Default) {
-                            UserManageAssets(context).resourcePrepare()
-                        }
-                        isCopyingResources = false // Copying complete
-
-                        isAppLoggingEnabled = false
-                        context.startGame()
-
-                    }
-                } else  {
-                    isAppLoggingEnabled = false
-                    context.startGame()
-                }
+                attemptLaunchGame(
+                    context = context,
+                    savedPath = savedPath,
+                    codeGroupOption = codeGroupOption,
+                    bypassGameCheck = bypassGameCheck,
+                    onCopyingChanged = { isCopyingResources = it },
+                )
             }
         },
         containerColor = Color(alpha = 0.6f, red = 0f, green = 0f, blue = 0f),
@@ -198,7 +169,6 @@ fun MyFloatingActionButton() {
 fun BarOptions (context: Context) {
     var expanded by remember { mutableStateOf(false) }
     var showDialog by remember { mutableStateOf(false) }
-    val settingsFile = File(SETTINGS_FILE)
     val codeGroupOption by readCodeGroup(context).collectAsState(initial = "OpenMW")
 
     IconButton(onClick = { isTabExpanded = !isTabExpanded }) {
@@ -283,14 +253,7 @@ fun BarOptions (context: Context) {
                 confirmButton = {
                     Button(
                         onClick = {
-                            if (settingsFile.exists()) {
-                                settingsFile.delete()
-                                Log.d("ManageAssets", "Deleted existing file: $SETTINGS_FILE")
-                                // Copy over settings.cfg
-                                UserManageAssets(context).resetUserConfig()
-                                expanded = false
-                            }
-                            MToast(stringRes(R.string.settings_file_reset))
+                            if (resetUserSettingsFile(context)) expanded = false
                             showDialog = false
                         }
                     ) {
@@ -307,4 +270,92 @@ fun BarOptions (context: Context) {
             )
         }
     }
+}
+
+/**
+ * The complete Play preamble, lifted verbatim out of [MyFloatingActionButton]'s click handler so
+ * EVERY launcher's Play button runs the same checks and setup. Both the Alpha3 Play FAB and the
+ * simplified launcher's Play button call this — the simplified button previously called
+ * [startGame] bare, which is what produced both Play bugs:
+ *
+ *  - It skipped the game-files guard below, so Play was pressable with nothing selected and
+ *    launched into a broken engine.
+ *  - It skipped [UserManageAssets.resourcePrepare], the ONLY thing in the app that copies
+ *    `resources/` + `defaults.bin` + the companion mod to external storage. Without it the engine
+ *    finds no `resources/` directory and quits immediately. Because Alpha3's Play did run it, the
+ *    simplified Play appeared to "start working" once Alpha3's had been pressed once.
+ *
+ * Behaviour is unchanged from the original inline version, deliberately including two quirks:
+ *  - `savedPath == null` (game files never selected) is a SILENT no-op — no launch, no message.
+ *  - [bypassGameCheck] (the "Android 15 game files not detected" opt-out) skips the esm check
+ *    entirely and launches regardless.
+ *
+ * [onCopyingChanged] reports the resource-copy phase so a caller can show a progress indicator;
+ * callers that don't need one can omit it.
+ */
+suspend fun attemptLaunchGame(
+    context: Context,
+    savedPath: String?,
+    codeGroupOption: String,
+    bypassGameCheck: Boolean,
+    onCopyingChanged: (Boolean) -> Unit = {},
+) {
+    UIStateManager.configureControls = false
+    launchedActivity = true
+    if (codeGroupOption == "OpenMW") {
+        if (!bypassGameCheck) {
+            val uri = savedPath
+            if (uri != null) {
+                val morrowindEsm = File(uri, "Morrowind.esm")
+                val morrowindEsmFallback = File(uri, "/Data Files/Morrowind.esm")
+                if (morrowindEsm.exists() || morrowindEsmFallback.exists()) {
+                    onCopyingChanged(true) // Start copying
+                    withContext(Dispatchers.Default) {
+                        UserManageAssets(context).resourcePrepare()
+                    }
+                    onCopyingChanged(false) // Copying complete
+                    editMode = false
+                    isAppLoggingEnabled = false
+                    context.startGame()
+                } else {
+                    MToast(stringRes(R.string.morrowind_folder_not_found_tip))
+                }
+            }
+        } else {
+            onCopyingChanged(true) // Start copying
+            withContext(Dispatchers.Default) {
+                UserManageAssets(context).resourcePrepare()
+            }
+            onCopyingChanged(false) // Copying complete
+
+            isAppLoggingEnabled = false
+            context.startGame()
+
+        }
+    } else {
+        isAppLoggingEnabled = false
+        context.startGame()
+    }
+}
+
+/**
+ * The launcher menu's "Reset Settings" action: delete the user's settings.cfg and re-copy the
+ * shipped default over it, then toast. Lifted verbatim out of [BarOptions]'s confirm button so the
+ * simplified launcher's settings screen runs exactly this, rather than a second implementation
+ * that could drift from it.
+ *
+ * Returns whether a settings file was actually found and reset (the old call site used that to
+ * close its dropdown).
+ */
+fun resetUserSettingsFile(context: Context): Boolean {
+    val settingsFile = File(SETTINGS_FILE)
+    val existed = settingsFile.exists()
+    if (existed) {
+        settingsFile.delete()
+        Log.d("ManageAssets", "Deleted existing file: $SETTINGS_FILE")
+        // Copy over settings.cfg
+        UserManageAssets(context).resetUserConfig()
+    }
+    MToast(stringRes(R.string.settings_file_reset))
+    return existed
 }

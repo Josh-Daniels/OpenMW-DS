@@ -63,6 +63,9 @@ object GameFilesPreferences {
     val ALLOWED_TO_TEXT_EDITOR = stringPreferencesKey("allowed_to_edit")
     val NEW_FEATURE_ENABLED_KEY = booleanPreferencesKey("new_feature_enabled")
     val TRANSLATION_ENABLED_KEY = booleanPreferencesKey("translation_enabled")
+    // Which launcher home screen MainActivity renders: false = the Alpha3 launcher (default,
+    // existing behaviour), true = the simplified OpenMW-DS launcher.
+    val SIMPLIFIED_LAUNCHER_KEY = booleanPreferencesKey("simplified_launcher")
     private val _gameFilesUri = MutableStateFlow<String?>(null)
     val BACKGROUND_ANIMATION_KEY = stringPreferencesKey("background_animation")
     val LANGUAGE_KEY = stringPreferencesKey("language")
@@ -335,6 +338,24 @@ object GameFilesPreferences {
     fun loadVibrationState(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
             preferences[VIBRATION_STATE_KEY]?.toBoolean() ?: false  // haptics OFF by default
+        }
+    }
+
+    /** Switch between the Alpha3 launcher (false) and the simplified launcher (true), and persist.
+     *  Non-destructive: the Alpha3 launcher is left fully intact and is reachable again by
+     *  flipping this back. */
+    suspend fun saveSimplifiedLauncher(context: Context, enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[SIMPLIFIED_LAUNCHER_KEY] = enabled
+        }
+    }
+
+    /** Whether the simplified launcher is in use. Defaults to true (simplified) — keep every
+     *  `collectAsState(initial = true)` call site in step with this fallback, so an unset
+     *  preference never flashes the wrong launcher for a frame. */
+    fun loadSimplifiedLauncher(context: Context): Flow<Boolean> {
+        return context.dataStore.data.map { preferences ->
+            preferences[SIMPLIFIED_LAUNCHER_KEY] ?: true  // simplified launcher by default
         }
     }
 

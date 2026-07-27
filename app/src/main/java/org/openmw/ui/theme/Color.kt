@@ -10,6 +10,27 @@ val SetupOnOrange = Color(0xFF2B1E10)
 // (settings left-column selected item, the Play button over the logo).
 val AccentLightBlue = Color(0xFF8AB4F8)
 
+// ---- warm stone & bronze palette (simplified launcher) ----
+// MIRRORS the companion UI's palette (CompanionScreen.kt, "palette: warm stone & bronze") so the
+// simplified launcher and the bottom-screen companion read as one app. Those constants are
+// `private` to CompanionScreen.kt and CLAUDE.md forbids modifying them, so the values are
+// duplicated here rather than imported — **if the companion palette ever changes, change these
+// too.** Names match theirs exactly to make that correspondence obvious.
+// (The proper long-term fix is to promote the companion's palette into this file and have
+// CompanionScreen reference it; that's a deliberate refactor of a 12k-line file, not a drive-by.)
+val MwStoneDark = Color(0xFF15120D)   // deep warm background
+val MwStonePanel = Color(0xFF252017)  // raised panel fill
+val MwSlotBg = Color(0xFF1C1812)      // slot / inset fill
+val MwSlotWorn = Color(0xFF3A2E1A)    // active / selected fill (bronze-tinted)
+val MwBronze = Color(0xFF8C6D3F)      // frame border
+val MwBronzeDark = Color(0xFF5A4528)  // inner border / dividers
+val MwBronzeLight = Color(0xFFC9A063) // highlights, selected, headings
+val MwBone = Color(0xFFD8CBB0)        // primary text
+val MwBoneDim = Color(0xFF9A8C70)     // secondary text
+val MwBoneBright = Color(0xFFF2EEE3)  // high-prominence text
+val MwBoneMuted = Color(0xFFBCAF96)   // low-prominence text
+val MwFloatStone = Color(0xF02A2318)  // near-opaque stone for floating panels over the background
+
 val Purple80 = Color(0xFFD0BCFF)
 val PurpleGrey80 = Color(0xFFCCC2DC)
 val Pink80 = Color(0xFFEFB8C8)

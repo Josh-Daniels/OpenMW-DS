@@ -37,6 +37,7 @@ import org.openmw.modDownloader.ModDatabase
 import org.openmw.modDownloader.ModListManager
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.navigation.RootNav
+import org.openmw.ui.page.simplified.SimplifiedLauncherRoot
 import org.openmw.ui.theme.OpenMWTheme
 import org.openmw.ui.view.AlphaMigrationFirstLaunch
 import org.openmw.ui.view.MoeDialog
@@ -196,7 +197,19 @@ class MainActivity : ComponentActivity() {
                         if (whatsNew) {
                             MyAlertDialog(showDialog = showDialog)
                         }
-                        RootNav()
+                        // Which launcher home screen to show. Default true = the simplified
+                        // launcher; false swaps in the Alpha3 launcher (RootNav), which is left
+                        // completely untouched. Both are reachable from each other's settings, so
+                        // this is non-destructive either way.
+                        val simplifiedLauncher by GameFilesPreferences
+                            .loadSimplifiedLauncher(this@MainActivity)
+                            .collectAsState(initial = true)
+
+                        if (simplifiedLauncher) {
+                            SimplifiedLauncherRoot()
+                        } else {
+                            RootNav()
+                        }
                         MoeDialog()
                         AlphaMigrationFirstLaunch()
                     }

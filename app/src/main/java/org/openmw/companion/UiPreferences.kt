@@ -309,11 +309,13 @@ object UiPreferences {
         if (gameUiIsMixed()) saveCustomSnapshot(context)
         gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
         touchInputFlow.value = p.getBoolean(TOUCH_INPUT, true)
-        // Game cursor and touch input are mutually exclusive. If a pre-existing config has both on,
-        // reconcile once here (touch input wins — it's the default), so the UI never shows both On.
-        if (gameCursorFlow.value && touchInputFlow.value) {
+        // Game cursor and touch input are the two halves of ONE input mode — exactly one is always
+        // on. Reconcile a legacy config that has both on, or both off (both-off used to be
+        // reachable), once here — touch input wins, since it's the default.
+        if (gameCursorFlow.value == touchInputFlow.value) {
+            touchInputFlow.value = true
             gameCursorFlow.value = false
-            p.edit().putBoolean(GAME_CURSOR, false).apply()
+            p.edit().putBoolean(TOUCH_INPUT, true).putBoolean(GAME_CURSOR, false).apply()
         }
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
@@ -386,12 +388,11 @@ object UiPreferences {
     /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Vanilla" quick-set
      *  buttons). Pending elements stay locked to VANILLA. Also flips the controller button-hint bar
      *  ([CONTROLLER_TOOLTIPS_KEY]): DS -> Off, Vanilla -> On (only useful when navigating native
-     *  menus), and the input mode: BOTH presets now turn Touch input ON (Game cursor OFF via mutual
-     *  exclusion) — neither preset enables the Game cursor, so a user who wants it must toggle it
-     *  manually in the Input section. DS additionally forces the Conversation Screen Layout to TOP
-     *  (the other per-window layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at
-     *  their own settings). All other Vanilla HUD toggles are left untouched; individual rows can
-     *  still be overridden afterwards. */
+     *  menus). DS additionally forces the Conversation Screen Layout to TOP (the other per-window
+     *  layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at their own settings).
+     *  The Input section (Touch input / Game cursor) is deliberately NOT touched by either preset —
+     *  it's the player's own choice and survives a quick-set. All other Vanilla HUD toggles are left
+     *  untouched too; individual rows can still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
         // Snapshot the current layout first if it's a Custom mix, so [Custom] can restore it even if
         // it wasn't captured by an earlier individual change. (No-op if the snapshot already matches.)
@@ -400,17 +401,12 @@ object UiPreferences {
         GAME_UI_ELEMENTS.filter { !it.pending }.forEach { setGameUiMode(context, it.key, mode) }
         bulkGameUi = false
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
-        when (mode) {
-            // Both presets use Touch input (Game cursor off via mutual exclusion). All DS also drops
-            // the DS conversation onto the top screen (Conversation layout -> TOP) and uses the Shelf
-            // item-list layout (the DS-native look; irrelevant under Vanilla, where the native windows
-            // render instead).
-            GameUiMode.DS -> {
-                setTouchInput(context, true)
-                setConversationLocation(context, ConversationLocation.TOP)
-                setInventoryLayout(context, InventoryLayout.SHELF)
-            }
-            GameUiMode.VANILLA -> setTouchInput(context, true)  // was setGameCursor(true) — swapped so All Vanilla is touch-driven
+        // All DS also drops the DS conversation onto the top screen (Conversation layout -> TOP) and
+        // uses the Shelf item-list layout (the DS-native look; irrelevant under Vanilla, where the
+        // native windows render instead). All Vanilla changes nothing beyond the elements themselves.
+        if (mode == GameUiMode.DS) {
+            setConversationLocation(context, ConversationLocation.TOP)
+            setInventoryLayout(context, InventoryLayout.SHELF)
         }
     }
 
@@ -463,12 +459,21 @@ object UiPreferences {
     /** Input: whether a tap on the top screen directly clicks there while a menu is open. */
     fun touchInputFlow(): StateFlow<Boolean> = touchInputFlow.asStateFlow()
 
-    /** Enable/disable direct touch-to-click and persist. Mutually exclusive with the game cursor:
-     *  turning this ON turns Game cursor OFF (both may be off, but not both on). */
-    fun setTouchInput(context: Context, enabled: Boolean) {
-        touchInputFlow.value = enabled
-        editor(context).putBoolean(TOUCH_INPUT, enabled).apply()
-        if (enabled) setGameCursor(context, false)
+    /** Enable/disable direct touch-to-click and persist. The inverse of the game cursor: turning
+     *  this ON turns Game cursor OFF, turning it OFF turns Game cursor ON (exactly one is always
+     *  on — neither both nor neither). */
+    fun setTouchInput(context: Context, enabled: Boolean) = applyInputMode(context, touch = enabled)
+
+    /** Write both halves of the input mode in one shot. Touch input and Game cursor are a single
+     *  either/or choice, so the two setters delegate here rather than cross-calling each other
+     *  (which, now that turning one off turns the other on, would recurse forever). */
+    private fun applyInputMode(context: Context, touch: Boolean) {
+        touchInputFlow.value = touch
+        gameCursorFlow.value = !touch
+        editor(context)
+            .putBoolean(TOUCH_INPUT, touch)
+            .putBoolean(GAME_CURSOR, !touch)
+            .apply()
     }
 
     /** Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. */
@@ -613,13 +618,10 @@ object UiPreferences {
         editor(context).putBoolean(PLAYER_COMBAT, enabled).apply()
     }
 
-    /** Enable/disable the top-screen game cursor and persist. Mutually exclusive with touch input:
-     *  turning this ON turns Touch input OFF (both may be off, but not both on). */
-    fun setGameCursor(context: Context, enabled: Boolean) {
-        gameCursorFlow.value = enabled
-        editor(context).putBoolean(GAME_CURSOR, enabled).apply()
-        if (enabled) setTouchInput(context, false)
-    }
+    /** Enable/disable the top-screen game cursor and persist. The inverse of touch input: turning
+     *  this ON turns Touch input OFF, turning it OFF turns Touch input ON (exactly one is always
+     *  on — neither both nor neither). */
+    fun setGameCursor(context: Context, enabled: Boolean) = applyInputMode(context, touch = !enabled)
 
     private fun editor(context: Context): SharedPreferences.Editor {
         val p = prefs ?: context.applicationContext

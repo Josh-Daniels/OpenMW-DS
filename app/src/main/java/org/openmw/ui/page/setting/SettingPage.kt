@@ -306,12 +306,28 @@ fun GeneralSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
+    // Same preference the simplified launcher's own settings screen writes — one source of truth.
+    val simplifiedLauncher by GameFilesPreferences.loadSimplifiedLauncher(context)
+        .collectAsState(initial = true)
 
     SettingSectionCard(
         title = stringResource(R.string.launcher_settings),
         icon = Icons.Default.Settings,
         initialExpanded = launchedActivity
     ) {
+        SettingRow(
+            title = stringResource(R.string.use_simplified_launcher),
+            subtitle = stringResource(R.string.use_simplified_launcher_tip)
+        ) {
+            Switch(
+                checked = simplifiedLauncher,
+                onCheckedChange = {
+                    scope.launch { GameFilesPreferences.saveSimplifiedLauncher(context, it) }
+                }
+            )
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+
         CodeGroupOptionSelector()
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
         

@@ -57,7 +57,10 @@ private fun launchCopySaves(scope: kotlinx.coroutines.CoroutineScope, context: a
     }
 }
 
-private fun launchCopySettings(scope: kotlinx.coroutines.CoroutineScope) {
+private fun launchCopySettings(
+    scope: kotlinx.coroutines.CoroutineScope,
+    onDone: () -> Unit = {},
+) {
     scope.launch {
         val result = withContext(Dispatchers.IO) { AlphaMigration.copySettings() }
         val msg = if (result.copied.isEmpty()) {
@@ -66,6 +69,7 @@ private fun launchCopySettings(scope: kotlinx.coroutines.CoroutineScope) {
             "Settings copied: ${result.copied.joinToString(", ")}"
         }
         MToast(msg)
+        onDone()
     }
 }
 
@@ -294,7 +298,13 @@ fun AlphaMigrationFirstLaunch() {
  * exact same copy logic as the popups.
  */
 @Composable
-fun AlphaMigrationButtons() {
+fun AlphaMigrationButtons(
+    /** Fired after "Copy settings" has finished rewriting settings.cfg. Hosts that display the
+     *  contents of that file (the simplified launcher's settings screen) need it to re-read —
+     *  `IniSettings` snapshots settings.cfg at first composition and never re-reads on its own.
+     *  Defaults to a no-op, so the Alpha3 home-screen call site is unchanged. */
+    onSettingsCopied: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -353,7 +363,7 @@ fun AlphaMigrationButtons() {
             confirmLabel = "Copy",
             dismissLabel = "Cancel",
             onConfirm = {
-                launchCopySettings(scope)
+                launchCopySettings(scope, onSettingsCopied)
                 confirmSettings = false
             },
             onDismiss = { confirmSettings = false },

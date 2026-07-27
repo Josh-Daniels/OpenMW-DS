@@ -142,6 +142,22 @@
     <string name="regenerate_navmesh">Regenerate Navmesh</string>
     <string name="generate_navmesh">Generate Navmesh</string>
     <string name="reset_settings">Reset Settings</string>
+    <string name="use_simplified_launcher">Use simplified launcher</string>
+    <string name="use_simplified_launcher_tip">Switch to the streamlined OpenMW-DS launcher. You can switch back from its settings screen at any time.</string>
+    <string name="simplified_launcher_title">OpenMW-DS</string>
+    <string name="simplified_launcher_settings_title">Settings</string>
+    <string name="simplified_launcher_more_coming">More settings are coming to this screen.</string>
+    <string name="simplified_no_content_files">No content files yet. Use “Add Mods” to add a Data Files folder.</string>
+    <string name="simplified_transfer_from_alpha3">Transfer from Alpha3</string>
+    <string name="simplified_load_order">Load Order</string>
+    <string name="simplified_copy_mod_order">Copy mod order from Alpha3</string>
+    <string name="simplified_copy_mod_order_tip">Replace your current mod load order with Alpha3\'s? Your game files path and any mod folders you\'ve added stay as they are. Mods Alpha3 lists that aren\'t installed here will be skipped.</string>
+    <string name="simplified_mod_order_imported">Mod order imported: %1$d entries</string>
+    <string name="simplified_mod_order_skipped">, %1$d skipped (not found)</string>
+    <string name="simplified_mod_order_no_source">No Alpha3 openmw.cfg found</string>
+    <string name="simplified_mod_order_empty_source">Alpha3 has no mod list to copy</string>
+    <string name="simplified_mod_order_no_morrowind">Not copied — Alpha3\'s list has no usable Morrowind.esm, which would leave the game unable to start</string>
+
     <string name="enable_logcat">Enable Logcat for launcher</string>
     <string name="total_device_memory">Total Device Memory</string>
     <string name="available_memory">Available Memory</string>

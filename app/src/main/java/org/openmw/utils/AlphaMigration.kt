@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.Environment
 import android.util.Log
 import org.openmw.Constants
+import org.openmw.ui.page.mod.ModValue
+import org.openmw.ui.page.mod.readModValues
 import java.io.File
 
 /**
@@ -220,5 +222,82 @@ object AlphaMigration {
         val result = SettingsResult(copied, missing)
         Log.d(TAG, "copySettings: $result")
         return result
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Mod load-order import (content= only)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Outcome of planning a mod-order import. [entries] is what should be written (already in
+     * Alpha3's order with ids renumbered from 1); a non-null [refusal] means write NOTHING.
+     */
+    data class ModOrderPlan(
+        val entries: List<ModValue> = emptyList(),
+        val skipped: List<String> = emptyList(),
+        val refusal: Refusal? = null,
+    ) {
+        enum class Refusal { NO_SOURCE, EMPTY_SOURCE, WOULD_LOSE_MORROWIND }
+    }
+
+    /** Alpha3's own openmw.cfg. Read-only, like everything else under the old root. */
+    fun oldOpenMwCfg(): File = File(oldFolderRoot(), "config/openmw.cfg")
+
+    /**
+     * Work out which of Alpha3's `content=` entries can be imported, WITHOUT writing anything.
+     *
+     * Deliberately scoped to `content=` — `data=` is left alone so the game-files path this
+     * install already has (and the curated defaults [copySettings] protects by excluding
+     * openmw.cfg) survive untouched. Alpha3's order becomes ours verbatim; this is an overwrite of
+     * the content section, not a merge, because the whole point is transferring load ORDER and a
+     * merge would preserve OUR order for every entry the two installs share.
+     *
+     * An entry is importable only if a file of that name exists under one of THIS install's
+     * `data=` roots — matched case-insensitively, since the roots are typically on a
+     * case-insensitive SD card while the cfg's spelling may differ. Unresolvable entries are
+     * reported rather than written, so a missing mod can't turn into a load-time failure.
+     *
+     * Refuses outright rather than writing a partial list if Morrowind.esm wouldn't survive the
+     * import — an install without it cannot launch.
+     */
+    fun planModOrderImport(): ModOrderPlan {
+        val src = oldOpenMwCfg()
+        if (!src.isFile) return ModOrderPlan(refusal = ModOrderPlan.Refusal.NO_SOURCE)
+
+        val incoming = readModValues(src.absolutePath).filter { it.category == "content" }
+        if (incoming.isEmpty()) return ModOrderPlan(refusal = ModOrderPlan.Refusal.EMPTY_SOURCE)
+
+        // THIS install's data roots — never Alpha3's. Values round-trip through the parser with
+        // their surrounding quotes, so strip those before treating them as paths.
+        val roots = readModValues()
+            .filter { it.category == "data" }
+            .map { it.value.trim().removeSurrounding("\"") }
+            .filter { it.isNotBlank() }
+
+        // One listing per root, lowercased, so resolution is a set lookup rather than a stat per
+        // (entry x root) and is case-insensitive.
+        val available = buildSet {
+            roots.forEach { root ->
+                File(root).listFiles()?.forEach { if (it.isFile) add(it.name.lowercase()) }
+            }
+        }
+
+        val resolved = mutableListOf<ModValue>()
+        val skipped = mutableListOf<String>()
+        incoming.forEach { entry ->
+            if (entry.value.lowercase() in available) resolved += entry else skipped += entry.value
+        }
+
+        // Must be present AND enabled: a `;content=Morrowind.esm` would import as unchecked and
+        // leave exactly the unlaunchable install this guard exists to prevent.
+        if (resolved.none { it.value.equals("Morrowind.esm", ignoreCase = true) && it.isChecked }) {
+            return ModOrderPlan(skipped = skipped, refusal = ModOrderPlan.Refusal.WOULD_LOSE_MORROWIND)
+        }
+
+        // writeModValuesToFile sorts by id, so ids must carry Alpha3's ordering.
+        val ordered = resolved.mapIndexed { index, entry -> entry.copy(id = index + 1) }
+        val plan = ModOrderPlan(entries = ordered, skipped = skipped)
+        Log.d(TAG, "planModOrderImport: ${ordered.size} importable, ${skipped.size} skipped")
+        return plan
     }
 }

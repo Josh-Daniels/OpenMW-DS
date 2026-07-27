@@ -190,10 +190,21 @@ fun writeIniValue(section: String, key: String, value: Any, comment: String?) {
     settingsFile.writeText(lines.joinToString("\n"))
 }
 
+/**
+ * The Settings.cfg editor: parses settings.cfg, renders every section as a collapsible card, and
+ * writes edits straight back. Self-contained and layout-agnostic — it is just a `Column`, so it
+ * drops into any host.
+ *
+ * [externalSearchQuery] lets a host supply the search text and render its own search field (the
+ * simplified launcher's settings screen pins search above its scroll area). Leave it null — the
+ * default — to keep the built-in search field and internal query state, which is what the Alpha3
+ * settings page uses; that path is unchanged.
+ */
 @Composable
-fun IniSettings() {
+fun IniSettings(externalSearchQuery: String? = null) {
     var settings by remember { mutableStateOf(readIniValues()) }
-    var searchQuery by remember { mutableStateOf("") }
+    var internalSearchQuery by remember { mutableStateOf("") }
+    val searchQuery = externalSearchQuery ?: internalSearchQuery
     val view = LocalView.current
     val context = LocalContext.current
     val translationChecked by GameFilesPreferences.loadTranslationState(context)
@@ -213,24 +224,26 @@ fun IniSettings() {
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        // Search Bar
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 12.dp),
-            placeholder = { Text("Search settings...", color = Color.Gray) },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color.Gray) },
-            singleLine = true,
-            shape = RoundedCornerShape(12.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = Color.Gray
+        // Search Bar — skipped when the host supplies the query and renders its own field.
+        if (externalSearchQuery == null) {
+            OutlinedTextField(
+                value = internalSearchQuery,
+                onValueChange = { internalSearchQuery = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                placeholder = { Text("Search settings...", color = Color.Gray) },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color.Gray) },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = Color.Gray
+                )
             )
-        )
+        }
 
         Column(
             modifier = Modifier.fillMaxWidth(),
