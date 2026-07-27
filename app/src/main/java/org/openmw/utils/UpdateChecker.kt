@@ -14,6 +14,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import org.openmw.BuildConfig
 import org.openmw.modDownloader.ModListManager
@@ -54,6 +55,37 @@ object UpdateChecker {
 
     /** GitHub rejects API requests with no User-Agent (403), so this header is mandatory. */
     private val USER_AGENT = "OpenMW-DS-Updater/${BuildConfig.RELEASE_VERSION}"
+
+    /**
+     * Hosts we are willing to pull an APK from.
+     *
+     * The download URL arrives inside the API response body, so without this the updater would
+     * fetch an installable APK from wherever that JSON happened to point. This confines it to
+     * GitHub-owned hosts.
+     *
+     * Verified against this repo's live release rather than assumed (Jul 2026): the API's
+     * `browser_download_url` is on **github.com**, which 302-redirects to
+     * **release-assets.githubusercontent.com**. `objects.githubusercontent.com` is the CDN host
+     * GitHub used previously and is kept for resilience; `api.github.com` covers the
+     * `/releases/assets/<id>` asset form, which this code does not currently request but which is
+     * the documented alternative.
+     *
+     * Exact-host matching, deliberately — no suffix/wildcard rule, so a lookalike like
+     * `github.com.evil.example` cannot pass. The cost is that if GitHub migrates its asset CDN
+     * again (as it already did once), downloads fail with the clear message below until this list
+     * is updated; that is the intended trade and is diagnosable from the failure text.
+     */
+    private val ALLOWED_DOWNLOAD_HOSTS = setOf(
+        "github.com",
+        "www.github.com",
+        "api.github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com"
+    )
+
+    /** Case-insensitive exact-host check against [ALLOWED_DOWNLOAD_HOSTS]. */
+    private fun isAllowedDownloadHost(host: String?): Boolean =
+        host != null && host.lowercase() in ALLOWED_DOWNLOAD_HOSTS
 
     /** Subdirectory of `context.cacheDir` holding downloaded APKs. */
     private const val CACHE_SUBDIR = "updates"
@@ -238,6 +270,19 @@ object UpdateChecker {
             val partial = File(dir, info.assetName + ".part")
 
             try {
+                // Refuse anything not served from a GitHub host, BEFORE opening the connection or
+                // creating files — the URL came out of a response body, so it is not inherently
+                // trustworthy just because the check succeeded.
+                val requestedHost = info.downloadUrl.toHttpUrlOrNull()?.host
+                if (!isAllowedDownloadHost(requestedHost)) {
+                    Log.w(TAG, "refusing download from untrusted host: ${info.downloadUrl}")
+                    _state.value = UpdateState.Failed(
+                        "Download blocked: ${requestedHost ?: "that address"} is not a " +
+                            "recognised GitHub download host"
+                    )
+                    return@withContext false
+                }
+
                 if (info.sizeBytes > 0) {
                     val needed = info.sizeBytes + FREE_SPACE_MARGIN_BYTES
                     if (dir.usableSpace < needed) {
@@ -257,6 +302,20 @@ object UpdateChecker {
                     .build()
 
                 ModListManager.client.newCall(request).execute().use { response ->
+                    // The shared client follows redirects, and github.com always 302s release
+                    // assets to a CDN host — so the pre-flight check above constrains only where
+                    // we ASKED, not where the bytes actually came from. Re-apply the same
+                    // allowlist to the final URL before reading a single byte, or a redirect
+                    // would walk straight around the check.
+                    val finalHost = response.request.url.host
+                    if (!isAllowedDownloadHost(finalHost)) {
+                        Log.w(TAG, "refusing download redirected to untrusted host: $finalHost")
+                        _state.value = UpdateState.Failed(
+                            "Download blocked: redirected to $finalHost, which is not a " +
+                                "recognised GitHub download host"
+                        )
+                        return@withContext false
+                    }
                     if (!response.isSuccessful) {
                         throw IOException("Download failed: HTTP ${response.code}")
                     }

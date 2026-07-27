@@ -66,6 +66,12 @@ object GameFilesPreferences {
     // Which launcher home screen MainActivity renders: false = the Alpha3 launcher (default,
     // existing behaviour), true = the simplified OpenMW-DS launcher.
     val SIMPLIFIED_LAUNCHER_KEY = booleanPreferencesKey("simplified_launcher")
+    // Version of the update whose home-screen banner the user dismissed, e.g. "0.9.0".
+    // Deliberately stores the VERSION STRING rather than a boolean: dismissing the banner for
+    // 0.9.0 must not also suppress it once 0.10.0 appears. Absent/empty = never dismissed.
+    // Only the banner reads this — the Settings-icon badge is intentionally NOT mutable, so it
+    // keeps reflecting update availability directly.
+    val UPDATE_BANNER_DISMISSED_KEY = stringPreferencesKey("update_banner_dismissed_version")
     private val _gameFilesUri = MutableStateFlow<String?>(null)
     val BACKGROUND_ANIMATION_KEY = stringPreferencesKey("background_animation")
     val LANGUAGE_KEY = stringPreferencesKey("language")
@@ -356,6 +362,23 @@ object GameFilesPreferences {
     fun loadSimplifiedLauncher(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
             preferences[SIMPLIFIED_LAUNCHER_KEY] ?: true  // simplified launcher by default
+        }
+    }
+
+    /** Record that the home-screen update banner was dismissed for [version] (the plain version,
+     *  no `v` prefix — compare against [UpdateInfo.version], not the git tag). Persists across
+     *  restarts, so the banner stays gone for as long as that version remains the latest. */
+    suspend fun saveDismissedUpdateBanner(context: Context, version: String) {
+        context.dataStore.edit { preferences ->
+            preferences[UPDATE_BANNER_DISMISSED_KEY] = version
+        }
+    }
+
+    /** The version whose update banner was dismissed, or "" if none. Callers compare this against
+     *  the CURRENT latest version, so a newer release re-shows the banner automatically. */
+    fun loadDismissedUpdateBanner(context: Context): Flow<String> {
+        return context.dataStore.data.map { preferences ->
+            preferences[UPDATE_BANNER_DISMISSED_KEY] ?: ""
         }
     }
 

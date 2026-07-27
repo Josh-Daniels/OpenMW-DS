@@ -177,6 +177,11 @@
     <string name="updates_install_file_missing">The downloaded file is no longer there. Please download it again.</string>
     <string name="updates_install_failed">Couldn\'t start the installer: %1$s</string>
     <string name="updates_failed">Update check failed: %1$s</string>
+    <string name="updates_banner">Update available — v%1$s</string>
+    <string name="updates_banner_dismiss">Dismiss</string>
+    <string name="updates_badge_desc">Update available</string>
+    <string name="updates_release_notes">View release notes</string>
+    <string name="updates_release_notes_failed">Couldn\'t open the release page.</string>
 
     <string name="enable_logcat">Enable Logcat for launcher</string>
     <string name="total_device_memory">Total Device Memory</string>

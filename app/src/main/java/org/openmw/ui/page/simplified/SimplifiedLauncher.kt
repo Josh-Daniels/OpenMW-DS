@@ -1,5 +1,10 @@
 package org.openmw.ui.page.simplified
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import android.view.HapticFeedbackConstants
@@ -15,6 +20,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +39,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -84,6 +91,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -128,6 +136,7 @@ import org.openmw.utils.IniSettings
 import org.openmw.utils.MToast
 import org.openmw.utils.OpenMWConfigUtils
 import org.openmw.utils.UpdateChecker
+import org.openmw.utils.UpdateInfo
 import org.openmw.utils.UpdateState
 import org.openmw.utils.stringRes
 import sh.calvin.reorderable.ReorderableItem
@@ -153,6 +162,65 @@ private const val TRANSFER_SECTION_WIDTH_FRACTION = 0.6f
  *  full-width option rows rather than buttons; its HEIGHT is unconstrained so it grows with the
  *  section drop-downs. */
 private const val SETTINGS_SECTION_WIDTH_FRACTION = 0.9f
+
+/** Attention colour for the update badge and banner — the same warm orange as the setup buttons
+ *  (`SetupOrange`), mirrored locally so this file needs no new theme import. It reads as "notice
+ *  me" against the bronze/bone palette without being an error red. */
+private val UpdateAccent = Color(0xFFEDA95B)
+
+/** The repo's human-facing releases page. A specific release is this plus `/tag/<tag_name>`; the
+ *  bare page is the fallback when no tag is known. Deliberately NOT the API URL in UpdateChecker
+ *  (that returns JSON) and NOT `/releases/latest` (a redirect that would show whatever is newest
+ *  rather than the release we actually told the user about). */
+private const val RELEASES_PAGE_URL = "https://github.com/Josh-Daniels/OpenMW-DS/releases"
+
+/**
+ * The update being offered, or null when there is nothing to tell the user about.
+ *
+ * Available/Downloading/Ready all mean "a newer release is known" — the badge, banner and release
+ * notes link should stay put across a download rather than blinking out the moment one starts.
+ * Idle/Checking/UpToDate/Failed all mean "nothing to offer", which is what makes the badge clear
+ * itself automatically once a check comes back up to date.
+ */
+private fun UpdateState.offeredUpdate(): UpdateInfo? = when (this) {
+    is UpdateState.Available -> info
+    is UpdateState.Downloading -> info
+    is UpdateState.Ready -> info
+    else -> null
+}
+
+/** Nearest Activity for [this] context, unwrapping ContextWrapper layers; null if there is none. */
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
+/**
+ * Open the GitHub release page for [tag] in the browser, falling back to the general releases
+ * page when the tag is unknown.
+ *
+ * No `topScreenLaunchOptions()` here, for the same reason ApkInstaller omits it: this is only
+ * reachable from the launcher settings screen hosted by MainActivity, which already self-corrects
+ * onto display 0 — so inheriting the caller's display puts the browser on the screen the user just
+ * tapped, which is the correct behaviour rather than an oversight.
+ */
+private fun openReleaseNotes(context: Context, tag: String?) {
+    val url = if (tag.isNullOrBlank()) RELEASES_PAGE_URL else "$RELEASES_PAGE_URL/tag/$tag"
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        // Only needed when we're not launching from an Activity; adding it unconditionally would
+        // push the browser into its own task even when a normal activity launch is available.
+        if (context.findActivity() == null) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(intent) }
+        .onFailure {
+            Log.w("SimplifiedLauncher", "could not open release page $url", it)
+            MToast(stringRes(R.string.updates_release_notes_failed))
+        }
+}
 
 /**
  * Run the Alpha3 mod-order import and report the outcome.
@@ -315,6 +383,20 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
     var isCopyingResources by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
+    // Update notification state. `offeredUpdate()` is non-null for Available/Downloading/Ready.
+    val updateState by UpdateChecker.state.collectAsState()
+    val offeredUpdate = updateState.offeredUpdate()
+    // Remembered for the same reason as the three flows above — an inline accessor call returns a
+    // new Flow each composition and would restart the DataStore subscription every time.
+    val dismissedFlow = remember(context) { GameFilesPreferences.loadDismissedUpdateBanner(context) }
+    // `initial = null` is a deliberate "not loaded yet" sentinel distinct from the flow's own ""
+    // ("nothing dismissed"). Gating the banner on non-null means a previously-dismissed version
+    // never flashes the banner for one frame before the stored value arrives.
+    val dismissedVersion by dismissedFlow.collectAsState(initial = null)
+    val showUpdateBanner = offeredUpdate != null &&
+        dismissedVersion != null &&
+        dismissedVersion != offeredUpdate.version
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -364,22 +446,68 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                     MToast(stringRes(R.string.add_mod))
                 }
             )
-            IconButton(
-                onClick = onOpenSettings,
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(MwSlotBg, RoundedCornerShape(12.dp))
-                    .border(1.dp, MwBronzeDark, RoundedCornerShape(12.dp))
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = stringResource(R.string.setting),
-                    tint = MwBronzeLight
-                )
+            // Settings, with an update dot overlaid. The dot tracks update availability DIRECTLY
+            // and is deliberately not dismissible — it's the quiet always-on signal, so the
+            // banner's dismiss state must not silence it. It clears itself once a check comes
+            // back up to date, because offeredUpdate() is then null.
+            Box {
+                IconButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(MwSlotBg, RoundedCornerShape(12.dp))
+                        .border(1.dp, MwBronzeDark, RoundedCornerShape(12.dp))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        // The dot itself is a decorative Box, so the badge is announced here
+                        // instead — otherwise it would be invisible to a screen reader.
+                        contentDescription = if (offeredUpdate != null) {
+                            stringResource(R.string.setting) + " — " +
+                                stringResource(R.string.updates_badge_desc)
+                        } else {
+                            stringResource(R.string.setting)
+                        },
+                        tint = MwBronzeLight
+                    )
+                }
+                if (offeredUpdate != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(5.dp)
+                            .size(10.dp)
+                            // Dark ring so the dot stays legible over the icon's own strokes.
+                            .background(MwStoneDark, CircleShape)
+                            .padding(1.5.dp)
+                            .background(UpdateAccent, CircleShape)
+                    )
+                }
             }
         }
 
         Spacer(Modifier.height(10.dp))
+
+        // 1b. Update banner, directly above the load-order panel and matched to its width so the
+        //     two read as one centred column. Dismiss is remembered PER VERSION, so a later
+        //     release brings it back. Not weighted — it sizes to its content and simply takes a
+        //     little height from the panel below.
+        if (showUpdateBanner && offeredUpdate != null) {
+            UpdateBanner(
+                version = offeredUpdate.version,
+                onDismiss = {
+                    coroutineScope.launch {
+                        GameFilesPreferences.saveDismissedUpdateBanner(
+                            context, offeredUpdate.version
+                        )
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth(MOD_PANEL_WIDTH_FRACTION)
+                    .align(Alignment.CenterHorizontally)
+            )
+            Spacer(Modifier.height(8.dp))
+        }
 
         // 2. Mod load order. weight(1f) bounds it so the LIST scrolls inside the panel and the
         //    screen itself never scrolls — a scrolling screen would fight the drag-reorder gesture.
@@ -530,6 +658,57 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                 showModsBrowser = false
             },
             mode = FileBrowserMode.FOLDER
+        )
+    }
+}
+
+/**
+ * Home-screen "an update is available" strip, with an inline tappable "Dismiss".
+ *
+ * Dismiss is plain text rather than a Button widget on purpose: this is a passive notice, and a
+ * second real button next to Play/Settings would read as another primary action. Only the word
+ * itself is clickable — tapping the rest of the strip does nothing, so a stray tap while reaching
+ * for the load-order list below can't silently dismiss the notice.
+ */
+@Composable
+private fun UpdateBanner(
+    version: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .background(MwFloatStone, RoundedCornerShape(10.dp))
+            .border(1.dp, UpdateAccent, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Same dot as the Settings badge, tying the two signals together visually.
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(UpdateAccent, CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.updates_banner, version),
+            color = MwBone,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.updates_banner_dismiss),
+            color = MwBronzeLight,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            textDecoration = TextDecoration.Underline,
+            // Padding inside the clickable so the tap target is comfortably bigger than the glyphs.
+            modifier = Modifier
+                .clickable { onDismiss() }
+                .padding(horizontal = 6.dp, vertical = 3.dp)
         )
     }
 }
@@ -1187,6 +1366,24 @@ private fun ColumnScope.UpdatesCard() {
                     onClick = { scope.launch { UpdateChecker.check() } }
                 )
             }
+        }
+
+        // Release notes for the specific release being offered. Shown only when there IS one —
+        // there is nothing useful to link to in the up-to-date/idle/failed states. Uses the real
+        // tag_name from the API response rather than a /releases/latest redirect, so it always
+        // lands on the release we actually named above.
+        state.offeredUpdate()?.let { info ->
+            Text(
+                text = stringResource(R.string.updates_release_notes),
+                color = MwBronzeLight,
+                fontSize = 12.sp,
+                textDecoration = TextDecoration.Underline,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .clickable { openReleaseNotes(context, info.tag) }
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            )
         }
     }
 }
