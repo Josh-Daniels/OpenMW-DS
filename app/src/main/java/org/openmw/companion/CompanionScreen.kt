@@ -61,6 +61,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -638,6 +639,9 @@ fun CompanionScreen() {
         // Crime-reported toast — top of the whole z-stack so it's visible even over the looting /
         // barter panels (the native message renders behind them, bottom-center of the top screen).
         CrimeToast()
+
+        // Adaptive dimming — ABOVE everything else (see AdaptiveDimOverlay for why).
+        AdaptiveDimOverlay()
 
         // Per-element Game UI mode. Each companion overlay is gated by its OWN element: when that
         // element is VANILLA it's suppressed so native OpenMW handles it; DS shows the companion
@@ -7425,19 +7429,15 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 .padding(bottom = 8.dp, start = 144.dp, end = 144.dp)
         )
 
-        // Weapon — top-left icon box. Tapping toggles a persistent name label.
+        // Spell — top-LEFT icon box, on the same side as the FAV. SPELLS group below it. A
+        // cast-on-use enchanted item in the spell slot shows its enchantment charge as a small
+        // meter on the icon.
+        //
+        // Sides are chosen to match the favourite groups at the bottom (FAV. SPELLS bottom-left,
+        // FAV. GEAR bottom-right), so each screen edge is consistently "magic" or "gear". If the
+        // fav groups are ever swapped, swap these two to match.
         EquippedCornerIcon(
             modifier = Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 6.dp),
-            label = "WEAPON",
-            iconPath = weaponIcon,
-            showName = showWeaponName,
-            onToggle = { showWeaponName = !showWeaponName }
-        )
-
-        // Spell — top-right icon box, mirror of the weapon group. A cast-on-use enchanted item in
-        // the spell slot shows its enchantment charge as a small meter on the icon.
-        EquippedCornerIcon(
-            modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp, top = 6.dp),
             label = "SPELL",
             iconPath = spellIcon,
             showName = showSpellName,
@@ -7446,9 +7446,21 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             maxCharge = selectedSpellEntry?.maxCharge ?: 0
         )
 
-        // Sneak indicator — vanilla stealth icon (sneaking && undetected), shown just
-        // below the WEAPON icon at the same 40dp size. Clear of the name-label popouts
-        // (horizontal), the combat-target overlay (centre) and the bottom fav groups.
+        // Weapon — top-RIGHT icon box, above the FAV. GEAR group. Tapping toggles a persistent
+        // name label.
+        EquippedCornerIcon(
+            modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp, top = 6.dp),
+            label = "WEAPON",
+            iconPath = weaponIcon,
+            showName = showWeaponName,
+            onToggle = { showWeaponName = !showWeaponName }
+        )
+
+        // Sneak indicator — vanilla stealth icon (sneaking && undetected), shown just below the
+        // top-left icon box (the SPELL slot) at the same 40dp size. Left deliberately on this
+        // side when weapon/spell swapped sides: its 64dp offset is tuned to the corner-icon
+        // column height, and it stays clear of the name-label popouts (horizontal), the
+        // combat-target overlay (centre) and the bottom fav groups either way.
         // Driven by the native COMPANION_SNEAK_VISIBLE signal.
         if (sneakVisible) {
             SneakCornerIcon(
@@ -7456,22 +7468,23 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             )
         }
 
-        // Name labels — absolutely-positioned siblings of the icon columns above,
-        // so showing/hiding them never shifts the icons. Each sits beside its icon
-        // (weapon: to the right; spell: to the left), vertically centred on the box.
+        // Name labels — absolutely-positioned siblings of the icon columns above, so showing or
+        // hiding them never shifts the icons. Each opens INWARD from its icon (spell: to the
+        // right of the left icon; weapon: to the left of the right icon), vertically centred on
+        // the box. Must stay on the same side as the icon each one belongs to.
         // Horizontal offset = corner gap (8dp) + icon width (40dp) + 6dp gap.
-        if (showWeaponName) {
+        if (showSpellName) {
             CornerNameLabel(
-                name = weaponName,
+                name = selectedSpellName,
                 alignEnd = false,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(start = 8.dp + 40.dp + 6.dp, top = 6.dp)
             )
         }
-        if (showSpellName) {
+        if (showWeaponName) {
             CornerNameLabel(
-                name = selectedSpellName,
+                name = weaponName,
                 alignEnd = true,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -11046,6 +11059,7 @@ private fun OptionsSettingsList() {
         item { InventoryTabStyleRow() }
         item { EquippedBarRow() }
         item { EquippedInListRow() }
+        item { AdaptiveDimmingRow() }
         // "Spells Display" (Standard / Compact) removed — the compact spell list is now the only
         // version. The old SpellsListStyleRow composable is commented out below for reference.
 
@@ -11401,6 +11415,142 @@ private fun EquippedInListRow() {
                 active = !show,
                 enabled = true
             ) { UiPreferences.setShowEquippedInList(context, false) }
+        }
+    }
+}
+
+/**
+ * Scene luminance at or above which the companion is left completely undimmed.
+ *
+ * Raised from 0.28 after testing: night exteriors sit well above the interior floor below, so with
+ * a lower anchor they landed only part-way up the ramp and barely dimmed. Bright daylight should
+ * still be above this and stay fully clear — if daylight starts dimming, this is the value to
+ * lower (see the debug log in [AdaptiveDimOverlay] for what real cells actually report).
+ */
+private const val DIM_LUMINANCE_BRIGHT = 0.40f
+
+/**
+ * Scene luminance at or below which the overlay reaches [DIM_MAX_ALPHA].
+ *
+ * MUST NOT be lower than the engine's `Shaders/minimum interior brightness` (default **0.08**),
+ * which clamps every interior's ambient UP to that value in `configureAmbient`. This was 0.02
+ * originally, which put the floor below anything the engine can ever report — so the darkest cave
+ * only reached ~0.42 alpha and [DIM_MAX_ALPHA] was mathematically unreachable. If that setting is
+ * ever changed, change this to match.
+ */
+private const val DIM_LUMINANCE_DARK = 0.08f
+
+/**
+ * Ceiling on the overlay's opacity.
+ *
+ * This layer sits ABOVE every other companion layer including popups and the crime toast, so the
+ * ceiling is what keeps the UI readable rather than merely dim — raising it trades legibility for
+ * darkness. Raised 0.55 -> 0.75 on request after testing showed the previous ceiling was too light
+ * (and, per [DIM_LUMINANCE_DARK], was never actually reached). If the UI becomes hard to read in a
+ * pitch-dark interior, lower this first.
+ */
+private const val DIM_MAX_ALPHA = 0.75f
+
+/** Fade duration between dim levels. Long enough that cell transitions and weather/lightning
+ *  changes read as a smooth adjustment instead of a strobe. */
+private const val DIM_ANIM_MS = 800
+
+/**
+ * Full-screen adaptive dimming layer.
+ *
+ * WHY IT EXISTS: the companion renders UI at a fixed brightness, so with both screens set to the
+ * same manual brightness the bottom one looks far brighter than the top once the player is
+ * somewhere dark. This darkens the bottom screen to track the game's own ambient light.
+ *
+ * WHY AN OVERLAY AND NOT REAL BRIGHTNESS: both physical displays report `displayGroupId 0`, and
+ * Android manages brightness per display GROUP — so a per-window `screenBrightness` would dim BOTH
+ * screens or be ignored, and would fight the player's own manual brightness setting. A translucent
+ * layer is purely local to this window and never touches device brightness.
+ *
+ * WHY ABOVE EVERYTHING (zIndex 40f, over the 30f crime toast / persuasion popup): the effect is
+ * simulating ambient darkness of the whole panel, so it has to be uniform. Sitting below the
+ * overlays would let a dialogue or item popup punch through at full brightness in a pitch-dark
+ * cave — exactly the problem this fixes. [DIM_MAX_ALPHA] is what keeps that readable.
+ *
+ * NO POINTER MODIFIERS: a Box carrying only `background()` does not consume pointer input (the
+ * dropdown scrim nearby has to add `pointerInput` explicitly to intercept taps). Adding
+ * `clickable`/`pointerInput`/`focusable` here would silently swallow every touch on the companion.
+ */
+@Composable
+private fun AdaptiveDimOverlay() {
+    val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
+    val luminance by GameStateRepository.ambientLuminance.collectAsState()
+
+    // Gate at the mapping stage rather than skipping the composable, so switching the option off
+    // animates smoothly back to clear instead of snapping.
+    val target = if (!enabled) 0f else {
+        // Linear ramp between the two luminance anchors, inverted (darker scene -> more opacity).
+        val t = ((DIM_LUMINANCE_BRIGHT - luminance) /
+                (DIM_LUMINANCE_BRIGHT - DIM_LUMINANCE_DARK)).coerceIn(0f, 1f)
+        t * DIM_MAX_ALPHA
+    }
+
+    // The luminance anchors above are estimates; what real cells report is the only way to tune
+    // them properly (e.g. whether a clear day really is above DIM_LUMINANCE_BRIGHT). Debug builds
+    // only, and keyed on luminance rounded to 2dp so it logs on real change, not per frame —
+    // the native side already throttles to ~4Hz.
+    if (BuildConfig.DEBUG) {
+        LaunchedEffect(kotlin.math.round(luminance * 100f), enabled) {
+            Log.d(
+                "AdaptiveDim",
+                "luminance=${"%.3f".format(luminance)} -> alpha=${"%.2f".format(target)} (on=$enabled)"
+            )
+        }
+    }
+
+    val alpha by animateFloatAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = DIM_ANIM_MS),
+        label = "adaptiveDim"
+    )
+
+    // Skip the draw entirely when clear, so the common outdoor/disabled case costs nothing.
+    if (alpha > 0.001f) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .zIndex(40f)
+                .background(Color.Black.copy(alpha = alpha))
+        )
+    }
+}
+
+// Adaptive dimming — darken the companion screen to match how dark the game scene is. The bottom
+// screen draws UI at a fixed brightness, so at equal manual brightness it reads as much brighter
+// than the top screen once the player is somewhere dark. This is a translucent black overlay only;
+// it never touches the device's real screen brightness (both physical displays share one brightness
+// group, so per-display control isn't possible anyway). "Companion Tabs" section.
+@Composable
+private fun AdaptiveDimmingRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Adaptive Dimming", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Dims this screen in dark places to match the game.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setAdaptiveDimming(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setAdaptiveDimming(context, false) }
         }
     }
 }

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileProvider path mapping for the in-app updater.
+
+    `cache-path` resolves to context.getCacheDir(), and the `updates/` subdirectory is exactly
+    where UpdateChecker.download() writes the APK. Scoped to that one subdirectory rather than the
+    whole cache so the grant exposes nothing else (the icon cache, Kram temp files, etc.).
+-->
+<paths>
+    <cache-path
+        name="updates"
+        path="updates/" />
+</paths>

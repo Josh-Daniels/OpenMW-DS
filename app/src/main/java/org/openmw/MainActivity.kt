@@ -52,6 +52,7 @@ import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.MyAlertDialog
 import org.openmw.utils.PermissionHelper
 import org.openmw.utils.PermissionHelper.getManageExternalStoragePermission
+import org.openmw.utils.UpdateChecker
 import org.openmw.utils.UserManageAssets
 import org.openmw.utils.topScreenLaunchOptions
 
@@ -188,6 +189,19 @@ class MainActivity : ComponentActivity() {
                                 val configFilePath = Constants.SETTINGS_FILE
                                 val configFileObserver = ConfigFileObserver(configFilePath)
                                 configFileObserver.startWatching()
+                            }
+                            // Automatic update check. Deliberately here and NOT in
+                            // onFirstLaunch()/IdentityMarker's spot — that runs inside a
+                            // withContext the launcher AWAITS before setContent, so a slow or
+                            // unreachable network would delay first paint. By this point the UI
+                            // is already composed.
+                            //
+                            // Its own launch (not appended to the block above) so a stalled HTTP
+                            // call can't hold up the config observer behind it. Result lands in
+                            // UpdateChecker.state, which the Settings screen observes — it only
+                            // CHECKS; the ~71MB download stays an explicit user action.
+                            scope.launch(Dispatchers.IO) {
+                                UpdateChecker.checkOnLaunch()
                             }
                         }
 

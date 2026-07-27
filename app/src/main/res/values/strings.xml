@@ -158,6 +158,26 @@
     <string name="simplified_mod_order_empty_source">Alpha3 has no mod list to copy</string>
     <string name="simplified_mod_order_no_morrowind">Not copied — Alpha3\'s list has no usable Morrowind.esm, which would leave the game unable to start</string>
 
+    <!-- In-app updater (Phase 1: check / compare / download; no install action yet) -->
+    <string name="updates_title">Updates</string>
+    <string name="updates_current_version">Installed: v%1$s</string>
+    <string name="updates_check">Check for updates</string>
+    <string name="updates_checking">Checking for updates…</string>
+    <string name="updates_up_to_date">You\'re up to date.</string>
+    <string name="updates_available">Update available: v%1$s</string>
+    <string name="updates_download">Download (%1$s)</string>
+    <string name="updates_download_no_size">Download</string>
+    <string name="updates_downloading">Downloading… %1$s</string>
+    <string name="updates_downloading_indeterminate">Downloading…</string>
+    <string name="updates_cancel">Cancel</string>
+    <string name="updates_ready">Downloaded v%1$s — ready to install.</string>
+    <string name="updates_install">Install v%1$s</string>
+    <string name="updates_install_hint">Your saves, settings and mod list are kept.</string>
+    <string name="updates_install_permission_needed">Allow OpenMW-DS to install apps, then tap Install again.</string>
+    <string name="updates_install_file_missing">The downloaded file is no longer there. Please download it again.</string>
+    <string name="updates_install_failed">Couldn\'t start the installer: %1$s</string>
+    <string name="updates_failed">Update check failed: %1$s</string>
+
     <string name="enable_logcat">Enable Logcat for launcher</string>
     <string name="total_device_memory">Total Device Memory</string>
     <string name="available_memory">Available Memory</string>

@@ -65,6 +65,19 @@ object GameStateRepository {
     private val _sneakVisible = MutableStateFlow(false)
     val sneakVisible: StateFlow<Boolean> = _sneakVisible.asStateFlow()
 
+    // Scene ambient luminance (Rec.709 relative luminance of the engine's ambient light colour),
+    // from the native COMPANION_AMBIENT line emitted in RenderingManager::setAmbientColour. That
+    // is the choke point both the exterior (weather, which folds in time of day) and interior
+    // (cell mood, post minimum-interior-brightness clamp) paths pass through, so one signal
+    // covers interior/exterior, time of day and weather.
+    //
+    // Natively throttled (min 0.02 change, max ~4Hz) — it is called every frame otherwise.
+    // Backs the companion's adaptive dimming overlay. Typically ~0..1 but NOT clamped here: the
+    // engine's ambient colour can exceed 1.0 (weather flashes add to it), so consumers must
+    // handle >1. Default 1f = "bright", so nothing dims before the first line arrives.
+    private val _ambientLuminance = MutableStateFlow(1f)
+    val ambientLuminance: StateFlow<Float> = _ambientLuminance.asStateFlow()
+
     // true while the in-game pause/options menu (GM_MainMenu) is open. Driven by
     // COMPANION_PAUSE_MENU_OPEN / _CLOSED lines from companion.lua. Gates the
     // bottom-screen options/display-settings overlay (EngineActivity).
@@ -746,6 +759,13 @@ object GameStateRepository {
             // HUD::setSneakVisible. Payload is "true"/"false".
             trimmed.contains("COMPANION_SNEAK_VISIBLE:") -> {
                 _sneakVisible.value = trimmed.substringAfter("COMPANION_SNEAK_VISIBLE:").trim() == "true"
+            }
+            // Scene ambient luminance for the adaptive dimming overlay. A malformed or partial
+            // line is ignored rather than defaulting to 0, which would slam the overlay to its
+            // darkest.
+            trimmed.contains("COMPANION_AMBIENT:") -> {
+                trimmed.substringAfter("COMPANION_AMBIENT:").trim().toFloatOrNull()
+                    ?.let { _ambientLuminance.value = it }
             }
             // Barter session. ITEM first (most frequent). Each ITEM carries its own side,
             // so vendor/player items go to separate buffers. None of these prefixes is a

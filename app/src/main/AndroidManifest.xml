@@ -44,6 +44,11 @@
 
     <!-- Allow access to the vibrator -->
     <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- In-app updater: hand a downloaded APK to the system package installer. This only lets us
+         ASK; the user must still grant "install unknown apps" per-app (minSdk 26 = the release
+         that introduced that model, so it is the only flow we need). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     
     <application
         android:appCategory="game"
@@ -91,6 +96,21 @@
                 android:name="autoStoreLocales"
                 android:value="true" />
         </service>
+
+        <!-- Serves the downloaded update APK to the system installer as a content:// Uri. A raw
+             file:// Uri throws FileUriExposedException on API 24+, so this is mandatory, not a
+             convenience. Authority is templated off applicationId so it follows any future id
+             change (as happened with com.alpha3.launcher -> org.openmw.ds); ApkInstaller derives
+             the same string at runtime from context.packageName. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <activity
             android:name="org.openmw.EngineActivity"

@@ -178,6 +178,7 @@ object UiPreferences {
     private const val INVENTORY_TAB_STYLE = "inventory_tab_style"
     private const val HIDE_EQUIPPED_BAR = "hide_equipped_bar"
     private const val SHOW_EQUIPPED_IN_LIST = "show_equipped_in_list"
+    private const val ADAPTIVE_DIMMING = "adaptive_dimming"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
     // Training / spell-buying popup location (Bottom only for now; Top pending — same as Repair,
@@ -238,6 +239,13 @@ object UiPreferences {
     // (freeing space for an extra row of items). Default true (hidden) — worn items show inline
     // (showEquippedInList default true) and via the Equipped tab.
     private val hideEquippedBarFlow = MutableStateFlow(true)
+
+    // Whether the companion screen dims itself to match how dark the game scene is. The bottom
+    // screen renders UI at a fixed brightness, so at equal manual brightness it looks much
+    // brighter than the top screen once the player is somewhere dark. Driven by the native
+    // ambient-luminance signal (GameStateRepository.ambientLuminance); purely a translucent black
+    // overlay — it never touches the device's real screen brightness. Default true (on).
+    private val adaptiveDimmingFlow = MutableStateFlow(true)
 
     // Whether equipped (worn) items are ALSO shown inline in the Inventory "All" list. Independent of
     // the bar: worn items are always reachable via the "Equipped" filter tab and/or the bar. Default
@@ -332,6 +340,7 @@ object UiPreferences {
             ?.let { inventoryTabStyleFlow.value = it }
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
         showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
+        adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
         p.getString(LOOTING_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
             ?.let { lootingLocationFlow.value = it }
@@ -517,6 +526,15 @@ object UiPreferences {
     fun setHideEquippedBar(context: Context, hide: Boolean) {
         hideEquippedBarFlow.value = hide
         editor(context).putBoolean(HIDE_EQUIPPED_BAR, hide).apply()
+    }
+
+    /** Whether the companion screen dims to match the game scene's ambient light. */
+    fun adaptiveDimmingFlow(): StateFlow<Boolean> = adaptiveDimmingFlow.asStateFlow()
+
+    /** Set whether adaptive dimming is enabled and persist. */
+    fun setAdaptiveDimming(context: Context, enabled: Boolean) {
+        adaptiveDimmingFlow.value = enabled
+        editor(context).putBoolean(ADAPTIVE_DIMMING, enabled).apply()
     }
 
     /** Whether worn items are also shown inline in the Inventory "All" list. */

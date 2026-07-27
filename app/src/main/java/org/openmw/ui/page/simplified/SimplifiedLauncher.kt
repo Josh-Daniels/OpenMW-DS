@@ -4,6 +4,8 @@ import android.os.Build
 import android.util.Log
 import android.view.HapticFeedbackConstants
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -16,6 +18,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -47,6 +50,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -64,12 +68,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -79,9 +89,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.openmw.BuildConfig
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager.customCFG
@@ -106,13 +118,17 @@ import org.openmw.ui.view.SetupButton
 import org.openmw.ui.view.attemptLaunchGame
 import org.openmw.ui.view.resetUserSettingsFile
 import org.openmw.utils.AlphaMigration
+import org.openmw.utils.ApkInstaller
 import org.openmw.utils.FileBrowserMode
+import org.openmw.utils.InstallResult
 import org.openmw.utils.FileBrowserPopup
 import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.IniSettings
 import org.openmw.utils.MToast
 import org.openmw.utils.OpenMWConfigUtils
+import org.openmw.utils.UpdateChecker
+import org.openmw.utils.UpdateState
 import org.openmw.utils.stringRes
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -392,6 +408,39 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
         // without game files, so greying the button there would break it.
         val playEnabled = !isCopyingResources && (!gameFilesMissing || bypassGameCheck)
         val playContentAlpha = if (playEnabled) 1f else 0.5f
+
+        // Play holds focus by default so the controller can start the game without touching the
+        // screen.
+        //
+        // The request MUST wait for the button to actually be placed: FocusRequester.requestFocus()
+        // throws "FocusRequester is not initialized" if its node hasn't been laid out yet, and a
+        // LaunchedEffect keyed only on state runs before that first layout. Keying off onPlaced is
+        // what makes this deterministic — an earlier version guarded the call with runCatching and
+        // silently never focused anything.
+        //
+        // Also gated on playEnabled, because a disabled Button is not focusable at all: on a cold
+        // start `savedPath` arrives asynchronously from the DataStore, so Play is briefly disabled
+        // and a request made in that window would be dropped.
+        val playFocus = remember { FocusRequester() }
+        var playFocused by remember { mutableStateOf(false) }
+        var playPlaced by remember { mutableStateOf(false) }
+        // Requesting on placement alone is NOT enough, even though it reports success: when the
+        // Android window subsequently gains focus, Compose hands initial focus to the first
+        // focusable in layout order — the top-left "Select game files" button — silently
+        // overriding us. So wait for the window to actually be focused and request after that.
+        // Re-requesting on each window-focus gain is deliberate: it also re-selects Play when
+        // returning from the game or the settings screen.
+        val windowInfo = LocalWindowInfo.current
+        LaunchedEffect(playPlaced, playEnabled, windowInfo) {
+            if (!playPlaced || !playEnabled) return@LaunchedEffect
+            snapshotFlow { windowInfo.isWindowFocused }.collect { hasWindowFocus ->
+                if (hasWindowFocus) {
+                    val ok = runCatching { playFocus.requestFocus() }.isSuccess
+                    Log.d("SimplifiedLauncher", "Play focus requested (window focused), ok=$ok")
+                }
+            }
+        }
+
         Button(
             onClick = {
                 coroutineScope.launch {
@@ -407,7 +456,12 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
             enabled = playEnabled,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp),
+                .height(56.dp)
+                // onPlaced must come before focusRequester/the focus target so we only request
+                // focus once this node genuinely exists in the layout.
+                .onPlaced { playPlaced = true }
+                .focusRequester(playFocus)
+                .onFocusChanged { playFocused = it.isFocused },
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = MwSlotWorn,
@@ -416,7 +470,16 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                 // surface.
                 disabledContainerColor = MwSlotBg,
             ),
-            border = BorderStroke(2.dp, if (playEnabled) MwBronzeLight else MwBronzeDark)
+            // Focus has to be VISIBLE or a pre-selected button is indistinguishable from an idle
+            // one — the player would have no way to know A does anything.
+            border = BorderStroke(
+                if (playFocused && playEnabled) 3.dp else 2.dp,
+                when {
+                    !playEnabled -> MwBronzeDark
+                    playFocused -> MwBoneBright
+                    else -> MwBronzeLight
+                }
+            )
         ) {
             if (isCopyingResources) {
                 CircularProgressIndicator(
@@ -809,6 +872,12 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(14.dp))
             }
 
+            // In-app updater. Sits ABOVE the Settings.cfg cards (and below the transient Alpha3
+            // transfer block) so it's reachable without scrolling past 20 category cards — it's
+            // an occasional, deliberate action, not something buried in the settings tree.
+            UpdatesCard()
+            Spacer(Modifier.height(14.dp))
+
             // Settings.cfg editor in its own bordered card, same family as the Transfer card above
             // but wider. Deliberately NO fixed height and no weight(): the Column wraps its content,
             // so the box grows and shrinks as the section drop-downs expand, and the surrounding
@@ -919,5 +988,205 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 }
             }
         )
+    }
+}
+
+/**
+ * "Updates" card — check GitHub for a newer release and download it.
+ *
+ * Phase 1: there is deliberately NO working install action. Handing the downloaded APK to the
+ * package installer needs a `FileProvider`, `REQUEST_INSTALL_PACKAGES` and the per-app
+ * unknown-sources grant, none of which exist yet, so the Install button is present but disabled
+ * with an explanatory note rather than faked.
+ *
+ * All state lives in [UpdateChecker], not here, so the result of the automatic on-launch check is
+ * already showing when this screen opens instead of being re-fetched.
+ */
+@Composable
+private fun ColumnScope.UpdatesCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val state by UpdateChecker.state.collectAsState()
+    // Held so the Cancel button can abort an in-flight download. UpdateChecker treats the
+    // resulting CancellationException as a user action and restores the "Available" offer.
+    var downloadJob by remember { mutableStateOf<Job?>(null) }
+
+    // --- Install (Phase 2) -------------------------------------------------------------------
+    // Deliberately NO "installing…" state anywhere below. Once the system installer is showing,
+    // this app has no reliable completion event (it may be killed and replaced mid-install), and
+    // backing out of the prompt notifies us of nothing — so any spinner we set could never be
+    // cleared. Leaving the button plainly tappable is both simpler and impossible to get stuck.
+
+    /** Hand the currently-downloaded APK to the installer, reporting anything that blocks it. */
+    fun runInstall() {
+        val ready = UpdateChecker.state.value as? UpdateState.Ready ?: return
+        when (val result = ApkInstaller.install(context, ready.file)) {
+            // The installer owns the screen from here; nothing more for us to do.
+            is InstallResult.Launched -> Unit
+            // cacheDir is OS-evictable, so the file can genuinely vanish between download and
+            // tap. Reset to Idle so the card offers a fresh check rather than a dead button.
+            is InstallResult.FileMissing -> {
+                MToast(stringRes(R.string.updates_install_file_missing))
+                UpdateChecker.dismiss()
+            }
+            is InstallResult.Failed ->
+                MToast(context.getString(R.string.updates_install_failed, result.reason))
+        }
+    }
+
+    // ACTION_MANAGE_UNKNOWN_APP_SOURCES reports no meaningful result code — the user can flip the
+    // switch and press back, or just press back — so re-QUERY the permission instead of trusting
+    // a RESULT_OK. Uses registerForActivityResult; the codebase's older PermissionAssistant still
+    // uses the deprecated startActivityForResult/onActivityResult pair, but it's a standalone
+    // helper with no shared plumbing to reuse here.
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (ApkInstaller.canInstall(context)) {
+            // Granted while they were away — continue straight into the install they asked for.
+            runInstall()
+        } else {
+            // Declined. One explanatory toast, then nothing: no re-prompt, no loop. The Install
+            // button stays exactly where it was and can be tapped again.
+            MToast(stringRes(R.string.updates_install_permission_needed))
+        }
+    }
+
+    fun startInstall() {
+        if (ApkInstaller.canInstall(context)) {
+            runInstall()
+            return
+        }
+        runCatching { permissionLauncher.launch(ApkInstaller.unknownSourcesSettingsIntent(context)) }
+            .onFailure {
+                // Some devices/ROMs lack the per-app unknown-sources screen entirely.
+                MToast(context.getString(R.string.updates_install_failed, it.message ?: ""))
+            }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth(TRANSFER_SECTION_WIDTH_FRACTION)
+            .align(Alignment.CenterHorizontally)
+            .background(MwFloatStone, RoundedCornerShape(12.dp))
+            .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
+            .padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = stringResource(R.string.updates_title),
+            color = MwBronzeLight,
+            fontSize = 16.sp,
+            fontFamily = FontFamily.Serif,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 2.dp)
+        )
+        Text(
+            text = stringResource(R.string.updates_current_version, BuildConfig.RELEASE_VERSION),
+            color = MwBoneDim,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+
+        // Status line — one per state, so the card always says what just happened.
+        val status: String? = when (val s = state) {
+            is UpdateState.Idle -> null
+            is UpdateState.Checking -> stringResource(R.string.updates_checking)
+            is UpdateState.UpToDate -> stringResource(R.string.updates_up_to_date)
+            is UpdateState.Available -> stringResource(R.string.updates_available, s.info.version)
+            is UpdateState.Downloading ->
+                if (s.isDeterminate) {
+                    stringResource(
+                        R.string.updates_downloading,
+                        "${UpdateChecker.formatBytes(s.bytesRead)} / " +
+                            UpdateChecker.formatBytes(s.totalBytes)
+                    )
+                } else {
+                    stringResource(R.string.updates_downloading_indeterminate)
+                }
+            is UpdateState.Ready -> stringResource(R.string.updates_ready, s.info.version)
+            is UpdateState.Failed -> stringResource(R.string.updates_failed, s.message)
+        }
+        if (status != null) {
+            Text(
+                text = status,
+                color = if (state is UpdateState.Failed) Color(0xFFC75C5C) else MwBone,
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+        }
+
+        // Real progress, not a spinner — this is a ~71MB transfer, so an indeterminate bar would
+        // leave the user with no idea whether it is 5 seconds or 5 minutes from done.
+        (state as? UpdateState.Downloading)?.let { s ->
+            if (s.isDeterminate) {
+                LinearProgressIndicator(
+                    progress = { s.fraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp),
+                    color = MwBronzeLight,
+                    trackColor = MwSlotBg
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp),
+                    color = MwBronzeLight,
+                    trackColor = MwSlotBg
+                )
+            }
+        }
+
+        when (val s = state) {
+            is UpdateState.Downloading -> {
+                SetupButton(
+                    text = stringResource(R.string.updates_cancel),
+                    onClick = {
+                        downloadJob?.cancel()
+                        downloadJob = null
+                    }
+                )
+            }
+
+            is UpdateState.Available -> {
+                SetupButton(
+                    text = if (s.info.sizeBytes > 0) {
+                        stringResource(
+                            R.string.updates_download,
+                            UpdateChecker.formatBytes(s.info.sizeBytes)
+                        )
+                    } else {
+                        stringResource(R.string.updates_download_no_size)
+                    },
+                    onClick = {
+                        downloadJob = scope.launch { UpdateChecker.download(context) }
+                    }
+                )
+            }
+
+            is UpdateState.Ready -> {
+                SetupButton(
+                    text = stringResource(R.string.updates_install, s.info.version),
+                    onClick = { startInstall() }
+                )
+                Text(
+                    text = stringResource(R.string.updates_install_hint),
+                    color = MwBoneDim,
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+
+            else -> {
+                SetupButton(
+                    text = stringResource(R.string.updates_check),
+                    onClick = { scope.launch { UpdateChecker.check() } }
+                )
+            }
+        }
     }
 }

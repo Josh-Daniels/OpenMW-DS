@@ -18,6 +18,35 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
+// ---------------------------------------------------------------------------------------------
+// Release version — the SINGLE source of truth for "what version is this?".
+//
+// Stored WITHOUT a `v` prefix; display contexts (options footer, identity marker) add `v` at
+// render time, and the GitHub release TAG carries one (`v0.8.0`), so anything comparing the two
+// must strip it. Bump this one line per release.
+// ---------------------------------------------------------------------------------------------
+val releaseVersion = "0.8.0"
+
+// Derive the OS-facing versionCode from `releaseVersion` rather than hand-maintaining a second
+// number. It used to be a hardcoded `2` that never moved, which meant the package manager had no
+// idea 0.9.0 was newer than 0.8.0 — updates still installed (Android only rejects a STRICTLY
+// lower code), but any logic reasoning about version ordering via versionCode was silently wrong.
+//
+// Scheme: major * 10000 + minor * 100 + patch, so 0.8.0 -> 800 and 0.7.5 -> 705. That gives each
+// of minor/patch two digits; the require() below fails the build loudly rather than silently
+// wrapping if a component ever exceeds 99 (at which point widen the multipliers).
+val derivedVersionCode = run {
+    val parts = releaseVersion.split(".").map { it.trim().takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+    val major = parts.getOrElse(0) { 0 }
+    val minor = parts.getOrElse(1) { 0 }
+    val patch = parts.getOrElse(2) { 0 }
+    require(minor in 0..99 && patch in 0..99) {
+        "releaseVersion '$releaseVersion' has a minor/patch component over 99; the " +
+            "major*10000 + minor*100 + patch versionCode scheme would collide. Widen it."
+    }
+    major * 10000 + minor * 100 + patch
+}
+
 val generatedAssetsDir = layout.buildDirectory.dir("generated_assets")
 val generateOpenMWAssets = tasks.register("generateOpenMWAssets") {
     outputs.dir(generatedAssetsDir)
@@ -75,7 +104,7 @@ android {
 
         //noinspection OldTargetApi
         targetSdk = 36
-        versionCode = 2
+        versionCode = derivedVersionCode
         versionName = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")
         }.standardOutput.asText.get().trim()
@@ -83,9 +112,10 @@ android {
         buildConfigField("int", "RANDOMIZER", "${Random().nextInt(999).let { if (it < 0) -it else it }}")
 
         // Human-readable release label, separate from the git-hash `versionName` (which
-        // stays as-is for crash-report precision). Bump this manually per release. Stored
-        // WITHOUT a `v` prefix — display contexts add `v` at render time.
-        buildConfigField("String", "RELEASE_VERSION", "\"0.8.0\"")
+        // stays as-is for crash-report precision). Bump `releaseVersion` at the top of this
+        // file — it also drives versionCode above. Stored WITHOUT a `v` prefix; display
+        // contexts add `v` at render time.
+        buildConfigField("String", "RELEASE_VERSION", "\"$releaseVersion\"")
 
         ndk {
             //noinspection ChromeOsAbiSupport

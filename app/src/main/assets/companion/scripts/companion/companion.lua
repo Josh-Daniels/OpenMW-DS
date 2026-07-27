@@ -15,13 +15,43 @@ local STATS_INTERVAL = 0.1
 local SLOW_INTERVAL = 0.2
 local JOURNAL_INTERVAL = 5.0
 
+-- Engine equipment-slot number -> companion slot label.
+--
+-- These are MWWorld::InventoryStore::Slot_* (inventorystore.hpp:33-51) — NOT an arbitrary
+-- list. types.Actor.getEquipment() returns a table keyed by these numbers and setEquipment()
+-- consumes the same numbering, so they must match the engine exactly. Max valid slot is 18:
+-- setEquipment's loop (mwlua/types/actor.cpp) iterates 0..Slots-1, so any higher key is
+-- silently dropped. (Entries [19]/[20] used to exist here and could never match anything.)
+--
+-- Slots 16/17 are really CarriedRight/CarriedLeft; kept labelled "weapon"/"shield" because
+-- that is what they hold in practice and the HUD reads state.equipment["weapon"].
+--
+-- Keep in sync with slotForItem below — both describe the same engine slots, and a fix to
+-- one alone desyncs COMPANION_EQUIPMENT's labels from what is actually equipped.
 local SLOT_NAMES = {
-    [1] = "cuirass", [2] = "greaves", [3] = "left_pauldron", [4] = "right_pauldron",
-    [5] = "left_gauntlet", [6] = "right_gauntlet", [7] = "boots", [8] = "shirt",
-    [9] = "pants", [10] = "skirt", [11] = "robe", [12] = "helmet",
-    [13] = "amulet", [14] = "left_ring", [15] = "right_ring", [16] = "weapon",
-    [17] = "shield", [18] = "ammo", [19] = "carried_left", [20] = "carried_right"
+    [0] = "helmet", [1] = "cuirass", [2] = "greaves", [3] = "left_pauldron",
+    [4] = "right_pauldron", [5] = "left_gauntlet", [6] = "right_gauntlet", [7] = "boots",
+    [8] = "shirt", [9] = "pants", [10] = "skirt", [11] = "robe",
+    [12] = "left_ring", [13] = "right_ring", [14] = "amulet", [15] = "belt",
+    [16] = "weapon", [17] = "shield", [18] = "ammo"
 }
+
+-- Ring-slot recency. Rings are the only item with TWO valid slots (12 = LeftRing,
+-- 13 = RightRing), so when both are full something has to decide which one a newly equipped
+-- ring evicts. We replace the LEAST recently equipped, which needs recency the engine does not
+-- track for us.
+--
+-- lastRingSlot = the slot filled most recently; the other slot is therefore the older one.
+-- nil means "unknown" (e.g. both rings were already on when the script loaded).
+-- ringOccupants is the last-seen occupant per ring slot, used to notice a change — updated
+-- from exportEquipment on the slow tick so rings equipped through the VANILLA menu update
+-- recency too, not just ones equipped from the companion.
+local lastRingSlot = nil
+local ringOccupants = { [12] = nil, [13] = nil }
+
+local function noteRingEquipped(slot)
+    if slot == 12 or slot == 13 then lastRingSlot = slot end
+end
 
 local function jsonEscape(s)
     s = string.gsub(s, '\\', '\\\\')
@@ -1129,8 +1159,9 @@ end
 local lastEquipmentStr = nil
 
 local function exportEquipment()
+    local equipped = types.Actor.getEquipment(self)
     local parts = {}
-    for slot, item in pairs(types.Actor.getEquipment(self)) do
+    for slot, item in pairs(equipped) do
         local slotName = SLOT_NAMES[slot] or ("slot" .. tostring(slot))
         local sid = stackId(item)
         -- Prefer instance id so Kotlin can match the exact equipped stack;
@@ -1139,6 +1170,25 @@ local function exportEquipment()
         table.insert(parts, string.format(
             '"%s":"%s"', slotName, jsonEscape(slotVal)))
     end
+
+    -- Watch the two ring slots for occupancy changes so a ring equipped from the VANILLA menu
+    -- also updates recency — otherwise "least recently equipped" would only ever reflect
+    -- companion equips and would evict the wrong ring after any vanilla change. Runs before the
+    -- change-detection early-return below so it is never skipped.
+    for _, rslot in ipairs({ 12, 13 }) do
+        local item = equipped[rslot]
+        local occupant = nil
+        if item then
+            local sid = stackId(item)
+            occupant = (sid ~= "") and sid or item.recordId
+        end
+        if occupant ~= ringOccupants[rslot] then
+            ringOccupants[rslot] = occupant
+            -- Only a slot becoming filled counts as "equipped"; clearing one does not.
+            if occupant ~= nil then noteRingEquipped(rslot) end
+        end
+    end
+
     local line = 'COMPANION_EQUIPMENT:{' .. table.concat(parts, ',') .. '}'
     if line == lastEquipmentStr then return end
     lastEquipmentStr = line
@@ -1455,8 +1505,16 @@ end
 
 -- ===== Inbound actions =====
 
--- Best-effort slot lookup for equipping. This is the part most likely to
--- need tweaking if some item types don't equip — watch the COMPANION_DEBUG log.
+-- Slot lookup for equipping. Numbers are MWWorld::InventoryStore::Slot_* — see the SLOT_NAMES
+-- comment at the top of this file; keep the two in sync.
+--
+-- WHY THIS MATTERS MORE THAN IT LOOKS: a wrong slot number here does NOT fail loudly. The
+-- engine's setEquipment (mwlua/types/actor.cpp) silently falls back to the item's first
+-- *allowed* slot that it hasn't already marked used, so a wrong number still equips correctly
+-- as long as the real slot is free. The mismatch only surfaces once that slot is occupied,
+-- where it degrades into a silent no-op. Helmet/amulet/ring were all wrong this way until
+-- Jul 2026 (helmet said 12=LeftRing, amulet 13=RightRing, rings 14/15=Amulet/Belt), which is
+-- why "equip a second amulet" did nothing while the first one always worked.
 local function slotForItem(item, currentEquip)
     if types.Weapon.objectIsInstance(item) then
         local wt = types.Weapon.record(item).type
@@ -1478,7 +1536,7 @@ local function slotForItem(item, currentEquip)
         local t = types.Armor.record(item).type
         local AT = types.Armor.TYPE
         local map = {
-            [AT.Helmet]=12, [AT.Cuirass]=1, [AT.LPauldron]=3, [AT.RPauldron]=4,
+            [AT.Helmet]=0, [AT.Cuirass]=1, [AT.LPauldron]=3, [AT.RPauldron]=4,
             [AT.Greaves]=2, [AT.Boots]=7, [AT.LGauntlet]=5, [AT.RGauntlet]=6,
             [AT.Shield]=17, [AT.LBracer]=5, [AT.RBracer]=6,
         }
@@ -1487,10 +1545,24 @@ local function slotForItem(item, currentEquip)
         local t = types.Clothing.record(item).type
         local CT = types.Clothing.TYPE
         if t == CT.Ring then
-            if currentEquip[14] ~= nil then return 15 else return 14 end
+            -- The only item with TWO valid slots: 12 = Slot_LeftRing, 13 = Slot_RightRing.
+            -- Fill whichever is actually free. (The old condition tested currentEquip[14],
+            -- which is the AMULET slot, so it never described ring occupancy at all — the
+            -- engine's fallback was placing both rings by accident.)
+            if currentEquip[12] == nil then return 12 end
+            if currentEquip[13] == nil then return 13 end
+            -- Both occupied: replace the ring equipped LEAST recently. Returning a real ring
+            -- slot here is what makes this a replace rather than a no-op — the slot is allowed
+            -- for a ring, so the engine equips into it and unequips the previous occupant.
+            -- lastRingSlot is the most recently filled slot, so the other one is the older.
+            if lastRingSlot == 12 then return 13 end
+            if lastRingSlot == 13 then return 12 end
+            -- Recency unknown (both rings already on before the script started tracking).
+            -- Fall back to the left ring, matching which slot we fill first when both are free.
+            return 12
         end
         local map = {
-            [CT.Amulet]=13, [CT.Shirt]=8, [CT.Pants]=9, [CT.Skirt]=10,
+            [CT.Amulet]=14, [CT.Belt]=15, [CT.Shirt]=8, [CT.Pants]=9, [CT.Skirt]=10,
             [CT.Robe]=11, [CT.Shoes]=7, [CT.LGlove]=5, [CT.RGlove]=6,
         }
         return map[t]
@@ -1524,6 +1596,10 @@ local function equipItem(arg)
     end
     equip[slot] = found
     types.Actor.setEquipment(self, equip)
+    -- Record ring recency immediately rather than waiting for exportEquipment's next slow tick,
+    -- so two taps in quick succession don't both see the same stale "most recent" slot and
+    -- evict the same ring twice.
+    noteRingEquipped(slot)
     playItemSound(found, true)
     emit("COMPANION_DEBUG: equipped " .. arg .. " -> slot " .. slot)
 end
