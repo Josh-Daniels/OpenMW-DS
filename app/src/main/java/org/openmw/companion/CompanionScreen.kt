@@ -68,8 +68,11 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.zIndex
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -106,6 +109,7 @@ import androidx.compose.ui.unit.TextUnit
 // Splash image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
+import org.libsdl.app.SDLActivity
 import org.openmw.BuildConfig
 import org.openmw.R
 import androidx.compose.ui.layout.ContentScale
@@ -120,6 +124,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.util.Log
+import android.view.KeyEvent
 import androidx.compose.ui.graphics.ImageBitmap
 import org.openmw.Constants
 import androidx.compose.ui.graphics.asImageBitmap
@@ -301,6 +306,11 @@ private fun SpellEntry.displayName(): String =
 private fun BarterItem.displayName(): String =
     if (name.isNotBlank()) name else prettify(id)
 
+/** Canonical head-to-toe display order for equipment slots. Currently UNREFERENCED — its only
+ *  consumer was the inventory strip's equipped-chip row, replaced by the sort controls. Kept
+ *  because it encodes the intended ordering for any future equipped view (the "Equipped" filter
+ *  tab and the pinned Equipped section both sort by category rank instead). */
+@Suppress("unused")
 private val EQUIPMENT_SLOT_ORDER = listOf(
     "weapon", "ammo", "shield",
     "lockpick", "probe",
@@ -323,10 +333,14 @@ private val INV_CATEGORIES = listOf(
                                   "shield", "armor")),
     InvCategory("Apparel", setOf("amulet", "left_ring", "shirt", "pants", "skirt",
                                   "robe", "clothing")),
-    InvCategory("Tools",   setOf("lockpick", "probe", "apparatus", "repair")),
+    // "carried_left" is Lights (torches/lanterns) — itemCategory maps ONLY types.Light there, so
+    // this moves exactly torches out of Misc and nothing else. Grouped with Tools because that
+    // category is already "carried, not worn, has a use" (lockpicks/probes/apparatus/repair hammers)
+    // rather than a vanilla grouping — vanilla itself files torches under Misc.
+    InvCategory("Tools",   setOf("lockpick", "probe", "apparatus", "repair", "carried_left")),
     InvCategory("Books",       setOf("book", "scroll")),
     InvCategory("Consumables", setOf("potion", "ingredient")),
-    InvCategory("Misc",        setOf("misc", "carried_left")),
+    InvCategory("Misc",        setOf("misc")),
 )
 
 // Sentinel filter label (NOT an INV_CATEGORIES entry): shows only equipped items. Rendered as
@@ -345,10 +359,14 @@ private fun itemCategoryRank(category: String): Int = when (category) {
     "consumable", "potion" -> 3
     "ingredient" -> 4
     "book", "scroll" -> 6
-    "carried_left" -> 7
-    "tools", "lockpick" -> 9
-    "probe" -> 11
-    else -> 8   // misc (apparatus/repair/light are folded into "misc" by itemCategory)
+    // ONE rank for the whole INV_CATEGORIES "Tools" set, so those items sort contiguously and ahead
+    // of Misc. Previously they were scattered — carried_left 7, apparatus/repair fell through to the
+    // misc `else` 8, lockpick 9, probe 11 — which interleaved tools with misc items in the flattened
+    // CARDS "All" view. Torches (carried_left) join them here rather than sitting next to Misc.
+    // (The old `else` comment claiming apparatus/repair/light fold into "misc" was stale: itemCategory
+    // returns them as their own categories.)
+    "tools", "lockpick", "probe", "apparatus", "repair", "carried_left" -> 7
+    else -> 8   // misc
 }
 
 /** Subtle gold backdrop behind an enchanted item's icon (mirrors vanilla's menu_icon_magic frame).
@@ -453,9 +471,37 @@ private fun cycleBarterCat(items: List<BarterItem>, current: String?, dir: Int):
 }
 
 /** Stone panel with a bronze frame — the signature Morrowind window look. */
+/**
+ * Background-fill opacity for panels in the CURRENT composition. 1f (opaque) everywhere by default,
+ * so bottom-screen companion panels are untouched; the top-screen overlay windows provide the
+ * player's chosen value via [ProvideTopPanelOpacity].
+ *
+ * A CompositionLocal rather than a parameter because the panels that need to fade are drawn by
+ * composables SHARED with the bottom screen (`ShelfDualPanel`, the loot/barter grid columns, the
+ * conversation panel). Threading a flag through every one of them would touch a dozen signatures
+ * and be easy to miss a call site on; providing it at the window root means "anything drawn inside
+ * a top overlay fades, everything else doesn't" falls out automatically.
+ */
+private val LocalPanelOpacity = compositionLocalOf { 1f }
+
+/** Wrap a TOP-screen overlay's content so its panels honour the opacity setting. Public because
+ *  EngineActivity applies it at each top-screen window root — that is the one place that reliably
+ *  means "this composition is on the top screen", and it covers overlays added later for free. */
+@Composable
+fun ProvideTopPanelOpacity(content: @Composable () -> Unit) {
+    val opacity by UiPreferences.topPanelOpacityFlow().collectAsState()
+    CompositionLocalProvider(LocalPanelOpacity provides opacity, content = content)
+}
+
+/**
+ * The standard panel look. Only the FILL honours [LocalPanelOpacity] — the 2dp Bronze border stays
+ * fully opaque on purpose, so at 0% the panel's bounds (and therefore which text belongs to it)
+ * are still readable against the game behind it.
+ */
+@Composable
 private fun Modifier.mwPanel(): Modifier = this
     .clip(RoundedCornerShape(3.dp))
-    .background(StonePanel)
+    .background(StonePanel.copy(alpha = LocalPanelOpacity.current))
     .border(2.dp, Bronze, RoundedCornerShape(3.dp))
 
 /** Index-cycle a category order list, wrapping. dir +1 = next, -1 = previous; a missing current
@@ -1106,7 +1152,10 @@ fun ConversationHistoryOverlay() {
                 .fillMaxWidth(0.75f)             // ~25% narrower than full width
                 .fillMaxHeight(0.51f)            // ~10% taller than the previous 0.46
                 .clip(RoundedCornerShape(3.dp))
-                .background(StonePanel)          // match the TOP-view conversation panel (mwPanel)
+                // Hand-rolled rather than mwPanel() (different width/height), so it must apply the
+                // top-panel opacity itself or the SPLIT read-only history would stay opaque while
+                // every neighbouring panel faded.
+                .background(StonePanel.copy(alpha = LocalPanelOpacity.current))
                 .border(2.dp, Bronze, RoundedCornerShape(3.dp))
         ) {
             if (npcName.isNotEmpty()) {
@@ -3024,7 +3073,9 @@ private fun ShelfCenterDivider(width: Dp = SHELF_CENTER_DIVIDER_WIDTH) {
             Modifier
                 .size(16.dp)
                 .clip(CircleShape)
-                .background(SplitBoxBg)
+                // Same panel fill as the columns either side, so it fades with them — left opaque
+                // it would sit between two transparent panels as a solid blob.
+                .background(SplitBoxBg.copy(alpha = LocalPanelOpacity.current))
                 .border(1.dp, Bronze, CircleShape),
             contentAlignment = Alignment.Center
         ) {
@@ -3448,7 +3499,11 @@ private fun LootingOverlay(
                 ) { takeAll() }
                 if (session.isCorpse) {
                     LootButton(
-                        label = "Dispose of Corpse", hint = "R1",
+                        // Y, not R1 — Dispose moved to Action2/Y when R1 was repurposed for
+                        // category cycling; this BOTTOM-layout hint was left behind while
+                        // LootingControlsOnly (SPLIT) was updated. The binding above is
+                        // onAction2, so "Y" is what actually works.
+                        label = "Dispose of Corpse", hint = "Y",
                         enabled = true,
                         modifier = Modifier.weight(1f)
                     ) { CompanionActions.containerDispose() }
@@ -3785,9 +3840,19 @@ private val LOOT_SPLIT_COLUMN_GAP = 8.dp
 // Each split-overlay column is its own boxed panel (dark fill, subtle border, rounded, padded);
 // the gap between the two boxes provides the visual separation (no divider line).
 private val SplitBoxBg = Color(0xFF1A1410)
+/**
+ * Panel box for a SPLIT loot/barter column. Honours [LocalPanelOpacity] exactly like [mwPanel] —
+ * these columns are the top screen's main DS panels, and they do NOT go through `mwPanel()` (they
+ * have their own radius/padding and a dimmer fill), which is why they need the alpha applied here
+ * too. Border stays opaque so the column bounds survive a fully-transparent fill.
+ *
+ * Also used by ShelfDualPanel, which renders on BOTH screens — harmless, because the local
+ * defaults to 1f anywhere outside a top-screen overlay window.
+ */
+@Composable
 private fun Modifier.splitColumnBox(): Modifier = this
     .clip(RoundedCornerShape(6.dp))
-    .background(SplitBoxBg)
+    .background(SplitBoxBg.copy(alpha = LocalPanelOpacity.current))
     .border(1.dp, BronzeDark, RoundedCornerShape(6.dp))
     .padding(8.dp)
 
@@ -8190,6 +8255,11 @@ private fun FavSlotView(
 private fun InventoryPanel(state: GameState) {
     val tabStyle by UiPreferences.inventoryTabStyleFlow().collectAsState()
     val cards = tabStyle == InventoryTabStyle.CARDS
+    // Sort state is deliberately NOT persisted — it's a transient "let me find the heavy things"
+    // view, not a setting, and coming back to a remembered non-default order later would be
+    // surprising. Resets to Default whenever the tab is left.
+    var sortMode by remember { mutableStateOf(InvSort.DEFAULT) }
+    var sortDescending by remember { mutableStateOf(true) }
     val hideEquippedBar by UiPreferences.hideEquippedBarFlow().collectAsState()
     val showEquippedInList by UiPreferences.showEquippedInListFlow().collectAsState()
     var selectedCategoryLabel by remember { mutableStateOf<String?>(null) }
@@ -8214,7 +8284,24 @@ private fun InventoryPanel(state: GameState) {
             .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        EquippedStrip(state)
+        EquippedStrip(
+            state = state,
+            sortMode = sortMode,
+            sortDescending = sortDescending,
+            onSort = { mode ->
+                if (mode == InvSort.DEFAULT) {
+                    sortMode = InvSort.DEFAULT
+                } else if (sortMode == mode) {
+                    // Re-tapping the active sort flips direction rather than doing nothing.
+                    sortDescending = !sortDescending
+                } else {
+                    // A fresh sort starts high→low: "what's heaviest / most valuable" is the
+                    // question people actually open these for.
+                    sortMode = mode
+                    sortDescending = true
+                }
+            }
+        )
         // Ordered filter tabs (All, [Equipped], then present categories) for swipe-cycling — same
         // order CategorySubTabs renders.
         val invTabOrder = buildList<String?> {
@@ -8236,26 +8323,22 @@ private fun InventoryPanel(state: GameState) {
                     selectedCategoryLabel = cycleValue(invTabOrder, selectedCategoryLabel, dir)
                 }
             ) {
-                InventoryItemList(state, selectedCategoryLabel, cards, hideEquippedBar, showEquippedInList)
+                InventoryItemList(
+                    state, selectedCategoryLabel, cards, hideEquippedBar, showEquippedInList,
+                    sortMode, sortDescending
+                )
             }
         }
     }
 }
 
 @Composable
-private fun EquippedStrip(state: GameState) {
-    val wornItems = remember(state.inventory, state.equipment) {
-        EQUIPMENT_SLOT_ORDER
-            .mapNotNull { slot -> state.equipment[slot] }
-            .mapNotNull { sid ->
-                // equipment values are now per-stack instance ids (stackId); fall back
-                // to recordId matching for older Lua that emits recordId instead.
-                state.inventory.find { it.stackId == sid }
-                    ?: state.inventory.find { it.stackId.isEmpty() && it.id == sid }
-            }
-            .distinctBy { it.stackId.ifEmpty { it.id } }
-    }
-
+private fun EquippedStrip(
+    state: GameState,
+    sortMode: InvSort,
+    sortDescending: Boolean,
+    onSort: (InvSort) -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -8264,16 +8347,21 @@ private fun EquippedStrip(state: GameState) {
             .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Gold + carried weight, before the EQUIPPED strip. From COMPANION_STATS.
+        // Gold + carried weight. From COMPANION_STATS, and the ONLY place either is shown on this
+        // tab — kept exactly as-is when the equipped chip row was replaced by the sort controls.
         StripStat("GOLD", state.gold.toString())
         StripDivider()
         StripStat(
             "WEIGHT",
             "${state.encumbrance.current.toInt()}/${state.encumbrance.max.toInt()}"
         )
-        StripDivider()
+        // Flexible gap: pushes the whole SORT cluster to the RIGHT edge of the strip, separating
+        // the read-only stats (left) from the controls (right). The weight lives here rather than
+        // on the chip Row so the chips wrap their content and stay hard against the right edge
+        // instead of stretching across the free space.
+        Spacer(Modifier.weight(1f))
         Text(
-            "EQUIPPED",
+            "SORT",
             color = BronzeLight,
             fontSize = 10.sp,
             fontFamily = MwDisplay,
@@ -8287,18 +8375,61 @@ private fun EquippedStrip(state: GameState) {
                 .height(28.dp)
                 .background(BronzeDark)
         )
-        if (wornItems.isEmpty()) {
-            Text("Nothing equipped", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
-        } else {
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                wornItems.forEach { item -> EquippedChip(item.displayName()) }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            InvSort.entries.forEach { mode ->
+                SortChip(
+                    label = mode.label,
+                    active = sortMode == mode,
+                    // Default has no direction — an arrow on it would imply a toggle that isn't there.
+                    arrow = if (sortMode == mode && mode != InvSort.DEFAULT) {
+                        if (sortDescending) "▼" else "▲"
+                    } else null,
+                    onClick = { onSort(mode) }
+                )
             }
+        }
+    }
+}
+
+/** Sort modes for the inventory tab. [label] is what the chip shows. */
+private enum class InvSort(val label: String) {
+    // "Value" rather than "Price": the field is the item's base record value (what the vanilla
+    // tooltip calls Value), not a merchant-adjusted price — the number differs from what you'd
+    // actually be paid, so "Price" overstated it.
+    DEFAULT("Default"), WEIGHT("Weight"), PRICE("Value")
+}
+
+/** A sort control in the inventory strip. Styled like [CategoryTab] (the tab row directly below it)
+ *  so the two rows of controls read as the same family, with a direction arrow when active. */
+@Composable
+private fun SortChip(label: String, active: Boolean, arrow: String?, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(2.dp))
+            .background(if (active) Bronze else Color.Transparent)
+            .border(1.dp, if (active) BronzeLight else BronzeDark, RoundedCornerShape(2.dp))
+            .clickable { onClick() }
+            // ~60% taller than the original 4dp: these are frequently-tapped controls sitting in a
+            // 54dp strip that had spare vertical room, and the extra height also makes them a
+            // comfortably bigger touch target on the small panel.
+            .padding(horizontal = 8.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label.uppercase(),
+            color = if (active) BoneBright else BoneMuted,
+            fontSize = 10.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp,
+            maxLines = 1
+        )
+        if (arrow != null) {
+            Spacer(Modifier.width(3.dp))
+            Text(arrow, color = BoneBright, fontSize = 8.sp, fontFamily = MwData)
         }
     }
 }
@@ -8306,19 +8437,23 @@ private fun EquippedStrip(state: GameState) {
 /** A compact label-over-value readout for the equipped strip (Gold / Weight). */
 @Composable
 private fun StripStat(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    // Label BESIDE the value, not stacked above it: the strip is 54dp tall but the sort controls
+    // only need one line, so the stats were wasting the width they had and cramping the height.
+    // Reading "GOLD 250" left-to-right is also closer to how the rest of the UI reads.
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             label,
             color = BoneDim,
-            fontSize = 8.sp,
+            fontSize = 9.sp,
             fontFamily = MwDisplay,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp
         )
+        Spacer(Modifier.width(5.dp))
         Text(
             value,
             color = BronzeLight,
-            fontSize = 12.sp,
+            fontSize = 13.sp,
             fontFamily = MwData,
             fontWeight = FontWeight.Bold,
             maxLines = 1
@@ -8339,32 +8474,18 @@ private fun StripDivider() {
 }
 
 @Composable
-private fun EquippedChip(label: String) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(SlotWorn)
-            .border(1.dp, BronzeLight, RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 5.dp)
-    ) {
-        Text(
-            label,
-            color = BronzeLight,
-            fontSize = 11.sp,
-            fontFamily = MwBody,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-@Composable
 private fun CategorySubTabs(
     categories: List<InvCategory>,
     selected: String?,
     hasEquipped: Boolean,
     onSelect: (String?) -> Unit
 ) {
+    // Single horizontally-scrolling row, deliberately. A FlowRow that wrapped to two lines made
+    // every tab reachable without scrolling, but the second line cost the item list below too much
+    // vertical space on the 1240x1080 panel — squeezing the rows/cards more than the scrolling was
+    // costing. Scrolling the tabs is the cheaper trade here.
+    // Side effect of this shape: the nested horizontal scroller consumes drags that START on the
+    // tab row, so categorySwipe only fires from the list body below.
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -8409,7 +8530,9 @@ private fun InventoryItemList(
     selectedCategoryLabel: String?,
     cards: Boolean,
     hideEquippedBar: Boolean,
-    showEquippedInList: Boolean
+    showEquippedInList: Boolean,
+    sortMode: InvSort = InvSort.DEFAULT,
+    sortDescending: Boolean = true
 ) {
     val wornIds = remember(state.equipment) { state.equipment.values.toSet() }
     val equippedFilter = selectedCategoryLabel == EQUIPPED_FILTER
@@ -8433,13 +8556,43 @@ private fun InventoryItemList(
     val favs by FavouritesRepository.state.collectAsState()
     val favIds = remember(favs) { favs.gear.mapNotNull { it?.id }.toSet() }
 
-    // Sort within a section: category rank, then favourite-first, then name. Every list/grid path
-    // below builds on this (the worn-first paths prepend a worn tier), so favourites rise to the top
-    // of each category everywhere.
-    val catNameSort = compareBy<InventoryItem> { itemCategoryRank(it.category) }
-        .thenByDescending { it.id in favIds }
-        .thenBy { it.displayName().lowercase() }
-    val wornItems = remember(state.inventory, wornIds, favIds) {
+    // DEFAULT is the canonical three-tier order: category rank, then favourite-first, then name.
+    //
+    // Weight/Price are a PURE ordering — no category tier and no favourite tier. Choosing "heaviest
+    // first" means the heaviest thing you own, not the heaviest thing in each category; a category
+    // tier made the grid still look grouped by type. List mode keeps its headers regardless, because
+    // that view iterates INV_CATEGORIES and filters per group — the headers come from the grouping,
+    // not from this comparator — so dropping the tier sorts purely within each header, which is what
+    // "sort within each category" should mean. (It also fixes categories whose members have
+    // different ranks, e.g. Consumables, where potions used to sort ahead of every ingredient
+    // regardless of weight.)
+    //
+    // Name is the final tiebreak in every mode so equal weights/prices don't shuffle between
+    // recompositions.
+    val catNameSort = remember(favIds, sortMode, sortDescending) {
+        when (sortMode) {
+            InvSort.DEFAULT -> compareBy<InventoryItem> { itemCategoryRank(it.category) }
+                .thenByDescending { it.id in favIds }
+                .thenBy { it.displayName().lowercase() }
+            InvSort.WEIGHT ->
+                (if (sortDescending) compareByDescending<InventoryItem> { it.weight }
+                else compareBy { it.weight })
+                    .thenBy { it.displayName().lowercase() }
+            InvSort.PRICE ->
+                (if (sortDescending) compareByDescending<InventoryItem> { it.value }
+                else compareBy { it.value })
+                    .thenBy { it.displayName().lowercase() }
+        }
+    }
+    // Equipped items float to the front ONLY in the default order. With an explicit Weight/Price
+    // sort the whole list must be in that order — a pinned block of worn gear at the top is exactly
+    // the "it's not really sorted" problem the category tier caused.
+    fun wornFirst(base: Comparator<InventoryItem>): Comparator<InventoryItem> =
+        if (sortMode == InvSort.DEFAULT) compareByDescending<InventoryItem> { isWorn(it) }.then(base)
+        else base
+    // Key must include the sort inputs — catNameSort is rebuilt when they change, and without them
+    // here the Equipped list/section would keep serving the previous ordering.
+    val wornItems = remember(state.inventory, wornIds, favIds, sortMode, sortDescending) {
         state.inventory.filter { isWorn(it) }.sortedWith(catNameSort)
     }
     // Enchantment charge for cast-on-use items, sourced from the SPELLS export (the only place
@@ -8463,13 +8616,11 @@ private fun InventoryItemList(
                 selectedGroup == null ->
                     state.inventory.filter { showEquippedInList || !isWorn(it) }
                         .sortedWith(
-                            if (showEquippedInList)
-                                compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort)
-                            else catNameSort
+                            if (showEquippedInList) wornFirst(catNameSort) else catNameSort
                         )
                 else ->
                     state.inventory.filter { it.category in selectedGroup.cats }
-                        .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort))
+                        .sortedWith(wornFirst(catNameSort))
             }
             ItemCardGrid(
                 items = gridItems,
@@ -8503,9 +8654,7 @@ private fun InventoryItemList(
                                 .filter { it.category in grp.cats && (showEquippedInList || !isWorn(it)) }
                                 // Worn items float to the front of their category group when shown inline.
                                 .sortedWith(
-                                    if (showEquippedInList)
-                                        compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort)
-                                    else catNameSort
+                                    if (showEquippedInList) wornFirst(catNameSort) else catNameSort
                                 )
                             if (groupItems.isNotEmpty()) {
                                 item(key = "hdr_${grp.label}") { SpellSectionHeader(grp.label) }
@@ -8523,7 +8672,7 @@ private fun InventoryItemList(
                     else -> {
                         val groupItems = state.inventory
                             .filter { it.category in selectedGroup.cats }
-                            .sortedWith(compareByDescending<InventoryItem> { isWorn(it) }.then(catNameSort))
+                            .sortedWith(wornFirst(catNameSort))
                         items(groupItems) { item ->
                             val worn = isWorn(item)
                             ItemRow(item, worn, equippable = item.isEquippable(),
@@ -10910,6 +11059,310 @@ private object OptionsMenuScrollState {
 }
 
 /**
+ * Which options sections are expanded, held OUTSIDE composition for the same reason as
+ * [OptionsMenuScrollState]: the pause overlay is a separate window that is recreated on every
+ * open, so a plain `remember` would re-collapse every section each time the menu is opened.
+ *
+ * `mutableStateMapOf` (not a plain map) so toggling recomposes the LazyColumn — the section rows
+ * are emitted conditionally from these flags, so a non-observable map would flip the arrow without
+ * ever showing/hiding the content.
+ *
+ * **Default is COLLAPSED (absent key ⇒ false).** The five sections together emit ~35 rows, which
+ * is several screens of scrolling on the 1240x1080 bottom panel; all-collapsed turns the menu into
+ * a five-line index that fits without scrolling, which is the whole point of the rework. The cost
+ * is one extra tap to reach a setting — paid back immediately because the section you want is now
+ * visible on screen instead of somewhere down a long scroll. Scroll position still persists
+ * independently, so returning to the menu lands where you left it.
+ */
+// Section titles double as their expansion-state keys — one string per section, so a title
+// change can't silently desync from a separate key constant.
+private const val SECTION_SCREEN_LAYOUT = "DS Screen Layout"
+// Renamed from "Game UI" — every row here is a DS-vs-Vanilla choice, which the old name did not
+// convey. NOTE the title doubles as the expansion-state key, so this rename resets that one
+// section to collapsed exactly once (the old key is simply never looked up again). Harmless.
+private const val SECTION_DS_OR_VANILLA = "DS or Vanilla"
+private const val SECTION_VANILLA_HUD = "Vanilla HUD"
+private const val SECTION_INPUT = "Input"
+private const val SECTION_COMPANION_TABS = "Companion Tabs"
+private const val SECTION_DEVELOPER_TOOLS = "Developer Tools"
+
+private object OptionsSectionState {
+    private val expanded = mutableStateMapOf<String, Boolean>()
+
+    fun isExpanded(key: String): Boolean = expanded[key] == true
+
+    fun toggle(key: String) {
+        expanded[key] = !isExpanded(key)
+    }
+}
+
+/**
+ * Collapsible section heading for the options menu — the [OptionsSectionHeader] look (uppercase
+ * BronzeLight MwDisplay + Bronze underline) plus a chevron and a tap target.
+ *
+ * Deliberately NOT built on `IniSectionCard`: that composable takes ini-shaped data
+ * (`List<Triple<…>>`) and renders `IniSettingItem`s itself with no content slot, is Material-themed
+ * rather than using this file's private Morrowind palette, and wraps its children in a Column —
+ * which would flatten these rows out of the LazyColumn and lose their keys. This follows the same
+ * visual PATTERN while leaving the rows as real lazy items emitted by the caller.
+ */
+@Composable
+private fun OptionsCollapsibleHeader(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    dimmed: Boolean = false
+) {
+    Column(
+        Modifier
+            .alpha(if (dimmed) 0.4f else 1f)
+            .fillMaxWidth()
+            .clickable { onToggle() }
+            .padding(top = 20.dp, bottom = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                title.uppercase(),
+                color = BronzeLight,
+                fontSize = 22.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.5.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                if (expanded) "▾" else "▸",
+                color = BronzeLight,
+                fontSize = 20.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+    }
+}
+
+/** [OptionsCollapsibleHeader] bound to [OptionsSectionState] — the form every section uses. */
+@Composable
+private fun CollapsibleSection(title: String) {
+    OptionsCollapsibleHeader(
+        title = title,
+        expanded = OptionsSectionState.isExpanded(title),
+        onToggle = { OptionsSectionState.toggle(title) }
+    )
+}
+
+/* ---- DS Controls reference page ---- */
+
+/**
+ * A button or gesture name, in the app's existing `[X]`-style chip idiom (see [LootButton] and the
+ * quantity picker's `MAX [Y]`): monospace [MwData] on a dark slot fill with a bronze hairline.
+ *
+ * ONE treatment for every control on the page — face buttons (`R3`, `X`, `Y`, `B`), sticks
+ * (`Left stick`), and gestures (`Tap`, `Long press`, `Swipe ↔`) all render identically. That is
+ * deliberate: roughly a third of the reference is gestures, which have no honest unbranded glyph,
+ * so an icon set would inevitably become icons-for-some, text-for-the-rest. A fixed [minWidth]
+ * keeps the description column aligned down the page.
+ */
+@Composable
+private fun ControlChip(label: String, minWidth: Dp = 82.dp) {
+    Box(
+        modifier = Modifier
+            .widthIn(min = minWidth)
+            .clip(RoundedCornerShape(3.dp))
+            .background(SlotBg)
+            .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = BronzeLight,
+            fontSize = 10.sp,
+            fontFamily = MwData,
+            maxLines = 1
+        )
+    }
+}
+
+/** One control: the chip on the left, what it does on the right. */
+private data class ControlEntry(val chip: String, val text: String)
+
+/** A context the controls apply in (Inventory, HUD, Looting, …). */
+private data class ControlGroup(val title: String, val entries: List<ControlEntry>)
+
+/**
+ * The reference content. Documents EXISTING behaviour only — nothing here rebinds anything.
+ *
+ * "Tap: equip or use" is phrased loosely on purpose: the inventory tap action is context-dependent
+ * (books read, potions drink, gear equips/unequips, plain misc items do nothing), and spelling all
+ * four cases out here would cost more clarity than it buys on a quick-reference page.
+ */
+private val DS_CONTROL_GROUPS = listOf(
+    ControlGroup(
+        "Inventory & Spells",
+        listOf(
+            ControlEntry("Tap", "Equip or use the item"),
+            ControlEntry("Long press", "More options"),
+            ControlEntry("Swipe ↔", "Switch category")
+        )
+    ),
+    ControlGroup(
+        "HUD",
+        listOf(
+            ControlEntry("Tap", "The Effects label to see active effects"),
+            ControlEntry("Tap", "The map to open the full map"),
+            ControlEntry("Tap", "A door marker to see where it leads"),
+            ControlEntry("Tap", "The Spell or Weapon icon to show its name"),
+            ControlEntry("Tap", "A favourite slot to use it"),
+            ControlEntry("Long press", "A favourite slot to see more options")
+        )
+    ),
+    ControlGroup(
+        "Stats",
+        listOf(ControlEntry("Tap", "Anything for more information"))
+    ),
+    ControlGroup(
+        "Journal",
+        listOf(ControlEntry("Swipe ↔", "Page through entries"))
+    ),
+    ControlGroup(
+        "Looting",
+        listOf(
+            ControlEntry("R3", "Inspect item"),
+            ControlEntry("X", "Take all"),
+            ControlEntry("Y", "Dispose of corpse"),
+            ControlEntry("B", "Close")
+        )
+    ),
+    ControlGroup(
+        "Bartering",
+        listOf(
+            ControlEntry("R3", "Inspect item"),
+            ControlEntry("X", "Make offer"),
+            ControlEntry("Left stick", "Adjust gold"),
+            ControlEntry("B", "Cancel")
+        )
+    ),
+    ControlGroup(
+        "Elsewhere",
+        listOf(
+            ControlEntry("D-pad", "Quantity to adjust the amount"),
+            ControlEntry("Y", "Quantity to set to the whole stack"),
+            ControlEntry("D-pad", "Resting to choose how many hours"),
+            ControlEntry("X", "Resting to rest until healed"),
+            ControlEntry("A", "Repair to repair the selected item"),
+            ControlEntry("X", "Repair to repair everything"),
+            ControlEntry("A", "Training to train the selected skill"),
+            ControlEntry("A", "Travel to confirm the destination"),
+            ControlEntry("Tap", "Dialogue highlighted words to see NPC says to ask about them")
+        )
+    )
+)
+
+/** Entry point to [DsControlsPage], pinned above Quick Set in the options list. */
+@Composable
+private fun DsControlsButton(onOpen: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp, bottom = 2.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(PillActiveBg.copy(alpha = 0.94f))
+            .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+            .clickable { onOpen() }
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "DS Controls",
+            color = BronzeLight,
+            fontSize = 16.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+    }
+}
+
+/**
+ * The controls reference. Replaces the settings list in place (rather than being an overlay) so it
+ * works identically from the in-game pause menu and the title-screen popup, neither of which can
+ * host a Compose `Dialog` — the companion runs in a TYPE_PRESENTATION window.
+ */
+@Composable
+private fun DsControlsPage(onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(PillActiveBg.copy(alpha = 0.94f))
+                    .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                    .clickable { onBack() }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    "◀ Back",
+                    color = BronzeLight, fontSize = 15.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "DS CONTROLS",
+                color = BronzeLight,
+                fontSize = 18.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.5.sp
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                top = 4.dp, bottom = 24.dp
+            )
+        ) {
+            DS_CONTROL_GROUPS.forEach { group ->
+                item(key = "hdr_${group.title}") { SpellSectionHeader(group.title) }
+                itemsIndexed(
+                    group.entries,
+                    // Chip labels repeat within a group ("Tap" appears 4x under HUD), so the key
+                    // must include the index — a chip-only key would be a duplicate-key crash.
+                    key = { i, e -> "${group.title}_${i}_${e.chip}" }
+                ) { _, entry ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ControlChip(entry.chip)
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            entry.text,
+                            color = Bone,
+                            fontSize = 13.sp,
+                            fontFamily = MwBody,
+                            lineHeight = 17.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * The display-settings menu. A quick-set row ([All DS]/[All Vanilla]), then three sections:
  * SCREEN LAYOUT, GAME UI (per-element DS/Vanilla), VANILLA HUD (native top-screen HUD element
  * On/Off toggles), and INPUT. Full-screen, scrollable, BronzeLight-themed. Writes to
@@ -10986,9 +11439,24 @@ private fun OptionsTitleBar(titleScreen: Boolean) {
 
 /** The scrollable list of all settings sections. Rendered inline for the in-game pause menu and
  *  inside [OptionsPopup] for the title screen. Scroll position persists via OptionsMenuScrollState
- *  (the pause overlay window is recreated each open, so a plain rememberLazyListState would reset). */
+ *  (the pause overlay window is recreated each open, so a plain rememberLazyListState would reset).
+ *
+ *  The DS Controls page is hosted HERE rather than in [OptionsMenuOverlay] so both entry points —
+ *  the in-game pause menu (which renders this inline) and the title screen (which renders it inside
+ *  [OptionsPopup]) — get it from one wiring. Its open state is a plain `remember`, deliberately:
+ *  reopening the options menu should land on the settings, not on whatever sub-page was last shown. */
 @Composable
 private fun OptionsSettingsList() {
+    var showControls by remember { mutableStateOf(false) }
+    if (showControls) {
+        DsControlsPage(onBack = { showControls = false })
+        return
+    }
+    OptionsSettingsListContent(onOpenControls = { showControls = true })
+}
+
+@Composable
+private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
     val listState = rememberLazyListState(
         OptionsMenuScrollState.index, OptionsMenuScrollState.offset
     )
@@ -11006,62 +11474,101 @@ private fun OptionsSettingsList() {
             .padding(horizontal = 16.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
     ) {
+        // Controls reference. Sits ABOVE Quick Set because it is the one entry a new player needs
+        // before they can use anything else on this screen.
+        item { DsControlsButton(onOpen = onOpenControls) }
+
         // Quick-set row: bulk-set every (non-pending) Game UI element. Never touches HUD.
+        // Deliberately left unheaded/always-visible — it is a single row, not a section.
         item { QuickSetRow() }
 
-        // SCREEN LAYOUT: which screen each element is drawn on.
-        item { OptionsSectionHeader("DS Screen Layout") }
-        // One cross-cutting switch (Classic grid / Shelf) for ALL two-panel item screens
-        // (looting, pickpocket, barter). Sits above the per-element location rows.
-        item { InventoryLayoutRow() }
-        item { ConversationLocationRow() }
-        item { LootingLocationRow() }
-        item { BarteringLocationRow() }
-        item { PersuasionLocationRow() }
-        item { RepairLocationRow() }
-        item { TravelLocationRow() }
-        item { SpellBuyingLocationRow() }
-        item { TrainingLocationRow() }
-        items(
-            GAME_UI_ELEMENTS.filter {
-                it.key != "game_ui_conversation" &&
-                    it.key != "game_ui_persuasion" &&
-                    it.key != "game_ui_looting" &&
-                    it.key != "game_ui_bartering" &&
-                    it.key != "game_ui_spellbuying" &&
-                    it.key != "game_ui_training" &&
-                    it.key != "game_ui_repair" &&
-                    it.key != "game_ui_travel"
-            },
-            key = { "layout_" + it.key }
-        ) { ScreenLayoutPendingRow(it) }
+        // Each section below: a collapsible header, then its rows emitted ONLY while expanded.
+        // Conditional emission (rather than wrapping the rows in a card) keeps every row a real
+        // lazy item with its own key — the `"layout_"` prefix on ScreenLayoutPendingRow's reuse of
+        // GAME_UI_ELEMENTS is what stops it colliding with the Game UI section's keys, and both
+        // sections can now be expanded at once, so that prefix is still load-bearing.
 
-        // GAME UI: per-element DS/Vanilla.
-        item { OptionsSectionHeader("Game UI") }
-        // Combat top-screen options sit at the top of this section.
-        item { TargetHealthLocationRow() }
-        item { PlayerCombatRow() }
-        items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
+        // SCREEN LAYOUT: which screen each element is drawn on.
+        item { CollapsibleSection(SECTION_SCREEN_LAYOUT) }
+        if (OptionsSectionState.isExpanded(SECTION_SCREEN_LAYOUT)) {
+            // One cross-cutting switch (Classic grid / Shelf) for ALL two-panel item screens
+            // (looting, pickpocket, barter). Sits above the per-element location rows.
+            item { InventoryLayoutRow() }
+            // Combat top-screen options. These are "which screen?" picks, not DS/Vanilla toggles,
+            // so they belong here rather than in DS-or-Vanilla — deliberately reversing the
+            // Jul 2026 move that put them under the old "Game UI" header.
+            item { TargetHealthLocationRow() }
+            item { PlayerCombatRow() }
+            item { ConversationLocationRow() }
+            item { LootingLocationRow() }
+            item { BarteringLocationRow() }
+            item { PersuasionLocationRow() }
+            item { RepairLocationRow() }
+            item { TravelLocationRow() }
+            item { SpellBuyingLocationRow() }
+            item { TrainingLocationRow() }
+            item { RestwaitLocationRow() }
+            item { CrimeLocationRow() }
+            item { TopPanelOpacityRow() }
+            items(
+                GAME_UI_ELEMENTS.filter {
+                    it.key != "game_ui_conversation" &&
+                        it.key != "game_ui_persuasion" &&
+                        it.key != "game_ui_looting" &&
+                        it.key != "game_ui_bartering" &&
+                        it.key != "game_ui_spellbuying" &&
+                        it.key != "game_ui_training" &&
+                        it.key != "game_ui_repair" &&
+                        it.key != "game_ui_travel" &&
+                        // Now have real [Bottom][Top] rows above, so they must NOT also appear as
+                        // greyed PENDING rows here (that would be a duplicate key AND a duplicate row).
+                        it.key != "game_ui_restwait" &&
+                        it.key != "game_ui_crime"
+                },
+                key = { "layout_" + it.key }
+            ) { ScreenLayoutPendingRow(it) }
+        }
+
+        // DS OR VANILLA: per-element, is this drawn by the companion or by native OpenMW?
+        item { CollapsibleSection(SECTION_DS_OR_VANILLA) }
+        if (OptionsSectionState.isExpanded(SECTION_DS_OR_VANILLA)) {
+            items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
+        }
 
         // VANILLA HUD: whether each native top-screen HUD element is shown.
-        item { OptionsSectionHeader("Vanilla HUD") }
-        items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
-        item { Alpha3OverlayRow() }
+        item { CollapsibleSection(SECTION_VANILLA_HUD) }
+        if (OptionsSectionState.isExpanded(SECTION_VANILLA_HUD)) {
+            items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
+            item { Alpha3OverlayRow() }
+        }
 
-        item { OptionsSectionHeader("Input") }
-        item { TouchInputRow() }
-        item { GameCursorRow() }
+        item { CollapsibleSection(SECTION_INPUT) }
+        if (OptionsSectionState.isExpanded(SECTION_INPUT)) {
+            item { TouchInputRow() }
+            item { GameCursorRow() }
+        }
 
         // COMPANION TABS: density/appearance of the bottom-screen companion tabs. Kept in its own
         // section — deliberately NOT near the "DS Screen Layout" Inventory Layout (Classic/Shelf)
         // row, which governs a different (two-panel looting/barter) screen.
-        item { OptionsSectionHeader("Companion Tabs") }
-        item { InventoryTabStyleRow() }
-        item { EquippedBarRow() }
-        item { EquippedInListRow() }
-        item { AdaptiveDimmingRow() }
+        item { CollapsibleSection(SECTION_COMPANION_TABS) }
+        if (OptionsSectionState.isExpanded(SECTION_COMPANION_TABS)) {
+            item { InventoryTabStyleRow() }
+            item { EquippedBarRow() }
+            item { EquippedInListRow() }
+            item { AdaptiveDimmingRow() }
+        }
         // "Spells Display" (Standard / Compact) removed — the compact spell list is now the only
         // version. The old SpellsListStyleRow composable is commented out below for reference.
+
+        // DEVELOPER TOOLS: scaffolding only — the toggle below is permanently disabled and has no
+        // functionality behind it. Placed last so it is the least prominent section.
+        item { CollapsibleSection(SECTION_DEVELOPER_TOOLS) }
+        if (OptionsSectionState.isExpanded(SECTION_DEVELOPER_TOOLS)) {
+            item { DeveloperToolsBlurb() }
+            item { OpenConsoleRow() }
+            item { DeveloperToolsPendingRow("Developer mode") }
+        }
 
         // Quiet release-version footer (diagnostic/reference; `v` prefix added here).
         item {
@@ -11220,7 +11727,9 @@ private fun QuickSetRow() {
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
         Text("Quick set", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Set every Game UI row at once (also sets input mode + the controller hint bar)",
+            // Names the section it acts on — kept in step with the "DS or Vanilla" rename, or the
+            // menu would refer to a header that no longer exists.
+            "Set every DS or Vanilla row at once (also sets the controller hint bar)",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -11303,9 +11812,11 @@ private fun GameUiRow(el: GameUiElement) {
  *  TOP = full conversation on top (not yet implemented — selectable, behaves like SPLIT).
  *  Writes ConversationLocation to UiPreferences on every tap. Dimmed and inert when the
  *  Conversation Game UI element is Vanilla (native handles it, so there's no layout to pick). */
-/** The Inventory Layout row: a [Classic][Shelf] selector controlling how ALL two-panel item screens
- *  (looting/pickpocket, barter) render their item lists. One switch, all those contexts. Always
- *  enabled (not gated on any per-element DS/Vanilla mode). Default Classic. */
+/** The "Looting & Barter Layout" row: a [Classic][Shelf] selector controlling how ALL two-panel
+ *  item screens (looting/pickpocket, barter) render their item lists. One switch, all those
+ *  contexts. Always enabled (not gated on any per-element DS/Vanilla mode). Default Classic.
+ *  Named to stay distinct from the Companion Tabs "Inventory Tab Style" row — the underlying
+ *  pref key (`inventory_layout`) is unchanged, so no migration is involved. */
 @Composable
 private fun InventoryLayoutRow() {
     val context = LocalContext.current
@@ -11318,7 +11829,10 @@ private fun InventoryLayoutRow() {
     val enabled = !(modes.isNotEmpty() && modes.all { it == GameUiMode.VANILLA })
 
     Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        Text("Inventory Layout", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        // "Looting & Barter Layout", NOT "Inventory Layout" — the old name collided with the
+        // Companion Tabs section's "Inventory Tab Style" row (which governs the companion's own
+        // Inventory tab). This one governs only the two-panel looting/pickpocket/barter screens.
+        Text("Looting & Barter Layout", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
@@ -11787,6 +12301,81 @@ private fun TravelLocationRow() {
     }
 }
 
+/** Rest/Wait location row — [Bottom][Top], Top pending. Presentational for now: RestWaitOverlay is
+ *  hardcoded to the bottom screen and does not read this flow (see the pref's note). */
+@Composable
+private fun RestwaitLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.restwaitLocationFlow().collectAsState()
+    ServiceLocationRow("Rest / Wait", "game_ui_restwait", loc, showSplit = false) {
+        UiPreferences.setRestwaitLocation(context, it)
+    }
+}
+
+/** Crime-alert location row — [Bottom][Top], Top pending. Presentational for now: the CrimeToast is
+ *  hardcoded to the bottom screen and does not read this flow (see the pref's note). */
+@Composable
+private fun CrimeLocationRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.crimeLocationFlow().collectAsState()
+    ServiceLocationRow("Crime alerts", "game_ui_crime", loc, showSplit = false) {
+        UiPreferences.setCrimeLocation(context, it)
+    }
+}
+
+/**
+ * Opacity of DS overlay panel BACKGROUNDS on the top screen, 0–100%.
+ *
+ * No floor: only the panel fill fades, never the text/bars drawn on it (and the Bronze border stays
+ * opaque), so even 0% leaves the content fully legible over the game rather than stranding anyone.
+ * Bottom-screen companion panels are deliberately unaffected — Adaptive Dimming (Companion Tabs) is
+ * the separate bottom-screen concept.
+ */
+@Composable
+private fun TopPanelOpacityRow() {
+    val context = LocalContext.current
+    val opacity by UiPreferences.topPanelOpacityFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Top screen panel opacity",
+                color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "${(opacity * 100).roundToInt()}%",
+                color = BronzeLight, fontSize = 12.sp, fontFamily = MwData
+            )
+        }
+        Text(
+            "How solid DS panels drawn over the game look. Text stays readable at any setting.",
+            color = BoneDim, fontSize = 10.sp, fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("0%", color = BoneDim, fontSize = 11.sp, fontFamily = MwData)
+            Slider(
+                value = opacity,
+                onValueChange = { UiPreferences.setTopPanelOpacity(context, it) },
+                valueRange = 0f..1f,
+                colors = SliderDefaults.colors(
+                    thumbColor = BronzeLight,
+                    activeTrackColor = BronzeLight,
+                    inactiveTrackColor = BronzeDark,
+                    activeTickColor = Color.Transparent,
+                    inactiveTickColor = Color.Transparent
+                ),
+                modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+            )
+            Text("100%", color = BoneDim, fontSize = 11.sp, fontFamily = MwData)
+        }
+    }
+}
+
 /** The Target-health location row: a [Bottom][Top] pill selector. BOTTOM (default) = the
  *  bottom-screen HUD combat-target bar; TOP = an additional top-screen overlay (top-centre). */
 @Composable
@@ -11881,6 +12470,119 @@ private fun ScreenLayoutPendingRow(el: GameUiElement) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(Modifier.weight(1f), label = "Bottom", active = true, enabled = false) {}
             OptionPill(Modifier.weight(1f), label = "Top", active = false, enabled = false) {}
+        }
+    }
+}
+
+/** Explanatory blurb for the Developer Tools section. Deliberately blunt about what these are:
+ *  the section is easy to stumble into from the pause menu, and anything landing here later will
+ *  drive the same console pathway the in-game console uses (CompanionActions.runCommand →
+ *  EngineActivity.sendCompanionCommand → drainCompanionCommands → lua->handleConsoleCommand),
+ *  i.e. it can change game state in ways a normal playthrough never would. */
+@Composable
+private fun DeveloperToolsBlurb() {
+    Text(
+        "Tools for development and testing. These act as cheats and run through the same " +
+            "process as console commands, so they can change your game in ways normal play " +
+            "cannot. Best left alone unless you know you need them.",
+        color = BoneDim,
+        fontSize = 11.sp,
+        fontFamily = MwBody,
+        lineHeight = 15.sp,
+        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+    )
+}
+
+/**
+ * Opens the native in-game console on the TOP screen, exactly as a hardware keyboard's backtick
+ * would.
+ *
+ * Traced path for a real keypress: `SDLActivity.dispatchKeyEvent` → `onNativeKeyDown(keyCode)` →
+ * SDL's Android backend maps `AKEYCODE_GRAVE` (Android `KEYCODE_GRAVE`, 68) to
+ * **`SDL_SCANCODE_GRAVE`** (`SDL_androidkeyboard.c` Android_Keycodes[68]) → OpenMW's
+ * `KeyboardManager::keyPressed` matches it against `getKeyBinding(A_Console)`, whose default IS
+ * `SDL_SCANCODE_GRAVE` (`bindingsmanager.cpp`) → `ActionManager::toggleConsole()` →
+ * `WindowManager::toggleConsole()`.
+ *
+ * So this injects the SAME event a real key produces rather than reaching into the engine — no
+ * native bridge, no new console-opening mechanism, and it automatically respects a rebound console
+ * key only insofar as the DEFAULT binding is concerned (see the caveat in the report: if the user
+ * rebinds A_Console away from grave, this stops matching).
+ *
+ * `onNativeKeyDown`/`Up` are already `public static native` on the bundled SDLActivity and are what
+ * its own key handler calls, so this is a Kotlin-only change.
+ */
+private fun openNativeConsole() {
+    runCatching {
+        SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_GRAVE)
+        SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_GRAVE)
+    }.onFailure { Log.w("CompanionScreen", "could not inject console key", it) }
+}
+
+/** Developer Tools action: open the native console for manual testing. Full-width tappable row,
+ *  visually distinct from the locked pending row below it so it doesn't read as disabled too. */
+@Composable
+private fun OpenConsoleRow() {
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Console", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Opens the game's console on the top screen, same as pressing ` on a keyboard.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(PillActiveBg.copy(alpha = 0.94f))
+                .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                .clickable { openNativeConsole() }
+                .padding(vertical = 9.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "Open Console",
+                color = BronzeLight,
+                fontSize = 14.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+    }
+}
+
+/** A Developer Tools row that is scaffolding only: label + PENDING tag over a locked [Off][On]
+ *  selector, both pills disabled. Mirrors [ScreenLayoutPendingRow]'s presentation so "not built
+ *  yet" reads the same everywhere in this menu. There is deliberately NO preference behind it —
+ *  adding one now would persist a value nothing consumes. */
+@Composable
+private fun DeveloperToolsPendingRow(label: String) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                color = BoneDim,
+                fontSize = 14.sp,
+                fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "PENDING",
+                color = BoneDim.copy(alpha = 0.7f),
+                fontSize = 9.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(Modifier.weight(1f), label = "Off", active = true, enabled = false) {}
+            OptionPill(Modifier.weight(1f), label = "On", active = false, enabled = false) {}
         }
     }
 }

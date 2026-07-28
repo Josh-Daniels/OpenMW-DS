@@ -192,6 +192,18 @@ object UiPreferences {
     // Conversation location; they now read their own pref (a stale SPLIT is rejected on load).
     private const val REPAIR_LOCATION = "layout_repair"
     private const val TRAVEL_LOCATION = "layout_travel"
+    // Rest/Wait + crime-alert location — same [Bottom][Top] shape again (Bottom built, Top pending).
+    // NOTE both overlays (RestWaitOverlay, CrimeToast) are currently hardcoded to the bottom screen
+    // and do NOT read these flows, so today these prefs are presentational only: they move both rows
+    // out of the greyed "PENDING" fallback into the same Bottom-selected/Top-pending form the other
+    // services use. Wire the overlays to these flows when a Top variant is actually built.
+    private const val RESTWAIT_LOCATION = "layout_restwait"
+    private const val CRIME_LOCATION = "layout_crime"
+    // Background-fill opacity (0f..1f) of DS overlay panels drawn on the TOP screen, so the game
+    // can be seen through them. Default 1f = fully opaque, i.e. no visual change until the player
+    // moves the slider. BOTTOM-screen companion panels are deliberately NOT affected (nothing is
+    // behind them; Adaptive Dimming is the separate bottom-screen concept — do not conflate).
+    private const val TOP_PANEL_OPACITY = "top_panel_opacity"
     private const val TARGET_HEALTH_LOCATION = "layout_target_health"
     // Persuasion popup location (Bottom / Top — both implemented, unlike the pending service rows).
     private const val PERSUASION_LOCATION = "layout_persuasion"
@@ -260,6 +272,9 @@ object UiPreferences {
     private val spellBuyingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
     private val repairLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
     private val travelLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val restwaitLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val crimeLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val topPanelOpacityFlow = MutableStateFlow(1f)
 
     // Where the combat target's health bar is drawn (BOTTOM / TOP). Default TOP.
     private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.TOP)
@@ -365,6 +380,17 @@ object UiPreferences {
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
             ?.takeIf { it != ScreenLocation.SPLIT }
             ?.let { travelLocationFlow.value = it }
+        p.getString(RESTWAIT_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != ScreenLocation.SPLIT }
+            ?.let { restwaitLocationFlow.value = it }
+        p.getString(CRIME_LOCATION, null)
+            ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != ScreenLocation.SPLIT }
+            ?.let { crimeLocationFlow.value = it }
+        // Clamped on read as well as on write: a corrupt/out-of-range stored value must not produce
+        // an invalid alpha (Compose throws on alpha outside 0..1).
+        topPanelOpacityFlow.value = p.getFloat(TOP_PANEL_OPACITY, 1f).coerceIn(0f, 1f)
         p.getString(TARGET_HEALTH_LOCATION, null)
             ?.let { runCatching { TargetHealthLocation.valueOf(it) }.getOrNull() }
             ?.let { targetHealthLocationFlow.value = it }
@@ -607,6 +633,34 @@ object UiPreferences {
     fun setTravelLocation(context: Context, loc: ScreenLocation) {
         travelLocationFlow.value = loc
         editor(context).putString(TRAVEL_LOCATION, loc.name).apply()
+    }
+
+    /** Where the rest/wait popup is drawn (BOTTOM; TOP pending — the overlay is bottom-only today). */
+    fun restwaitLocationFlow(): StateFlow<ScreenLocation> = restwaitLocationFlow.asStateFlow()
+
+    /** Set the rest/wait popup location and persist. */
+    fun setRestwaitLocation(context: Context, loc: ScreenLocation) {
+        restwaitLocationFlow.value = loc
+        editor(context).putString(RESTWAIT_LOCATION, loc.name).apply()
+    }
+
+    /** Where the crime alert toast is drawn (BOTTOM; TOP pending — the toast is bottom-only today). */
+    fun crimeLocationFlow(): StateFlow<ScreenLocation> = crimeLocationFlow.asStateFlow()
+
+    /** Set the crime-alert location and persist. */
+    fun setCrimeLocation(context: Context, loc: ScreenLocation) {
+        crimeLocationFlow.value = loc
+        editor(context).putString(CRIME_LOCATION, loc.name).apply()
+    }
+
+    /** Background-fill opacity (0f..1f) of DS overlay panels on the TOP screen. 1f = opaque. */
+    fun topPanelOpacityFlow(): StateFlow<Float> = topPanelOpacityFlow.asStateFlow()
+
+    /** Set the top-screen panel opacity and persist. Clamped to 0..1. */
+    fun setTopPanelOpacity(context: Context, value: Float) {
+        val v = value.coerceIn(0f, 1f)
+        topPanelOpacityFlow.value = v
+        editor(context).putFloat(TOP_PANEL_OPACITY, v).apply()
     }
 
     /** Where the combat target's health bar is drawn (BOTTOM / TOP). */

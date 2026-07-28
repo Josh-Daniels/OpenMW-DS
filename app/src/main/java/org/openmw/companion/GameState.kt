@@ -29,6 +29,10 @@ data class InventoryItem(
     /** Per-unit weight (record weight; gold = 0). Backs the loot overlay's optimistic
      *  encumbrance delta. Defaults 0 so older lines without the field are inert. */
     val weight: Float = 0f,
+    /** Base record value in gold. Backs the inventory tab's Price sort ONLY — it is the base value,
+     *  not a merchant-adjusted price, and never feeds a transaction. Defaults 0 so older Lua without
+     *  the field still parses (those items simply sort as worthless). */
+    val value: Int = 0,
     /** Enchantment (id + type label + effects) for the info popup; null = not enchanted. */
     val enchant: ItemEnchant? = null
 )

@@ -21,6 +21,7 @@ import org.openmw.companion.LootingTopOverlay
 import org.openmw.companion.PersuasionLocation
 import org.openmw.companion.PersuasionTopOverlay
 import org.openmw.companion.PlayerCombatTopOverlay
+import org.openmw.companion.ProvideTopPanelOpacity
 import org.openmw.companion.ScreenLocation
 import org.openmw.companion.TargetHealthLocation
 import org.openmw.companion.UiPreferences
@@ -1279,7 +1280,7 @@ class EngineActivity : SDLActivity() {
                 setViewTreeLifecycleOwner(this@EngineActivity)
                 setViewTreeViewModelStoreOwner(this@EngineActivity)
                 setViewTreeSavedStateRegistryOwner(this@EngineActivity)
-                setContent { ConversationHistoryOverlay() }
+                setContent { ProvideTopPanelOpacity { ConversationHistoryOverlay() } }
             }
             val lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -1343,7 +1344,7 @@ class EngineActivity : SDLActivity() {
     private fun showCombatTargetTopOverlay() = showTopScreenOverlay(
         alreadyShown = { combatTargetTopView != null },
         onAdded = { combatTargetTopView = it },
-    ) { CombatTargetTopOverlay() }
+    ) { ProvideTopPanelOpacity { CombatTargetTopOverlay() } }
 
     private fun hideCombatTargetTopOverlay() {
         val overlay = combatTargetTopView ?: return
@@ -1354,7 +1355,7 @@ class EngineActivity : SDLActivity() {
     private fun showPlayerCombatTopOverlay() = showTopScreenOverlay(
         alreadyShown = { playerCombatTopView != null },
         onAdded = { playerCombatTopView = it },
-    ) { PlayerCombatTopOverlay() }
+    ) { ProvideTopPanelOpacity { PlayerCombatTopOverlay() } }
 
     private fun hidePlayerCombatTopOverlay() {
         val overlay = playerCombatTopView ?: return
@@ -1402,7 +1403,7 @@ class EngineActivity : SDLActivity() {
     private fun showLootingTopOverlay() = showInteractiveTopScreenOverlay(
         alreadyShown = { lootingTopView != null },
         onAdded = { lootingTopView = it },
-    ) { LootingTopOverlay() }
+    ) { ProvideTopPanelOpacity { LootingTopOverlay() } }
 
     private fun hideLootingTopOverlay() {
         val overlay = lootingTopView ?: return
@@ -1413,7 +1414,7 @@ class EngineActivity : SDLActivity() {
     private fun showPersuasionTopOverlay() = showInteractiveTopScreenOverlay(
         alreadyShown = { persuasionTopView != null },
         onAdded = { persuasionTopView = it },
-    ) { PersuasionTopOverlay() }
+    ) { ProvideTopPanelOpacity { PersuasionTopOverlay() } }
 
     private fun hidePersuasionTopOverlay() {
         val overlay = persuasionTopView ?: return
@@ -1424,7 +1425,7 @@ class EngineActivity : SDLActivity() {
     private fun showBarterTopOverlay() = showInteractiveTopScreenOverlay(
         alreadyShown = { barterTopView != null },
         onAdded = { barterTopView = it },
-    ) { BarterTopOverlay() }
+    ) { ProvideTopPanelOpacity { BarterTopOverlay() } }
 
     private fun hideBarterTopOverlay() {
         val overlay = barterTopView ?: return

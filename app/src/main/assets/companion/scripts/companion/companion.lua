@@ -887,15 +887,21 @@ local function itemJson(item)
     local ok, rec = pcall(function() return item.type.record(item) end)
     local icon = (ok and rec and rec.icon) or ""
     local weight = (ok and rec and rec.weight) or 0   -- for the loot overlay's optimistic encumbrance
+    -- Base record value in gold, for the inventory tab's Price sort. Base (not condition- or
+    -- merchant-adjusted) on purpose: it matches the vanilla tooltip's "Value", and barter's own
+    -- per-item value is exported separately by the NATIVE barter path — this field never feeds a
+    -- transaction, only the sort order.
+    local value = (ok and rec and rec.value) or 0
     local sid = stackId(item)
     local cat = itemCategory(item)
     local statVal, statKey, cond = itemStats(item, cat)
     local condField = ""
     if cond ~= nil then condField = string.format(',"cond":%.3f', cond) end
     return string.format(
-        '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","weight":%.2f,"statVal":"%s","statKey":"%s"%s%s}',
+        '{"id":"%s","sid":"%s","name":"%s","count":%d,"cat":"%s","icon":"%s","weight":%.2f,"value":%d,' ..
+            '"statVal":"%s","statKey":"%s"%s%s}',
         jsonEscape(item.recordId), jsonEscape(sid), jsonEscape(itemName(item)),
-        item.count, cat, jsonEscape(icon), weight,
+        item.count, cat, jsonEscape(icon), weight, value,
         jsonEscape(statVal), jsonEscape(statKey), condField, enchantJson(item))
 end
 
@@ -1888,12 +1894,29 @@ local function exportInfo(arg)
         -- alchemy effects (avoids showing enchant effects twice).
         if isType(types.Weapon) then
             addRow(rows, "Type", weaponTypeStr(rec))
-            addRow(rows, "Chop", string.format("%d-%d",
-                math.floor((rec.chopMinDamage or 0) + 0.5), math.floor((rec.chopMaxDamage or 0) + 0.5)))
-            addRow(rows, "Slash", string.format("%d-%d",
-                math.floor((rec.slashMinDamage or 0) + 0.5), math.floor((rec.slashMaxDamage or 0) + 0.5)))
-            addRow(rows, "Thrust", string.format("%d-%d",
-                math.floor((rec.thrustMinDamage or 0) + 0.5), math.floor((rec.thrustMaxDamage or 0) + 0.5)))
+            -- Only the damage row that actually APPLIES to this weapon class, mirroring itemStats'
+            -- logic (and the vanilla tooltip in mwclass/weapon.cpp). Emitting all three unconditionally
+            -- meant an arrow read "Chop 5-10 / Slash 0-0 / Thrust 0-0" — two meaningless rows on every
+            -- bow, crossbow, arrow, bolt and thrown weapon. Marksman/ammo store damage in CHOP with
+            -- thrust=0; thrown is chop x2; spears thrust; blunt/axe chop; blades slash.
+            local WT = types.Weapon.TYPE
+            local t = rec.type
+            local dmgLabel, dmgMin, dmgMax
+            if t == WT.MarksmanBow or t == WT.MarksmanCrossbow or t == WT.Arrow or t == WT.Bolt then
+                dmgLabel, dmgMin, dmgMax = "Damage", rec.chopMinDamage, rec.chopMaxDamage
+            elseif t == WT.MarksmanThrown then
+                dmgLabel = "Damage"
+                dmgMin, dmgMax = (rec.chopMinDamage or 0) * 2, (rec.chopMaxDamage or 0) * 2
+            elseif t == WT.SpearTwoWide then
+                dmgLabel, dmgMin, dmgMax = "Thrust", rec.thrustMinDamage, rec.thrustMaxDamage
+            elseif t == WT.BluntOneHand or t == WT.BluntTwoClose or t == WT.BluntTwoWide
+                or t == WT.AxeOneHand or t == WT.AxeTwoHand then
+                dmgLabel, dmgMin, dmgMax = "Chop", rec.chopMinDamage, rec.chopMaxDamage
+            else
+                dmgLabel, dmgMin, dmgMax = "Slash", rec.slashMinDamage, rec.slashMaxDamage
+            end
+            addRow(rows, dmgLabel, string.format("%d-%d",
+                math.floor((dmgMin or 0) + 0.5), math.floor((dmgMax or 0) + 0.5)))
             addRow(rows, "Reach", fmtNum(rec.reach))
             addRow(rows, "Speed", fmtNum(rec.speed))
             enchantPts()
