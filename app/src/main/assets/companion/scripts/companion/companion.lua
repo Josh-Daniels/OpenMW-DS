@@ -1,6 +1,8 @@
 local types = require('openmw.types')
 local self = require('openmw.self')
-local ui = require('openmw.ui')
+-- openmw.ui is no longer required: its only use was ui.setConsoleMode("Companion") in onActive,
+-- removed because it hijacked the real console for the whole session (see the note there). Kept as
+-- a comment rather than silently dropped so the absence reads as deliberate.
 local core = require('openmw.core')
 local ambient = require('openmw.ambient')
 local camera = require('openmw.camera')
@@ -2229,7 +2231,23 @@ local function onFrame(dt)
 end
 
 local function onActive()
-    ui.setConsoleMode("Companion")
+    -- NOTE: we deliberately do NOT call ui.setConsoleMode("Companion") here any more.
+    --
+    -- That set the REAL console's persistent mode for the whole session, and console.cpp keys three
+    -- behaviours off a non-empty mode: it echoes "<mode> <command>" instead of "> <command>", it
+    -- routes EVERY typed command to Lua and `return`s before the MWScript path, and it disables Tab
+    -- completion. Net effect for a player: typing anything into the console printed
+    -- "Companion <command>" and then silently did nothing, because our onConsoleCommand accepted it
+    -- (mode matched) and dispatchCommand dropped it for lacking the "CMP:" prefix. It also broke
+    -- OpenMW's own Lua console (omw/console/player.lua only recognises `lua`/`luap`/... when
+    -- mode == ''), and stomped the Lua[...] modes that script sets for itself.
+    --
+    -- The CMP: channel does NOT depend on this. Commands injected from Kotlin arrive via
+    -- drainCompanionCommands -> handleConsoleCommand("Companion", cmd, ptr), which passes that
+    -- string as a literal ARGUMENT; LuaManager::handleConsoleCommand forwards its parameter
+    -- straight to PlayerScripts::consoleCommand -> the onConsoleCommand engine handlers, never
+    -- reading the console window's own mConsoleMode. So the `mode ~= "Companion"` guard below still
+    -- matches injected commands, and now correctly ignores anything the player types.
     exportJournal()
     -- Force-dismiss the bottom-screen options overlay after a game LOAD.
     -- Loading from the pause menu tears down GM_MainMenu, but the resulting

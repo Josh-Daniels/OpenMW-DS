@@ -48,18 +48,18 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
     - https://www.gog.com/en/game/the_elder_scrolls_iii_morrowind_goty_edition
 
 ---
-## Installation (updated for v0.7.5 or higher)
+## Installation (updated for v0.8.6 or higher)
 You will first need a copy of Morrowind on the device. Best downloaded from a PC then transferred to the Thor. You will need the entire Morrowind folder, not just the Data Files folder.
 
 ### Upgrading from OpenMW-DS versions 0.7.5 or newer.
-- Download the APK from Releases page and install the app. 
-- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again. If still not showing, follow the first time install guide below.
-- No need to copy your alpha3 saves or settings if the option is there, unless those saves are newer than your OpenMW-DS saves.
-- You can now run the game by pressing the OpenMW-DS icon on the right.
+- Download the APK from Releases page and install the app.
+- Check that your esm files and mods are listed on the new home page. If not showing, follow the first time install guide below.
+- If you have Alpha3 saves newer than your OpenMW-DS saves then you can copy them over in Settings.
+- Press play game to play game...
 
 
 ### Upgrading from OpenMW-DS versions .0.7.0 or older, or Alpha 3.
-- Download the APK from Releases page and install the app. 
+- Download the APK from Releases page and install the app.
 - The app will recognise you have had a previous version of this app, or alpha3 installed and offer to copy your saves.
   - Copy your saves if you like.
   - Copy your alpha3 settings if you like. These are items found in the settings.cfg (like "prevent merchant equipping", and graphics settings). I recommend not doing this if you want a native OpenMW-DS experience. You can change the settings later anyway.
@@ -68,8 +68,8 @@ You will first need a copy of Morrowind on the device. Best downloaded from a PC
     - Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
   - Select your Data Files (inside Morrowind Folder) when prompted to add your mods.
     - Navigate to your Morrowind > Data Files folder, then tap "Use this folder"
-- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again.
-- You can now run the game by pressing the OpenMW-DS icon on the right.
+- Check Home Screen to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then back to see if that populated the list. If that didn't work then try to select Data Files folder again.
+- You can now run the game by pressing Play Game.
 
 ### First time install
 - Download the APK from the Releases page
@@ -80,8 +80,8 @@ You will first need a copy of Morrowind on the device. Best downloaded from a PC
   - Navigate to your Morrowind folder (NOT DATA FILES), then tap "Use this Folder".
 - Select your Data Files (inside Morrowind Folder) when prompted to add your mods.
   - Navigate to your Morrowind > Data Files folder, then tap "Use this folder"
-- Check the content tab to see if esm's are there. If mods esm's aren't listed then tap Settings (on the right), then Home (top right), then try checking the Content tab again.
-- You can now run the game by pressing the OpenMW-DS icon on the right.
+- Check the home page to see if esm's are in the load order. If mods esm's aren't listed then tap Settings (on the right), then back, then check the list again. If that doesn't work then try selecting the Data Files folder again.
+- You can now run the game by pressing the Play Game Button.
 
 ---
 ## Setup Guide
