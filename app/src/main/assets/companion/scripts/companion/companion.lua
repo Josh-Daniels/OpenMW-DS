@@ -9,6 +9,11 @@ local camera = require('openmw.camera')
 local nearby = require('openmw.nearby')
 local util = require('openmw.util')
 local interfaces = require('openmw.interfaces')
+-- openmw.debug is a PLAYER-context package (luabindings.cpp initPlayerPackages), which this
+-- script is, so the require succeeds — but it is only used by the Developer Tools actions, so
+-- guard it rather than letting a future context change break the whole script at load time.
+local debugApi = nil
+pcall(function() debugApi = require('openmw.debug') end)
 
 local statsTimer = 0
 local slowTimer = 0
@@ -1953,6 +1958,298 @@ local function exportInfo(arg)
         jsonEscape(name), table.concat(rows, ','), table.concat(effects, ',')))
 end
 
+-- =============================== Developer Tools ===============================
+-- Cheats / test helpers behind the companion's "Developer mode" option (CMP:dev_*).
+--
+-- These deliberately use ordinary Lua APIs rather than raw console commands. Every stat setter
+-- in mwlua/stats.cpp calls ObjectVariant::asSelfObject(), which throws for a global-script
+-- object ("Allowed only in local scripts for 'openmw.self'") — so the stat writes MUST live
+-- here in the player script, not in companion_global.lua. Only the two things Lua genuinely
+-- cannot do from this context are delegated: item creation (world.createObject is global-only →
+-- CompanionDevGiveItems) and resurrect (no Lua binding at all → handled natively in
+-- drainCompanionCommands). There is no raw-console-command channel and deliberately so.
+--
+-- Stat writes are DELAYED (cached and applied at the end of the frame, see SelfObject::cacheStat),
+-- so a read immediately after a write still returns the old value. Nothing here depends on that.
+
+local DEV_GOLD_AMOUNT = 100000
+local DEV_MAX_VITAL = 99999
+local DEV_ATTRIBUTE_CAP = 100
+local DEV_SET_LEVEL = 20
+-- NpcStats::getLevelupAttributeMultiplier does min(10, count) to pick iLevelUp<NN>Mult, so 10 is
+-- the top tier (x5 in vanilla). Without this every attribute on the level-up screen reads x1.
+local DEV_SKILL_INCREASES = 10
+-- How many spells each of the two magic buttons grabs, and how many items the bulk button adds.
+local DEV_SPELLKIT_PER_SCHOOL = 2
+local DEV_STACK_EFFECT_COUNT = 12
+local DEV_BULK_PER_TYPE = 6
+
+-- Change-detected god-mode / noclip state for the options pills. Both are real ENGINE flags
+-- (not preferences), so they can also be changed from the console or by another mod — polling
+-- them on the slow tick is what keeps the pills honest. Costs nothing when nothing changes.
+local lastDevState = nil
+local function exportDevState()
+    if not debugApi then return end
+    local god, noclip = false, false
+    pcall(function() god = debugApi.isGodMode() and true or false end)
+    -- Reported as noclip (the button's wording) = the INVERSE of collision being enabled.
+    pcall(function() noclip = (not debugApi.isCollisionEnabled()) and true or false end)
+    local line = (god and "1" or "0") .. "|" .. (noclip and "1" or "0")
+    if line ~= lastDevState then
+        lastDevState = line
+        emit("COMPANION_DEV_STATE:" .. line)
+    end
+end
+
+-- Hand a list of { id = recordId, count = n } to the global script, which owns world.createObject
+-- + moveInto (both global-only). Same shape as the existing drop / container-transfer events.
+local function devGiveItems(items)
+    if #items == 0 then
+        emit("COMPANION_DEBUG: dev give - nothing to add")
+        return
+    end
+    core.sendGlobalEvent('CompanionDevGiveItems', { actor = self.object, items = items })
+    emit("COMPANION_DEBUG: dev give " .. #items .. " item stack(s)")
+end
+
+-- Pick up to `perGroup` record ids per group from a record store, using `groupOf(rec)` to bucket
+-- and `accept(rec)` to filter. Records are chosen by their properties at runtime rather than from
+-- a hardcoded id list: a wrong id would silently add nothing, and hardcoding also breaks on any
+-- load order whose base game is not plain Morrowind.esm.
+local function devPickRecords(store, accept, groupOf, perGroup, limit)
+    local picked, counts, total = {}, {}, 0
+    local ok = pcall(function()
+        for _, rec in ipairs(store) do
+            if total >= (limit or math.huge) then break end
+            if (not accept) or accept(rec) then
+                local group = groupOf and groupOf(rec) or ""
+                if group ~= nil then
+                    counts[group] = counts[group] or 0
+                    if counts[group] < perGroup then
+                        counts[group] = counts[group] + 1
+                        total = total + 1
+                        picked[#picked + 1] = rec
+                    end
+                end
+            end
+        end
+    end)
+    if not ok then return {} end
+    return picked
+end
+
+-- Learnable spells (not powers/abilities/diseases), grouped by the school of their first effect,
+-- cheapest first within each school so the kit is actually castable at low level.
+local function devSpellCandidates()
+    local spells = {}
+    pcall(function()
+        for _, rec in ipairs(core.magic.spells.records) do
+            if rec.type == core.magic.SPELL_TYPE.Spell and rec.effects and rec.effects[1] then
+                spells[#spells + 1] = rec
+            end
+        end
+    end)
+    table.sort(spells, function(a, b)
+        local ca, cb = a.cost or 0, b.cost or 0
+        if ca ~= cb then return ca < cb end
+        return tostring(a.id) < tostring(b.id)
+    end)
+    return spells
+end
+
+local function devSchoolOf(rec)
+    local school = nil
+    pcall(function() school = rec.effects[1].effect.school end)
+    return school and tostring(school) or "other"
+end
+
+local function devAddSpellKit()
+    local known = {}
+    pcall(function()
+        for _, s in ipairs(types.Actor.spells(self)) do known[tostring(s.id)] = true end
+    end)
+    local added = 0
+    local counts = {}
+    for _, rec in ipairs(devSpellCandidates()) do
+        local id = tostring(rec.id)
+        local school = devSchoolOf(rec)
+        counts[school] = counts[school] or 0
+        if not known[id] and counts[school] < DEV_SPELLKIT_PER_SCHOOL then
+            counts[school] = counts[school] + 1
+            if pcall(function() types.Actor.spells(self):add(id) end) then added = added + 1 end
+        end
+    end
+    exportSpells()
+    emit("COMPANION_DEBUG: dev spell kit added " .. added .. " spell(s)")
+end
+
+-- Stack a pile of DIFFERENT active effects, for testing the effects summary / dropdown with
+-- realistic volume. activeSpells:add applies the effect directly — no magicka cost, no fail
+-- chance, no VFX — which is what makes it deterministic where repeated real casts are not.
+-- Only spells whose first effect actually LASTS are usable: the API docs warn that an effect
+-- with no duration expires instantly (that is what rules out abilities/instant damage here).
+local function devStackEffects()
+    local added = 0
+    for _, rec in ipairs(devSpellCandidates()) do
+        if added >= DEV_STACK_EFFECT_COUNT then break end
+        local dur, harmful = 0, true
+        pcall(function()
+            local eff = rec.effects[1]
+            dur = eff.duration or 0
+            harmful = eff.effect.harmful and true or false
+        end)
+        -- Beneficial + lasting only, so the test pile can't kill the player it is testing on.
+        if dur > 0 and not harmful then
+            -- effects indexes are 0-BASED here (they index the record's effect list directly via
+            -- .at(index) in magicbindings.cpp), unlike most OpenMW Lua list APIs.
+            local ok = pcall(function()
+                types.Actor.activeSpells(self):add({
+                    id = tostring(rec.id), effects = { 0 }, stackable = true,
+                })
+            end)
+            if ok then added = added + 1 end
+        end
+    end
+    exportActiveEffects()
+    emit("COMPANION_DEBUG: dev stacked " .. added .. " active effect(s)")
+end
+
+-- Enchanted ring + amulet pair, a torch, and one item per remaining equipment-slot family —
+-- the shapes the inventory/HUD code paths special-case (enchant backdrop, charge meter, the
+-- two-ring slot logic, carried-left light).
+local function devRegressionKit()
+    local items = {}
+    local function addAll(recs, count)
+        for _, rec in ipairs(recs) do items[#items + 1] = { id = tostring(rec.id), count = count or 1 } end
+    end
+
+    local T = types.Clothing.TYPE
+    local enchanted = function(rec) return rec.enchant ~= nil and rec.enchant ~= "" end
+    -- One enchanted ring and one enchanted amulet (grouped by clothing type, one each).
+    addAll(devPickRecords(types.Clothing.records,
+        function(rec) return enchanted(rec) and (rec.type == T.Ring or rec.type == T.Amulet) end,
+        function(rec) return rec.type end, 1))
+    -- Torch / lantern (carried_left, and the only item type with a burn-time condition).
+    addAll(devPickRecords(types.Light.records, nil, function() return "light" end, 1))
+    -- One armour piece per slot family, one weapon, plus shirt/pants for the clothing slots.
+    addAll(devPickRecords(types.Armor.records, nil, function(rec) return rec.type end, 1))
+    addAll(devPickRecords(types.Weapon.records, nil, function(rec) return rec.type end, 1))
+    addAll(devPickRecords(types.Clothing.records,
+        function(rec) return rec.type == T.Shirt or rec.type == T.Pants or rec.type == T.Shoes end,
+        function(rec) return rec.type end, 1))
+    devGiveItems(items)
+end
+
+-- A larger varied spread for inventory stress-testing (scrolling, sorting, category tabs).
+local function devBulkItems()
+    local items = {}
+    local function addAll(recs, count)
+        for _, rec in ipairs(recs) do items[#items + 1] = { id = tostring(rec.id), count = count or 1 } end
+    end
+    addAll(devPickRecords(types.Potion.records, nil, function() return "potion" end, DEV_BULK_PER_TYPE), 5)
+    addAll(devPickRecords(types.Ingredient.records, nil, function() return "ingredient" end, DEV_BULK_PER_TYPE), 10)
+    addAll(devPickRecords(types.Book.records, nil, function() return "book" end, DEV_BULK_PER_TYPE))
+    addAll(devPickRecords(types.Miscellaneous.records, nil, function() return "misc" end, DEV_BULK_PER_TYPE), 3)
+    addAll(devPickRecords(types.Weapon.records, nil, function(rec) return rec.type end, 1))
+    addAll(devPickRecords(types.Armor.records, nil, function(rec) return rec.type end, 1))
+    addAll(devPickRecords(types.Apparatus.records, nil, function() return "apparatus" end, 2))
+    addAll(devPickRecords(types.Lockpick.records, nil, function() return "lockpick" end, 2))
+    addAll(devPickRecords(types.Probe.records, nil, function() return "probe" end, 2))
+    addAll(devPickRecords(types.Repair.records, nil, function() return "repair" end, 2))
+    devGiveItems(items)
+end
+
+local function devDispatch(action)
+    if action == "gold" then
+        -- createObject lowercases ESM3 ids, so 'gold_001' is the canonical form of Gold_001.
+        devGiveItems({ { id = 'gold_001', count = DEV_GOLD_AMOUNT } })
+
+    elseif action == "maxhealth" or action == "maxmagicka" or action == "maxfatigue" then
+        -- One button per vital (health / magicka / fatigue are independently useful when testing).
+        -- .base is the one that matters: it raises the MAX (this mirrors OpenMW's own SetHealth
+        -- opcode, which sets base then fills current). Setting only .current would regenerate away.
+        local vital = string.sub(action, 4)
+        pcall(function()
+            local stat = types.Actor.stats.dynamic[vital](self)
+            stat.base = DEV_MAX_VITAL
+            stat.current = DEV_MAX_VITAL
+        end)
+        emit("COMPANION_DEBUG: dev max " .. vital)
+
+    elseif action == "maxattributes" then
+        for _, attrId in ipairs(ATTR_IDS) do
+            pcall(function()
+                local stat = types.Actor.stats.attributes[attrId](self)
+                stat.base = DEV_ATTRIBUTE_CAP
+                stat.damage = 0
+            end)
+        end
+        emit("COMPANION_DEBUG: dev max attributes")
+
+    elseif action == "god" then
+        if debugApi then
+            pcall(function() debugApi.toggleGodMode() end)
+            exportDevState()
+            emit("COMPANION_DEBUG: dev god mode toggled")
+        end
+
+    elseif action == "noclip" then
+        if debugApi then
+            pcall(function() debugApi.toggleCollision() end)
+            exportDevState()
+            emit("COMPANION_DEBUG: dev noclip toggled")
+        end
+
+    elseif action == "setlevel20" then
+        -- Raw level jump — identical to the console's SetLevel (both only call
+        -- CreatureStats::setLevel), so it deliberately SKIPS the level-up screen and the
+        -- attribute gains that come with it. Use dev_levelup to exercise that flow instead.
+        pcall(function() types.Actor.stats.level(self).current = DEV_SET_LEVEL end)
+        emit("COMPANION_DEBUG: dev set level " .. DEV_SET_LEVEL)
+
+    elseif action == "levelup" then
+        -- Fill the level-up bar, then open the real screen. Normally the dialog is pushed by
+        -- WaitDialog::onWaitingFinished when a REST ends with progress >= iLevelUpTotal; opening
+        -- the mode directly avoids depending on rest being allowed (combat / underwater / no bed).
+        local total = 10
+        pcall(function() total = math.floor(core.getGMST("iLevelUpTotal")) end)
+        pcall(function() types.NPC.stats.level(self).progress = total end)
+        -- Without these the screen's attribute multipliers all read x1 (see DEV_SKILL_INCREASES).
+        for _, attrId in ipairs(ATTR_IDS) do
+            pcall(function()
+                types.NPC.stats.level(self).skillIncreasesForAttribute[attrId] = DEV_SKILL_INCREASES
+            end)
+        end
+        -- The stat writes above are DELAYED (applied at the end of this frame), and AddUiMode is
+        -- itself deferred, so the dialog opens after they have landed.
+        self:sendEvent('AddUiMode', { mode = 'LevelUp' })
+        emit("COMPANION_DEBUG: dev level up (progress " .. total .. ")")
+
+    elseif action == "spellkit" then
+        devAddSpellKit()
+
+    elseif action == "stackeffects" then
+        devStackEffects()
+
+    elseif action == "regressionkit" then
+        devRegressionKit()
+
+    elseif action == "bulkitems" then
+        devBulkItems()
+
+    elseif action == "night" then
+        -- Global variables are global-script-only. Writing 'gamehour' routes through
+        -- World::setGlobalFloat -> DateTimeManager::updateGlobalFloat -> setHour, i.e. the exact
+        -- same path the console's "set gamehour to 22" takes.
+        core.sendGlobalEvent('CompanionDevSetHour', { hour = 22 })
+        emit("COMPANION_DEBUG: dev set night")
+
+    else
+        -- dev_resurrect never reaches Lua (intercepted natively in drainCompanionCommands).
+        emit("COMPANION_DEBUG: dev unknown action " .. tostring(action))
+    end
+end
+
 local function dispatchCommand(command)
     if string.sub(command, 1, 4) ~= "CMP:" then return end
     local payload = string.sub(command, 5)
@@ -2005,6 +2302,12 @@ local function dispatchCommand(command)
             playItemSound(firstContainerItem(), true)
             emit("COMPANION_DEBUG: container take all (await close)")
         end
+        return
+    end
+    -- Developer Tools (CMP:dev_<action>). All no-arg, so they are matched here alongside the
+    -- other no-arg commands, before the "<action> <arg>" split below.
+    if string.sub(payload, 1, 4) == "dev_" then
+        devDispatch(string.sub(payload, 5))
         return
     end
     if payload == "container_close" then
@@ -2201,6 +2504,7 @@ local function onUpdate(dt)
         exportTarget()
         exportPlayerStatus()
         exportDoorMarkers()
+        exportDevState()
     end
     journalTimer = journalTimer + dt
     if journalTimer >= JOURNAL_INTERVAL then

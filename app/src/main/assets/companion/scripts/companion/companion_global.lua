@@ -1,4 +1,5 @@
 local types = require('openmw.types')
+local world = require('openmw.world')
 
 local function onDropItem(data)
     local inv = types.Actor.inventory(data.actor)
@@ -180,9 +181,40 @@ local function onContainerTransfer(data)
     end)
 end
 
+-- Developer Tools: put items straight into the player's inventory. world.createObject and
+-- moveInto are BOTH global-script-only, which is the only reason this lives here — the record
+-- SELECTION is done in companion.lua (types.*.records is readable from any context), so this
+-- handler stays dumb: it just instantiates the ids it is handed.
+--
+-- data.items = { { id = <recordId>, count = <n> }, ... }
+local function onDevGiveItems(data)
+    if not (data and data.actor and data.items) then return end
+    local inv = types.Actor.inventory(data.actor)
+    for _, entry in ipairs(data.items) do
+        -- Per item: a bad/absent record id raises rather than returning nil, and one bad entry
+        -- must not abandon the rest of the batch.
+        pcall(function()
+            world.createObject(entry.id, entry.count or 1):moveInto(inv)
+        end)
+    end
+end
+
+-- Developer Tools: set the in-game clock. MWScript global variables are global-script-only.
+-- Writing 'gamehour' goes through World::setGlobalFloat -> DateTimeManager::updateGlobalFloat ->
+-- setHour — the identical path the console's "set gamehour to 22" takes, so this is not an
+-- approximation of the time change, it IS the time change.
+local function onDevSetHour(data)
+    if not (data and data.hour) then return end
+    pcall(function()
+        world.mwscript.getGlobalVariables().gamehour = data.hour
+    end)
+end
+
 return {
     eventHandlers = {
         CompanionDropItem = onDropItem,
         CompanionContainerTransfer = onContainerTransfer,
+        CompanionDevGiveItems = onDevGiveItems,
+        CompanionDevSetHour = onDevSetHour,
     }
 }

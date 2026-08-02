@@ -65,6 +65,13 @@ object GameStateRepository {
     private val _sneakVisible = MutableStateFlow(false)
     val sneakVisible: StateFlow<Boolean> = _sneakVisible.asStateFlow()
 
+    // Live god-mode / noclip state, from the change-detected COMPANION_DEV_STATE line (Lua
+    // openmw.debug isGodMode/isCollisionEnabled, slow tick). Backs the Developer Tools toggle
+    // pills so they show what the ENGINE actually has set rather than a blind local guess —
+    // these flags can also be changed from the console or survive across a save load.
+    private val _devToggles = MutableStateFlow(DevToggleState())
+    val devToggles: StateFlow<DevToggleState> = _devToggles.asStateFlow()
+
     // Scene ambient luminance (Rec.709 relative luminance of the engine's ambient light colour),
     // from the native COMPANION_AMBIENT line emitted in RenderingManager::setAmbientColour. That
     // is the choke point both the exterior (weather, which folds in time of day) and interior
@@ -759,6 +766,18 @@ object GameStateRepository {
             // HUD::setSneakVisible. Payload is "true"/"false".
             trimmed.contains("COMPANION_SNEAK_VISIBLE:") -> {
                 _sneakVisible.value = trimmed.substringAfter("COMPANION_SNEAK_VISIBLE:").trim() == "true"
+            }
+            // Developer Tools engine toggles, "<god 0/1>|<noclip 0/1>". Change-detected Lua-side,
+            // so this only arrives on a real transition. A malformed line is ignored rather than
+            // parsed as "both off", which would make the pills lie.
+            trimmed.contains("COMPANION_DEV_STATE:") -> {
+                val parts = trimmed.substringAfter("COMPANION_DEV_STATE:").trim().split("|")
+                if (parts.size == 2) {
+                    _devToggles.value = DevToggleState(
+                        godMode = parts[0] == "1",
+                        noclip = parts[1] == "1"
+                    )
+                }
             }
             // Scene ambient luminance for the adaptive dimming overlay. A malformed or partial
             // line is ignored rather than defaulting to 0, which would slam the overlay to its

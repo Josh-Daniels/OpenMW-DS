@@ -7,7 +7,10 @@ int stderr = 0; // Hack: fix linker error
 #include "mwbase/environment.hpp"
 #include "mwbase/journal.hpp"
 #include "mwbase/luamanager.hpp"
+#include "mwbase/mechanicsmanager.hpp"
+#include "mwbase/statemanager.hpp"
 #include "mwbase/windowmanager.hpp"
+#include "mwbase/world.hpp"
 #include "mwdialogue/quest.hpp"
 #include "mwdialogue/topic.hpp"
 #include "mwsound/soundbridge.hpp"
@@ -290,6 +293,32 @@ static void exportTopics()
     Log(Debug::Info) << "COMPANION_TOPICS_END";
 }
 
+// Developer Tools: revive the player after death (CMP:dev_resurrect).
+//
+// This is the ONLY Developer Tools action that is not pure Lua. MWScript's Resurrect opcode has
+// no Lua binding at all, so the two calls it makes for the player are reproduced here verbatim
+// (statsextensions.cpp OpResurrect, player branch): MechanicsManager::resurrect, then resumeGame
+// if death had already moved the state manager into State_Ended. Both are reachable straight off
+// MWBase::Environment, so this needs no window/engine plumbing.
+//
+// Self-targeted only — the player Ptr is fetched here rather than taken from a selected reference,
+// so there is no console-style "click an object first" dependency. Harmless on a living player
+// (resurrect is a no-op when not dead).
+static void companionResurrectPlayer()
+{
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world) return;
+
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (player.isEmpty()) return;
+
+    MWBase::Environment::get().getMechanicsManager()->resurrect(player);
+    if (MWBase::Environment::get().getStateManager()->getState() == MWBase::StateManager::State_Ended)
+        MWBase::Environment::get().getStateManager()->resumeGame();
+
+    Log(Debug::Info) << "COMPANION_DEBUG: dev resurrect";
+}
+
 // Called from InputWrapper::capture() every frame on the engine thread.
 void drainCompanionCommands()
 {
@@ -354,6 +383,13 @@ void drainCompanionCommands()
         {
             // Known topics are not exposed to Lua; read them from the C++ journal.
             exportTopics();
+        }
+        // Developer Tools resurrect. Intercepted here rather than forwarded because
+        // MechanicsManager::resurrect has no Lua binding (every OTHER CMP:dev_* action is
+        // handled in companion.lua). Must not fall through — Lua would just log it as unknown.
+        else if (cmd.rfind("CMP:dev_resurrect", 0) == 0)
+        {
+            companionResurrectPlayer();
         }
         // Barter (CMP:barter_*) is driven natively — the merchant Ptr, the gold pool, the
         // mercantile-adjusted prices and the haggle result all live in the C++ TradeWindow,

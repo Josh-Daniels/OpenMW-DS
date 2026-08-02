@@ -1,6 +1,6 @@
 --- a/apps/openmw/mwinput/controllermanager.cpp
 +++ b/apps/openmw/mwinput/controllermanager.cpp
-@@ -27,6 +27,11 @@
+@@ -27,6 +27,15 @@
  // Hide UI is active; used below to keep the gamepad GUI cursor suppressed so the
  // left thumbstick can't re-summon it over barter/map/service windows.
  extern "C" bool companionHudEnabled();
@@ -9,10 +9,14 @@
 +// invisible cursor when the option is off, and to force controller menus into highlight-navigation
 +// mode (A activates the highlighted item). Touch-to-click is a separate path and is unaffected.
 +extern "C" bool companionCursorEnabled();
++// COMPANION: also declared by companion-controller-nav.patch (applied AFTER this one). Redeclared
++// here so this patch does not depend on a later patch for a symbol it uses; identical redeclaration
++// of a function is legal, and this keeps the two patches independently resettable.
++extern "C" bool companionNavActive();
  #endif
  
  namespace MWInput
-@@ -93,7 +98,14 @@
+@@ -93,7 +102,21 @@
  
      void ControllerManager::update(float dt)
      {
@@ -23,12 +27,19 @@
 +            // is off — this is the cursor-movement source. Menu navigation still works via the d-pad
 +            // highlight path, and touch-to-click is a separate input path (unaffected).
 +            && companionCursorEnabled()
++            // COMPANION: nor while a DS overlay owns navigation. That overlay's native window is
++            // HIDDEN, so this block would steer a cursor nothing can see, and its setCursorActive(
++            // true) below re-shows it on the top screen. Gating the whole block (rather than the one
++            // guilty axis) also covers any future axis leak: gamepadToGuiControl swallows LEFTX /
++            // RIGHTX / RIGHTY under companionNavActive but NOT LEFTY, which reaches the
++            // A_MoveForwardBackward channel this block reads as yAxis -> vertical-only cursor drift.
++            && !companionNavActive()
 +#endif
 +        )
          {
              float xAxis = mBindingsManager->getActionValue(A_MoveLeftRight) * 2.0f - 1.0f;
              float yAxis = mBindingsManager->getActionValue(A_MoveForwardBackward) * 2.0f - 1.0f;
-@@ -280,7 +292,8 @@
+@@ -280,7 +303,8 @@
                  mGamepadGuiCursorEnabled = topWin->isGamepadCursorAllowed();
  #ifdef __ANDROID__
                  // COMPANION: never enable the gamepad cursor while Hide UI is active.
@@ -38,7 +49,7 @@
  #endif
  
                  // Fall through to mouse click
-@@ -395,7 +408,8 @@
+@@ -395,7 +419,8 @@
  #ifdef __ANDROID__
                  // COMPANION: never enable the gamepad cursor while Hide UI is active,
                  // so the left thumbstick can't re-summon it over barter/map windows.

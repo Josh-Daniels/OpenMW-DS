@@ -168,6 +168,38 @@ object CompanionActions {
         }
     }
 
+    // --- Developer Tools ------------------------------------------------------------------
+    // Cheats / test helpers behind the Developer Tools "Developer mode" opt-in. All of these are
+    // handled in companion.lua (dispatchCommand's "dev_" branch) — see the note there for why the
+    // Lua APIs are used rather than raw console commands. The ONE exception is devResurrect, which
+    // is intercepted NATIVELY in drainCompanionCommands: MechanicsManager::resurrect has no Lua
+    // binding at all.
+    private fun dev(action: String) = runCommand("CMP:dev_$action")
+
+    fun devAddGold() = dev("gold")
+
+    // One per vital rather than a single "max everything" — each is independently useful when
+    // testing (e.g. magicka only, to exercise casting without also removing damage pressure).
+    // The Lua side derives the stat name from the action suffix, so these three names matter.
+    fun devMaxHealth() = dev("maxhealth")
+    fun devMaxMagicka() = dev("maxmagicka")
+    fun devMaxFatigue() = dev("maxfatigue")
+
+    fun devMaxAttributes() = dev("maxattributes")
+    fun devToggleGodMode() = dev("god")
+    fun devToggleNoclip() = dev("noclip")
+    fun devSetLevel20() = dev("setlevel20")
+    fun devTriggerLevelUp() = dev("levelup")
+    fun devAddSpellKit() = dev("spellkit")
+    fun devStackEffects() = dev("stackeffects")
+    fun devAddRegressionKit() = dev("regressionkit")
+    fun devAddBulkItems() = dev("bulkitems")
+    fun devSetNight() = dev("night")
+
+    /** Revive the player after death. Native-only (no Lua binding for MechanicsManager::resurrect);
+     *  also resumes the game if death had already put the state manager in State_Ended. */
+    fun devResurrect() = dev("resurrect")
+
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")
         try {

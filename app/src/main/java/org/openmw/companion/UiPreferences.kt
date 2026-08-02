@@ -179,6 +179,7 @@ object UiPreferences {
     private const val HIDE_EQUIPPED_BAR = "hide_equipped_bar"
     private const val SHOW_EQUIPPED_IN_LIST = "show_equipped_in_list"
     private const val ADAPTIVE_DIMMING = "adaptive_dimming"
+    private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
     // Training / spell-buying popup location (Bottom only for now; Top pending — same as Repair,
@@ -259,6 +260,13 @@ object UiPreferences {
     // overlay — it never touches the device's real screen brightness. Default true (on).
     private val adaptiveDimmingFlow = MutableStateFlow(true)
 
+    // Whether the Developer Tools action panel (add gold, max stats, god mode, …) is shown. These
+    // are cheats and can change a save in ways normal play cannot, so this gates them behind a
+    // deliberate opt-in rather than putting the buttons one tap from the pause menu. Default FALSE
+    // — a fresh install never shows the panel. Persisted like any other pref, so it survives a
+    // restart once turned on (turning it back off just hides the panel; nothing is undone).
+    private val developerModeFlow = MutableStateFlow(false)
+
     // Whether equipped (worn) items are ALSO shown inline in the Inventory "All" list. Independent of
     // the bar: worn items are always reachable via the "Equipped" filter tab and/or the bar. Default
     // true (worn items listed inline, floated to the front of their section).
@@ -291,14 +299,16 @@ object UiPreferences {
     private val hudFlows: Map<String, MutableStateFlow<Boolean>> =
         HUD_ELEMENTS.associate { it.key to MutableStateFlow(hudDefaultOn(it.key)) }
 
-    // Input section: whether touch / thumbsticks drive the top-screen game cursor.
-    // Default false (off). The actual cursor suppression lives in a native patch;
-    // this only stores the preference.
+    // Input section: whether a visible top-screen game cursor exists and can be steered with the
+    // thumbstick. Default false (off). The actual cursor suppression lives in a native patch; this
+    // only stores the preference. INDEPENDENT of touchInputFlow below — see setGameCursor.
     private val gameCursorFlow = MutableStateFlow(false)
 
     // Input section: direct touch-to-click on the top screen while a menu (GUI mode) is open —
-    // tap a spot = a mouse click there, no cursor movement. Default true (on). This only stores the
-    // preference; the touch handler reads it to decide whether to inject the direct click.
+    // tap a spot = a mouse click there. Default true (on). This only stores the preference; the
+    // touch handler reads it to decide whether to inject the direct click. What it uniquely buys is
+    // tapping while the cursor is HIDDEN: with the game cursor on, taps already reach the engine
+    // through the ordinary visible-cursor path. INDEPENDENT of gameCursorFlow — see setTouchInput.
     private val touchInputFlow = MutableStateFlow(true)
 
     // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default true (shown on
@@ -330,15 +340,16 @@ object UiPreferences {
         // If the loaded layout is already a Custom mix, make sure a snapshot exists (covers configs
         // made before this feature), so [Custom] is immediately tappable rather than dim-highlighted.
         if (gameUiIsMixed()) saveCustomSnapshot(context)
+        // Game cursor and touch input load verbatim — either or both on are all valid states. The
+        // one invalid state is BOTH OFF (no top-screen pointer input at all), which the setters
+        // prevent; reconcile it here too, since a config persisted while both-off was briefly
+        // reachable must not come back as a lockout. Touch input is the one turned back on (it is
+        // the shipped default, and unlike the cursor it doesn't change what A does in native menus).
         gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
         touchInputFlow.value = p.getBoolean(TOUCH_INPUT, true)
-        // Game cursor and touch input are the two halves of ONE input mode — exactly one is always
-        // on. Reconcile a legacy config that has both on, or both off (both-off used to be
-        // reachable), once here — touch input wins, since it's the default.
-        if (gameCursorFlow.value == touchInputFlow.value) {
+        if (!gameCursorFlow.value && !touchInputFlow.value) {
             touchInputFlow.value = true
-            gameCursorFlow.value = false
-            p.edit().putBoolean(TOUCH_INPUT, true).putBoolean(GAME_CURSOR, false).apply()
+            p.edit().putBoolean(TOUCH_INPUT, true).apply()
         }
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
@@ -356,6 +367,7 @@ object UiPreferences {
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
         showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
         adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
+        developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         p.getString(LOOTING_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
             ?.let { lootingLocationFlow.value = it }
@@ -494,21 +506,15 @@ object UiPreferences {
     /** Input: whether a tap on the top screen directly clicks there while a menu is open. */
     fun touchInputFlow(): StateFlow<Boolean> = touchInputFlow.asStateFlow()
 
-    /** Enable/disable direct touch-to-click and persist. The inverse of the game cursor: turning
-     *  this ON turns Game cursor OFF, turning it OFF turns Game cursor ON (exactly one is always
-     *  on — neither both nor neither). */
-    fun setTouchInput(context: Context, enabled: Boolean) = applyInputMode(context, touch = enabled)
-
-    /** Write both halves of the input mode in one shot. Touch input and Game cursor are a single
-     *  either/or choice, so the two setters delegate here rather than cross-calling each other
-     *  (which, now that turning one off turns the other on, would recurse forever). */
-    private fun applyInputMode(context: Context, touch: Boolean) {
-        touchInputFlow.value = touch
-        gameCursorFlow.value = !touch
-        editor(context)
-            .putBoolean(TOUCH_INPUT, touch)
-            .putBoolean(GAME_CURSOR, !touch)
-            .apply()
+    /** Enable/disable direct touch-to-click and persist. Mostly independent of [setGameCursor] —
+     *  this one governs whether a tap CLICKS, that one governs whether a steerable cursor is DRAWN,
+     *  and either or BOTH may be on. The single constraint is that **at least one must stay on**:
+     *  with both off there is no top-screen pointer input at all, which reads as a lockout rather
+     *  than a setting. So turning this off while the cursor is also off turns the cursor ON. */
+    fun setTouchInput(context: Context, enabled: Boolean) {
+        touchInputFlow.value = enabled
+        editor(context).putBoolean(TOUCH_INPUT, enabled).apply()
+        if (!enabled && !gameCursorFlow.value) setGameCursor(context, true)
     }
 
     /** Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. */
@@ -561,6 +567,15 @@ object UiPreferences {
     fun setAdaptiveDimming(context: Context, enabled: Boolean) {
         adaptiveDimmingFlow.value = enabled
         editor(context).putBoolean(ADAPTIVE_DIMMING, enabled).apply()
+    }
+
+    /** Whether the Developer Tools action panel (cheats / test helpers) is shown. */
+    fun developerModeFlow(): StateFlow<Boolean> = developerModeFlow.asStateFlow()
+
+    /** Set whether Developer Tools actions are shown and persist. */
+    fun setDeveloperMode(context: Context, enabled: Boolean) {
+        developerModeFlow.value = enabled
+        editor(context).putBoolean(DEVELOPER_MODE, enabled).apply()
     }
 
     /** Whether worn items are also shown inline in the Inventory "All" list. */
@@ -690,10 +705,23 @@ object UiPreferences {
         editor(context).putBoolean(PLAYER_COMBAT, enabled).apply()
     }
 
-    /** Enable/disable the top-screen game cursor and persist. The inverse of touch input: turning
-     *  this ON turns Touch input OFF, turning it OFF turns Touch input ON (exactly one is always
-     *  on — neither both nor neither). */
-    fun setGameCursor(context: Context, enabled: Boolean) = applyInputMode(context, touch = !enabled)
+    /** Enable/disable the top-screen game cursor and persist. Mostly independent of [setTouchInput]
+     *  (see there) — either or both may be on, but at least one must stay on, so turning this off
+     *  while touch input is also off turns touch input ON.
+     *  The two do share the engine's single cursor position (`MouseManager::mGuiCursorX/Y`),
+     *  which composes fine with no coordination: a tap SETS it absolutely, the thumbstick ADDS to it
+     *  relatively, last input wins — ordinary mouse-plus-trackpad behaviour.
+     *
+     *  NOTE turning this on also changes what **A** does in NATIVE (Vanilla) menus: with a cursor
+     *  present the engine treats A as a mouse click at the cursor instead of "activate the
+     *  highlighted item" (the `mGamepadGuiCursorEnabled` branches in `controllermanager.cpp`). D-pad
+     *  highlight navigation is unaffected. That is pre-existing engine behaviour tied to the cursor,
+     *  not to touch input — surfaced in this option's description and on the DS Controls page. */
+    fun setGameCursor(context: Context, enabled: Boolean) {
+        gameCursorFlow.value = enabled
+        editor(context).putBoolean(GAME_CURSOR, enabled).apply()
+        if (!enabled && !touchInputFlow.value) setTouchInput(context, true)
+    }
 
     private fun editor(context: Context): SharedPreferences.Editor {
         val p = prefs ?: context.applicationContext

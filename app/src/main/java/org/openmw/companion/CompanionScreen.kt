@@ -1,6 +1,7 @@
 package org.openmw.companion
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -421,6 +422,40 @@ private fun HorizontalGridScrollbar(state: LazyGridState, modifier: Modifier = M
         }
     }
 }
+
+/** "There is more list below/above" hint for a plain `verticalScroll` [ScrollState] — a centred
+ *  chevron strip meant to sit BELOW the scrolling content as its sibling, in the same Column.
+ *
+ *  This is the vertical counterpart of the `canScrollForward` chevron on `CategoryShelf`'s shelves,
+ *  and it replaced a thin drawn scrollbar (Aug 2026) that was too easy to miss on the 3.92" bottom
+ *  screen. A chevron survives being glanced at; 3dp of bronze does not.
+ *
+ *  Emits NOTHING when the content fits (no wasted row on a short list), but once it is scrollable
+ *  at all the strip stays at a FIXED height and only swaps its glyph — so reaching the bottom
+ *  doesn't resize the menu under the player's finger. */
+@Composable
+private fun ScrollMoreHint(state: ScrollState, modifier: Modifier = Modifier) {
+    val scrollable by remember(state) {
+        derivedStateOf { state.canScrollForward || state.canScrollBackward }
+    }
+    if (!scrollable) return
+    val more = state.canScrollForward
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(SCROLL_HINT_HEIGHT)
+            .background(SlotBg.copy(alpha = 0.6f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            if (more) "▾" else "▴",
+            color = BronzeLight, fontSize = 11.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+private val SCROLL_HINT_HEIGHT = 14.dp
 
 // How a tap / long-press acts on an inventory item. Mutually exclusive, keyed off
 // the coarse category from Lua's itemCategory(). Kept in one place so the two
@@ -7055,11 +7090,7 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                         fontFamily = MwDisplay, fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(4.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        state.activeEffects.forEach { effect ->
-                            EffectDot(effect.harmful, 10.dp)
-                        }
-                    }
+                    EffectsSummary(state.activeEffects)
                 }
                 DropdownMenu(
                     expanded = effectsExpanded,
@@ -7070,6 +7101,17 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                     border = BorderStroke(1.dp, Bronze),
                     shape = RoundedCornerShape(3.dp)
                 ) {
+                    // Cap at ~7 rows then scroll, so a heavily-buffed character can't grow the
+                    // dropdown to the full screen height. Same heightIn(max) + verticalScroll
+                    // pattern as InventoryEquippedSection / ItemInfoPopupCard. (M3's own
+                    // DropdownMenuContent also scrolls, but only at the window bound — it has no
+                    // row-count cap, and with the content bounded here it has nothing left to do.)
+                    val effectsScroll = rememberScrollState()
+                    Column(
+                        Modifier
+                            .heightIn(max = EFFECTS_DROPDOWN_MAX_HEIGHT)
+                            .verticalScroll(effectsScroll)
+                    ) {
                     state.activeEffects.forEach { effect ->
                         val effectIcon = rememberItemIcon(effect.icon)
                         Row(
@@ -7118,9 +7160,67 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                             }
                         }
                     }
+                    }
+                    ScrollMoreHint(effectsScroll)
                 }
             }
         }
+    }
+}
+
+/** Height cap for the active-effects dropdown before it starts scrolling. Deliberately **6.5 rows,
+ *  not 7** (a row = a 20dp icon + 7dp padding either side = 34dp): cutting the last row in half is
+ *  itself the "this list continues" signal, which needs no widget and no explanation.
+ *
+ *  Only a heuristic, which is why [ScrollMoreHint] carries the real signal: rows are NOT uniform —
+ *  an effect with a subtitle is ~43dp — so with a subtitled list the cap lands somewhere else in
+ *  the row, and could in principle land right on a boundary. */
+private val EFFECTS_DROPDOWN_MAX_HEIGHT = 221.dp
+
+/** Fixed width of the [EffectsSummary] cluster. Hard-set (rather than wrap-content) so the row is
+ *  the SAME width whether the player has one effect or thirty — that constancy is the whole point
+ *  of the summary, since the Health/Magicka/Fatigue bars share this Row's space via weight(1f) and
+ *  a growing effects cluster used to squeeze them. Sized for two 2-digit counts. */
+private val EFFECTS_SUMMARY_WIDTH = 66.dp
+
+/** The active-effects indicator in [TopStatBar]: a beneficial count and a harmful count, each with
+ *  its palette dot, in a fixed-width cluster.
+ *
+ *  Replaced a one-dot-per-effect row (Aug 2026), which grew without bound and starved the vitals
+ *  bars. Deliberately NOT a proportional/averaged indicator: a single harmful effect among many
+ *  beneficial ones must stay visible (it is the one you need to notice mid-combat), and any
+ *  ratio-based form rounds it away. A count cannot — 1 harmful always reads as 1.
+ *
+ *  A zero count is dimmed rather than hidden, so the cluster keeps a stable shape while a nonzero
+ *  harmful count still stands out against it. */
+@Composable
+private fun EffectsSummary(effects: List<ActiveEffect>) {
+    val harmful = effects.count { it.harmful }
+    val beneficial = effects.size - harmful
+    Row(
+        modifier = Modifier.width(EFFECTS_SUMMARY_WIDTH),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        EffectsSummaryCount(count = beneficial, harmful = false)
+        Spacer(Modifier.width(8.dp))
+        EffectsSummaryCount(count = harmful, harmful = true)
+    }
+}
+
+@Composable
+private fun EffectsSummaryCount(count: Int, harmful: Boolean) {
+    Row(
+        modifier = Modifier.alpha(if (count == 0) 0.35f else 1f),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        EffectDot(harmful, 10.dp)
+        Spacer(Modifier.width(3.dp))
+        Text(
+            count.toString(),
+            color = Bone, fontSize = 11.sp, fontFamily = MwData,
+            maxLines = 1
+        )
     }
 }
 
@@ -11260,6 +11360,17 @@ private val DS_CONTROL_GROUPS = listOf(
             ControlEntry("A", "Travel to confirm the destination"),
             ControlEntry("Tap", "Dialogue highlighted words to see NPC says to ask about them")
         )
+    ),
+    // Last on purpose: a conditional caveat rather than a control you use every session. Scoped
+    // deliberately to what A does — this is not a general explainer for the Input options. The
+    // cause is the engine's own gamepad-cursor handling (mGamepadGuiCursorEnabled), so it applies
+    // in the game's NATIVE menus, not the companion's own screens.
+    ControlGroup(
+        "With Game cursor on",
+        listOf(
+            ControlEntry("A", "Clicks whatever the cursor is over in the game's own menus, rather than the highlighted item"),
+            ControlEntry("D-pad", "Still highlights menu items as usual")
+        )
     )
 )
 
@@ -11460,6 +11571,9 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
     val listState = rememberLazyListState(
         OptionsMenuScrollState.index, OptionsMenuScrollState.offset
     )
+    // Read here rather than inside the Developer Tools section because the section's rows are
+    // emitted from the LazyColumn's item scope, which is not a composable context.
+    val developerMode by UiPreferences.developerModeFlow().collectAsState()
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .collect { (index, offset) ->
@@ -11561,13 +11675,17 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
         // "Spells Display" (Standard / Compact) removed — the compact spell list is now the only
         // version. The old SpellsListStyleRow composable is commented out below for reference.
 
-        // DEVELOPER TOOLS: scaffolding only — the toggle below is permanently disabled and has no
-        // functionality behind it. Placed last so it is the least prominent section.
+        // DEVELOPER TOOLS: cheats / test helpers. Placed last so it is the least prominent
+        // section, and the action panel is gated behind the "Developer mode" toggle (default off)
+        // so a fresh install never puts these one tap from the pause menu.
         item { CollapsibleSection(SECTION_DEVELOPER_TOOLS) }
         if (OptionsSectionState.isExpanded(SECTION_DEVELOPER_TOOLS)) {
             item { DeveloperToolsBlurb() }
             item { OpenConsoleRow() }
-            item { DeveloperToolsPendingRow("Developer mode") }
+            item { DeveloperModeRow() }
+            if (developerMode) {
+                item(key = "dev_actions") { DeveloperActionsPanel() }
+            }
         }
 
         // Quiet release-version footer (diagnostic/reference; `v` prefix added here).
@@ -12475,8 +12593,8 @@ private fun ScreenLayoutPendingRow(el: GameUiElement) {
 }
 
 /** Explanatory blurb for the Developer Tools section. Deliberately blunt about what these are:
- *  the section is easy to stumble into from the pause menu, and anything landing here later will
- *  drive the same console pathway the in-game console uses (CompanionActions.runCommand →
+ *  the section is easy to stumble into from the pause menu, and everything in it rides the same
+ *  channel the rest of the companion uses (CompanionActions.runCommand →
  *  EngineActivity.sendCompanionCommand → drainCompanionCommands → lua->handleConsoleCommand),
  *  i.e. it can change game state in ways a normal playthrough never would. */
 @Composable
@@ -12555,42 +12673,247 @@ private fun OpenConsoleRow() {
     }
 }
 
-/** A Developer Tools row that is scaffolding only: label + PENDING tag over a locked [Off][On]
- *  selector, both pills disabled. Mirrors [ScreenLayoutPendingRow]'s presentation so "not built
- *  yet" reads the same everywhere in this menu. There is deliberately NO preference behind it —
- *  adding one now would persist a value nothing consumes. */
+/** Master switch for the Developer Tools action panel. [Off][On] pill selector, default Off,
+ *  persisted in UiPreferences. Turning it off only HIDES the panel — nothing any button did is
+ *  undone (god mode and noclip in particular stay however they were left, which is why those two
+ *  read their real engine state rather than a remembered one). */
 @Composable
-private fun DeveloperToolsPendingRow(label: String) {
+private fun DeveloperModeRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.developerModeFlow().collectAsState()
+
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Developer mode", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Show the testing actions below",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(Modifier.weight(1f), label = "Off", active = !enabled, enabled = true) {
+                UiPreferences.setDeveloperMode(context, false)
+            }
+            OptionPill(Modifier.weight(1f), label = "On", active = enabled, enabled = true) {
+                UiPreferences.setDeveloperMode(context, true)
+            }
+        }
+    }
+}
+
+/**
+ * The Developer Tools action panel, shown only while "Developer mode" is on.
+ *
+ * Every button sends one `CMP:dev_*` command; all but Resurrect are handled in companion.lua
+ * using ordinary Lua APIs (see the Developer Tools block there for why that is preferred over
+ * raw console commands). Emitted as a SINGLE lazy item rather than one per button — they are a
+ * unit, they appear and disappear together, and keeping them in one item avoids ~14 more keys in
+ * a list whose key collisions are already a documented hazard.
+ *
+ * God Mode and Noclip are the only stateful entries: they mirror real engine flags, read back
+ * from [GameStateRepository.devToggles], so the pills stay correct even if the flag is changed
+ * from the console or was already set when the save loaded.
+ */
+@Composable
+private fun DeveloperActionsPanel() {
+    val devToggles by GameStateRepository.devToggles.collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp)) {
+        DevToggleRow(
+            label = "God mode",
+            description = "No damage, no magicka cost, no encumbrance limit",
+            on = devToggles.godMode,
+            onToggle = { CompanionActions.devToggleGodMode() }
+        )
+        DevToggleRow(
+            label = "Noclip",
+            description = "Walk through walls and floors",
+            on = devToggles.noclip,
+            onToggle = { CompanionActions.devToggleNoclip() }
+        )
+
+        DevSectionLabel("Character")
+        DevActionButton(
+            title = "Health",
+            description = "Raises your maximum health to 99,999 and refills it.",
+            button = "Max Health"
+        ) { CompanionActions.devMaxHealth() }
+        DevActionButton(
+            title = "Magicka",
+            description = "Raises your maximum magicka to 99,999 and refills it.",
+            button = "Max Magicka"
+        ) { CompanionActions.devMaxMagicka() }
+        DevActionButton(
+            title = "Fatigue",
+            description = "Raises your maximum fatigue to 99,999 and refills it.",
+            button = "Max Fatigue"
+        ) { CompanionActions.devMaxFatigue() }
+        DevActionButton(
+            title = "Attributes",
+            description = "Sets all eight attributes to 100 and clears any damage to them.",
+            button = "Max All Attributes"
+        ) { CompanionActions.devMaxAttributes() }
+        // Two deliberately different level buttons — the difference is the whole point of having
+        // both, so each description says plainly what it skips or shows.
+        DevActionButton(
+            title = "Level",
+            description = "Jumps straight to level 20. Skips the level-up screen, so you get no " +
+                "attribute increases from it.",
+            button = "Set Level 20"
+        ) { CompanionActions.devSetLevel20() }
+        DevActionButton(
+            title = "Level up",
+            description = "Fills the level-up bar and opens the level-up screen",
+            button = "Trigger Level Up"
+        ) { CompanionActions.devTriggerLevelUp() }
+        DevActionButton(
+            title = "Resurrect",
+            description = "Brings you back after death, without reloading a save.",
+            button = "Resurrect"
+        ) { CompanionActions.devResurrect() }
+
+        DevSectionLabel("Items")
+        DevActionButton(
+            title = "Gold",
+            description = "Puts 100,000 gold in your inventory.",
+            button = "Add 100,000 Gold"
+        ) { CompanionActions.devAddGold() }
+        DevActionButton(
+            title = "Equipment samples",
+            description = "One item of every wearable kind: an enchanted ring and amulet, a " +
+                "torch, armour for each slot, one of each weapon type, and basic clothing. For " +
+                "checking how gear equips and displays.",
+            button = "Add Equipment Samples"
+        ) { CompanionActions.devAddRegressionKit() }
+        DevActionButton(
+            title = "Inventory filler",
+            description = "Dozens of mixed stacks. Potions, ingredients, books, tools, weapons " +
+                "and armour. For testing scrolling, sorting and the category tabs with a full bag.",
+            button = "Fill Inventory"
+        ) { CompanionActions.devAddBulkItems() }
+
+        DevSectionLabel("Magic")
+        DevActionButton(
+            title = "Spells",
+            description = "Teaches you a couple of cheap spells from each school of magic.",
+            button = "Add Test Spell Kit"
+        ) { CompanionActions.devAddSpellKit() }
+        DevActionButton(
+            title = "Active effects",
+            description = "Applies a dozen different beneficial effects at once, to fill the " +
+                "effects list on the HUD and Stats screen.",
+            button = "Stack Many Effects"
+        ) { CompanionActions.devStackEffects() }
+
+        DevSectionLabel("World")
+        DevActionButton(
+            title = "Time of day",
+            description = "Sets the in-game clock to 10 PM.",
+            button = "Set Night Time"
+        ) { CompanionActions.devSetNight() }
+    }
+}
+
+/** Small grouping label inside the Developer Tools action panel. */
+@Composable
+private fun DevSectionLabel(text: String) {
+    Text(
+        text.uppercase(),
+        color = BoneDim,
+        fontSize = 9.sp,
+        fontFamily = MwDisplay,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
+    )
+}
+
+/**
+ * A one-shot Developer Tools action, presented exactly like [OpenConsoleRow]: a short heading, a
+ * sentence saying what it actually does, then a full-width button.
+ *
+ * The description is not decoration — several of these actions are impossible to guess from a
+ * label ("Inventory filler", and the two level buttons whose whole distinction is what they skip),
+ * and the panel is reached from the pause menu where a wrong tap edits the save. Matching the
+ * console row's metrics rather than a tighter custom size keeps the section visually one thing and
+ * gives every action a comfortable tap target on the 3.92" bottom screen.
+ */
+@Composable
+private fun DevActionButton(
+    title: String,
+    description: String,
+    button: String,
+    onClick: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text(title, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            description,
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(PillActiveBg.copy(alpha = 0.94f))
+                .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                .clickable { onClick() }
+                .padding(vertical = 9.dp),
+            contentAlignment = Alignment.Center
+        ) {
             Text(
-                label,
-                color = BoneDim,
+                button,
+                color = BronzeLight,
                 fontSize = 14.sp,
-                fontFamily = MwBody,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                "PENDING",
-                color = BoneDim.copy(alpha = 0.7f),
-                fontSize = 9.sp,
                 fontFamily = MwDisplay,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
         }
+    }
+}
+
+/** A Developer Tools entry backed by a live ENGINE flag rather than a preference: [Off][On] pills
+ *  reflecting [on], with taps sending a TOGGLE command (the engine owns the value, so we ask it to
+ *  flip rather than telling it what to be — that keeps this correct if the flag changed elsewhere).
+ *  Tapping the already-active pill is a deliberate no-op rather than a redundant toggle. */
+@Composable
+private fun DevToggleRow(label: String, description: String, on: Boolean, onToggle: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text(label, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            description,
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(Modifier.weight(1f), label = "Off", active = true, enabled = false) {}
-            OptionPill(Modifier.weight(1f), label = "On", active = false, enabled = false) {}
+            OptionPill(Modifier.weight(1f), label = "Off", active = !on, enabled = true) {
+                if (on) onToggle()
+            }
+            OptionPill(Modifier.weight(1f), label = "On", active = on, enabled = true) {
+                if (!on) onToggle()
+            }
         }
     }
 }
 
-/** Input row: toggle whether touch / thumbsticks drive the top-screen game cursor.
- *  [Off][On] pill selector (default Off), writing to UiPreferences on every tap. */
 /** Input: direct touch-to-click on the top screen while a menu is open. [Off][On] pill selector
- *  (default On), writing to UiPreferences on every tap. */
+ *  (default On), writing to UiPreferences on every tap.
+ *
+ *  Mostly independent of [GameCursorRow] — the two are orthogonal (tap-to-click vs. a steerable
+ *  cursor) and either or both may be on. Both OFF is the one disallowed combination (it leaves no
+ *  top-screen pointer input at all), so turning this off while the cursor is off turns the cursor
+ *  on instead — handled in [UiPreferences.setTouchInput], which is why both pills stay tappable. */
 @Composable
 private fun TouchInputRow() {
     val context = LocalContext.current
@@ -12599,7 +12922,7 @@ private fun TouchInputRow() {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Touch input", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Tap the top screen to click there directly in menus, like a touchscreen",
+            "Tap the top screen to click there in menus, even with no cursor showing",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -12623,6 +12946,15 @@ private fun TouchInputRow() {
     }
 }
 
+/** Input row: toggle the visible, thumbstick-steered cursor on the top screen. [Off][On] pill
+ *  selector (default Off), writing to UiPreferences on every tap. Mostly independent of
+ *  [TouchInputRow] — either or both may be on, but turning this off while touch input is also off
+ *  turns touch input on instead (see [UiPreferences.setGameCursor]).
+ *
+ *  The second subtitle line documents a real behaviour change that comes with the cursor: the engine
+ *  treats **A** as a click at the cursor rather than "activate the highlighted item" whenever a
+ *  gamepad cursor is active (`mGamepadGuiCursorEnabled` in `controllermanager.cpp`). It belongs on
+ *  THIS row because it is caused by the cursor, not by touch input. Also on the DS Controls page. */
 @Composable
 private fun GameCursorRow() {
     val context = LocalContext.current
@@ -12631,11 +12963,20 @@ private fun GameCursorRow() {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Game cursor", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Touch and thumbsticks control the game cursor on the top screen",
+            "Show a cursor on the top screen and steer it with the thumbstick",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
             modifier = Modifier.padding(top = 1.dp)
+        )
+        Text(
+            "While it is on, A clicks whatever the cursor is over in the game's own menus, " +
+                "instead of the highlighted item. The D-pad still highlights as usual.",
+            color = BoneDim.copy(alpha = 0.7f),
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            lineHeight = 13.sp,
+            modifier = Modifier.padding(top = 3.dp)
         )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

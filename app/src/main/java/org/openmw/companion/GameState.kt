@@ -457,6 +457,17 @@ data class DoorMarker(
     val name: String
 )
 
+/** Live state of the two engine-side Developer Tools toggles (god mode / player collision), from
+ *  the change-detected COMPANION_DEV_STATE line. Both are real engine flags owned by
+ *  `openmw.debug` (`isGodMode()` / `isCollisionEnabled()`), NOT preferences — the console, another
+ *  mod, or a reload can change them behind our back, so the options pills read this rather than a
+ *  locally remembered value. `noclip` is the INVERSE of isCollisionEnabled (collision off = noclip
+ *  on) so it matches the button's label. Defaults are the engine's own start-of-game state. */
+data class DevToggleState(
+    val godMode: Boolean = false,
+    val noclip: Boolean = false
+)
+
 data class JournalEntry(
     val questId: String,
     val questName: String = "",  // display name from core.dialogue; empty = fall back to prettified ID
