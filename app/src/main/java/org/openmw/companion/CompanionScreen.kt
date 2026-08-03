@@ -13018,16 +13018,21 @@ private fun DeveloperActionsPanel() {
             description = "Raises your maximum fatigue to 99,999 and refills it.",
             button = "Max Fatigue"
         ) { CompanionActions.devMaxFatigue() }
+        // Additive, not set-to-100: pressing repeatedly keeps stacking, which is the point — it is
+        // how you push a character far past vanilla limits to see how the UI copes with 3- and
+        // 4-digit values. One press on a fresh character lands about where the old "max" did.
         DevActionButton(
             title = "Attributes",
-            description = "Sets all eight attributes to 100 and clears any damage to them.",
-            button = "Max All Attributes"
-        ) { CompanionActions.devMaxAttributes() }
+            description = "Adds 100 to all eight attributes and clears any damage to them. " +
+                "Press again to keep raising them past the usual limit.",
+            button = "Add 100 to All Attributes"
+        ) { CompanionActions.devAddAttributes() }
         DevActionButton(
             title = "Skills",
-            description = "Sets all 27 skills to 100 and clears any damage to them.",
-            button = "Max All Skills"
-        ) { CompanionActions.devMaxSkills() }
+            description = "Adds 100 to all 27 skills and clears any damage to them. " +
+                "Press again to keep raising them past the usual limit.",
+            button = "Add 100 to All Skills"
+        ) { CompanionActions.devAddSkills() }
         // Two deliberately different level buttons — the difference is the whole point of having
         // both, so each description says plainly what it skips or shows.
         DevActionButton(

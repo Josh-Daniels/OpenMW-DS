@@ -185,8 +185,8 @@ object CompanionActions {
     fun devMaxMagicka() = dev("maxmagicka")
     fun devMaxFatigue() = dev("maxfatigue")
 
-    fun devMaxAttributes() = dev("maxattributes")
-    fun devMaxSkills() = dev("maxskills")
+    fun devAddAttributes() = dev("addattributes")
+    fun devAddSkills() = dev("addskills")
     fun devToggleGodMode() = dev("god")
     fun devToggleNoclip() = dev("noclip")
     fun devSetLevel20() = dev("setlevel20")

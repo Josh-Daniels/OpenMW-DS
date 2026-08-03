@@ -1974,10 +1974,13 @@ end
 
 local DEV_GOLD_AMOUNT = 100000
 local DEV_MAX_VITAL = 99999
-local DEV_ATTRIBUTE_CAP = 100
--- Vanilla's ordinary skill ceiling. Kept separate from the attribute cap even though both are
--- currently 100 — they are different game concepts and one could be retuned without the other.
-local DEV_SKILL_CAP = 100
+-- How much the attribute / skill buttons ADD per press. Deliberately additive rather than a set-to
+-- ceiling: pressing repeatedly keeps stacking, which is what makes the buttons useful for pushing a
+-- character far past vanilla limits to test UI at extreme values. 100 is vanilla's ordinary cap, so
+-- one press on a fresh character lands roughly there and behaves like the old "max" button did.
+-- Nothing clamps this — MWMechanics::AttributeValue::setBase is a plain assignment and the Lua
+-- binding calls it directly — so values well above 100 stick.
+local DEV_STAT_INCREMENT = 100
 local DEV_SET_LEVEL = 20
 -- NpcStats::getLevelupAttributeMultiplier does min(10, count) to pick iLevelUp<NN>Mult, so 10 is
 -- the top tier (x5 in vanilla). Without this every attribute on the level-up screen reads x1.
@@ -2184,30 +2187,33 @@ local function devDispatch(action)
         end)
         emit("COMPANION_DEBUG: dev max " .. vital)
 
-    elseif action == "maxattributes" then
+    elseif action == "addattributes" then
+        -- Read-then-add, so each press stacks on the last. Safe despite stat writes being DELAYED
+        -- (cached and applied at end of frame): each attribute is a separate stat, and successive
+        -- presses are frames apart, so the read always sees the previous press's value.
         for _, attrId in ipairs(ATTR_IDS) do
             pcall(function()
                 local stat = types.Actor.stats.attributes[attrId](self)
-                stat.base = DEV_ATTRIBUTE_CAP
+                stat.base = stat.base + DEV_STAT_INCREMENT
                 stat.damage = 0
             end)
         end
-        emit("COMPANION_DEBUG: dev max attributes")
+        emit("COMPANION_DEBUG: dev add " .. DEV_STAT_INCREMENT .. " attributes")
 
-    elseif action == "maxskills" then
-        -- Same shape as maxattributes: .base is the trained value and .damage is separate
-        -- (drain/absorb), so both have to be written for the skill to actually read 100.
+    elseif action == "addskills" then
+        -- Same shape as addattributes: .base is the trained value and .damage is separate
+        -- (drain/absorb), so both have to be written for the skill to actually read the new total.
         -- SKILL_IDS is the same list the stats export walks, so this covers exactly the skills
         -- the Stats screen shows. Each write is pcall'd individually — a single unexpected id
         -- must not abort the other 26.
         for _, skillId in ipairs(SKILL_IDS) do
             pcall(function()
                 local stat = types.NPC.stats.skills[skillId](self)
-                stat.base = DEV_SKILL_CAP
+                stat.base = stat.base + DEV_STAT_INCREMENT
                 stat.damage = 0
             end)
         end
-        emit("COMPANION_DEBUG: dev max skills")
+        emit("COMPANION_DEBUG: dev add " .. DEV_STAT_INCREMENT .. " skills")
 
     elseif action == "god" then
         if debugApi then
