@@ -47,6 +47,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -84,6 +85,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
@@ -134,11 +136,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openmw.utils.GameFilesPreferences
 import java.io.File
+import java.nio.ByteBuffer
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import org.openmw.ui.theme.GAME_FONT_SIZE_SCALE
+import org.openmw.ui.theme.loadGameFont
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -238,10 +244,66 @@ private object QuantityRequestState {
     }
 }
 
-// ---- type roles (swap to bundled Morrowind fonts later in one place) ----
-private val MwDisplay = FontFamily.Serif
-private val MwBody    = FontFamily.Serif
-private val MwData    = FontFamily.Monospace
+// ---- type roles ----
+//
+// These three are the ONLY font declarations in the companion + DS overlays; every one of the
+// ~320 text sites goes through them, with no inline FontFamily.Serif/Monospace anywhere. That is
+// what lets the "Game font" option below be a three-line change rather than a sweep.
+//
+// They are @Composable getters, not plain vals, so they can read [LocalGameFont] — this keeps all
+// ~320 call sites (`fontFamily = MwBody`) completely untouched. Safe because every usage sits in
+// composable scope: none appear in `remember {}`, a draw scope, or a default parameter value.
+private val MwDisplay: FontFamily
+    @Composable get() = LocalGameFont.current ?: FontFamily.Serif
+private val MwBody: FontFamily
+    @Composable get() = LocalGameFont.current ?: FontFamily.Serif
+private val MwData: FontFamily
+    @Composable get() = LocalGameFont.current ?: FontFamily.Monospace
+
+
+/**
+ * The typeface for the CURRENT composition, or null to use the Android system fonts.
+ *
+ * Null by default, which is what keeps the options menu on the system fonts: it is hosted in its
+ * own window with no provider, so the switch that controls this setting is always legible in a
+ * known typeface — including when the chosen one turns out to be hard to read.
+ */
+private val LocalGameFont = compositionLocalOf<FontFamily?> { null }
+
+/**
+ * Supplies the font setting to a companion composition. Applied at the two roots that between them
+ * cover both physical screens: [CompanionScreen] (bottom) and [ProvideTopPanelOpacity] (each
+ * top-screen overlay window). Providing at the root rather than threading a parameter means
+ * overlays added later inherit it for free.
+ */
+@Composable
+private fun ProvideCompanionFont(content: @Composable () -> Unit) {
+    val vanillaFont by UiPreferences.vanillaFontFlow().collectAsState()
+    val context = LocalContext.current
+    // Only touched when the option is on, so the default install never reads the asset. A single
+    // CompositionLocal read per text site is also far cheaper than collecting the pref flow at
+    // each of the ~320 of them.
+    val family = if (vanillaFont) remember(context) { loadGameFont(context) } else null
+
+    if (family == null) {
+        // Off (or the asset failed to load): provide nothing but the null font, so sizing is
+        // byte-for-byte what it was before this option existed.
+        CompositionLocalProvider(LocalGameFont provides family, content = content)
+        return
+    }
+
+    // Scale every `.sp` in one place via the density's fontScale — see [GAME_FONT_SIZE_SCALE].
+    // fontScale is the right lever precisely because it is text-only: `.dp` conversions read
+    // `density`, which is left untouched, so panels, icons and paddings keep their exact sizes and
+    // only the glyphs grow. `lineHeight` is also in sp, so line spacing scales with the text
+    // instead of leaving it cramped.
+    val density = LocalDensity.current
+    CompositionLocalProvider(
+        LocalGameFont provides family,
+        LocalDensity provides Density(density.density, density.fontScale * GAME_FONT_SIZE_SCALE),
+        content = content
+    )
+}
 
 private const val TOP_BAR_SPACE = 76
 private const val BOTTOM_BAR_SPACE = 76
@@ -519,13 +581,19 @@ private fun cycleBarterCat(items: List<BarterItem>, current: String?, dir: Int):
  */
 private val LocalPanelOpacity = compositionLocalOf { 1f }
 
-/** Wrap a TOP-screen overlay's content so its panels honour the opacity setting. Public because
- *  EngineActivity applies it at each top-screen window root — that is the one place that reliably
- *  means "this composition is on the top screen", and it covers overlays added later for free. */
+/** Wrap a TOP-screen overlay's content so it picks up the shared companion environment: panel
+ *  opacity and the font setting. Public because EngineActivity applies it at each top-screen
+ *  window root — that is the one place that reliably means "this composition is on the top
+ *  screen", and it covers overlays added later for free.
+ *
+ *  Name kept for its existing call sites; it now supplies the font too, so a DS overlay on the top
+ *  screen matches the companion below it without EngineActivity needing to know about fonts. */
 @Composable
 fun ProvideTopPanelOpacity(content: @Composable () -> Unit) {
     val opacity by UiPreferences.topPanelOpacityFlow().collectAsState()
-    CompositionLocalProvider(LocalPanelOpacity provides opacity, content = content)
+    CompositionLocalProvider(LocalPanelOpacity provides opacity) {
+        ProvideCompanionFont(content)
+    }
 }
 
 /**
@@ -567,8 +635,24 @@ private fun Modifier.categorySwipe(key: Any?, onCycle: (dir: Int) -> Unit): Modi
         )
     }
 
+/**
+ * The bottom-screen companion UI. A thin wrapper so the whole screen composes under the shared
+ * font setting; the top-screen DS overlays get the same thing via [ProvideTopPanelOpacity].
+ *
+ * [UiPreferences.init] is called HERE, before the setting is read, rather than relying on the copy
+ * inside the content below: the wrapper composes first, so without this the font pref would be
+ * read at its default and the screen would visibly re-font itself a frame later. It is idempotent,
+ * so the inner call simply becomes a no-op.
+ */
 @Composable
 fun CompanionScreen() {
+    val context = LocalContext.current
+    remember(context) { UiPreferences.init(context); true }
+    ProvideCompanionFont { CompanionScreenContent() }
+}
+
+@Composable
+private fun CompanionScreenContent() {
     val state by GameStateRepository.state.collectAsState()
     var tab by remember { mutableStateOf(Tab.HUD) }
     // Dismiss the item info popup when the tab changes so it never lingers over another screen.
@@ -2111,6 +2195,95 @@ private fun dialogueAnnotated(text: String, links: List<String>, interactive: Bo
                 withStyle(SpanStyle(color = BronzeLight)) { append(phrase) }
             }
             i = bestStart + bestLen
+        }
+    }
+}
+
+/**
+ * Characters a journal topic link may start after. Taken verbatim from the engine's
+ * `KeywordSearch::highlightKeywords`, which only begins a match at the text start or after one of
+ * these — that word-start anchoring is what stops a topic like "ash" lighting up inside "cash".
+ */
+private val TOPIC_WORD_SEPARATORS = charArrayOf('\n', '\r', ' ', '\t', '\'', '"', '(', '[')
+
+/**
+ * Journal text with known dialogue topics turned into tappable links, mirroring vanilla's journal.
+ *
+ * The engine builds these by seeding a `KeywordSearch` with `Journal::getTopics()` and running
+ * `parseHyperText` over each entry. We already have exactly that topic set on this side — it is
+ * what `COMPANION_TOPICS_*` exports — so the matching is done here and no engine change is needed.
+ *
+ * Rules follow `KeywordSearch::highlightKeywords`: case-insensitive, anchored to a word start (see
+ * [TOPIC_WORD_SEPARATORS]), longest topic wins where several could match at the same position. The
+ * engine resolves overlaps globally by length; this scans left-to-right taking the longest match at
+ * each position, which gives the same result for non-nested topics and is far simpler.
+ *
+ * Two deliberate divergences from the engine, both because vanilla content does not exercise them:
+ *  - Explicit `@Topic#` markup is NOT handled. `parseHyperText` supports it, but a scan of
+ *    Morrowind.esm found no real instances (only binary noise), so it would be dead code here.
+ *    Localised or modded content CAN use it, and would show the raw `@`/`#` — worth revisiting if
+ *    this ever ships beyond English vanilla.
+ *  - Topic keywords are the display names. The engine passes them through
+ *    `Translation::Storage::topicKeyword`, which is identity for English.
+ *
+ * Note this is STRICTER than the conversation's [dialogueAnnotated], which matches anywhere in the
+ * text including mid-word. That looseness is long-shipped there and left alone; the journal is much
+ * denser prose, so a false link inside a longer word would be far more visible.
+ */
+@Composable
+private fun journalAnnotated(
+    text: String,
+    topics: List<String>,
+    onTopic: (String) -> Unit
+): AnnotatedString {
+    // Read at click time rather than captured, so a link tapped later still calls the current
+    // callback rather than one closed over on the composition that built the string.
+    val handler = rememberUpdatedState(onTopic)
+    return remember(text, topics) {
+        buildAnnotatedString {
+            if (topics.isEmpty()) {
+                append(text)
+                return@buildAnnotatedString
+            }
+            // Bucket by lowercase first character so each scan position only tests the topics that
+            // could possibly start there — with a few hundred known topics this is the difference
+            // between a trivial pass and a visibly slow one on a long entry.
+            val byFirstChar = HashMap<Char, MutableList<String>>()
+            for (topic in topics) {
+                if (topic.isNotEmpty()) {
+                    byFirstChar.getOrPut(topic[0].lowercaseChar()) { mutableListOf() }.add(topic)
+                }
+            }
+            // Longest first, so the first hit at a position is also the longest one.
+            byFirstChar.values.forEach { it.sortByDescending(String::length) }
+
+            var i = 0
+            var plainFrom = 0
+            while (i < text.length) {
+                if (i != 0 && text[i - 1] !in TOPIC_WORD_SEPARATORS) {
+                    i++
+                    continue
+                }
+                val match = byFirstChar[text[i].lowercaseChar()]
+                    ?.firstOrNull { text.regionMatches(i, it, 0, it.length, ignoreCase = true) }
+                if (match == null) {
+                    i++
+                    continue
+                }
+                if (i > plainFrom) append(text.substring(plainFrom, i))
+                // Show the text as written (case and all); navigate by the topic's own name.
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = "journalTopic",
+                        styles = TextLinkStyles(style = SpanStyle(color = BronzeLight))
+                    ) { handler.value(match) }
+                ) {
+                    append(text.substring(i, i + match.length))
+                }
+                i += match.length
+                plainFrom = i
+            }
+            if (plainFrom < text.length) append(text.substring(plainFrom))
         }
     }
 }
@@ -8460,23 +8633,23 @@ private fun EquippedStrip(
         // on the chip Row so the chips wrap their content and stay hard against the right edge
         // instead of stretching across the free space.
         Spacer(Modifier.weight(1f))
-        Text(
-            "SORT",
-            color = BronzeLight,
-            fontSize = 10.sp,
-            fontFamily = MwDisplay,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.5.sp
+        // Icon in place of a "SORT" caption + divider rule. Those cost ~55dp of a ~473dp strip,
+        // which the game font's larger text turned into a real squeeze — the chips crowded the
+        // Gold/Weight readouts on their left. The icon says the same thing in ~18dp.
+        //
+        // A VECTOR rather than a text glyph on purpose: MysticCards has no arrow/symbol coverage
+        // (no ▲ ▼ ◀ ▶ · ✓ …), so a typographic sort mark would be at the mercy of font fallback.
+        // An ImageVector renders identically whichever font role is active. Precedent: the
+        // favourite star is already Icons.Filled.Star.
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.Sort,
+            contentDescription = "Sort",
+            tint = BronzeLight,
+            modifier = Modifier.size(18.dp)
         )
-        Box(
-            Modifier
-                .padding(horizontal = 10.dp)
-                .width(1.dp)
-                .height(28.dp)
-                .background(BronzeDark)
-        )
+        Spacer(Modifier.width(8.dp))
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             InvSort.entries.forEach { mode ->
@@ -8514,8 +8687,10 @@ private fun SortChip(label: String, active: Boolean, arrow: String?, onClick: ()
             .clickable { onClick() }
             // ~60% taller than the original 4dp: these are frequently-tapped controls sitting in a
             // 54dp strip that had spare vertical room, and the extra height also makes them a
-            // comfortably bigger touch target on the small panel.
-            .padding(horizontal = 8.dp, vertical = 11.dp),
+            // comfortably bigger touch target on the small panel. Horizontal padding trimmed 8->6
+            // to claw back width for the wider game-font labels; the vertical padding (which is
+            // what makes the target comfortable) is untouched.
+            .padding(horizontal = 6.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -9937,7 +10112,23 @@ private fun JournalPanel() {
     LaunchedEffect(Unit) {
         CompanionActions.refreshJournal()
         CompanionActions.refreshQuestStatus()
+        // Also needed by the JOURNAL and QUESTS tabs now, not just the Topics list: the known-topic
+        // set is what the entry text is linked against, and the journal opens on the Journal tab —
+        // without this, links would only appear after a visit to Topics.
+        CompanionActions.refreshTopics()
     }
+
+    // Tapping a topic link in any entry jumps to that topic's page, which is the vanilla journal's
+    // behaviour. Matched case-insensitively because the link shows the text as written, which need
+    // not match the topic's own capitalisation.
+    val openTopic: (String) -> Unit = { name ->
+        topics.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let {
+            selectedTopic = it
+            selectedJournalTab = JournalTab.Topics
+        }
+    }
+    // Link phrases, recomputed only when the topic set actually changes.
+    val topicNames = remember(topics) { topics.map { it.name } }
 
     Box(
         Modifier
@@ -9954,11 +10145,16 @@ private fun JournalPanel() {
                         if (sel == null)
                             JournalTopicsList(topics = topics, onTopic = { selectedTopic = it })
                         else
-                            JournalTopicDetail(topic = sel, onBack = { selectedTopic = null })
+                            JournalTopicDetail(
+                                topic = sel,
+                                onBack = { selectedTopic = null },
+                                topicNames = topicNames,
+                                onTopicLink = openTopic
+                            )
                     }
                     JournalTab.Journal ->
                         if (state.journalEntries.isEmpty()) JournalEmptyState()
-                        else JournalChronological(state.journalEntries)
+                        else JournalChronological(state.journalEntries, topicNames, openTopic)
                     JournalTab.Quests -> {
                         val qid = selectedQuestId
                         if (qid == null)
@@ -9971,7 +10167,9 @@ private fun JournalPanel() {
                             JournalQuestDetail(
                                 questId = qid,
                                 entries = state.journalEntries.filter { it.questId == qid },
-                                onBack = { selectedQuestId = null }
+                                onBack = { selectedQuestId = null },
+                                topicNames = topicNames,
+                                onTopicLink = openTopic
                             )
                     }
                 }
@@ -10092,7 +10290,12 @@ private fun TopicLetterHeader(letter: String) {
 }
 
 @Composable
-private fun JournalTopicDetail(topic: TopicInfo, onBack: () -> Unit) {
+private fun JournalTopicDetail(
+    topic: TopicInfo,
+    onBack: () -> Unit,
+    topicNames: List<String>,
+    onTopicLink: (String) -> Unit
+) {
     Column(Modifier.fillMaxSize().mwPanel()) {
         // Back nav (matches the journal back-navigation style).
         Row(
@@ -10114,7 +10317,8 @@ private fun JournalTopicDetail(topic: TopicInfo, onBack: () -> Unit) {
                         fontFamily = MwBody, fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
                 }
-                Text(entry.text, color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                Text(journalAnnotated(entry.text, topicNames, onTopicLink),
+                    color = Bone, fontSize = 14.sp, fontFamily = MwBody,
                     lineHeight = 22.4.sp,
                     modifier = Modifier.padding(
                         start = 10.dp, end = 10.dp,
@@ -10150,7 +10354,11 @@ private fun JournalNavBar(left: String?, onLeft: (() -> Unit)?, center: String, 
 }
 
 @Composable
-private fun JournalChronological(entries: List<JournalEntry>) {
+private fun JournalChronological(
+    entries: List<JournalEntry>,
+    topicNames: List<String>,
+    onTopicLink: (String) -> Unit
+) {
     // Each day fills one column. Two days per page (left = older, right = newer),
     // like an open book where each physical page holds one day.
     val pages = remember(entries) {
@@ -10176,9 +10384,11 @@ private fun JournalChronological(entries: List<JournalEntry>) {
         HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { pageIdx ->
             val pageDays = pages.getOrElse(pageIdx) { emptyList() }
             Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp)) {
-                JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.weight(1f))
+                JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.weight(1f),
+                    topicNames, onTopicLink)
                 Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-                JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.weight(1f))
+                JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.weight(1f),
+                    topicNames, onTopicLink)
             }
         }
 
@@ -10203,7 +10413,12 @@ private fun JournalChronological(entries: List<JournalEntry>) {
 }
 
 @Composable
-private fun JournalColumn(items: List<Pair<String?, JournalEntry?>>, modifier: Modifier) {
+private fun JournalColumn(
+    items: List<Pair<String?, JournalEntry?>>,
+    modifier: Modifier,
+    topicNames: List<String>,
+    onTopicLink: (String) -> Unit
+) {
     // verticalScroll lets long entries overflow cleanly rather than clip.
     Column(modifier.padding(horizontal = 6.dp).verticalScroll(rememberScrollState())) {
         items.forEach { (date, entry) ->
@@ -10212,7 +10427,8 @@ private fun JournalColumn(items: List<Pair<String?, JournalEntry?>>, modifier: M
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(top = 8.dp, bottom = 1.dp))
             } else if (entry != null) {
-                Text(entry.text, color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                Text(journalAnnotated(entry.text, topicNames, onTopicLink),
+                    color = Bone, fontSize = 14.sp, fontFamily = MwBody,
                     lineHeight = 18.sp,
                     modifier = Modifier.padding(bottom = 4.dp))
             }
@@ -10276,7 +10492,13 @@ private fun JournalQuestList(
 }
 
 @Composable
-private fun JournalQuestDetail(questId: String, entries: List<JournalEntry>, onBack: () -> Unit) {
+private fun JournalQuestDetail(
+    questId: String,
+    entries: List<JournalEntry>,
+    onBack: () -> Unit,
+    topicNames: List<String>,
+    onTopicLink: (String) -> Unit
+) {
     val title = entries.firstOrNull()?.let { questDisplayName(it) } ?: prettifyQuestId(questId)
     Column(Modifier.fillMaxSize().mwPanel()) {
         JournalNavBar(left = "Quests", onLeft = onBack, center = title, right = null, onRight = null)
@@ -10286,7 +10508,8 @@ private fun JournalQuestDetail(questId: String, entries: List<JournalEntry>, onB
                 Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
-                Text(entry.text, color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                Text(journalAnnotated(entry.text, topicNames, onTopicLink),
+                    color = Bone, fontSize = 14.sp, fontFamily = MwBody,
                     lineHeight = 20.sp,
                     modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp))
             }
@@ -11605,6 +11828,9 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
         // SCREEN LAYOUT: which screen each element is drawn on.
         item { CollapsibleSection(SECTION_SCREEN_LAYOUT) }
         if (OptionsSectionState.isExpanded(SECTION_SCREEN_LAYOUT)) {
+            // Typeface for both screens. First because it restyles everything at once, where the
+            // rest of this section moves individual elements between screens.
+            item { GameFontRow() }
             // One cross-cutting switch (Classic grid / Shelf) for ALL two-panel item screens
             // (looting, pickpocket, barter). Sits above the per-element location rows.
             item { InventoryLayoutRow() }
@@ -12149,6 +12375,48 @@ private fun AdaptiveDimOverlay() {
                 .zIndex(40f)
                 .background(Color.Black.copy(alpha = alpha))
         )
+    }
+}
+
+// Game font — render the companion and the DS overlays in the game's own typeface instead of the
+// Android system serif/monospace. First row of "DS Screen Layout" because it is the broadest
+// visual change on that page: it restyles every text site on both screens at once, where every
+// other row there moves one element around.
+//
+// The face is MysticCards (OpenMW's SIL-OFL Magic Cards replacement, already in the APK) — see
+// GameFont.kt for why Morrowind's own bitmap font cannot be used here. The subtitle says
+// "game's font" rather than naming it: to a player it IS the game's font, and "MysticCards" would
+// mean nothing on a settings page.
+//
+// Deliberately does NOT restyle this options menu — it is hosted in its own window with no font
+// provider, so this switch stays legible in a known typeface and can always be turned back off.
+@Composable
+private fun GameFontRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.vanillaFontFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Game Font", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Use the game's font for the companion screens and DS overlays. This menu is unchanged.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setVanillaFont(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setVanillaFont(context, false) }
+        }
     }
 }
 
@@ -12755,6 +13023,11 @@ private fun DeveloperActionsPanel() {
             description = "Sets all eight attributes to 100 and clears any damage to them.",
             button = "Max All Attributes"
         ) { CompanionActions.devMaxAttributes() }
+        DevActionButton(
+            title = "Skills",
+            description = "Sets all 27 skills to 100 and clears any damage to them.",
+            button = "Max All Skills"
+        ) { CompanionActions.devMaxSkills() }
         // Two deliberately different level buttons — the difference is the whole point of having
         // both, so each description says plainly what it skips or shows.
         DevActionButton(
@@ -12808,8 +13081,16 @@ private fun DeveloperActionsPanel() {
         ) { CompanionActions.devStackEffects() }
 
         DevSectionLabel("World")
+        // The two ends of the clock, mainly for exercising lighting-dependent behaviour such as
+        // adaptive dimming. Titled by the time rather than both being "Time of day", so the two
+        // rows are told apart by their heading and not only by their button text.
         DevActionButton(
-            title = "Time of day",
+            title = "Daytime",
+            description = "Sets the in-game clock to midday.",
+            button = "Set Day Time"
+        ) { CompanionActions.devSetDay() }
+        DevActionButton(
+            title = "Night-time",
             description = "Sets the in-game clock to 10 PM.",
             button = "Set Night Time"
         ) { CompanionActions.devSetNight() }

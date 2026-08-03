@@ -1975,11 +1975,19 @@ end
 local DEV_GOLD_AMOUNT = 100000
 local DEV_MAX_VITAL = 99999
 local DEV_ATTRIBUTE_CAP = 100
+-- Vanilla's ordinary skill ceiling. Kept separate from the attribute cap even though both are
+-- currently 100 — they are different game concepts and one could be retuned without the other.
+local DEV_SKILL_CAP = 100
 local DEV_SET_LEVEL = 20
 -- NpcStats::getLevelupAttributeMultiplier does min(10, count) to pick iLevelUp<NN>Mult, so 10 is
 -- the top tier (x5 in vanilla). Without this every attribute on the level-up screen reads x1.
 local DEV_SKILL_INCREASES = 10
 -- How many spells each of the two magic buttons grabs, and how many items the bulk button adds.
+-- Clock settings for the two time-of-day buttons. Midday and late evening, i.e. unambiguously
+-- lit and unambiguously dark — these exist mainly to exercise lighting-dependent behaviour such
+-- as adaptive dimming, so the two ends matter more than the exact hours.
+local DEV_DAY_HOUR = 12
+local DEV_NIGHT_HOUR = 22
 local DEV_SPELLKIT_PER_SCHOOL = 2
 local DEV_STACK_EFFECT_COUNT = 12
 local DEV_BULK_PER_TYPE = 6
@@ -2186,6 +2194,21 @@ local function devDispatch(action)
         end
         emit("COMPANION_DEBUG: dev max attributes")
 
+    elseif action == "maxskills" then
+        -- Same shape as maxattributes: .base is the trained value and .damage is separate
+        -- (drain/absorb), so both have to be written for the skill to actually read 100.
+        -- SKILL_IDS is the same list the stats export walks, so this covers exactly the skills
+        -- the Stats screen shows. Each write is pcall'd individually — a single unexpected id
+        -- must not abort the other 26.
+        for _, skillId in ipairs(SKILL_IDS) do
+            pcall(function()
+                local stat = types.NPC.stats.skills[skillId](self)
+                stat.base = DEV_SKILL_CAP
+                stat.damage = 0
+            end)
+        end
+        emit("COMPANION_DEBUG: dev max skills")
+
     elseif action == "god" then
         if debugApi then
             pcall(function() debugApi.toggleGodMode() end)
@@ -2237,12 +2260,13 @@ local function devDispatch(action)
     elseif action == "bulkitems" then
         devBulkItems()
 
-    elseif action == "night" then
+    elseif action == "day" or action == "night" then
         -- Global variables are global-script-only. Writing 'gamehour' routes through
         -- World::setGlobalFloat -> DateTimeManager::updateGlobalFloat -> setHour, i.e. the exact
         -- same path the console's "set gamehour to 22" takes.
-        core.sendGlobalEvent('CompanionDevSetHour', { hour = 22 })
-        emit("COMPANION_DEBUG: dev set night")
+        local hour = (action == "day") and DEV_DAY_HOUR or DEV_NIGHT_HOUR
+        core.sendGlobalEvent('CompanionDevSetHour', { hour = hour })
+        emit("COMPANION_DEBUG: dev set " .. action .. " (hour " .. hour .. ")")
 
     else
         -- dev_resurrect never reaches Lua (intercepted natively in drainCompanionCommands).

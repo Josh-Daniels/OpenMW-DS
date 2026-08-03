@@ -66,6 +66,7 @@ object GameFilesPreferences {
     // Which launcher home screen MainActivity renders: false = the Alpha3 launcher (default,
     // existing behaviour), true = the simplified OpenMW-DS launcher.
     val SIMPLIFIED_LAUNCHER_KEY = booleanPreferencesKey("simplified_launcher")
+    val LAUNCHER_GAME_FONT_KEY = booleanPreferencesKey("launcher_game_font")
     // Version of the update whose home-screen banner the user dismissed, e.g. "0.9.0".
     // Deliberately stores the VERSION STRING rather than a boolean: dismissing the banner for
     // 0.9.0 must not also suppress it once 0.10.0 appears. Absent/empty = never dismissed.
@@ -362,6 +363,25 @@ object GameFilesPreferences {
     fun loadSimplifiedLauncher(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
             preferences[SIMPLIFIED_LAUNCHER_KEY] ?: true  // simplified launcher by default
+        }
+    }
+
+    /** Use the game's typeface (MysticCards) for the SIMPLIFIED launcher, and persist. Applies to
+     *  that launcher only — the Alpha3 launcher is deliberately untouched, as with every other
+     *  simplified-launcher change. */
+    suspend fun saveLauncherGameFont(context: Context, enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[LAUNCHER_GAME_FONT_KEY] = enabled
+        }
+    }
+
+    /** Whether the simplified launcher uses the game's typeface. Defaults to true — it is the
+     *  intended look, matching the companion screens, and the setting exists to turn it OFF. Keep
+     *  every `collectAsState(initial = true)` call site in step with this fallback, so an unset
+     *  preference never flashes the wrong font for a frame. */
+    fun loadLauncherGameFont(context: Context): Flow<Boolean> {
+        return context.dataStore.data.map { preferences ->
+            preferences[LAUNCHER_GAME_FONT_KEY] ?: true  // game font by default
         }
     }
 

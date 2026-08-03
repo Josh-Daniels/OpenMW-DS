@@ -186,6 +186,7 @@ object CompanionActions {
     fun devMaxFatigue() = dev("maxfatigue")
 
     fun devMaxAttributes() = dev("maxattributes")
+    fun devMaxSkills() = dev("maxskills")
     fun devToggleGodMode() = dev("god")
     fun devToggleNoclip() = dev("noclip")
     fun devSetLevel20() = dev("setlevel20")
@@ -194,6 +195,7 @@ object CompanionActions {
     fun devStackEffects() = dev("stackeffects")
     fun devAddRegressionKit() = dev("regressionkit")
     fun devAddBulkItems() = dev("bulkitems")
+    fun devSetDay() = dev("day")
     fun devSetNight() = dev("night")
 
     /** Revive the player after death. Native-only (no Lua binding for MechanicsManager::resurrect);

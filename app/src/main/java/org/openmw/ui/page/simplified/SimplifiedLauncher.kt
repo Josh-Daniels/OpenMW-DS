@@ -59,6 +59,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -86,11 +87,17 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.Density
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
+import org.openmw.ui.theme.GAME_FONT_SIZE_SCALE
+import org.openmw.ui.theme.loadGameFont
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
@@ -304,8 +311,16 @@ private suspend fun importAlpha3ModOrder(viewModel: ModAssistantViewModel) {
 @Composable
 fun SimplifiedLauncherRoot() {
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
 
     BackHandler(enabled = showSettings) { showSettings = false }
+
+    // Game typeface, defaulting ON so this launcher matches the companion screens out of the box.
+    // Remembered before collecting — an inline accessor returns a new Flow each composition and
+    // would restart the DataStore subscription every time (see the note on the home screen's flows).
+    val gameFontFlow = remember(context) { GameFilesPreferences.loadLauncherGameFont(context) }
+    val useGameFont by gameFontFlow.collectAsState(initial = true)
+    val gameFont = if (useGameFont) remember(context) { loadGameFont(context) } else null
 
     // Scoped colour override rather than edits to shared code. The Settings.cfg editor's switches
     // (`IniSettingItem`: checkedThumb = colorScheme.primary, checkedTrack = primaryContainer), its
@@ -314,6 +329,10 @@ fun SimplifiedLauncherRoot() {
     // instead of recolouring them there (which would recolour Alpha3 too), this re-themes only what
     // is composed inside the simplified launcher. Any Material component drawn here picks up the
     // bronze automatically, including ones added later.
+    // The font rides the SAME scoped MaterialTheme as the colours, for the same reason: it reaches
+    // every Material component composed inside this launcher — including the shared Settings.cfg
+    // editor's labels, switches and section titles — without touching IniAssistant.kt and therefore
+    // without changing the Alpha3 launcher, which keeps the system font.
     MaterialTheme(
         colorScheme = MaterialTheme.colorScheme.copy(
             primary = MwBronzeLight,          // switch thumb, section titles, focused borders
@@ -321,8 +340,23 @@ fun SimplifiedLauncherRoot() {
             primaryContainer = MwBronzeDark,  // switch track when checked
             outline = MwBronzeDark,           // unchecked switch border
             surfaceVariant = MwSlotBg,        // unchecked switch track
-        )
+        ),
+        typography = if (gameFont == null) MaterialTheme.typography
+                     else MaterialTheme.typography.withFontFamily(gameFont)
     ) {
+        // Same size compensation the companion applies: MysticCards' lowercase and digits occupy
+        // much less of the em than the system serif (x-height 0.409 vs 0.536), so at an identical
+        // sp it reads a couple of points small. fontScale is text-only — `.dp` reads `density`,
+        // left untouched — so panels and paddings keep their sizes and only the glyphs grow.
+        val density = LocalDensity.current
+        val scaled = remember(density, gameFont) {
+            if (gameFont == null) density
+            else Density(density.density, density.fontScale * GAME_FONT_SIZE_SCALE)
+        }
+        CompositionLocalProvider(
+            LocalLauncherFont provides gameFont,
+            LocalDensity provides scaled
+        ) {
         Box(modifier = Modifier.fillMaxSize()) {
             // The SAME animated background the Alpha3 launcher draws (RootNavHost renders it behind
             // MainScreen). It honours the user's existing `background_animation` preference —
@@ -340,8 +374,50 @@ fun SimplifiedLauncherRoot() {
                 SimplifiedLauncherHome(onOpenSettings = { showSettings = true })
             }
         }
+        }
     }
 }
+
+/**
+ * The launcher's typeface for the current composition, or null for the Android system fonts.
+ * Provided once at [SimplifiedLauncherRoot]; read by [LauncherSerif] so the handful of explicitly
+ * styled headings follow the setting along with everything Material draws.
+ */
+private val LocalLauncherFont = compositionLocalOf<FontFamily?> { null }
+
+/**
+ * The launcher's display face. Mirrors the companion's `MwDisplay` role: the game font when the
+ * setting is on, otherwise the platform serif this launcher shipped with.
+ *
+ * A @Composable getter, so the existing `fontFamily = LauncherSerif` call sites need no other
+ * change — the same trick the companion uses for its three font roles.
+ */
+private val LauncherSerif: FontFamily
+    @Composable get() = LocalLauncherFont.current ?: FontFamily.Serif
+
+/**
+ * Every Material text style re-pointed at [family]. Compose has no single "set the theme font"
+ * switch — `Typography` carries an independent `TextStyle` per role — so each of the fifteen has to
+ * be copied. Only the family changes; sizes, weights and letter spacing are left exactly as the
+ * Material defaults, which is what keeps this a font swap rather than a restyle.
+ */
+private fun Typography.withFontFamily(family: FontFamily) = Typography(
+    displayLarge = displayLarge.copy(fontFamily = family),
+    displayMedium = displayMedium.copy(fontFamily = family),
+    displaySmall = displaySmall.copy(fontFamily = family),
+    headlineLarge = headlineLarge.copy(fontFamily = family),
+    headlineMedium = headlineMedium.copy(fontFamily = family),
+    headlineSmall = headlineSmall.copy(fontFamily = family),
+    titleLarge = titleLarge.copy(fontFamily = family),
+    titleMedium = titleMedium.copy(fontFamily = family),
+    titleSmall = titleSmall.copy(fontFamily = family),
+    bodyLarge = bodyLarge.copy(fontFamily = family),
+    bodyMedium = bodyMedium.copy(fontFamily = family),
+    bodySmall = bodySmall.copy(fontFamily = family),
+    labelLarge = labelLarge.copy(fontFamily = family),
+    labelMedium = labelMedium.copy(fontFamily = family),
+    labelSmall = labelSmall.copy(fontFamily = family),
+)
 
 /**
  * The simplified launcher's home screen. Landscape (top screen, 16:9): a row of setup actions,
@@ -412,7 +488,8 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         // Screen heading, styled to match the companion UI's own "OpenMW-DS" title:
-        // CompanionScreen's `MwDisplay` font role + Bold. MwDisplay resolves to FontFamily.Serif
+        // CompanionScreen's `MwDisplay` font role + Bold. LauncherSerif follows the Game font
+        // setting, resolving to the game typeface or the platform serif
         // and is `private` to CompanionScreen.kt (as is its BronzeLight palette), so this mirrors
         // the value rather than importing it — the companion's typography is deliberately not
         // modified to widen visibility. Colour is MwBronzeLight — the same bronze the companion
@@ -421,7 +498,7 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
             text = stringResource(R.string.simplified_launcher_title),
             color = MwBronzeLight,
             fontSize = 28.sp,
-            fontFamily = FontFamily.Serif,
+            fontFamily = LauncherSerif,
             fontWeight = FontWeight.Bold,
             modifier = Modifier
                 .align(Alignment.CenterHorizontally)
@@ -1005,6 +1082,10 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
     val simplifiedLauncherFlow =
         remember(context) { GameFilesPreferences.loadSimplifiedLauncher(context) }
     val simplifiedLauncher by simplifiedLauncherFlow.collectAsState(initial = true)
+    // Same remember-then-collect shape; `initial = true` matches the store's own default so the
+    // switch never shows the wrong position for a frame.
+    val gameFontFlow = remember(context) { GameFilesPreferences.loadLauncherGameFont(context) }
+    val launcherGameFont by gameFontFlow.collectAsState(initial = true)
     var showResetDialog by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var confirmModOrder by rememberSaveable { mutableStateOf(false) }
@@ -1092,7 +1173,7 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                         text = stringResource(R.string.simplified_transfer_from_alpha3),
                         color = MwBronzeLight,
                         fontSize = 16.sp,
-                        fontFamily = FontFamily.Serif,
+                        fontFamily = LauncherSerif,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(bottom = 6.dp)
                     )
@@ -1130,7 +1211,7 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                     text = stringResource(R.string.openmw_settings),
                     color = MwBronzeLight,
                     fontSize = 16.sp,
-                    fontFamily = FontFamily.Serif,
+                    fontFamily = LauncherSerif,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
@@ -1147,6 +1228,26 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
 
             HorizontalDivider(
                 modifier = Modifier.padding(vertical = 12.dp),
+                color = MwBronzeDark
+            )
+
+            // Game font — above the launcher toggle, since it changes THIS launcher's appearance
+            // while the toggle leaves it entirely. Applies to the simplified launcher only; the
+            // Alpha3 launcher keeps the system font either way.
+            SettingRow(
+                title = stringResource(R.string.launcher_game_font),
+                subtitle = stringResource(R.string.launcher_game_font_tip)
+            ) {
+                Switch(
+                    checked = launcherGameFont,
+                    onCheckedChange = {
+                        scope.launch { GameFilesPreferences.saveLauncherGameFont(context, it) }
+                    }
+                )
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 8.dp),
                 color = MwBronzeDark
             )
 
@@ -1312,7 +1413,7 @@ private fun ColumnScope.UpdatesCard() {
             text = stringResource(R.string.updates_title),
             color = MwBronzeLight,
             fontSize = 16.sp,
-            fontFamily = FontFamily.Serif,
+            fontFamily = LauncherSerif,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(bottom = 2.dp)
         )

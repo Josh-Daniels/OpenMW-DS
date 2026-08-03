@@ -144,6 +144,8 @@
     <string name="reset_settings">Reset Settings</string>
     <string name="use_simplified_launcher">Use simplified launcher</string>
     <string name="use_simplified_launcher_tip">Switch to the streamlined OpenMW-DS launcher. You can switch back from its settings screen at any time.</string>
+    <string name="launcher_game_font">Use game font</string>
+    <string name="launcher_game_font_tip">Show this launcher in the game\'s font, matching the companion screens. Turn off for the standard system font.</string>
     <string name="simplified_launcher_title">OpenMW-DS</string>
     <string name="simplified_launcher_settings_title">Settings</string>
     <string name="simplified_launcher_more_coming">More settings are coming to this screen.</string>

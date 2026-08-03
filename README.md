@@ -121,6 +121,12 @@ OpenMW-DS is its own app (you can have alpha 3 installed separately if you like,
 - **[Alpha3](https://gitlab.com/duron27/alpha3)** (Jared Davenport / duron27) - the multi-engine launcher (OpenMW, UQM,
   Dethrace) with native haptics and a Compose UI customization system that this project is directly forked from. Many of
   Alpha3's OpenMW-specific improvements build on the Sisah2 lineage above.
+- **MysticCards** (OpenMW Team, derived from **[Pelagiad](https://isaskar.github.io/Pelagiad/)** by Isak Larborn) - the
+  typeface used for the companion screens, the DS overlays and the launcher. Bundled with OpenMW and licensed under the
+  [SIL Open Font License 1.1](https://scripts.sil.org/OFL); the full licence ships with the app at
+  `resources/vfs/fonts/MysticCardsFontLicense.txt`. Note this is *not* Morrowind's own font - that stays in your Data
+  Files and is never copied or redistributed. The bundled **DemonicLetters** (also OFL) and **DejaVu Sans Mono** fonts
+  come from OpenMW on the same terms, with their licences alongside.
 
 ---
 # Building from Source (For Developers)

@@ -2,11 +2,9 @@ TODO bugs & updates:
 
 Bug with bartering for max amount.
 Choosing custom class could use controller support.
-Investigate using original game font
 + or - for bartering
 More favourites
 Quick save bottom screen?
-A to play game still not working. Maybe a skip launcher option in options?
 
 Updates:
 - Set up DS screen for Level up, alchemy, enchanting, spellmaking

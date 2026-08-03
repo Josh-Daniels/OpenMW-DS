@@ -179,6 +179,7 @@ object UiPreferences {
     private const val HIDE_EQUIPPED_BAR = "hide_equipped_bar"
     private const val SHOW_EQUIPPED_IN_LIST = "show_equipped_in_list"
     private const val ADAPTIVE_DIMMING = "adaptive_dimming"
+    private const val VANILLA_FONT = "vanilla_font"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
@@ -259,6 +260,17 @@ object UiPreferences {
     // ambient-luminance signal (GameStateRepository.ambientLuminance); purely a translucent black
     // overlay — it never touches the device's real screen brightness. Default true (on).
     private val adaptiveDimmingFlow = MutableStateFlow(true)
+
+    // Whether the companion + DS overlays render in the game's own typeface instead of the Android
+    // system serif/monospace. The face is MysticCards.ttf — OpenMW's SIL-OFL replacement for
+    // Morrowind's Magic Cards, already bundled in the APK under
+    // assets/libopenmw/resources/vfs/fonts/. NOT Morrowind's own font: that ships as a fixed 16 px
+    // BITMAP atlas (.fnt + .tex), which cannot be an Android font resource at all, and which the
+    // bottom screen would have to enlarge (a 14 sp line is 32 px at this 369 dpi panel) — so the
+    // TTF lookalike is both the only practical option and the sharper one. Default TRUE: matching
+    // the game's own typeface is the intended look, so it is on out of the box and the switch
+    // exists to turn it OFF.
+    private val vanillaFontFlow = MutableStateFlow(true)
 
     // Whether the Developer Tools action panel (add gold, max stats, god mode, …) is shown. These
     // are cheats and can change a save in ways normal play cannot, so this gates them behind a
@@ -367,6 +379,7 @@ object UiPreferences {
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
         showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
         adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
+        vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         p.getString(LOOTING_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
@@ -567,6 +580,17 @@ object UiPreferences {
     fun setAdaptiveDimming(context: Context, enabled: Boolean) {
         adaptiveDimmingFlow.value = enabled
         editor(context).putBoolean(ADAPTIVE_DIMMING, enabled).apply()
+    }
+
+    /** Whether the companion + DS overlays use the game's typeface (MysticCards) instead of the
+     *  Android system serif/monospace. Deliberately NOT read by the options menu, which stays on
+     *  the system fonts so this switch can always be found and turned back off. */
+    fun vanillaFontFlow(): StateFlow<Boolean> = vanillaFontFlow.asStateFlow()
+
+    /** Set whether the game typeface is used and persist. */
+    fun setVanillaFont(context: Context, enabled: Boolean) {
+        vanillaFontFlow.value = enabled
+        editor(context).putBoolean(VANILLA_FONT, enabled).apply()
     }
 
     /** Whether the Developer Tools action panel (cheats / test helpers) is shown. */
