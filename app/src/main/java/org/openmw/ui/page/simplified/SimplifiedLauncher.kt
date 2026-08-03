@@ -83,8 +83,10 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
@@ -149,6 +151,13 @@ import java.io.File
  *  when the file actually changed. */
 private const val CFG_SETTLE_ATTEMPTS = 10
 private const val CFG_SETTLE_DELAY_MS = 200L
+
+/** Bounded retry for giving the Play button initial focus, so the controller's confirm button
+ *  starts the game on the FIRST press. One pass is the normal case — the retry only covers a
+ *  cold-start race with the window settling. Deliberately small: if focus is still refused after
+ *  this, something structural is wrong and looping longer would only hide it. */
+private const val PLAY_FOCUS_ATTEMPTS = 3
+private const val PLAY_FOCUS_RETRY_MS = 100L
 
 /** Width of the centred mod load-order card, as a fraction of the screen. The action row and Play
  *  button stay full width — only this middle panel narrows. */
@@ -558,14 +567,61 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
         // overriding us. So wait for the window to actually be focused and request after that.
         // Re-requesting on each window-focus gain is deliberate: it also re-selects Play when
         // returning from the game or the settings screen.
+        //
+        // TOUCH MODE is the reason the two earlier attempts at this failed, and it is why the
+        // input-mode request below is load-bearing rather than defensive:
+        //  - The app is opened by TAPPING its icon, so the window starts in Android touch mode.
+        //  - Material3's Button is built on Modifier.clickable, which registers its focus target
+        //    as `Focusability.SystemDefined` — defined as `canFocus = inputMode != InputMode.Touch`
+        //    (Focusability.kt). In touch mode the button is therefore not focusable AT ALL, and
+        //    `requestFocus()` is refused no matter how correctly it is timed.
+        //  - The refusal is SILENT: requestFocus() reports it in its RETURN VALUE, so the previous
+        //    `runCatching { … }.isSuccess` logged ok=true (only an exception would have made it
+        //    false) and the feature looked wired up while nothing was ever focused.
+        //  - The observed symptom followed from Android, not from us: with nothing focused, the
+        //    first confirm press was swallowed by ViewRootImpl leaving touch mode and assigning
+        //    default focus (checkForLeavingTouchModeAndConsume -> restoreDefaultFocus), which
+        //    landed on "Select game files"; the second press then activated THAT button. Only once
+        //    its dialog had been dismissed — by which point the system was out of touch mode, so
+        //    Play was focusable — did the window-focus request below finally take, which is why
+        //    Play appeared selected on the third press.
+        // Requesting InputMode.Keyboard leaves touch mode (AndroidComposeView maps it to
+        // View.requestFocusFromTouch(), which calls ViewRootImpl.ensureTouchMode(false)), so the
+        // Button becomes focusable and the FIRST press activates Play. It must come BEFORE the
+        // focus request: leaving touch mode itself assigns default focus to the first focusable,
+        // and we want the last word.
         val windowInfo = LocalWindowInfo.current
+        val inputModeManager = LocalInputModeManager.current
         LaunchedEffect(playPlaced, playEnabled, windowInfo) {
             if (!playPlaced || !playEnabled) return@LaunchedEffect
             snapshotFlow { windowInfo.isWindowFocused }.collect { hasWindowFocus ->
-                if (hasWindowFocus) {
-                    val ok = runCatching { playFocus.requestFocus() }.isSuccess
-                    Log.d("SimplifiedLauncher", "Play focus requested (window focused), ok=$ok")
+                if (!hasWindowFocus) return@collect
+                // Bounded retry, because the request can legitimately lose a race with the
+                // window/layout settling on a cold start. It stops as soon as focus is granted, so
+                // the normal path is a single pass. runCatching still guards the "FocusRequester is
+                // not initialized" throw (the node can go away between placement and this call) —
+                // but the GRANTED result is now read from the return value, not inferred from the
+                // absence of an exception.
+                var attempt = 0
+                var granted = false
+                while (!granted && attempt < PLAY_FOCUS_ATTEMPTS) {
+                    val keyboardMode = inputModeManager.requestInputMode(InputMode.Keyboard)
+                    granted = runCatching { playFocus.requestFocus() }.getOrDefault(false)
+                    attempt++
+                    if (!granted) {
+                        Log.d(
+                            "SimplifiedLauncher",
+                            "Play focus refused (attempt $attempt, keyboardMode=$keyboardMode, " +
+                                "inputMode=${inputModeManager.inputMode}); retrying"
+                        )
+                        delay(PLAY_FOCUS_RETRY_MS)
+                    }
                 }
+                Log.d(
+                    "SimplifiedLauncher",
+                    "Play focus granted=$granted after $attempt attempt(s), " +
+                        "inputMode=${inputModeManager.inputMode}"
+                )
             }
         }
 
