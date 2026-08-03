@@ -51,6 +51,9 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
 ## Installation (updated for v0.8.6 or higher)
 You will first need a copy of Morrowind on the device. Best downloaded from a PC then transferred to the Thor. You will need the entire Morrowind folder, not just the Data Files folder.
 
+### Upgrading from 0.8.6+
+- You can download and install in the launcher! Or you could follow instructions for 0.7.5+.
+
 ### Upgrading from OpenMW-DS versions 0.7.5 or newer.
 - Download the APK from Releases page and install the app.
 - Check that your esm files and mods are listed on the new home page. If not showing, follow the first time install guide below.
