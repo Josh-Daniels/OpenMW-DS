@@ -137,6 +137,9 @@ import kotlinx.coroutines.withContext
 import org.openmw.utils.GameFilesPreferences
 import java.io.File
 import java.nio.ByteBuffer
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
@@ -10412,12 +10415,42 @@ private fun JournalChronological(
     Column(Modifier.fillMaxSize().mwPanel()) {
         HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { pageIdx ->
             val pageDays = pages.getOrElse(pageIdx) { emptyList() }
-            Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp)) {
-                JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.weight(1f),
-                    topicNames, onTopicLink)
+            val offset = remember(pageIdx) { { pagerState.getOffsetDistanceInPages(pageIdx) } }
+            // Every spread is STACKED on the same rect (the graphicsLayer below cancels the pager's
+            // slide), so the two pages in play overlap exactly and only the turning leaf moves.
+            // Draw order therefore matters: the leaf must sit above the flat page it is uncovering
+            // (first half of the turn) or burying (second half). The page nearer its settled
+            // position is always the one holding the leaf, so "closest to settled draws on top" is
+            // the whole rule. derivedStateOf keeps this to ONE recomposition per turn — it flips at
+            // the halfway point, exactly when both leaves are edge-on and the swap can't be seen.
+            val onTop by remember(pageIdx) {
+                derivedStateOf { abs(pagerState.getOffsetDistanceInPages(pageIdx)) < 0.5f }
+            }
+            Row(
+                Modifier
+                    .fillMaxSize()
+                    .zIndex(if (onTop) 1f else 0f)
+                    .graphicsLayer {
+                        val off = offset()
+                        // Cancel the pager's slide so the book never travels sideways; the turn is
+                        // carried entirely by the leaf. Draw phase, so dragging costs no layout.
+                        translationX = -off * size.width
+                        // A page a full turn away is off-viewport in the pager's own layout, so it
+                        // must not linger on the stack.
+                        alpha = if (abs(off) >= 1f) 0f else 1f
+                    }
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            ) {
+                JournalPageHalf(offset, spineAtRight = true, modifier = Modifier.weight(1f)) {
+                    JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.fillMaxSize(),
+                        topicNames, onTopicLink)
+                }
+                // The spine itself stays flat — it is the hinge the leaf swings from.
                 Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-                JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.weight(1f),
-                    topicNames, onTopicLink)
+                JournalPageHalf(offset, spineAtRight = false, modifier = Modifier.weight(1f)) {
+                    JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.fillMaxSize(),
+                        topicNames, onTopicLink)
+                }
             }
         }
 
@@ -10438,6 +10471,96 @@ private fun JournalChronological(
                 }
             }
         }
+    }
+}
+
+// A leaf is exactly perpendicular to the page at the halfway point of a turn — that is geometry,
+// not taste, so it is not a tuning dial. It is named only to keep the intent readable below.
+private const val JOURNAL_LEAF_PERPENDICULAR = 90f
+// ---- Journal page-turn tuning dials (hand-tune on device; these are starting points) ----
+// Perspective strength (multiplied by density). LOWER = more extreme foreshortening. Compose's
+// default is 8dp; a bit further back keeps the leaf from ballooning as it swings past the reader.
+private const val JOURNAL_LEAF_CAMERA_DP = 14f
+// Peak darkness of the crease shadow at the spine, reached when the leaf stands perpendicular.
+private const val JOURNAL_LEAF_SHADE_ALPHA = 0.5f
+// Fraction of the half's width the crease shadow reaches before fading out.
+private const val JOURNAL_LEAF_SHADE_SPREAD = 0.55f
+
+/**
+ * One half of a journal spread — either the flat page lying in the book, or the leaf being turned.
+ * Which one it is depends on the sign of [offset], so a half swaps roles without any extra state.
+ *
+ * A real turn moves ONE leaf whose two faces belong to DIFFERENT spreads: turning forward, the
+ * front face is the outgoing spread's right column and the back face is the incoming spread's left
+ * column. Those live in different pager pages, so the leaf is built from two half-rotations that
+ * hand over at the perpendicular, where both are edge-on and the seam is invisible:
+ *
+ *  - the RIGHT half rotates 0° → -90° while its page is being left behind (offset < 0),
+ *  - the LEFT half rotates +90° → 0° while its page is arriving (offset > 0),
+ *  - on the other side of zero each half is the flat page underneath and does not rotate at all.
+ *
+ * Both use the SAME unmirrored `offset * 180` — the mirrored signs of the first attempt are exactly
+ * what made the right column appear to bend backwards while the left column fell correctly.
+ *
+ * Everything here is draw-phase: [offset] is read only inside `graphicsLayer`'s and `drawBehind`'s
+ * lambdas, so a drag invalidates draw alone. Composition (and therefore each column's scroll state
+ * and `journalAnnotated`'s topic-scan memo) is untouched.
+ */
+@Composable
+private fun JournalPageHalf(
+    offset: () -> Float,
+    spineAtRight: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    // Half a turn per face, so a face sweeps its full 90° over half the drag.
+    fun turnDegrees(off: Float): Float =
+        (if (spineAtRight) off.coerceAtLeast(0f) else off.coerceAtMost(0f)) * 180f
+    // Pages are stacked, so a half must be opaque or the spread beneath reads through it. Matches
+    // the panel it sits in, including the top-screen opacity setting.
+    val pageFill = StonePanel.copy(alpha = LocalPanelOpacity.current)
+    Box(
+        modifier
+            .fillMaxHeight()
+            .graphicsLayer {
+                val turn = turnDegrees(offset())
+                rotationY = turn.coerceIn(-JOURNAL_LEAF_PERPENDICULAR, JOURNAL_LEAF_PERPENDICULAR)
+                // Past perpendicular this face has turned away and the OTHER page's half is
+                // showing the leaf instead.
+                alpha = if (abs(turn) > JOURNAL_LEAF_PERPENDICULAR) 0f else 1f
+                cameraDistance = JOURNAL_LEAF_CAMERA_DP * density
+                // Hinge on the spine edge: right edge of the left half, left edge of the right half.
+                transformOrigin = TransformOrigin(if (spineAtRight) 1f else 0f, 0.5f)
+                // Clip to its own rect BEFORE the rotation, so a turning leaf can never paint
+                // across the spine into the other half.
+                clip = true
+            }
+            .background(pageFill)
+    ) {
+        content()
+        // Crease shadow, drawn OVER the text (later child wins) and fading outward from the spine.
+        // drawBehind on an empty Box keeps this in the draw phase alongside the rotation.
+        Box(
+            Modifier.matchParentSize().drawBehind {
+                val f = abs(turnDegrees(offset())) / JOURNAL_LEAF_PERPENDICULAR
+                if (f <= 0.001f) return@drawBehind      // flat page: no shading, no cost
+                val shade = Color.Black.copy(
+                    alpha = f.coerceAtMost(1f) * JOURNAL_LEAF_SHADE_ALPHA
+                )
+                val reach = size.width * JOURNAL_LEAF_SHADE_SPREAD
+                drawRect(
+                    if (spineAtRight)
+                        Brush.horizontalGradient(
+                            listOf(Color.Transparent, shade),
+                            startX = size.width - reach, endX = size.width
+                        )
+                    else
+                        Brush.horizontalGradient(
+                            listOf(shade, Color.Transparent), startX = 0f, endX = reach
+                        )
+                )
+            }
+        )
     }
 }
 
