@@ -1250,7 +1250,6 @@ local function exportJournal()
         local entries = j.journalTextEntries
         local count = #entries
         if count == journalExportedCount then return end
-        journalExportedCount = count
 
         emit('COMPANION_JOURNAL_START:' .. count)
         for i = 1, count do
@@ -1270,6 +1269,12 @@ local function exportJournal()
             end
         end
         emit('COMPANION_JOURNAL_END:' .. count)
+        -- Marked exported only AFTER the closing END is away. The Kotlin side only commits the
+        -- batch on END (it buffers from START), so recording the count up-front meant a batch lost
+        -- part-way left the app showing the previous journal with the tick convinced it was current
+        -- — no retry until the entry count happened to change again. Now a throw anywhere above
+        -- leaves the count stale and the next tick redoes the whole export.
+        journalExportedCount = count
     end)
     if not ok then
         emit("COMPANION_DEBUG: journal error: " .. tostring(err))

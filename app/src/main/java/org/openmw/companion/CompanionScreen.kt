@@ -10092,11 +10092,24 @@ private fun SpellRow(
 // JournalTab.entries renders TOPICS | JOURNAL | QUESTS in order.
 private enum class JournalTab { Topics, Journal, Quests }
 
+// COMPANION_JOURNAL_ENTRY's "m" is 1-based: the Lua binding returns mMonth + 1
+// (mwlua/types/player.cpp), so subtract before indexing.
 private fun morrowindMonthName(month: Int): String = listOf(
     "Morning Star", "Sun's Dawn", "First Seed", "Rain's Hand",
     "Second Seed", "Midyear", "Sun's Height", "Last Seed",
     "Hearthfire", "Frostfall", "Sun's Dusk", "Evening Star"
 ).getOrElse(month - 1) { "Month $month" }
+
+/**
+ * Date stamp for a journal entry, matching the in-game journal verbatim:
+ * "16 Last Seed (Day 1)". The engine builds the same string in
+ * JournalViewModelImpl::timestamp() (journalviewmodel.cpp) from mDayOfMonth /
+ * getMonthName(mMonth) / mDay, where mDay is the DaysPassed global — exactly the
+ * three fields this entry carries. "Day" is the sDay GMST engine-side; hardcoded
+ * here for the same reason morrowindMonthName's names are.
+ */
+private fun journalDateLabel(entry: JournalEntry): String =
+    "${entry.dayOfMonth} ${morrowindMonthName(entry.month)} (Day ${entry.day})"
 
 @Composable
 private fun JournalPanel() {
@@ -10361,13 +10374,18 @@ private fun JournalChronological(
 ) {
     // Each day fills one column. Two days per page (left = older, right = newer),
     // like an open book where each physical page holds one day.
+    //
+    // GROUPED BY entry.day (the DaysPassed global), NOT by the printed date. dayOfMonth+month
+    // repeat every in-game year, so keying on the label merged year 2's entries into year 1's
+    // bucket: past the anniversary of the first entry no NEW page was ever created again and the
+    // journal looked permanently frozen on its last page, with new entries silently appended to an
+    // old page near the front. day is monotonic, so it can't collide.
     val pages = remember(entries) {
-        val byDay = LinkedHashMap<String, MutableList<JournalEntry>>()
+        val byDay = LinkedHashMap<Int, Pair<String, MutableList<JournalEntry>>>()
         entries.forEach { e ->
-            val date = "${e.dayOfMonth} ${morrowindMonthName(e.month)}"
-            byDay.getOrPut(date) { mutableListOf() }.add(e)
+            byDay.getOrPut(e.day) { journalDateLabel(e) to mutableListOf() }.second.add(e)
         }
-        val dayCols = byDay.entries.map { (date, dayEntries) ->
+        val dayCols = byDay.values.map { (date, dayEntries) ->
             buildList<Pair<String?, JournalEntry?>> {
                 add(date to null)
                 dayEntries.forEach { add(null to it) }
@@ -10379,6 +10397,17 @@ private fun JournalChronological(
         initialPage = (pages.size - 1).coerceAtLeast(0),
         pageCount = { pages.size }
     )
+    // initialPage only applies when the state is first created, so a page added while the journal
+    // is already open would otherwise sit there unvisited (and unnoticed — the dot indicator just
+    // gains one 5dp dot). Follow the new page ONLY if the reader was already on the last one; if
+    // they've paged back to read something older, leave them there.
+    var knownPageCount by remember { mutableStateOf(pages.size) }
+    LaunchedEffect(pages.size) {
+        val previous = knownPageCount
+        knownPageCount = pages.size
+        if (pages.size > previous && pagerState.currentPage >= previous - 1)
+            pagerState.animateScrollToPage(pages.size - 1)
+    }
 
     Column(Modifier.fillMaxSize().mwPanel()) {
         HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { pageIdx ->
@@ -10504,7 +10533,7 @@ private fun JournalQuestDetail(
         JournalNavBar(left = "Quests", onLeft = onBack, center = title, right = null, onRight = null)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
             items(entries, key = { e -> "e:${e.day}:${e.dayOfMonth}:${e.text.length}" }) { entry ->
-                val date = "${entry.dayOfMonth} ${morrowindMonthName(entry.month)}"
+                val date = journalDateLabel(entry)
                 Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
