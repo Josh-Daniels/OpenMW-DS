@@ -179,6 +179,7 @@ object UiPreferences {
     private const val HIDE_EQUIPPED_BAR = "hide_equipped_bar"
     private const val SHOW_EQUIPPED_IN_LIST = "show_equipped_in_list"
     private const val ADAPTIVE_DIMMING = "adaptive_dimming"
+    private const val JOURNAL_PAGE_TURN = "journal_page_turn"
     private const val VANILLA_FONT = "vanilla_font"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
@@ -260,6 +261,12 @@ object UiPreferences {
     // ambient-luminance signal (GameStateRepository.ambientLuminance); purely a translucent black
     // overlay — it never touches the device's real screen brightness. Default true (on).
     private val adaptiveDimmingFlow = MutableStateFlow(true)
+
+    // Whether the journal's chronological view turns pages as a spine-hinged 3D leaf instead of the
+    // pager's plain horizontal slide. Purely visual — the two-column spread, the swipe gesture and
+    // the page grouping are identical either way. Default FALSE (plain slide): the flip is an
+    // effect, and a reading screen should default to the quietest thing that works.
+    private val journalPageTurnFlow = MutableStateFlow(false)
 
     // Whether the companion + DS overlays render in the game's own typeface instead of the Android
     // system serif/monospace. The face is MysticCards.ttf — OpenMW's SIL-OFL replacement for
@@ -379,6 +386,7 @@ object UiPreferences {
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
         showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
         adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
+        journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, false)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         p.getString(LOOTING_LOCATION, null)
@@ -580,6 +588,15 @@ object UiPreferences {
     fun setAdaptiveDimming(context: Context, enabled: Boolean) {
         adaptiveDimmingFlow.value = enabled
         editor(context).putBoolean(ADAPTIVE_DIMMING, enabled).apply()
+    }
+
+    /** Whether the journal's chronological view uses the spine-hinged page-turn animation. */
+    fun journalPageTurnFlow(): StateFlow<Boolean> = journalPageTurnFlow.asStateFlow()
+
+    /** Set whether the journal page-turn animation is enabled and persist. */
+    fun setJournalPageTurn(context: Context, enabled: Boolean) {
+        journalPageTurnFlow.value = enabled
+        editor(context).putBoolean(JOURNAL_PAGE_TURN, enabled).apply()
     }
 
     /** Whether the companion + DS overlays use the game's typeface (MysticCards) instead of the

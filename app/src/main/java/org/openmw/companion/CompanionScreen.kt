@@ -10412,9 +10412,26 @@ private fun JournalChronological(
             pagerState.animateScrollToPage(pages.size - 1)
     }
 
+    // The spine-hinged page turn is optional and OFF by default (Companion Tabs → "Journal Page
+    // Turn"). Off is the original plain pager slide — same spread, same swipe, same grouping; only
+    // the transition differs, so nothing outside the pager body branches on this.
+    val pageTurn by UiPreferences.journalPageTurnFlow().collectAsState()
+
     Column(Modifier.fillMaxSize().mwPanel()) {
         HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { pageIdx ->
             val pageDays = pages.getOrElse(pageIdx) { emptyList() }
+            if (!pageTurn) {
+                // Plain slide: the pager's own translation carries the whole spread sideways, so
+                // there is no stacking, no leaf, and no per-frame draw work at all.
+                Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp)) {
+                    JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.weight(1f),
+                        topicNames, onTopicLink)
+                    Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
+                    JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.weight(1f),
+                        topicNames, onTopicLink)
+                }
+                return@HorizontalPager
+            }
             val offset = remember(pageIdx) { { pagerState.getOffsetDistanceInPages(pageIdx) } }
             // Every spread is STACKED on the same rect (the graphicsLayer below cancels the pager's
             // slide), so the two pages in play overlap exactly and only the turning leaf moves.
@@ -12048,6 +12065,7 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
             item { InventoryTabStyleRow() }
             item { EquippedBarRow() }
             item { EquippedInListRow() }
+            item { JournalPageTurnRow() }
             item { AdaptiveDimmingRow() }
         }
         // "Spells Display" (Standard / Compact) removed — the compact spell list is now the only
@@ -12568,6 +12586,39 @@ private fun GameFontRow() {
                 active = !enabled,
                 enabled = true
             ) { UiPreferences.setVanillaFont(context, false) }
+        }
+    }
+}
+
+// Journal page turn — whether the chronological journal turns pages as a spine-hinged 3D leaf or
+// simply slides the next spread in. Purely a transition: the two-column spread, the swipe gesture
+// and the day grouping are identical either way. Default Off. "Companion Tabs" section.
+@Composable
+private fun JournalPageTurnRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.journalPageTurnFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Journal Page Turn", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Swipe the journal with a folding page instead of a plain slide.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setJournalPageTurn(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setJournalPageTurn(context, false) }
         }
     }
 }
