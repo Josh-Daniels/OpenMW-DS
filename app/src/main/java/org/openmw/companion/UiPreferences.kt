@@ -264,9 +264,11 @@ object UiPreferences {
 
     // Whether the journal's chronological view turns pages as a spine-hinged 3D leaf instead of the
     // pager's plain horizontal slide. Purely visual — the two-column spread, the swipe gesture and
-    // the page grouping are identical either way. Default FALSE (plain slide): the flip is an
-    // effect, and a reading screen should default to the quietest thing that works.
-    private val journalPageTurnFlow = MutableStateFlow(false)
+    // the page grouping are identical either way. **Default TRUE since Aug 9 2026**: it shipped OFF
+    // while the effect was unfinished (the leaf was visibly clipped by the panel), and was turned on
+    // by default once the overlay rewrite landed and it was approved on device. Change at BOTH this
+    // init and the getBoolean load fallback.
+    private val journalPageTurnFlow = MutableStateFlow(true)
 
     // Whether the companion + DS overlays render in the game's own typeface instead of the Android
     // system serif/monospace. The face is MysticCards.ttf — OpenMW's SIL-OFL replacement for
@@ -386,7 +388,7 @@ object UiPreferences {
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
         showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
         adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
-        journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, false)
+        journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, true)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         p.getString(LOOTING_LOCATION, null)

@@ -35,6 +35,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -75,6 +76,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -84,6 +86,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -203,6 +209,39 @@ private object DropdownState {
     var closeRequest by mutableStateOf(0)
     fun open() { anyOpen = true }
     fun closeAll() { anyOpen = false; closeRequest++ }
+}
+
+/**
+ * A pending "open this quest's journal page" request, raised by the HUD's followed-quest label and
+ * consumed by [JournalPanel] once the Journal tab is showing. Mirrors the DropdownState /
+ * QuantityRequestState global-holder pattern: the tab state lives in CompanionScreen and the quest
+ * sub-navigation lives inside JournalPanel, so a holder is cheaper than threading two callbacks
+ * down through MapPanel.
+ */
+private object JournalQuestNavState {
+    var questId by mutableStateOf<String?>(null)
+    fun request(id: String) { if (id.isNotEmpty()) questId = id }
+    /** Returns the pending quest id (if any) and clears it, so it fires exactly once. */
+    fun consume(): String? {
+        val q = questId
+        questId = null
+        return q
+    }
+}
+
+/**
+ * "Send the Journal back to its default view" request, raised by the BOTTOM tab bar's JOURNAL
+ * button. Needed because that button is the one case the panel can't detect on its own: switching
+ * to the Journal tab from elsewhere destroys and rebuilds JournalPanel (so its state is fresh
+ * anyway), but tapping JOURNAL while ALREADY on it leaves the panel — and whatever quest/topic
+ * detail it was showing — composed and untouched. Counter rather than a flag so repeat taps each
+ * re-fire; consumers compare against a remembered value so a freshly-composed panel ignores the
+ * standing count (see JournalPanel, where firing on first composition would race the quest-nav
+ * request from the HUD label).
+ */
+private object JournalResetState {
+    var resetRequest by mutableStateOf(0)
+    fun request() { resetRequest++ }
 }
 
 // A pending "how many?" prompt. Set by a deeply-nested row (e.g. an inventory
@@ -670,6 +709,9 @@ private fun CompanionScreenContent() {
     // (not LaunchedEffect) so favourite pills show persisted content on the very
     // first frame, with no post-composition flash of empty slots.
     remember(context) { FavouritesRepository.init(context) }
+    // Same first-frame treatment for the per-character quest prefs (hidden set + followed quest),
+    // so the HUD's followed-quest label and the quest list's stars are right on the first frame.
+    remember(context) { QuestPrefsRepository.init(context); true }
     // Load persisted UI routing (which screen the conversation lives on, etc.).
     remember(context) { UiPreferences.init(context); true }
 
@@ -692,6 +734,30 @@ private fun CompanionScreenContent() {
                 spellIds = state.spells.takeIf { it.isNotEmpty() }?.map { it.id }?.toSet()
             )
         }
+    }
+
+    // Quest prefs are save-dependent in exactly the same way (see QuestPrefsRepository). Kept as
+    // its own effect rather than folded into the favourites one so it re-runs on journal changes
+    // without re-running favourites' reconcile on every inventory tick. Same ordering rule: switch
+    // character first, then prune — and pass null while the journal is still empty (the save-load
+    // window) so a transient blank state can't wipe the hidden set.
+    LaunchedEffect(state.character.name, state.journalEntries) {
+        val name = state.character.name
+        if (name.isNotBlank()) {
+            QuestPrefsRepository.setCharacter(context, name)
+            QuestPrefsRepository.reconcile(
+                context,
+                questIds = state.journalEntries.takeIf { it.isNotEmpty() }
+                    ?.map { it.questId }?.toSet()
+            )
+        }
+    }
+
+    // The HUD's followed-quest label navigates to that quest's journal page, which lives in
+    // another tab — switch to it here (JournalPanel consumes the request once it composes).
+    val pendingQuestNav = JournalQuestNavState.questId
+    LaunchedEffect(pendingQuestNav) {
+        if (pendingQuestNav != null) tab = Tab.JOURNAL
     }
 
     Box(
@@ -719,7 +785,13 @@ private fun CompanionScreenContent() {
 
         BottomTabBar(
             selected = tab,
-            onSelect = { tab = it },
+            onSelect = {
+                // Tapping JOURNAL always returns it to the chronological journal view, including
+                // when it's already the selected tab (where the panel stays composed and would
+                // otherwise keep showing whatever detail page was open).
+                if (it == Tab.JOURNAL) JournalResetState.request()
+                tab = it
+            },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
@@ -807,6 +879,13 @@ private fun CompanionScreenContent() {
         // Crime-reported toast — top of the whole z-stack so it's visible even over the looting /
         // barter panels (the native message renders behind them, bottom-center of the top screen).
         CrimeToast()
+
+        // The turning journal leaf. Hosted HERE rather than inside JournalPanel because it has to
+        // paint over the BOTTOM tab bar as well as the journal's own sub-tab bar — and BottomTabBar
+        // is a later sibling at this level, so anything nested inside JournalPanel would draw
+        // underneath it however it were z-ordered. Inert unless the chronological journal is open
+        // with the page-turn animation on. Declared before AdaptiveDimOverlay so it dims too.
+        JournalLeafOverlay()
 
         // Adaptive dimming — ABOVE everything else (see AdaptiveDimOverlay for why).
         AdaptiveDimOverlay()
@@ -8001,17 +8080,111 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         // pills. Only present while a target exists (during combat), and only when the
         // target-health bar is routed to the bottom screen (TOP moves it to a top-screen overlay).
         val targetHealthLocation by UiPreferences.targetHealthLocationFlow().collectAsState()
-        if (targetHealthLocation == TargetHealthLocation.BOTTOM) {
-            state.target?.let { target ->
-                TargetHealthOverlay(
-                    target = target,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 6.dp)
-                )
+        val combatTarget =
+            if (targetHealthLocation == TargetHealthLocation.BOTTOM) state.target else null
+        // Non-null == the top-centre slot is taken; the followed-quest label below yields to it.
+        val targetOverlayShowing = combatTarget != null
+        if (combatTarget != null) {
+            TargetHealthOverlay(
+                target = combatTarget,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 6.dp)
+            )
+        }
+
+        // Followed quest — top-centre, the same slot the combat target uses, so it yields whenever
+        // that overlay is up (combat is transient, and target health routed to the bottom screen is
+        // not the default). Declared LAST in this Box so it paints above the door-marker bubble if
+        // they ever overlap.
+        val questPrefs by QuestPrefsRepository.state.collectAsState()
+        val followedId = questPrefs.followed
+        if (!targetOverlayShowing && followedId != null) {
+            val followedEntry = remember(followedId, state.journalEntries) {
+                state.journalEntries.lastOrNull { it.questId == followedId }
             }
+            FollowedQuestLabel(
+                questId = followedId,
+                title = followedEntry?.let { questDisplayName(it) } ?: prettifyQuestId(followedId),
+                hidden = followedId in questPrefs.hidden,
+                modifier = Modifier.align(Alignment.TopCenter)
+            )
         }
         }  // end map Box
+    }
+}
+
+/**
+ * The followed quest's name, top-centre on the HUD map. Tap jumps to its journal page; long-press
+ * opens the same Hide/Follow menu the quest list rows use.
+ *
+ * TOUCH HANDLING IS LOAD-BEARING, not decoration. The map Canvas covers the whole panel with its
+ * own detectTapGestures, and Compose delivers a pointer event to the TOPMOST node with a
+ * pointer-input modifier rather than fanning it out — so a plain Text here would not be a hit
+ * target at all and every tap on it would fall through and open the world map (which is exactly
+ * what the cell name does today). Hence: an outer empty tap-catcher + FAV_GROUP_MARGIN so
+ * near-miss taps around the label become no-ops (the fav groups' treatment, same constant), and a
+ * combinedClickable on the label itself, which consumes both gestures so the Canvas never sees
+ * them — no ambiguity with the map-open or door-marker-dismiss branches.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FollowedQuestLabel(
+    questId: String,
+    title: String,
+    hidden: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+
+    // Outer swallow margin; the inner padding keeps the visible label at the same 6dp from the top
+    // the combat-target overlay uses.
+    Box(
+        modifier = modifier
+            .pointerInput(Unit) { detectTapGestures {} }
+            .padding(FAV_GROUP_MARGIN)
+    ) {
+        Box {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 200.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xC0151210))
+                    .border(1.dp, BronzeDark, RoundedCornerShape(4.dp))
+                    .combinedClickable(
+                        onClick = { JournalQuestNavState.request(questId) },
+                        onLongClick = { menuOpen = true; DropdownState.open() }
+                    )
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "QUEST",
+                    color = BoneDim, fontSize = 9.sp,
+                    fontFamily = MwDisplay, letterSpacing = 1.5.sp
+                )
+                Spacer(Modifier.height(2.dp))
+                // No star here: the label IS the followed quest, so the marker would be redundant.
+                // The star only earns its place in the quest LIST, where it distinguishes one row.
+                Text(
+                    title,
+                    color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 15.sp
+                )
+            }
+
+            QuestContextMenu(
+                questId = questId, title = title, hidden = hidden, followed = true,
+                expanded = menuOpen,
+                onDismiss = { menuOpen = false; DropdownState.closeAll() }
+            )
+        }
     }
 }
 
@@ -10124,6 +10297,46 @@ private fun JournalPanel() {
     var selectedQuestId by remember { mutableStateOf<String?>(null) }
     // Sub-navigation within the TOPICS tab: null = topic list, non-null = detail.
     var selectedTopic by remember { mutableStateOf<TopicInfo?>(null) }
+    // Quest-list filter state. Hoisted OUT of JournalQuestList so it survives opening a quest and
+    // coming back — that list leaves composition on every detail navigation, so state owned there
+    // silently reverted to Active and dumped the player somewhere they hadn't chosen.
+    // Off = active quests only (default); on = also show finished quests.
+    var showAllQuests by remember { mutableStateOf(false) }
+    // Hidden-only view. MUTUALLY EXCLUSIVE with the above rather than additive: while on it
+    // REPLACES the list with the hidden quests.
+    var showHiddenQuests by remember { mutableStateOf(false) }
+
+    /** Back to the default quest view: the list (not a detail page), active quests only. */
+    fun resetQuestView() {
+        selectedQuestId = null
+        showAllQuests = false
+        showHiddenQuests = false
+    }
+
+    // Bottom-bar JOURNAL tap → back to the chronological journal view. Compared against a
+    // remembered count so a FRESHLY composed panel ignores the standing value: firing on first
+    // composition would race the quest-nav effect below and clobber the quest the HUD label asked
+    // for. A fresh panel is already in the default state, so there's nothing to reset anyway.
+    var lastJournalReset by remember { mutableIntStateOf(JournalResetState.resetRequest) }
+    LaunchedEffect(JournalResetState.resetRequest) {
+        if (JournalResetState.resetRequest != lastJournalReset) {
+            lastJournalReset = JournalResetState.resetRequest
+            selectedJournalTab = JournalTab.Journal
+            selectedTopic = null
+            resetQuestView()
+        }
+    }
+
+    // A tap on the HUD's followed-quest label routes here (CompanionScreen switches to this tab
+    // first, so this panel is composed by the time the effect runs): jump straight to that quest's
+    // detail page. Keyed on the pending id so a later tap on a different quest re-fires.
+    val pendingQuestNav = JournalQuestNavState.questId
+    LaunchedEffect(pendingQuestNav) {
+        JournalQuestNavState.consume()?.let { qid ->
+            selectedJournalTab = JournalTab.Quests
+            selectedQuestId = qid
+        }
+    }
 
     LaunchedEffect(Unit) {
         CompanionActions.refreshJournal()
@@ -10152,7 +10365,16 @@ private fun JournalPanel() {
             .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp)
     ) {
         Column(Modifier.fillMaxSize()) {
-            JournalTabBar(selected = selectedJournalTab, onSelect = { selectedJournalTab = it })
+            JournalTabBar(
+                selected = selectedJournalTab,
+                onSelect = { t ->
+                    // Tapping QUESTS always lands on the default view — the list, active quests
+                    // only — rather than resuming whatever detail page / filter was last left
+                    // open. Same "the heading is a way home" role the bottom JOURNAL button has.
+                    if (t == JournalTab.Quests) resetQuestView()
+                    selectedJournalTab = t
+                }
+            )
             Spacer(Modifier.height(8.dp))
             Box(Modifier.fillMaxSize()) {
                 when (selectedJournalTab) {
@@ -10177,6 +10399,11 @@ private fun JournalPanel() {
                             JournalQuestList(
                                 entries = state.journalEntries,
                                 finishedQuestIds = finishedQuestIds,
+                                showAll = showAllQuests,
+                                showHidden = showHiddenQuests,
+                                // Choosing Active/All always leaves the hidden-only view (exclusive).
+                                onShowAll = { showAllQuests = it; showHiddenQuests = false },
+                                onShowHidden = { showHiddenQuests = it },
                                 onQuest = { selectedQuestId = it }
                             )
                         else
@@ -10417,8 +10644,26 @@ private fun JournalChronological(
     // the transition differs, so nothing outside the pager body branches on this.
     val pageTurn by UiPreferences.journalPageTurnFlow().collectAsState()
 
+    // Hand the pager to JournalLeafOverlay while (and only while) the flip is actually in use, so
+    // the overlay is inert on the plain-slide path and after this screen goes away.
+    DisposableEffect(pagerState, pageTurn) {
+        if (pageTurn) JournalLeafOverlayState.pagerState = pagerState
+        onDispose {
+            if (JournalLeafOverlayState.pagerState === pagerState)
+                JournalLeafOverlayState.pagerState = null
+        }
+    }
+
     Column(Modifier.fillMaxSize().mwPanel()) {
-        HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { pageIdx ->
+        HorizontalPager(
+            state = pagerState,
+            // The pager's own rect is what the overlay measures each half from. Read from the
+            // PAGER, not from a page: pages are translated in the draw phase, so their laid-out
+            // bounds would not describe where they actually appear mid-drag.
+            modifier = Modifier.weight(1f).onGloballyPositioned {
+                JournalLeafOverlayState.pagerBounds = it.boundsInRoot()
+            }
+        ) { pageIdx ->
             val pageDays = pages.getOrElse(pageIdx) { emptyList() }
             if (!pageTurn) {
                 // Plain slide: the pager's own translation carries the whole spread sideways, so
@@ -10456,15 +10701,17 @@ private fun JournalChronological(
                         // must not linger on the stack.
                         alpha = if (abs(off) >= 1f) 0f else 1f
                     }
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .padding(horizontal = JOURNAL_SPREAD_H_PAD, vertical = JOURNAL_SPREAD_V_PAD)
             ) {
-                JournalPageHalf(offset, spineAtRight = true, modifier = Modifier.weight(1f)) {
+                JournalPageHalf(offset, spineAtRight = true, pageIdx = pageIdx,
+                    modifier = Modifier.weight(1f)) {
                     JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.fillMaxSize(),
                         topicNames, onTopicLink)
                 }
                 // The spine itself stays flat — it is the hinge the leaf swings from.
-                Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-                JournalPageHalf(offset, spineAtRight = false, modifier = Modifier.weight(1f)) {
+                Box(Modifier.width(JOURNAL_SPINE_WIDTH).fillMaxHeight().background(BronzeDark))
+                JournalPageHalf(offset, spineAtRight = false, pageIdx = pageIdx,
+                    modifier = Modifier.weight(1f)) {
                     JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.fillMaxSize(),
                         topicNames, onTopicLink)
                 }
@@ -10494,10 +10741,118 @@ private fun JournalChronological(
 // A leaf is exactly perpendicular to the page at the halfway point of a turn — that is geometry,
 // not taste, so it is not a tuning dial. It is named only to keep the intent readable below.
 private const val JOURNAL_LEAF_PERPENDICULAR = 90f
+
+// Below this many degrees the page is treated as FLAT. It is the handover point between the
+// in-pager copy (drawn at rest) and the overlay copy (drawn while turning) — see
+// JournalLeafOverlay. Small enough that the two are pixel-identical when they swap, so the
+// handover cannot be seen; the conditions are exact complements (<= here, > there) so there is
+// never a frame where neither draws.
+private const val JOURNAL_LEAF_FLAT_EPSILON = 0.5f
+
+// Spread geometry, SHARED by the in-pager layout and the overlay's copy of it. The overlay derives
+// each half's rect arithmetically from the pager's bounds rather than reading it back from layout,
+// because the page Row cancels the pager's scroll in the DRAW phase (translationX) and laid-out
+// bounds do not reflect that. These constants are what keep the two in step — change them here,
+// never at one of the two use sites.
+private val JOURNAL_SPREAD_H_PAD = 6.dp
+private val JOURNAL_SPREAD_V_PAD = 4.dp
+private val JOURNAL_SPINE_WIDTH = 1.dp
+
+// Draw order for the turning leaf. Must stay BELOW AdaptiveDimOverlay's 40f so the leaf dims with
+// everything else, and above the tab bars it is meant to paint over.
+private const val JOURNAL_LEAF_OVERLAY_Z = 35f
+
+/**
+ * Rotation of one half of a spread, in degrees, for a given pager offset.
+ *
+ * Extracted to a top-level function because the in-pager half and the overlay copy MUST agree
+ * exactly: the overlay shows a half precisely when the in-pager copy hides it. Two copies of this
+ * formula would be a silent-divergence bug waiting to happen.
+ *
+ * `spineAtRight` describes where the hinge is, so it identifies the LEFT column of a spread (its
+ * spine is on its right edge) — which rotates only while its page is ARRIVING (offset > 0) — versus
+ * the RIGHT column, which rotates only while its page is being LEFT BEHIND (offset < 0).
+ */
+private fun journalTurnDegrees(off: Float, spineAtRight: Boolean): Float =
+    (if (spineAtRight) off.coerceAtLeast(0f) else off.coerceAtMost(0f)) * 180f
+
+// Edge line of a journal page half. 1dp Bronze is the panel-border convention (mwPanel, the
+// context menus) — this is that treatment, not a new one.
+private val JOURNAL_PAGE_EDGE_WIDTH = 1.dp
+
+/**
+ * Draws a page half's THREE outer edges — top, bottom, and the outer side — and never the spine
+ * edge, where the two halves meet. A line down the middle of the spread would read as two boxes
+ * rather than one open book, and the spine already has its own 1dp divider between the halves.
+ *
+ * `Modifier.border` is not usable here: it always draws all four sides, and masking one off after
+ * the fact would fight the rotation. Three `drawLine` calls are the whole implementation.
+ *
+ * Which side is the spine comes from the SAME `spineAtRight` flag that drives the hinge and
+ * `transformOrigin`, so the two can never disagree: `spineAtRight` marks the LEFT column (hinged on
+ * its right edge), whose outer edge is therefore its left, and vice versa.
+ *
+ * Inset by half the stroke so the line sits fully inside the half's bounds, matching how
+ * `Modifier.border` renders.
+ */
+private fun DrawScope.drawJournalPageEdges(spineAtRight: Boolean) {
+    val stroke = JOURNAL_PAGE_EDGE_WIDTH.toPx()
+    val inset = stroke / 2f
+    val w = size.width
+    val h = size.height
+    drawLine(Bronze, Offset(0f, inset), Offset(w, inset), stroke)
+    drawLine(Bronze, Offset(0f, h - inset), Offset(w, h - inset), stroke)
+    // Outer side: the left column's outer edge is its left; the right column's is its right.
+    val x = if (spineAtRight) inset else w - inset
+    drawLine(Bronze, Offset(x, 0f), Offset(x, h), stroke)
+}
+
+/**
+ * Handoff between the journal's page halves (inside the pager) and [JournalLeafOverlay] (outside
+ * every clip in the journal's own subtree).
+ *
+ * WHY an overlay at all: the turning leaf has to paint OVER the journal's sub-tab bar and the
+ * bottom tab bar to read correctly, and it cannot from where it lives. `HorizontalPager` applies
+ * `clipScrollableContainer` internally — a hard clip on the scroll axis with no opt-out (its own
+ * KDoc says clipping "is not possible via [modifier] param") — and `mwPanel()` clips the panel on
+ * top of that. Neither has any reach over sibling composables regardless.
+ *
+ * What is published here is deliberately only STABLE data — the pager's state object, its laid-out
+ * bounds, and one [GraphicsLayer] per half — all written at composition or layout time. Nothing is
+ * written per frame: the overlay reads `pagerState` inside its own draw-phase lambda exactly as the
+ * in-pager halves do, so the two are frame-coherent by construction with no state writes during
+ * draw (which would risk an invalidation loop).
+ */
+private object JournalLeafOverlayState {
+    /** Non-null only while the chronological journal is showing AND the page-turn pref is on. */
+    var pagerState: PagerState? by mutableStateOf(null)
+    /** The pager's own laid-out rect in root coordinates. Not transformed, so it is stable. */
+    var pagerBounds: Rect by mutableStateOf(Rect.Zero)
+    /** Recorded content per half, keyed by (page index, spineAtRight). */
+    val halves = mutableStateMapOf<Pair<Int, Boolean>, GraphicsLayer>()
+}
 // ---- Journal page-turn tuning dials (hand-tune on device; these are starting points) ----
-// Perspective strength (multiplied by density). LOWER = more extreme foreshortening. Compose's
-// default is 8dp; a bit further back keeps the leaf from ballooning as it swings past the reader.
-private const val JOURNAL_LEAF_CAMERA_DP = 14f
+// Camera distance as a MULTIPLE OF THE LEAF'S OWN MEASURED WIDTH. Higher = flatter/weaker
+// perspective; lower = more extreme foreshortening.
+//
+// It is a multiple of the width, NOT a dp constant, because `cameraDistance` is a RAW PIXEL value
+// (`GraphicsLayer` KDoc: "The distance is expressed in pixels") whose sane range is set by the size
+// of the thing being rotated — the same KDoc recommends "a distance at least as far as the size of
+// the view, if the view is to be rotated", warning of artifacts when the rotated view ends up
+// partially behind the camera.
+//
+// The shipped value (0.15) is FAR below that recommendation, and deliberately so: it was chosen on
+// device for how dramatic the turn looks now that JournalLeafOverlay draws the leaf unclipped. At
+// this multiplier the free edge passes behind the camera after roughly 9° of turn, so the effect
+// is knowingly trading geometric correctness for looks. Judge any change to it on device, not
+// against the KDoc — and do not "correct" it back toward 1.0+ on principle.
+//
+// The previous form was `14f * density` (~32px here) against a ~578px-wide leaf — about 5% of the
+// documented minimum, so the leaf ballooned under extreme perspective and was then visibly clipped
+// by the panel. A density-scaled dp value is simply the wrong shape for this API: density says
+// nothing about how large the rotated element is. Do NOT reintroduce one.
+private const val JOURNAL_LEAF_CAMERA_WIDTH_FACTOR = 0.15f
+
 // Peak darkness of the crease shadow at the spine, reached when the leaf stands perpendicular.
 private const val JOURNAL_LEAF_SHADE_ALPHA = 0.5f
 // Fraction of the half's width the crease shadow reaches before fading out.
@@ -10527,57 +10882,175 @@ private const val JOURNAL_LEAF_SHADE_SPREAD = 0.55f
 private fun JournalPageHalf(
     offset: () -> Float,
     spineAtRight: Boolean,
+    pageIdx: Int,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
-    // Half a turn per face, so a face sweeps its full 90° over half the drag.
-    fun turnDegrees(off: Float): Float =
-        (if (spineAtRight) off.coerceAtLeast(0f) else off.coerceAtMost(0f)) * 180f
+    fun turnDegrees(off: Float) = journalTurnDegrees(off, spineAtRight)
     // Pages are stacked, so a half must be opaque or the spread beneath reads through it. Matches
     // the panel it sits in, including the top-screen opacity setting.
     val pageFill = StonePanel.copy(alpha = LocalPanelOpacity.current)
+
+    // This half's content, recorded so JournalLeafOverlay can replay it OUTSIDE every clip in this
+    // subtree. rememberGraphicsLayer releases it automatically when this half leaves composition
+    // (pager recycling), which is why the overlay must never hold onto it past that — hence the
+    // DisposableEffect below rather than a bare assignment.
+    val leafLayer = rememberGraphicsLayer()
+    DisposableEffect(pageIdx, spineAtRight, leafLayer) {
+        val key = pageIdx to spineAtRight
+        JournalLeafOverlayState.halves[key] = leafLayer
+        onDispose { JournalLeafOverlayState.halves.remove(key) }
+    }
+
     Box(
         modifier
             .fillMaxHeight()
-            .graphicsLayer {
-                val turn = turnDegrees(offset())
-                rotationY = turn.coerceIn(-JOURNAL_LEAF_PERPENDICULAR, JOURNAL_LEAF_PERPENDICULAR)
-                // Past perpendicular this face has turned away and the OTHER page's half is
-                // showing the leaf instead.
-                alpha = if (abs(turn) > JOURNAL_LEAF_PERPENDICULAR) 0f else 1f
-                cameraDistance = JOURNAL_LEAF_CAMERA_DP * density
-                // Hinge on the spine edge: right edge of the left half, left edge of the right half.
-                transformOrigin = TransformOrigin(if (spineAtRight) 1f else 0f, 0.5f)
-                // Clip to its own rect BEFORE the rotation, so a turning leaf can never paint
-                // across the spine into the other half.
-                clip = true
+            // NO rotation here any more — the overlay owns the turning leaf. This half records
+            // itself every draw and paints in place ONLY while flat; past the epsilon the overlay
+            // is drawing it instead, and drawing it twice would show the clipped copy through the
+            // unclipped one. The two conditions are exact complements, so there is no gap.
+            .drawWithContent {
+                if (size.width <= 0f || size.height <= 0f) {
+                    drawContent()
+                    return@drawWithContent
+                }
+                leafLayer.record { this@drawWithContent.drawContent() }
+                if (abs(turnDegrees(offset())) <= JOURNAL_LEAF_FLAT_EPSILON) drawLayer(leafLayer)
             }
             .background(pageFill)
     ) {
         content()
-        // Crease shadow, drawn OVER the text (later child wins) and fading outward from the spine.
-        // drawBehind on an empty Box keeps this in the draw phase alongside the rotation.
+        // Crease shadow + page edges, drawn OVER the text (later child wins). drawBehind on an
+        // empty Box keeps both in the draw phase alongside the rotation.
+        //
+        // The EDGES live here, inside the recorded content, on purpose: JournalLeafOverlay replays
+        // this same recorded layer, so the flat page and the turning leaf get the border from ONE
+        // source. That is what makes it impossible for a border to pop in at the 0.5° handover
+        // between the two — there is no second, overlay-only border to switch on.
         Box(
             Modifier.matchParentSize().drawBehind {
                 val f = abs(turnDegrees(offset())) / JOURNAL_LEAF_PERPENDICULAR
-                if (f <= 0.001f) return@drawBehind      // flat page: no shading, no cost
-                val shade = Color.Black.copy(
-                    alpha = f.coerceAtMost(1f) * JOURNAL_LEAF_SHADE_ALPHA
-                )
-                val reach = size.width * JOURNAL_LEAF_SHADE_SPREAD
-                drawRect(
-                    if (spineAtRight)
-                        Brush.horizontalGradient(
-                            listOf(Color.Transparent, shade),
-                            startX = size.width - reach, endX = size.width
-                        )
-                    else
-                        Brush.horizontalGradient(
-                            listOf(shade, Color.Transparent), startX = 0f, endX = reach
-                        )
-                )
+                if (f > 0.001f) {                       // flat page: no shading, no cost
+                    val shade = Color.Black.copy(
+                        alpha = f.coerceAtMost(1f) * JOURNAL_LEAF_SHADE_ALPHA
+                    )
+                    val reach = size.width * JOURNAL_LEAF_SHADE_SPREAD
+                    drawRect(
+                        if (spineAtRight)
+                            Brush.horizontalGradient(
+                                listOf(Color.Transparent, shade),
+                                startX = size.width - reach, endX = size.width
+                            )
+                        else
+                            Brush.horizontalGradient(
+                                listOf(shade, Color.Transparent), startX = 0f, endX = reach
+                            )
+                    )
+                }
+                // After the shadow, so the crease darkens the page but not its edge.
+                drawJournalPageEdges(spineAtRight)
             }
         )
+    }
+}
+
+/**
+ * The turning journal leaf, drawn OUTSIDE the journal's own clips so it can sweep over the
+ * sub-tab bar above and the bottom tab bar below. Hosted at the CompanionScreen root (see the
+ * placement note below) and reading [JournalLeafOverlayState].
+ *
+ * HOW IT AVOIDS THE Aug 6 2026 FAILURE, which reverted the first attempt at this:
+ *  - The 3D transform is applied by **`Modifier.graphicsLayer` only** — the same path already
+ *    proven in the pager. That attempt rotated via `Matrix.rotateY` inside a `DrawScope`, which
+ *    carries NO perspective term at all (verified in Compose's `Matrix.kt`: on an identity matrix
+ *    the `[3,2]` element stays 0, and Compose has no perspective/camera helper). An orthographic
+ *    Y-rotation is a pure `cos θ` horizontal squash, which is exactly the reported "no vertical
+ *    foreshortening". A `DrawScope` cannot express this transform — its `rotate` is 2D about Z —
+ *    so the recorded layer is used ONLY as flat content (`drawLayer` inside an already-rotated
+ *    modifier), never as the thing doing the rotating.
+ *  - `transformOrigin` is a **fraction** (`TransformOrigin`), which is the correct unit for this
+ *    API. The standalone `GraphicsLayer.pivotOffset` is in PIXELS and is deliberately not used;
+ *    writing a fraction into it puts the hinge a pixel from the corner, which would fold the leaf
+ *    sideways across the spine — the other half of what went wrong.
+ *  - `cameraDistance` is in raw pixels, derived from the leaf's measured width.
+ *
+ * NO POINTER INPUT, deliberately — a Box carrying only drawing modifiers does not consume touches
+ * (the dropdown scrim has to add `pointerInput` explicitly to intercept), so the tab bars it paints
+ * over stay tappable throughout. Same rule as `AdaptiveDimOverlay`.
+ */
+@Composable
+private fun JournalLeafOverlay() {
+    val pagerState = JournalLeafOverlayState.pagerState ?: return
+    val bounds = JournalLeafOverlayState.pagerBounds
+    if (bounds.width <= 0f || bounds.height <= 0f) return
+    val halves = JournalLeafOverlayState.halves
+    if (halves.isEmpty()) return
+
+    val density = LocalDensity.current
+    // This overlay's own origin, so root-space rects can be placed relative to it. Usually (0,0),
+    // but the CompanionScreen root carries imePadding, so it is measured rather than assumed.
+    var origin by remember { mutableStateOf(Offset.Zero) }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .zIndex(JOURNAL_LEAF_OVERLAY_Z)
+            .onGloballyPositioned { origin = it.boundsInRoot().topLeft }
+    ) {
+        val hPad = with(density) { JOURNAL_SPREAD_H_PAD.toPx() }
+        val vPad = with(density) { JOURNAL_SPREAD_V_PAD.toPx() }
+        val spine = with(density) { JOURNAL_SPINE_WIDTH.toPx() }
+        // Mirrors the in-pager Row: the spread is the pager rect inset by the shared padding, split
+        // into two equal halves around the spine. Because each page cancels the pager's scroll in
+        // the draw phase, every spread occupies this same rect — so one arithmetic rect serves any
+        // page, and there is nothing to re-measure mid-drag.
+        val contentW = bounds.width - hPad * 2f
+        val contentH = bounds.height - vPad * 2f
+        val halfW = (contentW - spine) / 2f
+        if (halfW <= 0f || contentH <= 0f) return@Box
+        val halfWidthDp = with(density) { halfW.toDp() }
+        val halfHeightDp = with(density) { contentH.toDp() }
+        val top = bounds.top + vPad
+
+        halves.forEach { (key, layer) ->
+            val (pageIdx, spineAtRight) = key
+            // spineAtRight == true is the LEFT column (its hinge is on its right edge).
+            val left = if (spineAtRight) bounds.left + hPad
+                       else bounds.left + hPad + halfW + spine
+            Box(
+                Modifier
+                    .offset {
+                        IntOffset(
+                            (left - origin.x).roundToInt(),
+                            (top - origin.y).roundToInt()
+                        )
+                    }
+                    .size(halfWidthDp, halfHeightDp)
+                    .graphicsLayer {
+                        val turn = journalTurnDegrees(
+                            pagerState.getOffsetDistanceInPages(pageIdx), spineAtRight
+                        )
+                        val swing = abs(turn)
+                        rotationY = turn.coerceIn(
+                            -JOURNAL_LEAF_PERPENDICULAR, JOURNAL_LEAF_PERPENDICULAR
+                        )
+                        // Visible ONLY while actually turning: at rest the in-pager copy draws
+                        // (complementary condition), and past the perpendicular this face has
+                        // turned away and the other page's half carries the leaf.
+                        alpha = if (swing <= JOURNAL_LEAF_FLAT_EPSILON ||
+                                    swing > JOURNAL_LEAF_PERPENDICULAR) 0f else 1f
+                        cameraDistance = size.width * JOURNAL_LEAF_CAMERA_WIDTH_FACTOR
+                        transformOrigin = TransformOrigin(if (spineAtRight) 1f else 0f, 0.5f)
+                        // NO clip — being free of it is the entire reason this overlay exists.
+                    }
+                    // The recorded layer already carries the page's three edges (see
+                    // drawJournalPageEdges in JournalPageHalf), so they rotate and foreshorten with
+                    // the content for free — and are identical to the flat page's, which is what
+                    // makes the handover invisible. Do NOT add a border modifier here: it would be
+                    // a second, overlay-only edge that appears the moment a turn starts.
+                    .drawBehind { drawLayer(layer) }
+            )
+        }
     }
 }
 
@@ -10609,10 +11082,16 @@ private fun JournalColumn(
 private fun JournalQuestList(
     entries: List<JournalEntry>,
     finishedQuestIds: Set<String>,
+    // Filter state is OWNED BY JournalPanel, not remembered here: this composable leaves
+    // composition on every quest-detail navigation, so state held locally would silently reset the
+    // view under the player each time they came back from reading a quest.
+    showAll: Boolean,
+    showHidden: Boolean,
+    onShowAll: (Boolean) -> Unit,
+    onShowHidden: (Boolean) -> Unit,
     onQuest: (String) -> Unit
 ) {
-    // Off = active quests only (default); on = also show finished quests.
-    var showAll by remember { mutableStateOf(false) }
+    val questPrefs by QuestPrefsRepository.state.collectAsState()
 
     // Most-recently-active quest first. Keep one representative entry per quest to resolve the display name.
     val quests = remember(entries) {
@@ -10620,43 +11099,183 @@ private fun JournalQuestList(
         entries.reversed().forEach { e -> seen.putIfAbsent(e.questId, e) }
         seen.values.toList()
     }
-    val visible = remember(quests, finishedQuestIds, showAll) {
-        if (showAll) quests else quests.filter { it.questId !in finishedQuestIds }
+    // A hidden quest is gone from BOTH the Active and All views regardless of its completion state
+    // — hiding is the player's own "I'm done with this" flag, independent of the engine's.
+    val visible = remember(quests, finishedQuestIds, showAll, showHidden, questPrefs.hidden) {
+        val hidden = questPrefs.hidden
+        when {
+            showHidden -> quests.filter { it.questId in hidden }
+            showAll -> quests.filter { it.questId !in hidden }
+            else -> quests.filter { it.questId !in hidden && it.questId !in finishedQuestIds }
+        }
     }
 
     Column(Modifier.fillMaxSize().mwPanel()) {
-        // Toggle button: label reflects the mode it switches TO.
+        // Toggle buttons: each label reflects the mode it switches TO. Show Hidden (left) and
+        // Active/All (right) are exclusive — tapping either drops out of the other's view.
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.End,
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
+                if (showHidden) "Hide Hidden" else "Show Hidden",
+                color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
+                modifier = Modifier.clickable { onShowHidden(!showHidden) }.padding(4.dp)
+            )
+            Text(
                 if (showAll) "Active Only" else "Show All",
                 color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
-                modifier = Modifier.clickable { showAll = !showAll }.padding(4.dp)
+                modifier = Modifier.clickable { onShowAll(!showAll) }.padding(4.dp)
             )
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+        if (showHidden && visible.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No hidden quests", color = BoneDim, fontSize = 14.sp, fontFamily = MwBody)
+            }
+            return@Column
+        }
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
             items(visible, key = { it.questId }) { rep ->
-                val finished = rep.questId in finishedQuestIds
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onQuest(rep.questId) }
-                        .padding(horizontal = 10.dp, vertical = 11.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(questDisplayName(rep), color = if (finished) BoneDim else Bone,
-                        fontSize = 14.sp, fontFamily = MwBody, modifier = Modifier.weight(1f))
-                    Text("▶", color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody)
-                }
-                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+                QuestRow(
+                    entry = rep,
+                    finished = rep.questId in finishedQuestIds,
+                    hidden = rep.questId in questPrefs.hidden,
+                    followed = questPrefs.followed == rep.questId,
+                    onClick = { onQuest(rep.questId) }
+                )
             }
             item { Spacer(Modifier.height(8.dp)) }
         }
+    }
+}
+
+/**
+ * One quest-list row: tap opens the quest, long-press opens [QuestContextMenu]. Long-press is new
+ * to the Journal (every other row here was tap-only), so it follows ItemRow's idiom exactly —
+ * combinedClickable + DropdownState so the root-level scrim handles tap-outside dismissal.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun QuestRow(
+    entry: JournalEntry,
+    finished: Boolean,
+    hidden: Boolean,
+    followed: Boolean,
+    onClick: () -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+    val title = questDisplayName(entry)
+
+    Box {
+        Column {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = onClick,
+                        onLongClick = { menuOpen = true; DropdownState.open() }
+                    )
+                    .padding(horizontal = 10.dp, vertical = 11.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Name + (optional) followed star share the flex column so the name truncates
+                // before the star, and the star stays a standalone Icon (ItemRow's convention).
+                Row(
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        title,
+                        color = if (finished) BoneDim else Bone,
+                        fontSize = 14.sp, fontFamily = MwBody,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (followed) {
+                        Spacer(Modifier.width(4.dp))
+                        FavStar()
+                    }
+                }
+                Text("▶", color = BronzeLight, fontSize = 13.sp, fontFamily = MwBody)
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+        }
+
+        QuestContextMenu(
+            questId = entry.questId, title = title, hidden = hidden, followed = followed,
+            expanded = menuOpen,
+            onDismiss = { menuOpen = false; DropdownState.closeAll() }
+        )
+    }
+}
+
+/**
+ * Long-press menu shared by the quest list rows and the HUD's followed-quest label: Hide/Unhide and
+ * Follow/Unfollow, each shown in whichever direction the quest's CURRENT state allows. Available
+ * regardless of active/finished/hidden status. Styled as ItemContextMenu.
+ */
+@Composable
+private fun QuestContextMenu(
+    questId: String,
+    title: String,
+    hidden: Boolean,
+    followed: Boolean,
+    expanded: Boolean,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = { onDismiss() },
+        properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+        containerColor = StonePanel,
+        shadowElevation = 0.dp,
+        border = BorderStroke(1.dp, Bronze),
+        shape = RoundedCornerShape(3.dp)
+    ) {
+        Text(
+            title,
+            color = BronzeLight,
+            fontSize = 12.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 220.dp).padding(horizontal = 12.dp, vertical = 8.dp)
+        )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+        val menuItemColors = MenuDefaults.itemColors(textColor = Bone)
+        DropdownMenuItem(
+            text = {
+                Text(if (hidden) "Unhide Quest" else "Hide Quest",
+                    fontFamily = MwBody, fontSize = 13.sp)
+            },
+            onClick = {
+                onDismiss()
+                if (hidden) QuestPrefsRepository.unhide(context, questId)
+                else QuestPrefsRepository.hide(context, questId)
+            },
+            colors = menuItemColors
+        )
+        DropdownMenuItem(
+            text = {
+                Text(if (followed) "Unfollow Quest" else "Follow Quest on HUD",
+                    fontFamily = MwBody, fontSize = 13.sp)
+            },
+            onClick = {
+                onDismiss()
+                // Following a different quest replaces the current one — only ever one at a time.
+                if (followed) QuestPrefsRepository.unfollow(context)
+                else QuestPrefsRepository.follow(context, questId)
+            },
+            colors = menuItemColors
+        )
     }
 }
 
@@ -11710,7 +12329,9 @@ private val DS_CONTROL_GROUPS = listOf(
             ControlEntry("Tap", "A door marker to see where it leads"),
             ControlEntry("Tap", "The Spell or Weapon icon to show its name"),
             ControlEntry("Tap", "A favourite slot to use it"),
-            ControlEntry("Long press", "A favourite slot to see more options")
+            ControlEntry("Long press", "A favourite slot to see more options"),
+            ControlEntry("Tap", "The followed quest to open it in the journal"),
+            ControlEntry("Long press", "The followed quest to hide or unfollow it")
         )
     ),
     ControlGroup(
@@ -11719,7 +12340,10 @@ private val DS_CONTROL_GROUPS = listOf(
     ),
     ControlGroup(
         "Journal",
-        listOf(ControlEntry("Swipe ↔", "Page through entries"))
+        listOf(
+            ControlEntry("Long press", "A quest to hide it or follow it on the HUD"),
+            ControlEntry("Swipe ↔", "Page through entries")
+        )
     ),
     ControlGroup(
         "Looting",
