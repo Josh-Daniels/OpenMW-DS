@@ -19,13 +19,14 @@
              const std::size_t avail = mTradeModel->getItem(idx).mCount;
              const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), avail);
              playerTradeModel->borrowItemToUs(idx, mTradeModel, n);
-@@ -970,11 +975,18 @@
+@@ -977,12 +982,19 @@
              const int idx = companionFindIndex(playerTradeModel, refId, /*borrowed=*/false);
              if (idx < 0)
                  return;
 +            soundItem = playerTradeModel->getItem(idx).mBase;
              const std::size_t avail = playerTradeModel->getItem(idx).mCount;
              const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), avail);
+             playerTradeModel->borrowItemFromUs(idx, n);
              mTradeModel->borrowItemToUs(idx, playerTradeModel, n);
          }
  
@@ -38,7 +39,7 @@
          MWBase::Environment::get().getWindowManager()->getInventoryWindow()->updateItemView();
          mItemView->update();
          updateOffer();
-@@ -995,6 +1007,9 @@
+@@ -1003,6 +1015,9 @@
          if (!playerTradeModel)
              return;
  
@@ -48,7 +49,7 @@
          if (side == "vendor")
          {
              // Un-stage a bought vendor item: it sits (Type_Barter) in the PLAYER model,
-@@ -1002,6 +1017,7 @@
+@@ -1010,6 +1025,7 @@
              const int idx = companionFindIndex(playerTradeModel, refId, /*borrowed=*/true);
              if (idx < 0)
                  return;
@@ -56,7 +57,7 @@
              const std::size_t held = playerTradeModel->getItem(idx).mCount;
              const std::size_t n = std::min<std::size_t>(static_cast<std::size_t>(count), held);
              playerTradeModel->returnItemBorrowedToUs(idx, n);
-@@ -1014,12 +1030,17 @@
+@@ -1022,12 +1038,17 @@
              const int idx = companionFindIndex(mTradeModel, refId, /*borrowed=*/true);
              if (idx < 0)
                  return;

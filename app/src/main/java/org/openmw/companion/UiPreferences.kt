@@ -164,6 +164,24 @@ val HUD_ELEMENTS: List<UiElement> = listOf(
  *
  * A plain object so it survives Activity boundaries, matching [GameStateRepository].
  */
+/**
+ * Bounds and defaults for the two adaptive-dimming brightness sliders. Public because both the
+ * options rows (slider `valueRange`) and the overlay's mapping read them, and they MUST agree — the
+ * lower bound of the MIN range is the legibility guarantee described on
+ * [UiPreferences.adaptiveDimMinBrightnessFlow].
+ *
+ * The two ranges deliberately do not overlap (min tops out at 0.50, max starts at 0.60), so no
+ * combination of slider positions can invert the ramp and there is no crossing case to handle.
+ */
+/** Darkest the companion may get in the darkest scene. The floor is the readability cap. */
+val ADAPTIVE_DIM_MIN_RANGE = 0.15f..0.50f
+/** Brightest the companion stays in the brightest scene. 1f = untouched. */
+val ADAPTIVE_DIM_MAX_RANGE = 0.60f..1.00f
+/** Pre-slider behaviour: the ramp ended at a hardcoded 0.75 overlay opacity. */
+const val ADAPTIVE_DIM_MIN_DEFAULT = 0.25f
+/** Pre-slider behaviour: bright scenes were left completely clear. */
+const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
+
 object UiPreferences {
     private const val PREFS = "companion_ui_settings"
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
@@ -179,6 +197,13 @@ object UiPreferences {
     private const val HIDE_EQUIPPED_BAR = "hide_equipped_bar"
     private const val SHOW_EQUIPPED_IN_LIST = "show_equipped_in_list"
     private const val ADAPTIVE_DIMMING = "adaptive_dimming"
+    // The two ends of the adaptive-dimming ramp, expressed as SCREEN BRIGHTNESS (1f = untouched,
+    // 0f = black) rather than overlay opacity, because that is what the options rows show the
+    // player. MIN = how dark the screen is allowed to get in the darkest scene; MAX = how bright it
+    // stays in the brightest scene. Stored as floats; see the ADAPTIVE_DIM_*_RANGE bounds below,
+    // which are what keeps the darkest setting short of unreadable.
+    private const val ADAPTIVE_DIM_MIN_BRIGHTNESS = "adaptive_dim_min_brightness"
+    private const val ADAPTIVE_DIM_MAX_BRIGHTNESS = "adaptive_dim_max_brightness"
     private const val JOURNAL_PAGE_TURN = "journal_page_turn"
     private const val VANILLA_FONT = "vanilla_font"
     private const val DEVELOPER_MODE = "developer_mode"
@@ -261,6 +286,25 @@ object UiPreferences {
     // ambient-luminance signal (GameStateRepository.ambientLuminance); purely a translucent black
     // overlay — it never touches the device's real screen brightness. Default true (on).
     private val adaptiveDimmingFlow = MutableStateFlow(true)
+
+    // How dark the companion is allowed to get in the DARKEST scene, as screen brightness
+    // (1f = undimmed). Default 0.25f reproduces exactly the behaviour before these sliders existed,
+    // where the ramp ended at a hardcoded 0.75 overlay opacity.
+    //
+    // THE LOWER BOUND IS THE LEGIBILITY GUARANTEE, not a taste default: this overlay sits above
+    // every other companion layer (popups, toasts), so nothing can punch back through it, and a
+    // player who drags this to the bottom in a pitch-dark cave must still be able to read the
+    // screen. 0.15f is one modest step darker than the tested-and-approved 0.25f. It is enforced in
+    // three places on purpose — the slider's range, the clamp in this setter, and the clamp in
+    // [AdaptiveDimOverlay]'s mapping — so neither a corrupt stored value nor a future call site can
+    // get past it. Do not lower it to "let people go darker"; turning the feature off is the
+    // supported way to want something else.
+    private val adaptiveDimMinBrightnessFlow = MutableStateFlow(ADAPTIVE_DIM_MIN_DEFAULT)
+
+    // How bright the companion stays in the BRIGHTEST scene, as screen brightness. Default 1f =
+    // fully clear outdoors, i.e. the pre-slider behaviour. Lowering it applies a baseline dim that
+    // is present even in daylight, for players who find the bottom screen too bright everywhere.
+    private val adaptiveDimMaxBrightnessFlow = MutableStateFlow(ADAPTIVE_DIM_MAX_DEFAULT)
 
     // Whether the journal's chronological view turns pages as a spine-hinged 3D leaf instead of the
     // pager's plain horizontal slide. Purely visual — the two-column spread, the swipe gesture and
@@ -388,6 +432,15 @@ object UiPreferences {
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
         showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
         adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
+        // Clamped on read as well as on write (same reasoning as topPanelOpacity below): a stored
+        // value from a corrupt prefs file, or from a build whose ranges differed, must never be able
+        // to produce a darker overlay than the legibility floor allows.
+        adaptiveDimMinBrightnessFlow.value =
+            p.getFloat(ADAPTIVE_DIM_MIN_BRIGHTNESS, ADAPTIVE_DIM_MIN_DEFAULT)
+                .coerceIn(ADAPTIVE_DIM_MIN_RANGE)
+        adaptiveDimMaxBrightnessFlow.value =
+            p.getFloat(ADAPTIVE_DIM_MAX_BRIGHTNESS, ADAPTIVE_DIM_MAX_DEFAULT)
+                .coerceIn(ADAPTIVE_DIM_MAX_RANGE)
         journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, true)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
@@ -590,6 +643,27 @@ object UiPreferences {
     fun setAdaptiveDimming(context: Context, enabled: Boolean) {
         adaptiveDimmingFlow.value = enabled
         editor(context).putBoolean(ADAPTIVE_DIMMING, enabled).apply()
+    }
+
+    /** Screen brightness (1f = undimmed) the companion reaches in the DARKEST scene. */
+    fun adaptiveDimMinBrightnessFlow(): StateFlow<Float> = adaptiveDimMinBrightnessFlow.asStateFlow()
+
+    /** Set the darkest-scene brightness and persist. Clamped to [ADAPTIVE_DIM_MIN_RANGE], whose
+     *  lower bound is the readability cap — this clamp is deliberate and must not be removed. */
+    fun setAdaptiveDimMinBrightness(context: Context, value: Float) {
+        val v = value.coerceIn(ADAPTIVE_DIM_MIN_RANGE)
+        adaptiveDimMinBrightnessFlow.value = v
+        editor(context).putFloat(ADAPTIVE_DIM_MIN_BRIGHTNESS, v).apply()
+    }
+
+    /** Screen brightness (1f = undimmed) the companion keeps in the BRIGHTEST scene. */
+    fun adaptiveDimMaxBrightnessFlow(): StateFlow<Float> = adaptiveDimMaxBrightnessFlow.asStateFlow()
+
+    /** Set the brightest-scene brightness and persist. Clamped to [ADAPTIVE_DIM_MAX_RANGE]. */
+    fun setAdaptiveDimMaxBrightness(context: Context, value: Float) {
+        val v = value.coerceIn(ADAPTIVE_DIM_MAX_RANGE)
+        adaptiveDimMaxBrightnessFlow.value = v
+        editor(context).putFloat(ADAPTIVE_DIM_MAX_BRIGHTNESS, v).apply()
     }
 
     /** Whether the journal's chronological view uses the spine-hinged page-turn animation. */

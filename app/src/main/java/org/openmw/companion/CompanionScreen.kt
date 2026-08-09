@@ -255,8 +255,27 @@ private data class QuantityRequest(
     val name: String,
     val max: Int,
     val confirmLabel: String,
+    /** Quantity the picker OPENS on (clamped to [1, max] by the selector). Every context passes the
+     *  whole stack [max] except a pickpocket Take — see [lootQtyInitial]. */
+    val initial: Int,
+    /** False for prompts raised from a plain companion TAB, where the controller isn't routed and
+     *  the MAX "[Y]" hint would name a dead button. See QuantitySelector.showControllerHint. */
+    val showControllerHint: Boolean = true,
     val onConfirm: (Int) -> Unit,
 )
+
+/**
+ * Quantity a loot prompt opens on: the whole stack, EXCEPT a TAKE from a living NPC's pockets.
+ *
+ * Vanilla's pickpocket catch chance is value-scaled by the stack being lifted — companion_global.lua
+ * passes [count] straight through `_runStandardPickpocketTake` into the native
+ * `PickpocketItemModel::onTakeItem` → `Pickpocket::pick` — so a max default would silently worsen the
+ * odds on every stacked lift, and a failed roll commits OT_Pickpocket (bounty) and closes the
+ * container. Pickpocket takes therefore start at 1 and the player must dial up to accept the worse
+ * roll. Puts are never a pickpocket risk, and corpses/chests are exempt from the roll entirely.
+ */
+private fun lootQtyInitial(count: Int, isTake: Boolean, isPickpocket: Boolean): Int =
+    if (isTake && isPickpocket) 1 else count
 
 /**
  * Tracks whether a cancelable bottom-screen MODAL is on screen — the QuantitySelector or the
@@ -276,10 +295,23 @@ private object QuantityRequestState {
     fun clear() { request = null }
 
     /** Show the selector only when it can matter: count > 1. For a single item,
-     *  invoke the action immediately with quantity 1 (no pointless prompt). */
-    fun requestOrRun(name: String, count: Int, confirmLabel: String, action: (Int) -> Unit) {
+     *  invoke the action immediately with quantity 1 (no pointless prompt).
+     *  [initial] defaults to the whole stack — the picker opens on max everywhere except a
+     *  pickpocket Take, which passes 1 (see [lootQtyInitial]). */
+    fun requestOrRun(
+        name: String,
+        count: Int,
+        confirmLabel: String,
+        initial: Int = count,
+        // Defaults true: every OVERLAY caller has controller nav. The two plain-tab callers
+        // (inventory Drop, favourites-slot Drop) pass false.
+        showControllerHint: Boolean = true,
+        action: (Int) -> Unit
+    ) {
         if (count > 1) {
-            request = QuantityRequest(name, count, confirmLabel) { n -> clear(); action(n) }
+            request = QuantityRequest(name, count, confirmLabel, initial, showControllerHint) { n ->
+                clear(); action(n)
+            }
         } else {
             action(1)
         }
@@ -871,6 +903,8 @@ private fun CompanionScreenContent() {
                 name = req.name,
                 max = req.max,
                 confirmLabel = req.confirmLabel,
+                initial = req.initial,
+                showControllerHint = req.showControllerHint,
                 onConfirm = req.onConfirm,
                 onCancel = { QuantityRequestState.clear() }
             )
@@ -2761,7 +2795,10 @@ private fun rememberLootNavFocus(
     containerSorted: List<InventoryItem>,
     rows: Int,
     isCorpse: Boolean,
-    requestQty: (String, Int, String, (Int) -> Unit) -> Unit,
+    // Living NPC (pickpocket): a TAKE prompt opens at 1 rather than the whole stack — see
+    // lootQtyInitial. Puts and corpse/chest takes still open on max.
+    isPickpocket: Boolean,
+    requestQty: (String, Int, String, Int, (Int) -> Unit) -> Unit,
     onPut: (InventoryItem, Int) -> Unit,
     onTake: (InventoryItem, Int) -> Unit,
     onTakeAll: () -> Unit,
@@ -2782,6 +2819,8 @@ private fun rememberLootNavFocus(
     val snapshot = rememberUpdatedState(Triple(playerSorted, containerSorted, isCorpse))
     // Category-cycle callback reads the parent's live per-side category state, so keep it fresh.
     val cycleState = rememberUpdatedState(onCycleCategory)
+    // Session-scoped, but this collector outlives a session swap (LaunchedEffect(Unit)).
+    val pickpocketState = rememberUpdatedState(isPickpocket)
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         GameStateRepository.navEvent.collect { ev ->
@@ -2811,7 +2850,12 @@ private fun rememberLootNavFocus(
                     val item = (if (side == 0) pSorted else cSorted).getOrNull(index)
                     if (item != null) {
                         val isPlayer = side == 0
-                        requestQty(item.displayName(), item.count, if (isPlayer) "Put" else "Take") { n ->
+                        requestQty(
+                            item.displayName(),
+                            item.count,
+                            if (isPlayer) "Put" else "Take",
+                            lootQtyInitial(item.count, isTake = !isPlayer, isPickpocket = pickpocketState.value)
+                        ) { n ->
                             if (isPlayer) onPut(item, n) else onTake(item, n)
                         }
                     }
@@ -3653,8 +3697,9 @@ private fun LootingOverlay(
         containerSorted = containerSorted,
         rows = 1,
         isCorpse = session.isCorpse,
-        requestQty = { name, count, label, action ->
-            QuantityRequestState.requestOrRun(name, count, label, action)
+        isPickpocket = session.isPickpocket,
+        requestQty = { name, count, label, initial, action ->
+            QuantityRequestState.requestOrRun(name, count, label, initial, action = action)
         },
         onPut = { it, n -> put(it, n) },
         onTake = { it, n -> take(it, n) },
@@ -3720,11 +3765,16 @@ private fun LootingOverlay(
                             QuantityRequestState.requestOrRun(itm.displayName(), itm.count, "Put") { n -> put(itm, n) }
                         }
                     },
+                    // (Puts above use the default initial = whole stack; the Take below is
+                    // pickpocket-aware — see lootQtyInitial.)
                     otherHeaderLeft = session.containerName.ifBlank { "Container" },
                     otherHeaderRight = AnnotatedString("${containerItems.size} items"),
                     otherItems = containerItems.map { itm ->
                         itm.toShelfItem(worn = false) {
-                            QuantityRequestState.requestOrRun(itm.displayName(), itm.count, "Take") { n -> take(itm, n) }
+                            QuantityRequestState.requestOrRun(
+                                itm.displayName(), itm.count, "Take",
+                                lootQtyInitial(itm.count, isTake = true, isPickpocket = session.isPickpocket)
+                            ) { n -> take(itm, n) }
                         }
                     },
                     otherEmptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
@@ -3765,6 +3815,7 @@ private fun LootingOverlay(
                     // Pickpocket: an empty visible list usually means your Sneak hid the
                     // items (not that the NPC is broke) — say so. Corpses/chests: "Empty".
                     emptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
+                    isPickpocket = session.isPickpocket,
                     focusedIndex = if (focus!!.side == 1) focus.index else -1,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
@@ -3874,6 +3925,8 @@ private fun LootColumn(
     isWorn: (InventoryItem) -> Boolean,
     onTransfer: (InventoryItem, Int) -> Unit,
     emptyText: String = "Empty",
+    /** Living NPC — a Take here opens the quantity picker at 1, not the stack (lootQtyInitial). */
+    isPickpocket: Boolean = false,
     focusedIndex: Int = -1,
     modifier: Modifier = Modifier
 ) {
@@ -3910,6 +3963,7 @@ private fun LootColumn(
                         worn = isPlayerSide && isWorn(item),
                         iconBitmap = rememberItemIcon(item.icon),
                         focused = i == focusedIndex,
+                        isPickpocket = isPickpocket,
                         onTransfer = onTransfer
                     )
                 }
@@ -3931,6 +3985,7 @@ private fun LootRow(
     worn: Boolean,
     iconBitmap: ImageBitmap? = null,
     focused: Boolean = false,
+    isPickpocket: Boolean = false,
     onTransfer: (InventoryItem, Int) -> Unit
 ) {
     val context = LocalContext.current
@@ -3944,10 +3999,14 @@ private fun LootRow(
     val isFav = isPlayerSide && favs.gear.any { it?.id == item.id }
     val confirmLabel = if (isPlayerSide) "Put" else "Take"
 
-    // The tap action (put or take), prompting for a quantity when the stack > 1.
+    // The tap action (put or take), prompting for a quantity when the stack > 1. The picker opens
+    // on the whole stack except a pickpocket Take (lootQtyInitial).
     // onTransfer performs BOTH the optimistic list move and the CMP:container_* command.
     fun transfer() {
-        QuantityRequestState.requestOrRun(label, item.count, confirmLabel) { n ->
+        QuantityRequestState.requestOrRun(
+            label, item.count, confirmLabel,
+            lootQtyInitial(item.count, isTake = !isPlayerSide, isPickpocket = isPickpocket)
+        ) { n ->
             onTransfer(item, n)
         }
     }
@@ -4235,9 +4294,10 @@ fun LootingTopOverlay() {
         if (item.stackId.isNotEmpty()) wornIds.contains(item.stackId) else wornIds.contains(item.id)
 
     // Local quantity picker (kept on the TOP screen, not the global bottom-screen holder).
+    // [initial] is supplied by the caller (which knows take-vs-put); see lootQtyInitial.
     var qtyReq by remember { mutableStateOf<QuantityRequest?>(null) }
-    val requestQty: (String, Int, String, (Int) -> Unit) -> Unit = { name, count, label, action ->
-        if (count > 1) qtyReq = QuantityRequest(name, count, label) { n -> qtyReq = null; action(n) }
+    val requestQty: (String, Int, String, Int, (Int) -> Unit) -> Unit = { name, count, label, initial, action ->
+        if (count > 1) qtyReq = QuantityRequest(name, count, label, initial) { n -> qtyReq = null; action(n) }
         else action(1)
     }
 
@@ -4295,6 +4355,7 @@ fun LootingTopOverlay() {
         containerSorted = containerVisible,
         rows = 3,
         isCorpse = session.isCorpse,
+        isPickpocket = session.isPickpocket,
         requestQty = requestQty,
         onPut = { it, n -> put(it, n) },
         onTake = { it, n -> take(it, n) },
@@ -4328,15 +4389,24 @@ fun LootingTopOverlay() {
                 playerHeaderLeft = playerName,
                 playerHeaderRight = goldWeightHeaderRight(playerGold, liveEncumbrance),
                 playerShelfItems = playerItems.filter { !isWorn(it) }.map { itm ->
-                    itm.toShelfItem(worn = false) { requestQty(itm.displayName(), itm.count, "Put") { n -> put(itm, n) } }
+                    itm.toShelfItem(worn = false) {
+                        requestQty(itm.displayName(), itm.count, "Put", itm.count) { n -> put(itm, n) }
+                    }
                 },
                 playerEquipped = playerItems.filter { isWorn(it) }.map { itm ->
-                    itm.toShelfItem(worn = true) { requestQty(itm.displayName(), itm.count, "Put") { n -> put(itm, n) } }
+                    itm.toShelfItem(worn = true) {
+                        requestQty(itm.displayName(), itm.count, "Put", itm.count) { n -> put(itm, n) }
+                    }
                 },
                 otherHeaderLeft = session.containerName.ifBlank { "Container" },
                 otherHeaderRight = AnnotatedString("${containerItems.size} items"),
                 otherItems = containerItems.map { itm ->
-                    itm.toShelfItem(worn = false) { requestQty(itm.displayName(), itm.count, "Take") { n -> take(itm, n) } }
+                    itm.toShelfItem(worn = false) {
+                        requestQty(
+                            itm.displayName(), itm.count, "Take",
+                            lootQtyInitial(itm.count, isTake = true, isPickpocket = session.isPickpocket)
+                        ) { n -> take(itm, n) }
+                    }
                 },
                 otherEmptyText = if (session.isPickpocket) "Nothing you can lift" else "Empty",
                 infoOnTop = true,
@@ -4375,6 +4445,7 @@ fun LootingTopOverlay() {
                 onSelectCategory = { containerCat = it },
                 onTransfer = { it, n -> take(it, n) },
                 onRequestQty = requestQty,
+                isPickpocket = session.isPickpocket,
                 focusedIndex = if (focus!!.side == 1) focus.index else -1,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
@@ -4396,6 +4467,8 @@ fun LootingTopOverlay() {
                 name = req.name,
                 max = req.max,
                 confirmLabel = req.confirmLabel,
+                initial = req.initial,
+                showControllerHint = req.showControllerHint,
                 onConfirm = req.onConfirm,
                 onCancel = { qtyReq = null }
             )
@@ -4426,7 +4499,9 @@ private fun LootGridColumn(
     selectedCategory: String?,
     onSelectCategory: (String?) -> Unit,
     onTransfer: (InventoryItem, Int) -> Unit,
-    onRequestQty: (String, Int, String, (Int) -> Unit) -> Unit,
+    onRequestQty: (String, Int, String, Int, (Int) -> Unit) -> Unit,
+    /** Living NPC — a Take here opens the quantity picker at 1, not the stack (lootQtyInitial). */
+    isPickpocket: Boolean = false,
     focusedIndex: Int = -1,
     modifier: Modifier = Modifier
 ) {
@@ -4483,6 +4558,7 @@ private fun LootGridColumn(
                         worn = isPlayerSide && isWorn(item),
                         iconBitmap = rememberItemIcon(item.icon),
                         focused = i == focusedIndex,
+                        isPickpocket = isPickpocket,
                         onTransfer = onTransfer,
                         onRequestQty = onRequestQty
                     )
@@ -4506,8 +4582,9 @@ private fun LootGridCell(
     worn: Boolean,
     iconBitmap: ImageBitmap? = null,
     focused: Boolean = false,
+    isPickpocket: Boolean = false,
     onTransfer: (InventoryItem, Int) -> Unit,
-    onRequestQty: (String, Int, String, (Int) -> Unit) -> Unit
+    onRequestQty: (String, Int, String, Int, (Int) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
@@ -4516,7 +4593,13 @@ private fun LootGridCell(
     }
     val label = item.displayName()
     val confirmLabel = if (isPlayerSide) "Put" else "Take"
-    fun transfer() { onRequestQty(label, item.count, confirmLabel) { n -> onTransfer(item, n) } }
+    // Opens on the whole stack except a pickpocket Take — see lootQtyInitial.
+    fun transfer() {
+        onRequestQty(
+            label, item.count, confirmLabel,
+            lootQtyInitial(item.count, isTake = !isPlayerSide, isPickpocket = isPickpocket)
+        ) { n -> onTransfer(item, n) }
+    }
 
     Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
         Column(
@@ -4686,13 +4769,23 @@ private fun QuantitySelector(
     name: String,
     max: Int,
     confirmLabel: String = "Confirm",
+    // Quantity the picker opens on, clamped to [1, safeMax]. Defaults to the whole stack: taking /
+    // putting / selling the lot is the common intent, so Confirm is a single tap. Callers that want
+    // a cautious start pass their own value — today that is the pickpocket Take (1), whose catch
+    // chance scales with the stack lifted; see lootQtyInitial.
+    initial: Int = max,
+    // Show the "[Y]" hint next to MAX. Only true where the controller is actually routed to this
+    // overlay — i.e. a DS SESSION overlay (loot/barter/…), which is what flips
+    // setCompanionNavActive(true) in EngineActivity so native re-emits input as COMPANION_NAV_*.
+    // The plain companion TABS (inventory Drop, favourites-slot Drop) are not sessions, so no
+    // NavEvent ever arrives there and the hint would be advertising a dead button. MAX itself stays
+    // tappable either way.
+    showControllerHint: Boolean = true,
     onConfirm: (Int) -> Unit,
     onCancel: () -> Unit
 ) {
     val safeMax = max.coerceAtLeast(1)
-    // Default to 1 (a mis-tapped Confirm then only drops one item); the "Max"
-    // button jumps straight to the whole stack for dump-everything.
-    var qty by remember(name, safeMax) { mutableStateOf(1) }
+    var qty by remember(name, safeMax, initial) { mutableStateOf(initial.coerceIn(1, safeMax)) }
     fun set(v: Int) { qty = v.coerceIn(1, safeMax) }
     // Single "jump to the whole stack" action, shared by the on-screen MAX button and the Y button.
     fun setMax() { set(safeMax) }
@@ -4783,8 +4876,8 @@ private fun QuantitySelector(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("of $safeMax", color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
                 Spacer(Modifier.width(10.dp))
-                // Quick "Max" set — cheaper than tapping +10 up a big stack. Also bound to the Y
-                // button; the [Y] hint follows the [X]/[B] hint style used by the overlay buttons.
+                // Quick "Max" set — cheaper than tapping +10 up a big stack. Stays TAPPABLE in every
+                // context; only the [Y] controller hint is conditional (see showControllerHint).
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(3.dp))
@@ -4800,12 +4893,15 @@ private fun QuantitySelector(
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp
                     )
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        "[Y]",
-                        color = if (qty < safeMax) BoneDim else BoneDim.copy(alpha = 0.5f),
-                        fontSize = 10.sp, fontFamily = MwData
-                    )
+                    // The [Y] hint follows the [X]/[B] hint style used by the overlay buttons.
+                    if (showControllerHint) {
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            "[Y]",
+                            color = if (qty < safeMax) BoneDim else BoneDim.copy(alpha = 0.5f),
+                            fontSize = 10.sp, fontFamily = MwData
+                        )
+                    }
                 }
             }
 
@@ -4821,12 +4917,14 @@ private fun QuantitySelector(
     }
 }
 
-// Square +/- stepper button used by QuantitySelector.
+// Square +/- stepper button used by QuantitySelector and the SPLIT barter gold row.
+// [size] scales the box and its glyph together; the ratios reproduce the original 48dp/22sp
+// (single glyph) and 48dp/15sp ("−10"/"+10") exactly, so the picker is visually unchanged.
 @Composable
-private fun QtyButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun QtyButton(label: String, enabled: Boolean, size: Dp = 48.dp, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(48.dp)
+            .size(size)
             .clip(RoundedCornerShape(4.dp))
             .background(if (enabled) SlotWorn else SlotBg)
             .border(1.dp, if (enabled) Bronze else BronzeDark, RoundedCornerShape(4.dp))
@@ -4836,7 +4934,7 @@ private fun QtyButton(label: String, enabled: Boolean, onClick: () -> Unit) {
         Text(
             label,
             color = if (enabled) BronzeLight else BoneDim,
-            fontSize = if (label.length > 1) 15.sp else 22.sp,
+            fontSize = (size.value * if (label.length > 1) 0.3125f else 0.4583f).sp,
             fontFamily = MwData,
             fontWeight = FontWeight.Bold
         )
@@ -6450,7 +6548,11 @@ private fun BarterControlsOnly(session: BarterSession) {
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.6f)
+                // Widened 0.6 → 0.84 (+40%) when the gold ± steppers landed (Aug 10 2026): four
+                // buttons sharing the row left the slider itself too short to aim at. The panel's
+                // OWN width is the dial here — the steppers are fixed-size and the slider takes
+                // weight(1f), so every extra dp of panel goes straight into slider travel.
+                .fillMaxWidth(BARTER_CONTROLS_PANEL_WIDTH)
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
                 .padding(16.dp),
@@ -6479,6 +6581,11 @@ private fun BarterControlsOnly(session: BarterSession) {
                 playerGold = session.playerGold,
                 vendorGold = session.vendorGold,
                 offerBalance = offerBalance,
+                // SPLIT only: this window is sparse, so the ± taps fit alongside the slider. The
+                // full BOTTOM overlay (BarterOverlay) shares this composable but keeps the bare
+                // slider — its panel already carries two item lists; flip this flag there if the
+                // steppers are wanted in that layout too.
+                showSteppers = true,
                 onSetBalance = ::setBalance
             )
             Row(
@@ -6510,6 +6617,9 @@ private fun BarterControlsOnly(session: BarterSession) {
  *
  * NOTE: the "0" end is neutral/no-gold, not the mathematically "fair" balance — see the brief; the
  * exact semantics are easy to retune here.
+ *
+ * [showSteppers] flanks the slider with `[−10][−] … [+][+10]` tap buttons (SPLIT controls only —
+ * see the note on the stepper row below).
  */
 @Composable
 private fun BarterGoldSlider(
@@ -6517,6 +6627,7 @@ private fun BarterGoldSlider(
     playerGold: Int,
     vendorGold: Int,
     offerBalance: Int,
+    showSteppers: Boolean = false,
     onSetBalance: (Int) -> Unit
 ) {
     val receiving = merchantOffer >= 0
@@ -6531,6 +6642,14 @@ private fun BarterGoldSlider(
         else -> Bone
     }
 
+    // Single choke point for every way the amount moves (slider drag, stepper taps): set the
+    // MAGNITUDE, clamped to the slider's own 0..sliderMax range, then re-apply the deal's sign.
+    // So the steppers can never reach a value the slider couldn't.
+    fun setMagnitude(mag: Int) {
+        val m = mag.coerceIn(0, sliderMax)
+        onSetBalance(if (receiving) m else -m)
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -6539,23 +6658,69 @@ private fun BarterGoldSlider(
             if (offerBalance > 0) "+${offerBalance}g" else "${offerBalance}g",
             color = labelColor, fontSize = 20.sp, fontFamily = MwData, fontWeight = FontWeight.Bold
         )
-        Slider(
-            value = magnitude.toFloat(),
-            onValueChange = { v ->
-                val mag = v.roundToInt().coerceIn(0, sliderMax)
-                onSetBalance(if (receiving) mag else -mag)
-            },
-            valueRange = 0f..sliderMax.coerceAtLeast(1).toFloat(),
-            enabled = sliderMax > 0,
-            colors = SliderDefaults.colors(
-                thumbColor = BronzeLight,
-                activeTrackColor = Bronze,
-                inactiveTrackColor = BronzeDark
-            ),
-            modifier = Modifier.fillMaxWidth()
-        )
+        val slider = @Composable { modifier: Modifier ->
+            Slider(
+                value = magnitude.toFloat(),
+                onValueChange = { v -> setMagnitude(v.roundToInt()) },
+                valueRange = 0f..sliderMax.coerceAtLeast(1).toFloat(),
+                enabled = sliderMax > 0,
+                colors = SliderDefaults.colors(
+                    thumbColor = BronzeLight,
+                    activeTrackColor = Bronze,
+                    inactiveTrackColor = BronzeDark
+                ),
+                modifier = modifier
+            )
+        }
+        if (!showSteppers) {
+            slider(Modifier.fillMaxWidth())
+        } else {
+            // Stepper row: [−10][−]  slider  [+][+10], mirroring the QuantitySelector's stepper
+            // shape (the drop menu) — the value itself is already the big label above, so the
+            // slider takes the middle instead of a number.
+            //
+            // DIRECTION: +/− move the MAGNITUDE (how much gold changes hands), i.e. the slider
+            // right/left — NOT the signed label. Selling, "+" means you receive more; BUYING, "+"
+            // means you pay more, so the label reads -100g → -110g. That matches the slider's own
+            // spatial meaning and the left-stick mapping in BarterControlsOnly ("physical right
+            // always moves the slider rightward, toward max cost/gold"), which would otherwise
+            // disagree with the buttons sitting right next to it.
+            //
+            // ±10 only when the range is big enough to need it (same rule as QuantitySelector's
+            // showTens). Shrink STEP_BTN if the row ever crowds the slider on a narrower panel.
+            val showTens = sliderMax > 10
+            val canDown = sliderMax > 0 && magnitude > 0
+            val canUp = sliderMax > 0 && magnitude < sliderMax
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(BARTER_STEP_GAP)
+            ) {
+                if (showTens) {
+                    QtyButton("−10", enabled = canDown, size = BARTER_STEP_BTN) { setMagnitude(magnitude - 10) }
+                }
+                QtyButton("−", enabled = canDown, size = BARTER_STEP_BTN) { setMagnitude(magnitude - 1) }
+                slider(Modifier.weight(1f))
+                QtyButton("+", enabled = canUp, size = BARTER_STEP_BTN) { setMagnitude(magnitude + 1) }
+                if (showTens) {
+                    QtyButton("+10", enabled = canUp, size = BARTER_STEP_BTN) { setMagnitude(magnitude + 10) }
+                }
+            }
+        }
     }
 }
+
+// SPLIT barter gold-stepper sizing. Smaller than QuantitySelector's 48dp squares because four of
+// them share a row WITH the slider.
+private val BARTER_STEP_BTN = 34.dp
+private val BARTER_STEP_GAP = 4.dp
+
+/** Width of the SPLIT barter controls panel (`BarterControlsOnly`) as a fraction of the bottom
+ *  screen. Was 0.6 before the gold ± steppers; +40% → 0.84, which is where the slider's remaining
+ *  travel stops feeling cramped. Grow this (not the button size) if the row ever tightens again —
+ *  the buttons are fixed-width and the slider is `weight(1f)`, so the panel width IS the slider
+ *  width. Applies to SPLIT only; the full bottom `BarterOverlay` has its own layout. */
+private const val BARTER_CONTROLS_PANEL_WIDTH = 0.84f
 
 /**
  * TOP-screen barter grids (Display 0). Hosted by [org.openmw.EngineActivity] in an interactive
@@ -6581,10 +6746,11 @@ fun BarterTopOverlay() {
     var playerCat by remember { mutableStateOf<String?>(null) }
     var vendorCat by remember { mutableStateOf<String?>(null) }
 
-    // Local quantity picker (kept on the TOP screen).
+    // Local quantity picker (kept on the TOP screen). Barter always opens on the whole stack —
+    // there is no pickpocket case here (selection is reversible and the Offer is a separate step).
     var qtyReq by remember { mutableStateOf<QuantityRequest?>(null) }
     val requestQty: (String, Int, String, (Int) -> Unit) -> Unit = { name, count, label, action ->
-        if (count > 1) qtyReq = QuantityRequest(name, count, label) { n -> qtyReq = null; action(n) }
+        if (count > 1) qtyReq = QuantityRequest(name, count, label, count) { n -> qtyReq = null; action(n) }
         else action(1)
     }
 
@@ -6765,6 +6931,8 @@ fun BarterTopOverlay() {
                 name = req.name,
                 max = req.max,
                 confirmLabel = req.confirmLabel,
+                initial = req.initial,
+                showControllerHint = req.showControllerHint,
                 onConfirm = req.onConfirm,
                 onCancel = { qtyReq = null }
             )
@@ -7994,7 +8162,11 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                             onClick = {
                                 dismiss()
                                 val count = item?.count ?: 1
-                                QuantityRequestState.requestOrRun(s.name, count, "Drop") { n ->
+                                // Map tab (favourites slot) — a plain TAB, no controller nav routed
+                                // here, so no "[Y]" hint. Same reasoning as the inventory Drop.
+                                QuantityRequestState.requestOrRun(
+                                    s.name, count, "Drop", showControllerHint = false
+                                ) { n ->
                                     CompanionActions.dropItem(s.id, n)
                                 }
                             },
@@ -9635,8 +9807,11 @@ private fun ItemContextMenu(
             text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
             onClick = {
                 onDismiss()
-                // count > 1 → ask how many; count == 1 drops immediately.
-                QuantityRequestState.requestOrRun(label, item.count, "Drop") { n ->
+                // count > 1 → ask how many; count == 1 drops immediately. Inventory is a plain TAB,
+                // not a DS session overlay, so controller nav isn't routed here — no "[Y]" hint.
+                QuantityRequestState.requestOrRun(
+                    label, item.count, "Drop", showControllerHint = false
+                ) { n ->
                     CompanionActions.dropItem(item.id, n)
                 }
             },
@@ -13082,26 +13257,29 @@ private fun EquippedInListRow() {
 private const val DIM_LUMINANCE_BRIGHT = 0.40f
 
 /**
- * Scene luminance at or below which the overlay reaches [DIM_MAX_ALPHA].
+ * Scene luminance at or below which the overlay reaches the player's chosen MINIMUM brightness.
  *
  * MUST NOT be lower than the engine's `Shaders/minimum interior brightness` (default **0.08**),
  * which clamps every interior's ambient UP to that value in `configureAmbient`. This was 0.02
  * originally, which put the floor below anything the engine can ever report — so the darkest cave
- * only reached ~0.42 alpha and [DIM_MAX_ALPHA] was mathematically unreachable. If that setting is
- * ever changed, change this to match.
+ * only reached ~0.42 alpha and the ramp's dark end was mathematically unreachable. If that setting
+ * is ever changed, change this to match.
  */
 private const val DIM_LUMINANCE_DARK = 0.08f
 
 /**
- * Ceiling on the overlay's opacity.
+ * ABSOLUTE ceiling on the overlay's opacity, i.e. the readability guarantee, independent of where
+ * the player has put the brightness sliders.
  *
- * This layer sits ABOVE every other companion layer including popups and the crime toast, so the
- * ceiling is what keeps the UI readable rather than merely dim — raising it trades legibility for
- * darkness. Raised 0.55 -> 0.75 on request after testing showed the previous ceiling was too light
- * (and, per [DIM_LUMINANCE_DARK], was never actually reached). If the UI becomes hard to read in a
- * pitch-dark interior, lower this first.
+ * This layer sits ABOVE every other companion layer including popups and the crime toast, so
+ * nothing can punch back through it — the ceiling is the only thing keeping the UI readable rather
+ * than merely dim. It was a plain hardcoded 0.75 before the min/max brightness sliders existed
+ * (raised there from 0.55 after testing). The sliders now choose where inside that budget the ramp
+ * ends, but they CANNOT exceed it: [UiPreferences.ADAPTIVE_DIM_MIN_RANGE]'s lower bound is
+ * `1 - DIM_ABSOLUTE_MAX_ALPHA`, and the mapping below re-clamps to this value as a backstop.
+ * Deliberately belt-and-braces — do not raise this to let people go darker.
  */
-private const val DIM_MAX_ALPHA = 0.75f
+private const val DIM_ABSOLUTE_MAX_ALPHA = 0.85f
 
 /** Fade duration between dim levels. Long enough that cell transitions and weather/lightning
  *  changes read as a smooth adjustment instead of a strobe. */
@@ -13122,7 +13300,7 @@ private const val DIM_ANIM_MS = 800
  * WHY ABOVE EVERYTHING (zIndex 40f, over the 30f crime toast / persuasion popup): the effect is
  * simulating ambient darkness of the whole panel, so it has to be uniform. Sitting below the
  * overlays would let a dialogue or item popup punch through at full brightness in a pitch-dark
- * cave — exactly the problem this fixes. [DIM_MAX_ALPHA] is what keeps that readable.
+ * cave — exactly the problem this fixes. [DIM_ABSOLUTE_MAX_ALPHA] is what keeps that readable.
  *
  * NO POINTER MODIFIERS: a Box carrying only `background()` does not consume pointer input (the
  * dropdown scrim nearby has to add `pointerInput` explicitly to intercept taps). Adding
@@ -13131,15 +13309,27 @@ private const val DIM_ANIM_MS = 800
 @Composable
 private fun AdaptiveDimOverlay() {
     val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
+    val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
+    val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
     val luminance by GameStateRepository.ambientLuminance.collectAsState()
 
     // Gate at the mapping stage rather than skipping the composable, so switching the option off
-    // animates smoothly back to clear instead of snapping.
+    // animates smoothly back to clear instead of snapping. This is also what makes the option a
+    // true master switch: it wins over any slider position.
     val target = if (!enabled) 0f else {
         // Linear ramp between the two luminance anchors, inverted (darker scene -> more opacity).
         val t = ((DIM_LUMINANCE_BRIGHT - luminance) /
                 (DIM_LUMINANCE_BRIGHT - DIM_LUMINANCE_DARK)).coerceIn(0f, 1f)
-        t * DIM_MAX_ALPHA
+        // The sliders are the two ENDS of that ramp, given as screen brightness (what the player
+        // sees) rather than overlay opacity (what we draw) — hence the inversion. t = 0 (brightest
+        // scene) lands on maxBrightness, t = 1 (darkest scene) on minBrightness.
+        val alphaAtBright = 1f - maxBrightness
+        val alphaAtDark = 1f - minBrightness
+        // Backstop clamp: the slider range and the setter already enforce this, so reaching it here
+        // means something upstream was bypassed. Keeping it means the readability guarantee holds
+        // even then. See [DIM_ABSOLUTE_MAX_ALPHA].
+        (alphaAtBright + t * (alphaAtDark - alphaAtBright))
+            .coerceIn(0f, DIM_ABSOLUTE_MAX_ALPHA)
     }
 
     // The luminance anchors above are estimates; what real cells report is the only way to tune
@@ -13147,7 +13337,7 @@ private fun AdaptiveDimOverlay() {
     // only, and keyed on luminance rounded to 2dp so it logs on real change, not per frame —
     // the native side already throttles to ~4Hz.
     if (BuildConfig.DEBUG) {
-        LaunchedEffect(kotlin.math.round(luminance * 100f), enabled) {
+        LaunchedEffect(kotlin.math.round(luminance * 100f), enabled, minBrightness, maxBrightness) {
             Log.d(
                 "AdaptiveDim",
                 "luminance=${"%.3f".format(luminance)} -> alpha=${"%.2f".format(target)} (on=$enabled)"
@@ -13252,10 +13442,16 @@ private fun JournalPageTurnRow() {
 // than the top screen once the player is somewhere dark. This is a translucent black overlay only;
 // it never touches the device's real screen brightness (both physical displays share one brightness
 // group, so per-display control isn't possible anyway). "Companion Tabs" section.
+// The two sliders below the On/Off pills set the ENDS of the dimming ramp. They are shown only
+// while the feature is on: off, they control nothing, and a live-looking slider that does nothing
+// reads as broken. Off remains a true master switch — the overlay's mapping zeroes on it before
+// either slider is consulted.
 @Composable
 private fun AdaptiveDimmingRow() {
     val context = LocalContext.current
     val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
+    val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
+    val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Adaptive Dimming", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
@@ -13278,6 +13474,84 @@ private fun AdaptiveDimmingRow() {
                 active = !enabled,
                 enabled = true
             ) { UiPreferences.setAdaptiveDimming(context, false) }
+        }
+
+        if (enabled) {
+            BrightnessSlider(
+                label = "Darkest (in dark places)",
+                blurb = "How dark this screen goes in the darkest interiors and at night.",
+                value = minBrightness,
+                range = ADAPTIVE_DIM_MIN_RANGE
+            ) { UiPreferences.setAdaptiveDimMinBrightness(context, it) }
+            BrightnessSlider(
+                label = "Brightest (in bright places)",
+                blurb = "How bright this screen stays outdoors in daylight. 100% = untouched.",
+                value = maxBrightness,
+                range = ADAPTIVE_DIM_MAX_RANGE
+            ) { UiPreferences.setAdaptiveDimMaxBrightness(context, it) }
+        }
+    }
+}
+
+/**
+ * One brightness slider for [AdaptiveDimmingRow], shown as a percentage of full screen brightness.
+ *
+ * Percent-of-brightness rather than overlay opacity because that is the thing the player is
+ * actually setting; the inversion to opacity happens once, in [AdaptiveDimOverlay]'s mapping. The
+ * end labels are drawn from [range] so they can never drift from the enforced bounds — in
+ * particular the MIN slider's left label IS the readability cap, and showing a different number
+ * there would be a lie about how dark the screen can get.
+ */
+@Composable
+private fun BrightnessSlider(
+    label: String,
+    blurb: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit
+) {
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                color = Bone, fontSize = 12.sp, fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "${(value * 100).roundToInt()}%",
+                color = BronzeLight, fontSize = 12.sp, fontFamily = MwData
+            )
+        }
+        Text(
+            blurb,
+            color = BoneDim, fontSize = 10.sp, fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${(range.start * 100).roundToInt()}%",
+                color = BoneDim, fontSize = 11.sp, fontFamily = MwData
+            )
+            Slider(
+                value = value,
+                onValueChange = onChange,
+                valueRange = range,
+                colors = SliderDefaults.colors(
+                    thumbColor = BronzeLight,
+                    activeTrackColor = BronzeLight,
+                    inactiveTrackColor = BronzeDark,
+                    activeTickColor = Color.Transparent,
+                    inactiveTickColor = Color.Transparent
+                ),
+                modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+            )
+            Text(
+                "${(range.endInclusive * 100).roundToInt()}%",
+                color = BoneDim, fontSize = 11.sp, fontFamily = MwData
+            )
         }
     }
 }
