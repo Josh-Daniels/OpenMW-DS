@@ -15,6 +15,7 @@ import org.openmw.companion.CompanionScreen
 import org.openmw.companion.ConversationHistoryOverlay
 import org.openmw.companion.GameStateRepository
 import org.openmw.companion.OptionsMenuOverlay
+import org.openmw.companion.UiSounds
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
 import org.openmw.companion.LootingTopOverlay
@@ -972,6 +973,11 @@ class EngineActivity : SDLActivity() {
         // or TOP (i.e. anything but BOTTOM). Independent of the Hide UI toggle —
         // conversation is always visible when active.
         UiPreferences.init(applicationContext)
+        // Interface sounds. Here rather than in CompanionScreen because the options menu — one of
+        // the three things that makes these sounds — lives in its OWN window outside that
+        // composition, and is reachable from the title screen. EngineActivity hosts both, so this
+        // is the one place that covers every surface. Idempotent; synthesis happens off-thread.
+        UiSounds.init(applicationContext)
 
         // Push the "Game cursor" option to native (companionCursorEnabled) so the
         // engine suppresses the top-screen SDL cursor when off. Fires once with the

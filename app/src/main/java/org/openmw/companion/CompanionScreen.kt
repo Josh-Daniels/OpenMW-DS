@@ -28,6 +28,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -99,6 +102,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.runtime.key
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -192,11 +197,32 @@ private val BoneDim     = Color(0xFF9A8C70)   // secondary text
 private val BoneBright  = Color(0xFFF2EEE3)   // item name, high prominence
 private val BoneMuted   = Color(0xFFBCAF96)   // item name, low prominence
 private val FloatStone  = Color(0xF02A2318)   // near-opaque stone for floating bars
-private val EnchantTint  = Color(0xFF5BA8E0).copy(alpha = 0.4f) // subtle light-blue backdrop for enchanted item icons
+
+/*
+ * Action-button roles for the service overlays (Repair / Training / Travel / Spell buying /
+ * Rest-Wait / Barter). These replaced a green "confirm" and a blue "cancel" (Aug 10 2026), which
+ * were the only two non-bronze buttons in the whole companion and read as belonging to a different
+ * app.
+ *
+ * They are ROLES, not new colours — both are existing palette entries, and the hierarchy they
+ * encode is what the green/blue pair was really communicating:
+ *   ActionConfirm (BronzeLight) — the primary action. Same treatment as "Rest Until Healed", which
+ *                                 was already BronzeLight, and as an active OptionPill.
+ *   ActionCancel  (Bronze)      — present and tappable, but subordinate.
+ * Disabled is a THIRD level and is left alone (BoneDim text on SlotBg, BronzeDark border). That is
+ * also why cancel is Bronze rather than BoneDim: BoneDim is the disabled text colour, so an enabled
+ * Cancel drawn in it would read as greyed out.
+ */
+private val ActionConfirm = BronzeLight
+private val ActionCancel  = Bronze
+// Backdrop behind an enchanted item's icon. GOLD, from the palette — it was a saturated light blue
+// (0xFF5BA8E0) until Aug 10 2026, which contradicted both its own helper's KDoc ("subtle gold
+// backdrop") and the transport note in CLAUDE.md ("the enchanted-icon gold backdrop"), and is the
+// wrong reference besides: vanilla's menu_icon_magic frame is a warm gold glow, not a blue one.
+private val EnchantTint  = BronzeLight.copy(alpha = 0.30f)
 
 private val HealthCol   = Color(0xFF8E2B20)   // blood red
 private val MagickaCol  = Color(0xFF35608F)   // arcane blue (stat bar)
-private val SpellFavCol = Color(0xFF83AEBE)   // spell fav slot border/text (muted steel blue)
 private val FatigueCol  = Color(0xFF4E7A3A)   // earthy green
 
 // ---- dropdown focus guard ----
@@ -2474,53 +2500,82 @@ private fun journalAnnotated(
     // Read at click time rather than captured, so a link tapped later still calls the current
     // callback rather than one closed over on the composition that built the string.
     val handler = rememberUpdatedState(onTopic)
-    return remember(text, topics) {
-        buildAnnotatedString {
-            if (topics.isEmpty()) {
-                append(text)
-                return@buildAnnotatedString
-            }
-            // Bucket by lowercase first character so each scan position only tests the topics that
-            // could possibly start there — with a few hundred known topics this is the difference
-            // between a trivial pass and a visibly slow one on a long entry.
-            val byFirstChar = HashMap<Char, MutableList<String>>()
-            for (topic in topics) {
-                if (topic.isNotEmpty()) {
-                    byFirstChar.getOrPut(topic[0].lowercaseChar()) { mutableListOf() }.add(topic)
-                }
-            }
-            // Longest first, so the first hit at a position is also the longest one.
-            byFirstChar.values.forEach { it.sortByDescending(String::length) }
+    val index = rememberTopicIndex(topics)
+    return remember(text, index) { buildJournalAnnotated(text, index) { handler.value } }
+}
 
-            var i = 0
-            var plainFrom = 0
-            while (i < text.length) {
-                if (i != 0 && text[i - 1] !in TOPIC_WORD_SEPARATORS) {
-                    i++
-                    continue
-                }
-                val match = byFirstChar[text[i].lowercaseChar()]
-                    ?.firstOrNull { text.regionMatches(i, it, 0, it.length, ignoreCase = true) }
-                if (match == null) {
-                    i++
-                    continue
-                }
-                if (i > plainFrom) append(text.substring(plainFrom, i))
-                // Show the text as written (case and all); navigate by the topic's own name.
-                withLink(
-                    LinkAnnotation.Clickable(
-                        tag = "journalTopic",
-                        styles = TextLinkStyles(style = SpanStyle(color = BronzeLight))
-                    ) { handler.value(match) }
-                ) {
-                    append(text.substring(i, i + match.length))
-                }
-                i += match.length
-                plainFrom = i
-            }
-            if (plainFrom < text.length) append(text.substring(plainFrom))
+/**
+ * Topic names bucketed by lowercase first character, longest-first within each bucket.
+ *
+ * Hoisted out of [buildJournalAnnotated] because the paginated journal builds a string for EVERY
+ * entry in one pass — rebuilding this index a thousand times would dominate that pass. With a few
+ * hundred known topics, bucketing is the difference between a trivial scan and a visibly slow one.
+ */
+private typealias TopicIndex = Map<Char, List<String>>
+
+private fun buildTopicIndex(topics: List<String>): TopicIndex {
+    val byFirstChar = HashMap<Char, MutableList<String>>()
+    for (topic in topics) {
+        if (topic.isNotEmpty()) {
+            byFirstChar.getOrPut(topic[0].lowercaseChar()) { mutableListOf() }.add(topic)
         }
     }
+    // Longest first, so the first hit at a position is also the longest one.
+    byFirstChar.values.forEach { it.sortByDescending(String::length) }
+    return byFirstChar
+}
+
+@Composable
+private fun rememberTopicIndex(topics: List<String>): TopicIndex =
+    remember(topics) { buildTopicIndex(topics) }
+
+/**
+ * The scan itself, as a PLAIN function — see [journalAnnotated] for the matching rules.
+ *
+ * Deliberately not `@Composable`: the paginated journal has to build these strings outside
+ * composition (it measures them to decide where pages break), and a single implementation is the
+ * only way the two paths can be guaranteed to link identically.
+ *
+ * [handlerProvider] is called at CLICK time, never captured, so a string built during an earlier
+ * composition — or cached across one, as [JournalPaginationCache] does — still routes to whatever
+ * handler is live now rather than to a dead composable's callback.
+ */
+private fun buildJournalAnnotated(
+    text: String,
+    index: TopicIndex,
+    handlerProvider: () -> ((String) -> Unit)?
+): AnnotatedString = buildAnnotatedString {
+    if (index.isEmpty()) {
+        append(text)
+        return@buildAnnotatedString
+    }
+    var i = 0
+    var plainFrom = 0
+    while (i < text.length) {
+        if (i != 0 && text[i - 1] !in TOPIC_WORD_SEPARATORS) {
+            i++
+            continue
+        }
+        val match = index[text[i].lowercaseChar()]
+            ?.firstOrNull { text.regionMatches(i, it, 0, it.length, ignoreCase = true) }
+        if (match == null) {
+            i++
+            continue
+        }
+        if (i > plainFrom) append(text.substring(plainFrom, i))
+        // Show the text as written (case and all); navigate by the topic's own name.
+        withLink(
+            LinkAnnotation.Clickable(
+                tag = "journalTopic",
+                styles = TextLinkStyles(style = SpanStyle(color = BronzeLight))
+            ) { handlerProvider()?.invoke(match) }
+        ) {
+            append(text.substring(i, i + match.length))
+        }
+        i += match.length
+        plainFrom = i
+    }
+    if (plainFrom < text.length) append(text.substring(plainFrom))
 }
 
 /* ---- Item / spell info popup (small, position-aware) ---- */
@@ -3255,7 +3310,7 @@ private fun ShelfCell(item: ShelfItem, focused: Boolean) {
                 if (item.selected && item.selectedCount > 1) {
                     Text(
                         "×${item.selectedCount}",
-                        color = BarterGreen, fontSize = 9.sp,
+                        color = BronzeLight, fontSize = 9.sp,
                         fontFamily = MwData, fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -5288,6 +5343,13 @@ private fun RowScope.KbKey(
     active: Boolean = false,
     onClick: () -> Unit
 ) {
+    // Every key — letters, shift, backspace, space, the 123 page flip and Enter — passes through
+    // here, so hooking the sound at this one point covers the whole keyboard for BOTH call sites
+    // (the native text-input prompt and the manual journal composer). Enter takes the heavier cue
+    // because it commits rather than types; `primary` is already the flag that marks it out
+    // visually, so the two stay in step.
+    val keyCue = if (primary) UiSounds.Cue.TOGGLE else UiSounds.Cue.KEY
+    val press: () -> Unit = { UiSounds.play(keyCue); onClick() }
     val highlight = primary || active
     Box(
         modifier = Modifier
@@ -5297,7 +5359,7 @@ private fun RowScope.KbKey(
             .clip(RoundedCornerShape(4.dp))
             .background(if (highlight) SlotWorn else SlotBg)
             .border(1.dp, if (highlight) Bronze else BronzeDark, RoundedCornerShape(4.dp))
-            .clickable { onClick() },
+            .clickable { press() },
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -5419,10 +5481,10 @@ private fun RepairOverlay(session: RepairSession) {
                 // when there's nothing at all to repair.
                 RepairButton(
                     label = "Repair All (${session.totalCost}g)",
-                    color = BarterGreen,
+                    color = ActionConfirm,
                     enabled = session.items.isNotEmpty()
                 ) { CompanionActions.repairAll() }
-                RepairButton(label = "Cancel", color = BarterBlue, enabled = true) {
+                RepairButton(label = "Cancel", color = ActionCancel, enabled = true) {
                     CompanionActions.repairCancel()
                 }
             }
@@ -5710,7 +5772,7 @@ private fun TrainingOverlayHost(session: TrainingSession?) {
                     fontFamily = MwData, modifier = Modifier.weight(1f)
                 )
                 // Cancel only makes sense while choosing (LIST); during the messages it's inert.
-                RepairButton(label = "Cancel", color = BarterBlue, enabled = phase == TrainingPhase.LIST) {
+                RepairButton(label = "Cancel", color = ActionCancel, enabled = phase == TrainingPhase.LIST) {
                     dismiss()
                 }
             }
@@ -5878,7 +5940,7 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
                     "Gold: ${session.playerGold}", color = BronzeLight, fontSize = 13.sp,
                     fontFamily = MwData, modifier = Modifier.weight(1f)
                 )
-                RepairButton(label = "Cancel", color = BarterBlue, enabled = true) {
+                RepairButton(label = "Cancel", color = ActionCancel, enabled = true) {
                     CompanionActions.spellBuyingCancel()
                 }
             }
@@ -6037,7 +6099,7 @@ private fun TravelOverlay(session: TravelSession) {
                     "Gold: ${session.playerGold}", color = BronzeLight, fontSize = 13.sp,
                     fontFamily = MwData, modifier = Modifier.weight(1f)
                 )
-                RepairButton(label = "Cancel", color = BarterBlue, enabled = true) {
+                RepairButton(label = "Cancel", color = ActionCancel, enabled = true) {
                     CompanionActions.travelCancel()
                 }
             }
@@ -6219,7 +6281,9 @@ private fun RestWaitOverlay(session: SleepSession) {
                 ) {
                     RepairButton(
                         label = "Rest Until Healed",
-                        color = BronzeLight, enabled = true,
+                        // Was already BronzeLight — i.e. this button is what the rest of them now
+                        // look like. Named for its role so it stays in step with them.
+                        color = ActionConfirm, enabled = true,
                         modifier = Modifier.fillMaxWidth()
                     ) { CompanionActions.sleep(session.hoursToHeal) }
                 }
@@ -6230,11 +6294,11 @@ private fun RestWaitOverlay(session: SleepSession) {
             ) {
                 RepairButton(
                     label = if (isRest) "Rest" else "Wait",
-                    color = BarterGreen, enabled = true,
+                    color = ActionConfirm, enabled = true,
                     modifier = Modifier.weight(1f)
                 ) { CompanionActions.sleep(hours) }
                 RepairButton(
-                    label = "Cancel", color = BarterBlue, enabled = true,
+                    label = "Cancel", color = ActionCancel, enabled = true,
                     modifier = Modifier.weight(1f)
                 ) { CompanionActions.sleepCancel() }
             }
@@ -6244,9 +6308,15 @@ private fun RestWaitOverlay(session: SleepSession) {
 
 /* ---- Barter overlay (bottom screen) ---- */
 
-private val BarterGreen = Color(0xFF7FBF7F)   // Offer / "player receives" (matches effect green)
+// Money DIRECTION only — green "you receive" vs red "you pay", the pairing that makes the offer
+// balance readable at a glance. Same two values as the magic-effect dots, deliberately.
+//
+// These are NOT button colours. Every service overlay's buttons used to take BarterGreen (confirm)
+// and a BarterBlue (cancel), which put a green and a blue button in the middle of an otherwise
+// entirely bronze UI; they now use [ActionConfirm]/[ActionCancel] below. BarterBlue is gone
+// entirely — it only ever meant "Cancel", and that is a role, not a value.
+private val BarterGreen = Color(0xFF7FBF7F)   // "player receives" (matches effect green)
 private val BarterRed = Color(0xFFC75C5C)     // "player pays" / rejected (matches effect red)
-private val BarterBlue = Color(0xFF6E93C9)    // Cancel
 
 /** The per-side visible barter list: filter by the selected category tab, then sort. On the PLAYER
  *  side, worn (equipped) items are floated to the top; the existing [itemCategoryRank] + name order is
@@ -6614,11 +6684,11 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 BarterButton(
-                    label = offerLabel, color = BarterGreen, enabled = offerEnabled,
+                    label = offerLabel, color = ActionConfirm, enabled = offerEnabled,
                     modifier = Modifier.weight(1f)
                 ) { CompanionActions.barterOffer() }
                 BarterButton(
-                    label = "Cancel", hint = "B", color = BarterBlue, enabled = true,
+                    label = "Cancel", hint = "B", color = ActionCancel, enabled = true,
                     modifier = Modifier.weight(1f)
                 ) { CompanionActions.barterCancel() }
             }
@@ -6786,11 +6856,11 @@ private fun BarterControlsOnly(session: BarterSession) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 BarterButton(
-                    label = offerLabel, color = BarterGreen, enabled = offerEnabled,
+                    label = offerLabel, color = ActionConfirm, enabled = offerEnabled,
                     modifier = Modifier.weight(1f)
                 ) { CompanionActions.barterOffer() }
                 BarterButton(
-                    label = "Cancel", hint = "B", color = BarterBlue, enabled = true,
+                    label = "Cancel", hint = "B", color = ActionCancel, enabled = true,
                     modifier = Modifier.weight(1f)
                 ) { CompanionActions.barterCancel() }
             }
@@ -7304,7 +7374,7 @@ private fun BarterGridCell(
                 if (selected && item.selectedCount > 1) {
                     Text(
                         "×${item.selectedCount}",
-                        color = BarterGreen, fontSize = 9.sp,
+                        color = BronzeLight, fontSize = 9.sp,
                         fontFamily = MwData, fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -7525,7 +7595,7 @@ private fun BarterRow(
                         val n = if (item.selectedCount > 1) " ×${item.selectedCount}" else ""
                         Text(
                             (if (isPlayerSide) "✓ selling" else "✓ buying") + n,
-                            color = BarterGreen, fontSize = 10.sp,
+                            color = BronzeLight, fontSize = 10.sp,
                             fontFamily = MwDisplay, fontWeight = FontWeight.Bold
                         )
                     } else {
@@ -8484,6 +8554,19 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
 }
 
 /**
+ * Width cap on the followed-quest label — doubled from 200dp Aug 10 2026 so long quest names get a
+ * real chance to read on one or two lines.
+ *
+ * 200dp was the width at which the label cleared the corner NAME LABELS (each side occupies about
+ * 8 + 40 + 120 = 168dp once a weapon/spell name is toggled on). At 400dp it no longer does, and
+ * that overlap is a DELIBERATE, accepted trade: the bare corner icons only take ~48dp a side, so
+ * the common case is clear either way, and the name popouts are opt-in and transient while the
+ * followed quest is persistent. If this needs to grow again, the corner labels are the thing to
+ * look at first — not this constant.
+ */
+private val FOLLOWED_QUEST_MAX_WIDTH = 400.dp
+
+/**
  * The followed quest's name, top-centre on the HUD map. Tap jumps to its journal page; long-press
  * opens the same Hide/Follow menu the quest list rows use.
  *
@@ -8519,10 +8602,10 @@ private fun FollowedQuestLabel(
         Box {
             Column(
                 modifier = Modifier
-                    .widthIn(max = 200.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xC0151210))
-                    .border(1.dp, BronzeDark, RoundedCornerShape(4.dp))
+                    .widthIn(max = FOLLOWED_QUEST_MAX_WIDTH)
+                    // NO background/border — the label sits straight on the map, matching
+                    // TargetHealthOverlay, which shares this exact slot and never had a box. The
+                    // panel was what made the two look like different kinds of thing.
                     .combinedClickable(
                         onClick = { JournalQuestNavState.request(questId) },
                         onLongClick = { menuOpen = true; DropdownState.open() }
@@ -10995,53 +11078,506 @@ private fun JournalNavBar(left: String?, onLeft: (() -> Unit)?, center: String, 
     Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
 }
 
+/* ---- Journal book pagination (animated page-turn mode only) ---- */
+
+/**
+ * One drawable piece of a journal column. The whole point of the type is that a [Body] is a
+ * FRAGMENT, not an entry: the paginator is free to cut one entry's text across a page boundary, and
+ * the renderer neither knows nor cares whether what it holds is a whole entry or the tail of one.
+ */
+private sealed interface JournalPageItem {
+    data class Header(val label: String) : JournalPageItem
+    data class Body(val text: AnnotatedString) : JournalPageItem
+    data object AddEntry : JournalPageItem
+}
+
+/**
+ * Paddings baked into the journal column layout, named here because the paginator has to ADD THEM
+ * UP to know how much fits while the renderers apply them as modifiers. Two consumers, one set of
+ * numbers — the same discipline [JOURNAL_SPREAD_H_PAD] and friends already enforce between the
+ * in-pager spread and [JournalLeafOverlay]'s arithmetic copy of it. Never write one of these as a
+ * literal at a use site.
+ */
+private val JOURNAL_COL_H_PAD = 6.dp
+/** Breathing room at the head and foot of every column. Without the top inset, a column that opens
+ *  mid-entry (which reflow makes the common case) starts its text hard against the page edge. */
+private val JOURNAL_COL_TOP_PAD = 10.dp
+private val JOURNAL_COL_BOTTOM_PAD = 6.dp
+/** Separation ABOVE a date header — from the previous day's text, so it is dropped when the header
+ *  is the first thing on a column and there is nothing above it to separate from. */
+private val JOURNAL_HEADER_PAD_TOP = 14.dp
+/** Gap between a date and its own first entry. Deliberately much smaller than [JOURNAL_HEADER_PAD_TOP]
+ *  so the heading groups with the text BELOW it rather than floating between two days. */
+private val JOURNAL_HEADER_PAD_BOTTOM = 6.dp
+private val JOURNAL_BODY_PAD_BOTTOM = 4.dp
+/** Outer (8 top + 10 bottom) plus the pill's own vertical padding (5 + 5). The 1dp border draws
+ *  inside the bounds and does NOT add layout height, so it is not counted. */
+private val JOURNAL_ADD_ENTRY_EXTRA_V = 28.dp
+
+/** Height always reserved for the page-dot strip — see the circularity note in [JournalChronological]. */
+private val JOURNAL_INDICATOR_STRIP = 13.dp
+
+/** Past this many pages the dots stop fitting across the panel and a counter is shown instead. */
+private const val JOURNAL_MAX_DOTS = 14
+
+/**
+ * Minimum lines of an entry left on a column, and carried onto the next, when its text is split.
+ * Stops a single orphaned line dangling at the foot of a page (or arriving alone at the head of
+ * one), which is the thing that most makes a reflowed page stop reading like a book.
+ */
+private const val JOURNAL_MIN_SPLIT_LINES = 2
+
+/**
+ * Text styles for the chronological journal, SHARED by the renderers and by the paginator's
+ * measurement pass. This sharing is load-bearing, not tidiness: a style the paginator measures with
+ * that differs by even a line-height from the one actually drawn produces pages that overflow or
+ * come up short, and the symptom (clipped last line) looks nothing like the cause.
+ */
+/** Larger than the body (14.sp) on purpose — a date is a heading and should read as one. */
+@Composable
+private fun journalHeaderStyle() = TextStyle(
+    color = BronzeLight, fontSize = 16.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+)
+
+@Composable
+private fun journalBodyStyle() = TextStyle(
+    color = Bone, fontSize = 14.sp, fontFamily = MwBody, lineHeight = 18.sp
+)
+
+@Composable
+private fun journalAddEntryStyle() = TextStyle(
+    color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody
+)
+
+/**
+ * Live handler for a topic link tapped inside a PAGINATED entry.
+ *
+ * The paginated strings are cached across compositions of `JournalPanel` (which is destroyed and
+ * rebuilt on every tab switch), so a link that captured its callback directly would, after the
+ * first rebuild, be calling into a dead composition — silently doing nothing. Reading a global at
+ * click time is what makes the cache safe to keep. Same role `rememberUpdatedState` plays for the
+ * non-cached call sites; a global is needed here only because the value has to outlive the
+ * composition that produced it.
+ */
+private object JournalTopicLinkHandler {
+    @Volatile
+    var current: ((String) -> Unit)? = null
+}
+
+/**
+ * Flows a linear stream of blocks into fixed-height columns, cutting entry text at LINE boundaries
+ * when it does not fit — i.e. real book pagination, where content spills to the next page rather
+ * than scrolling within one.
+ *
+ * Splitting at a line boundary is what makes this correct rather than merely plausible: line
+ * breaking is deterministic for a given (text, width, style, density), so a remainder that starts
+ * where a break already fell re-lays-out on the next column exactly as it did here. An arbitrary
+ * character split would not have that property and the two halves could disagree.
+ *
+ * Pure and Compose-free by design — everything it needs is passed in — so it can be reasoned about
+ * (and its output eyeballed) without a pager, an overlay or a recomposition anywhere near it.
+ *
+ * @param columnHeightPx usable height of one column, paddings already deducted by the caller.
+ * @return one list of items per COLUMN, in reading order. The caller pairs them into spreads.
+ */
+private fun paginateJournal(
+    blocks: List<JournalPageItem>,
+    measurer: TextMeasurer,
+    headerStyle: TextStyle,
+    bodyStyle: TextStyle,
+    contentWidthPx: Int,
+    columnHeightPx: Float,
+    headerPadTopPx: Float,
+    headerPadBottomPx: Float,
+    bodyPadPx: Float,
+    addEntryHeightPx: Float,
+    bodyLineHeightPx: Float
+): List<List<JournalPageItem>> {
+    if (contentWidthPx <= 0 || columnHeightPx <= 0f) return listOf(blocks)
+
+    val columns = mutableListOf<List<JournalPageItem>>()
+    var current = mutableListOf<JournalPageItem>()
+    var used = 0f
+    // Bare text height of the header most recently placed, so it can be re-costed if it turns out
+    // to be moving to a column of its own (where it loses its top padding).
+    var lastHeaderTextH = 0f
+
+    fun breakColumn() {
+        columns.add(current)
+        current = mutableListOf()
+        used = 0f
+    }
+
+    /** A header's total cost, which depends on whether anything sits above it on the column. */
+    fun headerHeight(textH: Float, first: Boolean) =
+        textH + headerPadBottomPx + if (first) 0f else headerPadTopPx
+
+    /** True when a date header is all that is on this column so far. */
+    fun onlyHeaderSoFar() = current.size == 1 && current[0] is JournalPageItem.Header
+
+    /**
+     * Move to a fresh column, TAKING A TRAILING DATE HEADER WITH US.
+     *
+     * This is the fix for a header stranded at the foot of one page with its entry starting on the
+     * next. The header is placed before its first entry is measured, so any later decision to break
+     * — the orphan rule, the widow rule, or simply not enough room — would otherwise leave it
+     * behind. A lookahead when placing the header cannot cover this on its own: it can only
+     * ESTIMATE how much of the entry will follow, and the widow rule can force a full push no
+     * matter how much room there was.
+     */
+    fun breakCarryingHeader() {
+        val trailing = current.lastOrNull()
+        if (trailing !is JournalPageItem.Header) {
+            breakColumn()
+            return
+        }
+        current.removeAt(current.lastIndex)
+        columns.add(current)
+        current = mutableListOf(trailing)
+        used = headerHeight(lastHeaderTextH, first = true)
+    }
+
+    val constraints = Constraints(maxWidth = contentWidthPx)
+    fun measure(text: AnnotatedString) =
+        measurer.measure(text, style = bodyStyle, constraints = constraints)
+
+    blocks.forEach { block ->
+        when (block) {
+            is JournalPageItem.Header -> {
+                val textH = measurer.measure(
+                    AnnotatedString(block.label), style = headerStyle, constraints = constraints
+                ).size.height.toFloat()
+                var h = headerHeight(textH, first = current.isEmpty())
+                // Cheap lookahead so the common case does not need the carry above: only keep the
+                // header here if a couple of lines of its first entry could follow it.
+                val needed = h + bodyPadPx + bodyLineHeightPx * JOURNAL_MIN_SPLIT_LINES
+                if (current.isNotEmpty() && used + needed > columnHeightPx) {
+                    breakColumn()
+                    h = headerHeight(textH, first = true)
+                }
+                current.add(block)
+                used += h
+                lastHeaderTextH = textH
+            }
+
+            is JournalPageItem.Body -> {
+                var rest = block.text
+                while (true) {
+                    // Can this block do better on a fresh column? Not if this one is already fresh
+                    // — and not if all that is on it is this block's own date header, which would
+                    // travel with it and leave the situation unchanged.
+                    val canEscape = used > 0f && !onlyHeaderSoFar()
+                    val available = columnHeightPx - used - bodyPadPx
+                    // Nothing worth starting here. The canEscape guard is also what terminates this
+                    // loop — without it a column too short for a single line would spin forever.
+                    if (available < bodyLineHeightPx) {
+                        if (!canEscape) {
+                            current.add(JournalPageItem.Body(rest))
+                            used = columnHeightPx
+                            break
+                        }
+                        breakCarryingHeader()
+                        continue
+                    }
+                    val layout = measure(rest)
+                    if (layout.size.height <= available) {
+                        current.add(JournalPageItem.Body(rest))
+                        used += layout.size.height + bodyPadPx
+                        break
+                    }
+                    // Last line whose bottom still clears the column floor.
+                    var line = layout.lineCount - 1
+                    while (line >= 0 && layout.getLineBottom(line) > available) line--
+                    val keptLines = line + 1
+                    // Too little would stay behind (or too little would carry over) to be worth
+                    // cutting — move the whole thing to a fresh column instead.
+                    val carriedLines = layout.lineCount - keptLines
+                    if (canEscape &&
+                        (keptLines < JOURNAL_MIN_SPLIT_LINES || carriedLines < JOURNAL_MIN_SPLIT_LINES)
+                    ) {
+                        breakCarryingHeader()
+                        continue
+                    }
+                    if (keptLines <= 0) {
+                        if (!canEscape) {
+                            current.add(JournalPageItem.Body(rest))
+                            used = columnHeightPx
+                            break
+                        }
+                        breakCarryingHeader()
+                        continue
+                    }
+                    // visibleEnd = false so the break keeps the line's trailing whitespace with the
+                    // line it belongs to; the remainder then starts cleanly on the next word.
+                    val split = layout.getLineEnd(line, false)
+                    if (split <= 0 || split >= rest.length) {
+                        // Degenerate — refuse to emit an empty fragment or spin on the same text.
+                        current.add(JournalPageItem.Body(rest))
+                        used = columnHeightPx
+                        break
+                    }
+                    current.add(JournalPageItem.Body(rest.subSequence(0, split)))
+                    breakColumn()
+                    rest = rest.subSequence(split, rest.length)
+                }
+            }
+
+            JournalPageItem.AddEntry -> {
+                if (used > 0f && used + addEntryHeightPx > columnHeightPx) breakColumn()
+                current.add(block)
+                used += addEntryHeightPx
+            }
+        }
+    }
+    if (current.isNotEmpty() || columns.isEmpty()) columns.add(current)
+    return columns
+}
+
+/**
+ * One journal's worth of paginated pages, held OUTSIDE composition.
+ *
+ * `JournalPanel` is destroyed and rebuilt on every tab switch, and its `LaunchedEffect(Unit)` fires
+ * `refreshJournal()`, which re-streams the whole journal and hands back a NEW list instance holding
+ * identical content. A plain `remember(entries)` would therefore re-run the measurement pass on
+ * every journal open, and again a moment later when that refresh lands. Keying on a CONTENT
+ * signature instead of list identity is what makes reopening the journal free.
+ *
+ * Single-slot on purpose: only one journal is ever on screen, and the pages hold the entry text, so
+ * keeping a history of them would be a real memory cost for no benefit.
+ */
+private object JournalPaginationCache {
+    private var key: Any? = null
+    private var pages: List<List<JournalPageItem>> = emptyList()
+
+    fun get(signature: Any, compute: () -> List<List<JournalPageItem>>): List<List<JournalPageItem>> {
+        if (signature != key) {
+            pages = compute()
+            key = signature
+        }
+        return pages
+    }
+}
+
+/**
+ * Everything the paginated output depends on. Anything that can change a line break has to be in
+ * here or the cache serves stale pages — which shows up as visibly wrong content, not as a crash.
+ * `fontScale` and `fontFamily` earn their places because the Game Font toggle changes both.
+ */
+private data class JournalPaginationKey(
+    val entriesHash: Int,
+    val topicsHash: Int,
+    val widthPx: Int,
+    val heightPx: Int,
+    val fontScale: Float,
+    val bodyFont: Any?,
+    val headerFont: Any?,
+    val showAddEntry: Boolean
+)
+
+/**
+ * The chronological journal. Two page MODELS live behind the "Journal Page Turn" preference and
+ * this wrapper picks between them:
+ *
+ *  - OFF — the original: one day per column, two days per spread, each column scrolling when its
+ *    day does not fit. Unchanged.
+ *  - ON  — real book pagination: content flows column to column, cutting an entry's text mid-way
+ *    when it has to, and nothing scrolls.
+ *
+ * The pref used to select only a TRANSITION, so it could flip freely under a shared pager. It now
+ * selects what a page CONTAINS, so `currentPage` means something different on either side of it —
+ * hence `key`, which rebuilds the pager state rather than leaving it indexing the wrong model.
+ * The cost is landing back on the newest page after a toggle, which is where the journal opens
+ * anyway.
+ */
 @Composable
 private fun JournalChronological(
     entries: List<JournalEntry>,
     topicNames: List<String>,
     onTopicLink: (String) -> Unit
 ) {
-    // Each day fills one column. Two days per page (left = older, right = newer),
-    // like an open book where each physical page holds one day.
-    //
+    val pageTurn by UiPreferences.journalPageTurnFlow().collectAsState()
+    key(pageTurn) {
+        JournalChronologicalPages(entries, topicNames, onTopicLink, pageTurn)
+    }
+}
+
+@Composable
+private fun JournalChronologicalPages(
+    entries: List<JournalEntry>,
+    topicNames: List<String>,
+    onTopicLink: (String) -> Unit,
+    pageTurn: Boolean
+) {
     // GROUPED BY entry.day (the DaysPassed global), NOT by the printed date. dayOfMonth+month
     // repeat every in-game year, so keying on the label merged year 2's entries into year 1's
     // bucket: past the anniversary of the first entry no NEW page was ever created again and the
     // journal looked permanently frozen on its last page, with new entries silently appended to an
     // old page near the front. day is monotonic, so it can't collide.
-    val pages = remember(entries) {
+    //
+    // BOTH page models are built from this one grouping, so that fix cannot be reintroduced by
+    // only half of them. In particular the paginated model must NOT walk `entries` emitting a
+    // header on day-change: custom entries are appended after every engine entry
+    // (rememberMergedJournal), so an out-of-order day would grow a second header of its own.
+    val dayGroups = remember(entries) {
         val byDay = LinkedHashMap<Int, Pair<String, MutableList<JournalEntry>>>()
         entries.forEach { e ->
             byDay.getOrPut(e.day) { journalDateLabel(e) to mutableListOf() }.second.add(e)
         }
-        val dayCols = byDay.values.map { (date, dayEntries) ->
+        byDay.values.map { (date, dayEntries) -> date to dayEntries.toList() }
+    }
+
+    // ---- Model A: one day per column (page-turn OFF) ----
+    val dayPages = remember(dayGroups, pageTurn) {
+        if (pageTurn) emptyList()
+        else dayGroups.map { (date, dayEntries) ->
             buildList<Pair<String?, JournalEntry?>> {
                 add(date to null)
                 dayEntries.forEach { add(null to it) }
             }
-        }
-        dayCols.chunked(2)  // pair days: [leftDay, rightDay]
+        }.chunked(2)  // pair days: [leftDay, rightDay]
     }
+
+    // ---- Model B: reflowed columns (page-turn ON) ----
+    // The "+ Add Entry" block participates in the flow rather than being tacked onto whichever
+    // column happens to be last, so its height is reserved and it can never overhang the page.
+    val gameDate by GameStateRepository.gameDate.collectAsState()
+    val showAddEntry = gameDate != null
+    val topicIndex = rememberTopicIndex(topicNames)
+    val measurer = rememberTextMeasurer()
+    val headerStyle = journalHeaderStyle()
+    val bodyStyle = journalBodyStyle()
+    val addEntryStyle = journalAddEntryStyle()
+    val density = LocalDensity.current
+
+    // Links inside PAGINATED text route through this rather than a captured callback, because the
+    // strings outlive the composition that built them (see JournalTopicLinkHandler). Keyed on Unit
+    // over a rememberUpdatedState rather than on the callback itself: `onTopicLink` is rebuilt on
+    // every recomposition of JournalPanel, so keying on it would tear this down and set it up again
+    // continuously.
+    val liveTopicLink = rememberUpdatedState(onTopicLink)
+    DisposableEffect(Unit) {
+        JournalTopicLinkHandler.current = { liveTopicLink.value(it) }
+        onDispose { JournalTopicLinkHandler.current = null }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().mwPanel()) {
+        // Column geometry, derived from the SAME constants the spread is laid out with. The
+        // paginator needs this before the pager exists, because page COUNT now depends on it —
+        // which is the whole reason this is a BoxWithConstraints.
+        val colWidthPx: Int
+        val colHeightPx: Float
+        with(density) {
+            val spreadW = maxWidth - JOURNAL_SPREAD_H_PAD * 2
+            val halfW = (spreadW - JOURNAL_SPINE_WIDTH) / 2
+            colWidthPx = (halfW - JOURNAL_COL_H_PAD * 2).toPx().toInt()
+            // The dot strip's height is reserved WHETHER OR NOT it draws. It used to render only
+            // for >1 page, which under reflow is circular: showing it shortens the column, which
+            // can add a page, which makes it show. Reserving unconditionally cuts the loop.
+            colHeightPx = (maxHeight - JOURNAL_SPREAD_V_PAD * 2 - JOURNAL_INDICATOR_STRIP -
+                JOURNAL_COL_TOP_PAD - JOURNAL_COL_BOTTOM_PAD).toPx()
+        }
+
+        val bookPages: List<List<JournalPageItem>> = if (!pageTurn) emptyList() else {
+            val signature = JournalPaginationKey(
+                entriesHash = entries.hashCode(),
+                topicsHash = topicNames.hashCode(),
+                widthPx = colWidthPx,
+                heightPx = colHeightPx.toInt(),
+                fontScale = density.fontScale,
+                bodyFont = bodyStyle.fontFamily,
+                headerFont = headerStyle.fontFamily,
+                showAddEntry = showAddEntry
+            )
+            JournalPaginationCache.get(signature) {
+                val blocks = buildList {
+                    dayGroups.forEach { (date, dayEntries) ->
+                        add(JournalPageItem.Header(date))
+                        dayEntries.forEach { e ->
+                            add(
+                                JournalPageItem.Body(
+                                    buildJournalAnnotated(e.text, topicIndex) {
+                                        JournalTopicLinkHandler.current
+                                    }
+                                )
+                            )
+                        }
+                    }
+                    if (showAddEntry) add(JournalPageItem.AddEntry)
+                }
+                val constraints = Constraints(maxWidth = colWidthPx.coerceAtLeast(1))
+                val addEntryHeightPx = with(density) {
+                    measurer.measure(
+                        AnnotatedString(JOURNAL_ADD_ENTRY_LABEL),
+                        style = addEntryStyle, constraints = constraints
+                    ).size.height + JOURNAL_ADD_ENTRY_EXTRA_V.toPx()
+                }
+                paginateJournal(
+                    blocks = blocks,
+                    measurer = measurer,
+                    headerStyle = headerStyle,
+                    bodyStyle = bodyStyle,
+                    contentWidthPx = colWidthPx,
+                    columnHeightPx = colHeightPx,
+                    headerPadTopPx = with(density) { JOURNAL_HEADER_PAD_TOP.toPx() },
+                    headerPadBottomPx = with(density) { JOURNAL_HEADER_PAD_BOTTOM.toPx() },
+                    bodyPadPx = with(density) { JOURNAL_BODY_PAD_BOTTOM.toPx() },
+                    addEntryHeightPx = addEntryHeightPx,
+                    bodyLineHeightPx = with(density) { bodyStyle.lineHeight.toPx() }
+                )
+            }
+        }
+
+        // Spreads. Both models produce a flat list of COLUMNS in reading order, so pairing them
+        // into two-page spreads is identical either way — the reflow never touched this.
+        val pageCount = if (pageTurn) (bookPages.size + 1) / 2 else dayPages.size
+        JournalSpreadPager(
+            pageCount = pageCount,
+            pageTurn = pageTurn,
+            dayPages = dayPages,
+            bookPages = bookPages,
+            topicNames = topicNames,
+            onTopicLink = onTopicLink,
+            addEntryStyle = addEntryStyle,
+            headerStyle = headerStyle,
+            bodyStyle = bodyStyle
+        )
+    }
+}
+
+/** The label on the manual-entry button. Named because the paginator measures it. */
+private const val JOURNAL_ADD_ENTRY_LABEL = "+ Add Manual Entry"
+
+@Composable
+private fun JournalSpreadPager(
+    pageCount: Int,
+    pageTurn: Boolean,
+    dayPages: List<List<List<Pair<String?, JournalEntry?>>>>,
+    bookPages: List<List<JournalPageItem>>,
+    topicNames: List<String>,
+    onTopicLink: (String) -> Unit,
+    addEntryStyle: TextStyle,
+    headerStyle: TextStyle,
+    bodyStyle: TextStyle
+) {
     val pagerState = rememberPagerState(
-        initialPage = (pages.size - 1).coerceAtLeast(0),
-        pageCount = { pages.size }
+        initialPage = (pageCount - 1).coerceAtLeast(0),
+        pageCount = { pageCount }
     )
     // initialPage only applies when the state is first created, so a page added while the journal
     // is already open would otherwise sit there unvisited (and unnoticed — the dot indicator just
     // gains one 5dp dot). Follow the new page ONLY if the reader was already on the last one; if
     // they've paged back to read something older, leave them there.
-    var knownPageCount by remember { mutableStateOf(pages.size) }
-    LaunchedEffect(pages.size) {
+    //
+    // Still correct under reflow: the flow is strictly sequential, so appending entries can only
+    // ever extend the tail — it never re-breaks a column the reader has already passed. So the
+    // count remains monotone and "was on the last page" keeps its meaning.
+    var knownPageCount by remember { mutableStateOf(pageCount) }
+    LaunchedEffect(pageCount) {
         val previous = knownPageCount
-        knownPageCount = pages.size
-        if (pages.size > previous && pagerState.currentPage >= previous - 1)
-            pagerState.animateScrollToPage(pages.size - 1)
+        knownPageCount = pageCount
+        if (pageCount > previous && pagerState.currentPage >= previous - 1)
+            pagerState.animateScrollToPage(pageCount - 1)
     }
-
-    // The spine-hinged page turn is optional (Bottom Screen → "Journal Page
-    // Turn"). Off is the original plain pager slide — same spread, same swipe, same grouping; only
-    // the transition differs, so nothing outside the pager body branches on this.
-    val pageTurn by UiPreferences.journalPageTurnFlow().collectAsState()
 
     // Hand the pager to JournalLeafOverlay while (and only while) the flip is actually in use, so
     // the overlay is inert on the plain-slide path and after this screen goes away.
@@ -11053,7 +11589,32 @@ private fun JournalChronological(
         }
     }
 
-    Column(Modifier.fillMaxSize().mwPanel()) {
+    /** One half of a spread, whichever model is in play. */
+    @Composable
+    fun Half(pageIdx: Int, right: Boolean, modifier: Modifier) {
+        if (pageTurn) {
+            JournalPaginatedColumn(
+                items = bookPages.getOrElse(pageIdx * 2 + if (right) 1 else 0) { emptyList() },
+                modifier = modifier,
+                headerStyle = headerStyle,
+                bodyStyle = bodyStyle,
+                addEntryStyle = addEntryStyle
+            )
+        } else {
+            val pageDays = dayPages.getOrElse(pageIdx) { emptyList() }
+            // The most recent day is the last column of the last page — which is the RIGHT half on
+            // a full spread but the LEFT half when the final page holds a single day (odd day
+            // count). Comparing against pageDays.size - 1 covers both without a special case, and
+            // yields nothing at all for an empty page.
+            val col = if (right) 1 else 0
+            JournalColumn(
+                pageDays.getOrElse(col) { emptyList() }, modifier, topicNames, onTopicLink,
+                showAddEntry = pageIdx == pageCount - 1 && pageDays.size - 1 == col
+            )
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
         HorizontalPager(
             state = pagerState,
             // The pager's own rect is what the overlay measures each half from. Read from the
@@ -11063,22 +11624,16 @@ private fun JournalChronological(
                 JournalLeafOverlayState.pagerBounds = it.boundsInRoot()
             }
         ) { pageIdx ->
-            val pageDays = pages.getOrElse(pageIdx) { emptyList() }
-            // The most recent day is the last column of the last page — which is the RIGHT half on
-            // a full spread but the LEFT half when the final page holds a single day (odd day
-            // count). Comparing against pageDays.size - 1 covers both without a special case, and
-            // yields nothing at all for an empty page.
-            val lastColIdx = pageDays.size - 1
-            val isNewestPage = pageIdx == pages.size - 1
             if (!pageTurn) {
                 // Plain slide: the pager's own translation carries the whole spread sideways, so
                 // there is no stacking, no leaf, and no per-frame draw work at all.
-                Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp)) {
-                    JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.weight(1f),
-                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 0)
-                    Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-                    JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.weight(1f),
-                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 1)
+                Row(
+                    Modifier.fillMaxSize()
+                        .padding(horizontal = JOURNAL_SPREAD_H_PAD, vertical = JOURNAL_SPREAD_V_PAD)
+                ) {
+                    Half(pageIdx, right = false, modifier = Modifier.weight(1f))
+                    Box(Modifier.width(JOURNAL_SPINE_WIDTH).fillMaxHeight().background(BronzeDark))
+                    Half(pageIdx, right = true, modifier = Modifier.weight(1f))
                 }
                 return@HorizontalPager
             }
@@ -11110,34 +11665,45 @@ private fun JournalChronological(
             ) {
                 JournalPageHalf(offset, spineAtRight = true, pageIdx = pageIdx,
                     modifier = Modifier.weight(1f)) {
-                    JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.fillMaxSize(),
-                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 0)
+                    Half(pageIdx, right = false, modifier = Modifier.fillMaxSize())
                 }
                 // The spine itself stays flat — it is the hinge the leaf swings from.
                 Box(Modifier.width(JOURNAL_SPINE_WIDTH).fillMaxHeight().background(BronzeDark))
                 JournalPageHalf(offset, spineAtRight = false, pageIdx = pageIdx,
                     modifier = Modifier.weight(1f)) {
-                    JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.fillMaxSize(),
-                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 1)
+                    Half(pageIdx, right = true, modifier = Modifier.fillMaxSize())
                 }
             }
         }
 
-        if (pages.size > 1) {
-            Row(
-                Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                repeat(pages.size) { idx ->
-                    Box(
-                        Modifier
-                            .padding(horizontal = 3.dp)
-                            .size(if (idx == pagerState.currentPage) 7.dp else 5.dp)
-                            .clip(CircleShape)
-                            .background(if (idx == pagerState.currentPage) BronzeLight else BronzeDark)
-                    )
+        // ALWAYS occupies its height, even at one page — see the circularity note where
+        // JOURNAL_INDICATOR_STRIP is deducted from the column height.
+        Box(
+            Modifier.fillMaxWidth().height(JOURNAL_INDICATOR_STRIP),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            if (pageCount in 2..JOURNAL_MAX_DOTS) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    repeat(pageCount) { idx ->
+                        Box(
+                            Modifier
+                                .padding(horizontal = 3.dp)
+                                .size(if (idx == pagerState.currentPage) 7.dp else 5.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (idx == pagerState.currentPage) BronzeLight else BronzeDark
+                                )
+                        )
+                    }
                 }
+            } else if (pageCount > JOURNAL_MAX_DOTS) {
+                // A long playthrough reflows into far more pages than the old one-day-per-column
+                // model produced, and a Row of dots simply runs off the panel. A counter is the
+                // only thing that stays readable at that length.
+                Text(
+                    "${pagerState.currentPage + 1} / $pageCount",
+                    color = BronzeLight, fontSize = 9.sp, fontFamily = MwBody
+                )
             }
         }
     }
@@ -11472,21 +12038,72 @@ private fun JournalColumn(
      */
     showAddEntry: Boolean = false
 ) {
+    val headerStyle = journalHeaderStyle()
+    val bodyStyle = journalBodyStyle()
     // verticalScroll lets long entries overflow cleanly rather than clip.
-    Column(modifier.padding(horizontal = 6.dp).verticalScroll(rememberScrollState())) {
-        items.forEach { (date, entry) ->
+    Column(
+        modifier
+            .padding(
+                start = JOURNAL_COL_H_PAD, end = JOURNAL_COL_H_PAD,
+                top = JOURNAL_COL_TOP_PAD, bottom = JOURNAL_COL_BOTTOM_PAD
+            )
+            .verticalScroll(rememberScrollState())
+    ) {
+        items.forEachIndexed { idx, (date, entry) ->
             if (date != null) {
-                Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 1.dp))
+                Text(date, style = headerStyle, modifier = Modifier.padding(
+                    // Nothing above it to separate from at the head of a column.
+                    top = if (idx == 0) 0.dp else JOURNAL_HEADER_PAD_TOP,
+                    bottom = JOURNAL_HEADER_PAD_BOTTOM))
             } else if (entry != null) {
-                Text(journalAnnotated(entry.text, topicNames, onTopicLink),
-                    color = Bone, fontSize = 14.sp, fontFamily = MwBody,
-                    lineHeight = 18.sp,
-                    modifier = Modifier.padding(bottom = 4.dp))
+                Text(journalAnnotated(entry.text, topicNames, onTopicLink), style = bodyStyle,
+                    modifier = Modifier.padding(bottom = JOURNAL_BODY_PAD_BOTTOM))
             }
         }
-        if (showAddEntry) AddJournalEntryButton()
+        if (showAddEntry) AddJournalEntryButton(journalAddEntryStyle())
+    }
+}
+
+/**
+ * A pre-paginated column: exactly what fits, already decided, so nothing here scrolls or clips.
+ *
+ * A [JournalPageItem.Body] may be a whole entry or a FRAGMENT of one — this draws them identically,
+ * which is the point. It is also what makes the page-turn overlay strictly better than before: a
+ * half is now fully drawn within its own rect, so the recorded [GraphicsLayer] the leaf replays
+ * carries the whole page rather than whatever slice of a scrolling column happened to be visible.
+ */
+@Composable
+private fun JournalPaginatedColumn(
+    items: List<JournalPageItem>,
+    modifier: Modifier,
+    headerStyle: TextStyle,
+    bodyStyle: TextStyle,
+    addEntryStyle: TextStyle
+) {
+    Column(
+        modifier.padding(
+            start = JOURNAL_COL_H_PAD, end = JOURNAL_COL_H_PAD,
+            top = JOURNAL_COL_TOP_PAD, bottom = JOURNAL_COL_BOTTOM_PAD
+        )
+    ) {
+        items.forEachIndexed { idx, item ->
+            when (item) {
+                is JournalPageItem.Header -> Text(
+                    item.label, style = headerStyle,
+                    modifier = Modifier.padding(
+                        // Must mirror headerHeight()'s `first` term in paginateJournal — the
+                        // paginator costed this header without a top pad when it leads a column.
+                        top = if (idx == 0) 0.dp else JOURNAL_HEADER_PAD_TOP,
+                        bottom = JOURNAL_HEADER_PAD_BOTTOM
+                    )
+                )
+                is JournalPageItem.Body -> Text(
+                    item.text, style = bodyStyle,
+                    modifier = Modifier.padding(bottom = JOURNAL_BODY_PAD_BOTTOM)
+                )
+                JournalPageItem.AddEntry -> AddJournalEntryButton(addEntryStyle)
+            }
+        }
     }
 }
 
@@ -11504,7 +12121,7 @@ private fun JournalColumn(
  * arrow/chevron block, which is why FavStar is a vector icon. "+" is plain ASCII and safe.
  */
 @Composable
-private fun AddJournalEntryButton() {
+private fun AddJournalEntryButton(style: TextStyle) {
     val gameDate by GameStateRepository.gameDate.collectAsState()
     if (gameDate == null) return
     Box(
@@ -11512,10 +12129,8 @@ private fun AddJournalEntryButton() {
         contentAlignment = Alignment.Center
     ) {
         Text(
-            "+ Add Entry",
-            color = BronzeLight,
-            fontSize = 12.sp,
-            fontFamily = MwBody,
+            JOURNAL_ADD_ENTRY_LABEL,
+            style = style,
             modifier = Modifier
                 .clip(RoundedCornerShape(3.dp))
                 .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
@@ -11571,7 +12186,7 @@ private fun JournalQuestList(
                 modifier = Modifier.clickable { onShowHidden(!showHidden) }.padding(4.dp)
             )
             Text(
-                if (showAll) "Active Only" else "Show All",
+                if (showAll) "Show Active Only" else "Show All",
                 color = BronzeLight, fontSize = 12.sp, fontFamily = MwBody,
                 modifier = Modifier.clickable { onShowAll(!showAll) }.padding(4.dp)
             )
@@ -12263,7 +12878,21 @@ private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
     }
 }
 
-private val STATS_LEFT_WIDTH = 165.dp
+/**
+ * Width of the Stats tab's left column (vitals + attributes + active effects).
+ *
+ * Widened 165 → 200dp Aug 10 2026, paid for by folding Minor skills into the Major column so the
+ * skills panel needs two columns instead of three. The whole tab was cramped and this is the one
+ * budget that governs it — the panel is 537.7dp wide (1240px at density 369), so:
+ *
+ *   skills panel = 537.7 − 24 (tab padding) − 8 (row gap) − LEFT
+ *   per column   = (skills panel − 20 (mwPanel padding) − 1 (divider)) / 2 − 16 (column padding)
+ *
+ * At 165dp with THREE columns that left ~90dp of usable text per column, which is not enough for
+ * "Restoration" + its value; at 200dp with two it is ~126dp, and the left column gains 35dp with it.
+ * Raising this further keeps working until the skill columns drop back under ~95dp (around 260dp).
+ */
+private val STATS_LEFT_WIDTH = 200.dp
 
 @Composable
 private fun StatsPanel(state: GameState, onSelectStat: (StatInfo) -> Unit) {
@@ -12605,31 +13234,60 @@ private fun SkillsPanel(
     modifier: Modifier = Modifier,
     onSelectStat: (StatInfo) -> Unit
 ) {
-    val major = remember(skills) { skills.filter { it.category == "major" } }
-    val minor = remember(skills) { skills.filter { it.category == "minor" } }
-    val misc = remember(skills) { skills.filter { it.category == "misc" } }
+    // TWO columns, not three: Major and Minor SHARE the left one (stacked, each still under its own
+    // heading). Three equal columns left ~90dp of usable width apiece, which truncated the longer
+    // skill names, and the space freed here is what lets STATS_LEFT_WIDTH grow — see that constant
+    // for the width budget. Major above Minor keeps the game's own ordering.
+    val majorMinor = remember(skills) {
+        buildList {
+            skills.filter { it.category == "major" }.let { if (it.isNotEmpty()) add("Major" to it) }
+            skills.filter { it.category == "minor" }.let { if (it.isNotEmpty()) add("Minor" to it) }
+        }
+    }
+    val misc = remember(skills) {
+        skills.filter { it.category == "misc" }.let {
+            if (it.isEmpty()) emptyList() else listOf("Misc" to it)
+        }
+    }
 
     Row(modifier.mwPanel().padding(10.dp)) {
-        SkillColumn("Major", major, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
+        SkillColumn(majorMinor, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
         Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-        SkillColumn("Minor", minor, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
-        Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
-        SkillColumn("Misc", misc, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
+        SkillColumn(misc, Modifier.weight(1f).fillMaxHeight(), onSelectStat)
     }
 }
 
+/**
+ * One skills column holding one or more labelled sections.
+ *
+ * The headings are `stickyHeader`s rather than a fixed heading above the list, because a column can
+ * now hold two sections and both lists scroll (Major+Minor is ~10 rows against ~292dp of height,
+ * Misc is 17). A heading pinned outside the scroll — what this did while every column held exactly
+ * one section — cannot say which section you are currently looking at once there are two.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SkillColumn(
-    label: String,
-    skills: List<SkillStat>,
+    sections: List<Pair<String, List<SkillStat>>>,
     modifier: Modifier = Modifier,
     onSelectStat: (StatInfo) -> Unit
 ) {
     Column(modifier.padding(horizontal = 8.dp)) {
-        SpellSectionHeader(label)
         LazyColumn(Modifier.fillMaxSize()) {
-            items(skills) { skill ->
-                SkillRow(skill) { onSelectStat(StatInfo.SkillInfo(skill)) }
+            sections.forEach { (label, list) ->
+                stickyHeader(key = "hdr_$label") {
+                    // Opaque: a sticky header scrolls OVER the rows beneath it, so without a fill
+                    // the skill names would read through it. Plain StonePanel rather than
+                    // mwPanel's `StonePanel.copy(alpha = LocalPanelOpacity.current)` because this
+                    // tab is bottom-screen only, where that local is always 1f — and a translucent
+                    // header could not occlude anything anyway.
+                    Box(Modifier.fillMaxWidth().background(StonePanel)) {
+                        SpellSectionHeader(label)
+                    }
+                }
+                items(list, key = { it.id }) { skill ->
+                    SkillRow(skill) { onSelectStat(StatInfo.SkillInfo(skill)) }
+                }
             }
         }
     }
@@ -13235,6 +13893,7 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
         if (OptionsSectionState.isExpanded(SECTION_BOTTOM_SCREEN)) {
             item { AdaptiveDimmingRow() }
             item { GameFontRow() }
+            item { UiSoundsRow() }
             item { OptionsSubLabel("Inventory tab") }
             item { InventoryTabStyleRow() }
             item { EquippedBarRow() }
@@ -14107,13 +14766,13 @@ private fun AdaptiveDimmingRow() {
             // Named so the two sliders read as one paired control (the ends of the ramp) rather
             // than as loose settings that happen to sit under a toggle.
             OptionsSubLabel("Dimming range")
-            BrightnessSlider(
+            PercentSlider(
                 label = "Darkest (in dark places)",
                 blurb = "How dark this screen goes in the darkest interiors and at night.",
                 value = minBrightness,
                 range = ADAPTIVE_DIM_MIN_RANGE
             ) { UiPreferences.setAdaptiveDimMinBrightness(context, it) }
-            BrightnessSlider(
+            PercentSlider(
                 label = "Brightest (in bright places)",
                 blurb = "How bright this screen stays outdoors in daylight. 100% = untouched.",
                 value = maxBrightness,
@@ -14124,16 +14783,21 @@ private fun AdaptiveDimmingRow() {
 }
 
 /**
- * One brightness slider for [AdaptiveDimmingRow], shown as a percentage of full screen brightness.
+ * A labelled 0–100% slider with a blurb and end labels. Used by [AdaptiveDimmingRow]'s two
+ * brightness sliders and by [UiSoundsRow]'s volume.
  *
- * Percent-of-brightness rather than overlay opacity because that is the thing the player is
- * actually setting; the inversion to opacity happens once, in [AdaptiveDimOverlay]'s mapping. The
- * end labels are drawn from [range] so they can never drift from the enforced bounds — in
- * particular the MIN slider's left label IS the readability cap, and showing a different number
- * there would be a lie about how dark the screen can get.
+ * (Named `BrightnessSlider` until Aug 10 2026, when interface-sound volume became a third caller
+ * and the old name started describing only two of them.)
+ *
+ * The end labels are drawn FROM [range] so they can never drift from the enforced bounds — in
+ * particular the adaptive-dimming MIN slider's left label IS the readability cap, and showing a
+ * different number there would be a lie about how dark the screen can get.
+ *
+ * Adaptive dimming passes percent-of-BRIGHTNESS rather than overlay opacity because that is the
+ * thing the player is actually setting; the inversion happens once, in [AdaptiveDimOverlay].
  */
 @Composable
-private fun BrightnessSlider(
+private fun PercentSlider(
     label: String,
     blurb: String,
     value: Float,
@@ -14165,9 +14829,12 @@ private fun BrightnessSlider(
                 "${(range.start * 100).roundToInt()}%",
                 color = BoneDim, fontSize = 11.sp, fontFamily = MwData
             )
+            // One ticker per slider instance; see SliderTickThrottle for why a raw
+            // sound-per-callback here would be an audio-spam bug rather than feedback.
+            val ticker = remember { SliderTickThrottle() }
             Slider(
                 value = value,
-                onValueChange = onChange,
+                onValueChange = { ticker.onValue(it, range); onChange(it) },
                 valueRange = range,
                 colors = SliderDefaults.colors(
                     thumbColor = BronzeLight,
@@ -14216,6 +14883,53 @@ private fun SpellsListStyleRow() {
 */
 
 /**
+ * "Interface sounds" — the master toggle for [UiSounds], plus its volume.
+ *
+ * Placed in BOTTOM SCREEN rather than Controls, which was the other candidate. Controls is about
+ * driving the GAME (touch input, game cursor, the Alpha3 button overlay) and **none of these cues
+ * fire during gameplay at all** — every trigger point is a piece of companion chrome: its keyboard,
+ * its options menu, its Developer Tools. That also puts it alongside the other two "how the
+ * companion presents itself" settings, and it shares their exact shape: Adaptive Dimming (visual),
+ * Game Font (typographic), this (auditory), each a toggle that reveals a slider while on.
+ *
+ * The volume slider is hidden rather than disabled while off, matching Adaptive Dimming — a live
+ * slider that controls nothing reads as broken.
+ */
+@Composable
+private fun UiSoundsRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.uiSoundsFlow().collectAsState()
+    val volume by UiPreferences.uiSoundVolumeFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Interface sounds", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Clicks for the on-screen keyboard, this menu, and Developer Tools buttons.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f), label = "On", active = enabled, enabled = true
+            ) { UiPreferences.setUiSounds(context, true) }
+            OptionPill(
+                Modifier.weight(1f), label = "Off", active = !enabled, enabled = true
+            ) { UiPreferences.setUiSounds(context, false) }
+        }
+
+        if (enabled) {
+            PercentSlider(
+                label = "Volume",
+                blurb = "Level of these sounds, within the device's own volume.",
+                value = volume,
+                range = UI_SOUND_VOLUME_RANGE
+            ) { UiPreferences.setUiSoundVolume(context, it) }
+        }
+    }
+}
+
+/**
  * Opacity of DS overlay panel BACKGROUNDS on the top screen, 0–100%.
  *
  * No floor: only the panel fill fades, never the text/bars drawn on it (and the Bronze border stays
@@ -14251,9 +14965,13 @@ private fun TopPanelOpacityRow() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("0%", color = BoneDim, fontSize = 11.sp, fontFamily = MwData)
+            val ticker = remember { SliderTickThrottle() }
             Slider(
                 value = opacity,
-                onValueChange = { UiPreferences.setTopPanelOpacity(context, it) },
+                onValueChange = {
+                    ticker.onValue(it, 0f..1f)
+                    UiPreferences.setTopPanelOpacity(context, it)
+                },
                 valueRange = 0f..1f,
                 colors = SliderDefaults.colors(
                     thumbColor = BronzeLight,
@@ -14499,7 +15217,9 @@ private fun OpenConsoleRow() {
                 .clip(RoundedCornerShape(4.dp))
                 .background(PillActiveBg.copy(alpha = 0.94f))
                 .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-                .clickable { openNativeConsole() }
+                // The one Developer Tools button that is not a DevActionButton, so it needs the
+                // cue wired by hand to match its neighbours.
+                .clickable { UiSounds.play(UiSounds.Cue.ACTION); openNativeConsole() }
                 .padding(vertical = 9.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -14715,7 +15435,10 @@ private fun DevActionButton(
                 .clip(RoundedCornerShape(4.dp))
                 .background(PillActiveBg.copy(alpha = 0.94f))
                 .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-                .clickable { onClick() }
+                // Cue.ACTION — the heaviest of the four, and the reason this feature exists: a
+                // cheat button changes state somewhere off-screen, so without a sound there is no
+                // evidence at all that the tap landed.
+                .clickable { UiSounds.play(UiSounds.Cue.ACTION); onClick() }
                 .padding(vertical = 9.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -14978,7 +15701,13 @@ private fun OptionPill(
             .clip(RoundedCornerShape(4.dp))
             .background(bg)
             .border(1.dp, border, RoundedCornerShape(4.dp))
-            .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
+            // EVERY options pill in the menu is one of these — the Game Menus mode selectors, the
+            // On/Off rows, and the Developer Tools toggles — so this single hook is the whole
+            // "changing a setting makes a sound" requirement. A disabled pill stays silent along
+            // with being inert, which is the correct signal.
+            .then(if (enabled) Modifier.clickable {
+                UiSounds.play(UiSounds.Cue.TOGGLE); onClick()
+            } else Modifier)
             .padding(vertical = 8.dp, horizontal = 6.dp),
         contentAlignment = Alignment.Center
     ) {

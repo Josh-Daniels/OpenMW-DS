@@ -1,12 +1,9 @@
 TODO bugs & updates:
 
-Bug with bartering for max amount.
 Choosing custom class could use controller support.
-+ or - for bartering
 More favourites
-Quick save bottom screen?
 
 Updates:
 - Set up DS screen for Level up, alchemy, enchanting, spellmaking
 - Split screen for alchemy, enchanting, spell making
-- Top screen only for bartering, looting, spells, training, persuation, repair, rest/wait, level up, alchemy, enchanting, spell making.
+- Top screen only for bartering, looting, spells, training, persuasion, repair, rest/wait, level up, alchemy, enchanting, spell making.

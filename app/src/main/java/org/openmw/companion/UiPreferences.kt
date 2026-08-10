@@ -187,6 +187,27 @@ const val ADAPTIVE_DIM_MIN_DEFAULT = 0.25f
 /** Pre-slider behaviour: bright scenes were left completely clear. */
 const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
 
+/**
+ * Level of the companion's own interface sounds, as a fraction of the device's media volume.
+ *
+ * Full range: unlike the adaptive-dimming sliders there is no floor to defend here — silencing the
+ * sounds entirely is a legitimate thing to want, and the master toggle is simply the faster way to
+ * get there.
+ *
+ * **Defaults to the middle of the slider.** These cues ride the same stream as the game's audio and
+ * are meant to confirm a tap landed, not compete with the soundtrack.
+ *
+ * **This is a fraction of `UiSounds.UI_SOUND_MAX_GAIN`, not of full scale** — the slider's 100% is
+ * that ceiling. The default was 0.2 against a ceiling of 1.0 until Aug 10 2026, when the ceiling
+ * dropped to 0.4 (the top of the old range was unusable, so most of the travel was wasted) and the
+ * default rose to 0.5 to keep the actual level identical: 0.5 x 0.4 = the previous 0.2 x 1.0. Change
+ * the two together or the shipped loudness moves.
+ *
+ * Read by BOTH the flow initialiser and the load fallback, so this one constant is the whole default.
+ */
+val UI_SOUND_VOLUME_RANGE = 0f..1f
+const val UI_SOUND_VOLUME_DEFAULT = 0.5f
+
 object UiPreferences {
     private const val PREFS = "companion_ui_settings"
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
@@ -210,6 +231,10 @@ object UiPreferences {
     private const val ADAPTIVE_DIM_MIN_BRIGHTNESS = "adaptive_dim_min_brightness"
     private const val ADAPTIVE_DIM_MAX_BRIGHTNESS = "adaptive_dim_max_brightness"
     private const val JOURNAL_PAGE_TURN = "journal_page_turn"
+    // Master switch + level for the companion's own interface sounds (keyboard, options pills and
+    // sliders, Developer Tools buttons). See UiSounds.
+    private const val UI_SOUNDS = "ui_sounds"
+    private const val UI_SOUND_VOLUME = "ui_sound_volume"
     private const val VANILLA_FONT = "vanilla_font"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
@@ -318,6 +343,11 @@ object UiPreferences {
     // by default once the overlay rewrite landed and it was approved on device. Change at BOTH this
     // init and the getBoolean load fallback.
     private val journalPageTurnFlow = MutableStateFlow(true)
+    // Interface sounds. Default ON — the feature exists because Developer Tools buttons gave no
+    // sign a tap had registered, so shipping it off by default would leave that unfixed for anyone
+    // who never finds the row.
+    private val uiSoundsFlow = MutableStateFlow(true)
+    private val uiSoundVolumeFlow = MutableStateFlow(UI_SOUND_VOLUME_DEFAULT)
 
     // Whether the companion + DS overlays render in the game's own typeface instead of the Android
     // system serif/monospace. The face is MysticCards.ttf — OpenMW's SIL-OFL replacement for
@@ -447,6 +477,9 @@ object UiPreferences {
             p.getFloat(ADAPTIVE_DIM_MAX_BRIGHTNESS, ADAPTIVE_DIM_MAX_DEFAULT)
                 .coerceIn(ADAPTIVE_DIM_MAX_RANGE)
         journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, true)
+        uiSoundsFlow.value = p.getBoolean(UI_SOUNDS, true)
+        uiSoundVolumeFlow.value = p.getFloat(UI_SOUND_VOLUME, UI_SOUND_VOLUME_DEFAULT)
+            .coerceIn(UI_SOUND_VOLUME_RANGE)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         p.getString(LOOTING_LOCATION, null)
@@ -648,6 +681,25 @@ object UiPreferences {
     fun setAdaptiveDimming(context: Context, enabled: Boolean) {
         adaptiveDimmingFlow.value = enabled
         editor(context).putBoolean(ADAPTIVE_DIMMING, enabled).apply()
+    }
+
+    /** Master switch for the companion's own interface sounds. See [UiSounds]. */
+    fun uiSoundsFlow(): StateFlow<Boolean> = uiSoundsFlow.asStateFlow()
+
+    /** Set whether interface sounds play and persist. */
+    fun setUiSounds(context: Context, enabled: Boolean) {
+        uiSoundsFlow.value = enabled
+        editor(context).putBoolean(UI_SOUNDS, enabled).apply()
+    }
+
+    /** Interface-sound level, 0f..1f, applied per play as the SoundPool stream volume. */
+    fun uiSoundVolumeFlow(): StateFlow<Float> = uiSoundVolumeFlow.asStateFlow()
+
+    /** Set the interface-sound level and persist. */
+    fun setUiSoundVolume(context: Context, value: Float) {
+        val v = value.coerceIn(UI_SOUND_VOLUME_RANGE)
+        uiSoundVolumeFlow.value = v
+        editor(context).putFloat(UI_SOUND_VOLUME, v).apply()
     }
 
     /** Screen brightness (1f = undimmed) the companion reaches in the DARKEST scene. */
