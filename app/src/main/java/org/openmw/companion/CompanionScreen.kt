@@ -827,8 +827,15 @@ private fun CompanionScreenContent() {
     // The non-empty GATE still tests the REAL journal, though — a save-load window where only
     // manual entries exist must not look like "the journal loaded", or reconcile would wipe the
     // hidden/followed state of every genuine quest.
+    //
+    // The finished-quest set rides along in the SAME effect rather than getting its own, so the
+    // setCharacter → mutate ordering above also covers it: a standalone effect could clear the
+    // followed quest out of the previous character's bucket during a runtime save switch.
     val mergedJournal = rememberMergedJournal(state.journalEntries)
-    LaunchedEffect(state.character.name, mergedJournal, state.journalEntries) {
+    val finishedQuestIdsForPrefs by GameStateRepository.finishedQuestIds.collectAsState()
+    LaunchedEffect(
+        state.character.name, mergedJournal, state.journalEntries, finishedQuestIdsForPrefs
+    ) {
         val name = state.character.name
         if (name.isNotBlank()) {
             QuestPrefsRepository.setCharacter(context, name)
@@ -837,6 +844,9 @@ private fun CompanionScreenContent() {
                 questIds = state.journalEntries.takeIf { it.isNotEmpty() }
                     ?.let { mergedJournal.map { e -> e.questId }.toSet() }
             )
+            // A completed quest stops being a sensible HUD pointer — drop it (no-op unless the
+            // followed quest is actually in the finished set; see clearFollowedIfFinished).
+            QuestPrefsRepository.clearFollowedIfFinished(context, finishedQuestIdsForPrefs)
         }
     }
 
@@ -11415,15 +11425,28 @@ private fun JournalChronologicalPages(
     // old page near the front. day is monotonic, so it can't collide.
     //
     // BOTH page models are built from this one grouping, so that fix cannot be reintroduced by
-    // only half of them. In particular the paginated model must NOT walk `entries` emitting a
-    // header on day-change: custom entries are appended after every engine entry
-    // (rememberMergedJournal), so an out-of-order day would grow a second header of its own.
+    // only half of them.
+    //
+    // SORTED BY DAY, not left in encounter order (fixed Aug 10 2026). The map is keyed correctly,
+    // but a LinkedHashMap orders buckets by FIRST APPEARANCE, and custom entries are appended after
+    // every engine entry (rememberMergedJournal) — so a manual note written on a day with no game
+    // entry of its own created its bucket LAST, after days that came after it. Repro: write a note,
+    // then let a quest update arrive the next day; the note jumped to the end of the journal. The
+    // append-at-end merge is still correct (it is what floats "Manual Entries" to the top of the
+    // quest list) — what was wrong was relying on it to also produce chronological BUCKETS here.
+    // Sorting on the key is the whole fix, and it keeps the year-collision fix intact: `day` is the
+    // monotonic DaysPassed global, so this is NOT a re-sort on the printed date.
+    //
+    // Within a day the order is unchanged — game entries in engine order, then any manual notes
+    // (themselves already day/createdAt-sorted by CustomJournalRepository). Engine entries carry no
+    // intra-day time, so nothing finer is derivable.
     val dayGroups = remember(entries) {
         val byDay = LinkedHashMap<Int, Pair<String, MutableList<JournalEntry>>>()
         entries.forEach { e ->
             byDay.getOrPut(e.day) { journalDateLabel(e) to mutableListOf() }.second.add(e)
         }
-        byDay.values.map { (date, dayEntries) -> date to dayEntries.toList() }
+        byDay.entries.sortedBy { it.key }
+            .map { (_, group) -> group.first to group.second.toList() }
     }
 
     // ---- Model A: one day per column (page-turn OFF) ----
@@ -11489,10 +11512,23 @@ private fun JournalChronologicalPages(
                 showAddEntry = showAddEntry
             )
             JournalPaginationCache.get(signature) {
+                // ONE HEADER PER ENTRY, not per day (fixed Aug 10 2026) — vanilla parity, and the
+                // fix for "most entries have no date above them" in this model.
+                //
+                // A per-DAY header is only sound while a day is a whole column, which is Model A's
+                // invariant, not this one: reflow cuts a day across pages, so every entry after the
+                // first landed under a heading that could be one or more pages back. The engine's
+                // own book does exactly what is done here — `AddJournalEntry` (journalbooks.cpp)
+                // writes `entry.timestamp()` before EVERY entry, then a section break — so a day
+                // with several entries repeats its date, by design and matching the game.
+                //
+                // Still driven off `dayGroups` rather than walking `entries` on day-change: the day
+                // grouping is what carries the year-collision fix (see above), and it keeps
+                // same-day entries adjacent regardless of where they came from in the merge.
                 val blocks = buildList {
                     dayGroups.forEach { (date, dayEntries) ->
-                        add(JournalPageItem.Header(date))
                         dayEntries.forEach { e ->
+                            add(JournalPageItem.Header(date))
                             add(
                                 JournalPageItem.Body(
                                     buildJournalAnnotated(e.text, topicIndex) {

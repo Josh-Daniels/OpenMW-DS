@@ -118,6 +118,24 @@ object QuestPrefsRepository {
     }
 
     /**
+     * Unfollow the followed quest once it has COMPLETED — same reasoning as [hide]: the HUD label
+     * is a pointer into the active quest list, so leaving it on a quest that has finished points at
+     * something no longer relevant.
+     *
+     * Unlike [reconcile] this needs no "is the data loaded yet" gate, and deliberately takes no
+     * null: it only ever acts when the followed id is PRESENT in [finishedQuestIds], so a set that
+     * is empty or still being assembled (the save-load window, or before the first
+     * `CMP:questStatus` reply) simply does nothing. Nothing here can clear a followed quest for any
+     * other reason.
+     */
+    fun clearFollowedIfFinished(context: Context, finishedQuestIds: Set<String>) {
+        if (currentCharacter.isBlank()) return
+        val followed = _state.value.followed ?: return
+        if (followed !in finishedQuestIds) return
+        commit(context, _state.value.copy(followed = null))
+    }
+
+    /**
      * Drop hidden/followed ids that no longer exist in the loaded save.
      *
      * [questIds] MUST be null while the journal hasn't loaded yet — the journal is empty during
