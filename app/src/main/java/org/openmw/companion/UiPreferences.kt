@@ -552,8 +552,11 @@ object UiPreferences {
      *  menus). DS additionally forces the Conversation Screen Layout to TOP (the other per-window
      *  layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at their own settings).
      *  The Input section (Touch input / Game cursor) is deliberately NOT touched by either preset —
-     *  it's the player's own choice and survives a quick-set. All other Native HUD toggles are left
-     *  untouched too; individual rows can still be overridden afterwards. */
+     *  it's the player's own choice and survives a quick-set. The Item List Style (Classic/Shelf) is
+     *  on that same side of the line as of Aug 2026: All DS used to force SHELF, which silently
+     *  overwrote a deliberate Classic choice AND made Shelf the effective default even though the
+     *  stored default is CLASSIC. All other Native HUD toggles are left untouched too; individual
+     *  rows can still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
         // Snapshot the current layout first if it's a Custom mix, so [Custom] can restore it even if
         // it wasn't captured by an earlier individual change. (No-op if the snapshot already matches.)
@@ -562,12 +565,11 @@ object UiPreferences {
         GAME_UI_ELEMENTS.filter { !it.pending }.forEach { setGameUiMode(context, it.key, mode) }
         bulkGameUi = false
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
-        // All DS also drops the DS conversation onto the top screen (Conversation layout -> TOP) and
-        // uses the Shelf item-list layout (the DS-native look; irrelevant under Vanilla, where the
-        // native windows render instead). All Native changes nothing beyond the elements themselves.
+        // All DS also drops the DS conversation onto the top screen (Conversation layout -> TOP).
+        // It does NOT touch the Item List Style any more — see the KDoc; Classic is the default and
+        // a player who picked Shelf keeps it. All Native changes nothing beyond the elements.
         if (mode == GameUiMode.DS) {
             setConversationLocation(context, ConversationLocation.TOP)
-            setInventoryLayout(context, InventoryLayout.SHELF)
         }
     }
 

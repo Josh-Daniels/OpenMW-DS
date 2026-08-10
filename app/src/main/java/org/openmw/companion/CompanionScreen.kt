@@ -83,6 +83,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -2257,6 +2258,75 @@ private fun ScrollByNav(
     }
 }
 
+/**
+ * WINDOWED scroll-into-view for a controller-focused cell — the shared core behind the two
+ * [WindowedFocusScroll] overloads below.
+ *
+ * These grids/rows used to call `animateScrollToItem(focusedIndex)` on every focus change, which
+ * scrolls the focused item to the START of the viewport — so EVERY horizontal D-pad step dragged
+ * the whole panel along and the selection was permanently pinned to the left-most column. Instead:
+ * if the focused cell is already fully inside the viewport, don't scroll at all; if it hangs over an
+ * edge, scroll by exactly the overhang so it comes just inside; only when it isn't laid out at all
+ * (a jump, or a category filter swapping the content out from under the index) fall back to the old
+ * [scrollToItem] jump.
+ *
+ * [itemStart]/[itemEnd] are the focused cell's MAIN-AXIS bounds (null = not currently laid out) and
+ * [vpStart]/[vpEnd] the viewport's, in the same coordinate space — which is what makes one body
+ * serve both a horizontal LazyGrid (x/width) and a LazyRow (offset/size).
+ */
+private suspend fun ScrollableState.scrollIntoWindow(
+    itemStart: Int?,
+    itemEnd: Int?,
+    vpStart: Int,
+    vpEnd: Int,
+    scrollToItem: suspend () -> Unit
+) {
+    if (itemStart == null || itemEnd == null) { scrollToItem(); return }
+    val delta = when {
+        itemStart < vpStart -> itemStart - vpStart   // hangs off the START edge → scroll back
+        itemEnd > vpEnd -> itemEnd - vpEnd           // hangs off the END edge → scroll forward
+        else -> return                               // fully visible → leave the view alone
+    }
+    animateScrollBy(delta.toFloat())
+}
+
+/**
+ * Keep the focused cell of a horizontal [LazyHorizontalGrid] in view WITHOUT pinning it to the left
+ * edge — see [scrollIntoWindow]. [contentKey] is the visible list: re-running on a content change
+ * (optimistic take/put, a category-filter swap) is what stops the focused cell being stranded
+ * off-screen when the items move under a focus index that itself didn't change.
+ */
+@Composable
+private fun WindowedFocusScroll(state: LazyGridState, focusedIndex: Int, itemCount: Int, contentKey: Any?) {
+    LaunchedEffect(focusedIndex, contentKey) {
+        if (focusedIndex !in 0 until itemCount) return@LaunchedEffect
+        val info = state.layoutInfo
+        val cell = info.visibleItemsInfo.firstOrNull { it.index == focusedIndex }
+        state.scrollIntoWindow(
+            itemStart = cell?.offset?.x,
+            itemEnd = cell?.let { it.offset.x + it.size.width },
+            vpStart = info.viewportStartOffset,
+            vpEnd = info.viewportEndOffset,
+        ) { state.animateScrollToItem(focusedIndex) }
+    }
+}
+
+/** [WindowedFocusScroll] for a horizontal LazyRow (the shelf layout's category strips). */
+@Composable
+private fun WindowedFocusScroll(state: LazyListState, focusedIndex: Int, itemCount: Int, contentKey: Any?) {
+    LaunchedEffect(focusedIndex, contentKey) {
+        if (focusedIndex !in 0 until itemCount) return@LaunchedEffect
+        val info = state.layoutInfo
+        val cell = info.visibleItemsInfo.firstOrNull { it.index == focusedIndex }
+        state.scrollIntoWindow(
+            itemStart = cell?.offset,
+            itemEnd = cell?.let { it.offset + it.size },
+            vpStart = info.viewportStartOffset,
+            vpEnd = info.viewportEndOffset,
+        ) { state.animateScrollToItem(focusedIndex) }
+    }
+}
+
 /** Left column: the running NPC-response history, auto-scrolled to the newest line.
  *  When [choices] is non-empty (a mid-dialogue question) the choice buttons render
  *  inline as the LAST item of the list, directly below the most recent response. */
@@ -2614,6 +2684,13 @@ object ItemInfoPopupState {
     var focusLinked by mutableStateOf(false)
     val isOpen get() = targetId != null
 
+    // Most recent bounds reported by EVERY composed row, not just the current target's. A plain
+    // HashMap on purpose (never snapshot state): it is written from the layout pass for every
+    // visible row, so a snapshot map would invalidate the popup host on every frame. Read only by
+    // follow(), to seed the anchor when the retarget arrives AFTER that layout pass — see the
+    // ordering note there. Capped so it can't grow across a long session.
+    private val anchorCache = HashMap<String, Rect>()
+
     fun open(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false,
              focusLinked: Boolean = false) {
         if (id.isBlank()) return
@@ -2637,7 +2714,18 @@ object ItemInfoPopupState {
      *  synchronously from the nav collectors (D-pad moves) AND reactively (FollowFocusedInfoPopup)
      *  when focus changes for a non-nav reason; either way the popup stays focus-linked. */
     fun follow(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
-        if (isOpen && id != targetId) open(id, name, ench, isSpell = isSpell, onTop = onTop, focusLinked = true)
+        if (!isOpen || id == targetId) return
+        open(id, name, ench, isSpell = isSpell, onTop = onTop, focusLinked = true)
+        // ORDERING (Bug: info popup went blank after taking the inspected item). open() resets the
+        // anchor and waits for the new row's onGloballyPositioned. That is fine for the D-pad path
+        // (the nav collector retargets BEFORE the frame's layout pass, so the report lands) and for
+        // a fresh open (the host's own arrival re-places the root, re-dispatching every row). But
+        // the REACTIVE path — FollowFocusedInfoPopup, a LaunchedEffect, which runs AFTER the layout
+        // pass triggered by the take — retargets once every row has already reported against the
+        // OLD id. Nothing then invalidates those rows' layout, so no further report ever arrives
+        // and the card stays invisible until the next D-pad press. The cache holds that same pass's
+        // report for the new item, so seed from it (null = not seen → wait, exactly as before).
+        anchorCache[id]?.let { anchor = it }
     }
 
     fun close() {
@@ -2647,14 +2735,22 @@ object ItemInfoPopupState {
         anchor = null
         onTopScreen = false
         focusLinked = false
+        anchorCache.clear()
         GameStateRepository.dismissItemInfo()
     }
 
-    /** A row reports its current bounds; only the active target's anchor is tracked (survives scroll). */
+    /** A row reports its current bounds. The active target's anchor is published to the popup
+     *  (survives scroll); every row's is also cached for [follow] (see the ordering note there). */
     fun reportAnchor(id: String, r: Rect) {
+        if (anchorCache.size >= ANCHOR_CACHE_MAX) anchorCache.clear()
+        anchorCache[id] = r
         if (targetId == id) anchor = r
     }
 }
+
+/** Cap on [ItemInfoPopupState]'s per-id anchor cache (cleared wholesale on overflow; it refills
+ *  from the next layout pass). Comfortably larger than any single screen's row count. */
+private const val ANCHOR_CACHE_MAX = 256
 
 /** The item currently under the controller focus cursor, projected to what the info popup needs
  *  (record id for CMP:info + the local name/enchant). Built at the FollowFocusedInfoPopup call site
@@ -2933,14 +3029,23 @@ private data class LootFocus(val side: Int, val index: Int)
 private fun lootVisible(
     items: List<InventoryItem>,
     categoryLabel: String?,
+    // DEFAULT keeps looting's own original order (worn-first, then category + name). Weight/Value
+    // are a pure ordering with no worn tier — same rule as the BOTTOM lists and the inventory tab.
+    sortMode: InvSort = InvSort.DEFAULT,
+    sortDescending: Boolean = true,
     isWorn: (InventoryItem) -> Boolean = { false }
 ): List<InventoryItem> {
     val group = INV_CATEGORIES.find { it.label == categoryLabel }
-    return items.filter { group == null || it.category in group.cats }
-        .sortedWith(
-            compareByDescending<InventoryItem> { isWorn(it) }
-                .then(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+    val filtered = items.filter { group == null || it.category in group.cats }
+    if (sortMode != InvSort.DEFAULT) {
+        return filtered.sortedWith(
+            invSortComparator(sortMode, sortDescending, { it.displayName() }, { it.weight }, { it.value })
         )
+    }
+    return filtered.sortedWith(
+        compareByDescending<InventoryItem> { isWorn(it) }
+            .then(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+    )
 }
 
 /** Cycle a looting column's category filter by [dir] (-1 = previous, +1 = next) through
@@ -3063,7 +3168,13 @@ private fun rememberLootNavFocus(
             }
         }
     }
-    return LootFocus(side, index)
+    // Clamp the REPORTED focus in composition, not just in the LaunchedEffect above: that effect
+    // runs after the composition that reads this, so taking the LAST item of a side would otherwise
+    // resolve focus to a non-existent index for one pass — which reads as "nothing is focused" and
+    // makes FollowFocusedInfoPopup close a focus-linked info popup that should just have moved. The
+    // effect still clamps the underlying state for the next nav press.
+    val n = (if (side == 0) playerSorted.size else containerSorted.size)
+    return LootFocus(side, index.coerceIn(0, (n - 1).coerceAtLeast(0)))
 }
 
 // ============================ SHELF LAYOUT (shared, Phases 1-3) ============================
@@ -3237,7 +3348,14 @@ private fun rememberShelfNavFocus(
             }
         }
     }
-    return ShelfFocus(side, row, item)
+    // Clamp the REPORTED focus in composition (see the same note in rememberLootNavFocus): taking
+    // the last item of a shelf drops that whole row, and the clamping effect above only catches up
+    // afterwards, so an unclamped row/item would resolve to null for one pass and close a
+    // focus-linked info popup instead of moving it.
+    val cur = if (side == 0) playerRows else containerRows
+    val safeRow = row.coerceIn(0, (cur.size - 1).coerceAtLeast(0))
+    val safeItem = item.coerceIn(0, ((cur.getOrNull(safeRow)?.items?.size ?: 0) - 1).coerceAtLeast(0))
+    return ShelfFocus(side, safeRow, safeItem)
 }
 
 /** Fixed-width reserved scroll gutter on a panel's inner edge. Always present (constant column
@@ -3365,9 +3483,9 @@ private fun ShelfCell(item: ShelfItem, focused: Boolean) {
 @Composable
 private fun CategoryShelf(shelf: ShelfRowData, focusedItem: Int) {
     val hState = rememberLazyListState()
-    LaunchedEffect(focusedItem) {
-        if (focusedItem in shelf.items.indices) hState.animateScrollToItem(focusedItem)
-    }
+    // Windowed, NOT pinned-to-the-left-edge (see WindowedFocusScroll) — the shelf strips are the
+    // shelf layout's horizontal navigation, so they get the same treatment as the classic grids.
+    WindowedFocusScroll(hState, focusedItem, shelf.items.size, shelf.items)
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Text(
             shelf.label,
@@ -3424,9 +3542,8 @@ private fun EquippedSection(
     focusedItem: Int,
 ) {
     val hState = rememberLazyListState()
-    LaunchedEffect(focusedItem) {
-        if (focusedItem in items.indices) hState.animateScrollToItem(focusedItem)
-    }
+    // Windowed, NOT pinned-to-the-left-edge — same as the category strips above.
+    WindowedFocusScroll(hState, focusedItem, items.size, items)
     val dash = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 4f))
     Column(
         Modifier
@@ -3861,16 +3978,33 @@ private fun LootingOverlay(
         CompanionActions.containerTakeAll()
     }
 
-    // Pre-sort both sides ONCE at the parent (worn-first player, then category+name) — the single
-    // source of order shared by the columns' display and the controller focus index.
-    val playerSorted = remember(playerItems, wornIds) {
-        playerItems.sortedWith(
-            compareByDescending<InventoryItem> { isWorn(it) }
-                .then(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
-        )
+    // Sort controls (Default / Weight / Value) — the same InvSortState + chips as the inventory tab.
+    val sort = rememberInvSortState()
+    // Pre-sort both sides ONCE at the parent — the single source of order shared by the columns'
+    // display AND the controller focus index, so sorting can never desync the two.
+    // DEFAULT keeps looting's own original order (worn-first player, then category + name); an
+    // explicit Weight/Value sort is a pure ordering across the whole side, with no worn tier — a
+    // pinned block of worn gear on top is exactly the "it's not really sorted" problem.
+    val playerSorted = remember(playerItems, wornIds, sort.mode, sort.descending) {
+        if (sort.mode == InvSort.DEFAULT) {
+            playerItems.sortedWith(
+                compareByDescending<InventoryItem> { isWorn(it) }
+                    .then(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+            )
+        } else {
+            playerItems.sortedWith(
+                invSortComparator(sort.mode, sort.descending, { it.displayName() }, { it.weight }, { it.value })
+            )
+        }
     }
-    val containerSorted = remember(containerItems) {
-        containerItems.sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+    val containerSorted = remember(containerItems, sort.mode, sort.descending) {
+        if (sort.mode == InvSort.DEFAULT) {
+            containerItems.sortedWith(compareBy({ itemCategoryRank(it.category) }, { it.displayName().lowercase() }))
+        } else {
+            containerItems.sortedWith(
+                invSortComparator(sort.mode, sort.descending, { it.displayName() }, { it.weight }, { it.value })
+            )
+        }
     }
     // Controller focus (BOTTOM = two side-by-side lists → rows = 1). Classic mode only — the shelf
     // layout runs its OWN nav (inside ShelfDualPanel); running both collectors would double-consume
@@ -3924,14 +4058,29 @@ private fun LootingOverlay(
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
-            // ---- Title bar: container name ----
-            Text(
-                session.containerName.ifBlank { "Container" },
-                color = BronzeLight, fontSize = 14.sp,
-                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
-            )
+            // ---- Title bar: container name + (Classic only) the sort chips ----
+            // The chips ride IN the title bar rather than on a row of their own: this list is being
+            // made roomier, so spending another ~34dp of height on a control strip would undo part
+            // of what the row tuning just bought. Vertical padding drops 8 → 4 because the chips
+            // (which carry their own) now set the bar's height.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    session.containerName.ifBlank { "Container" },
+                    color = BronzeLight, fontSize = 14.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                // Classic only — the Shelf layout builds its own lists straight from playerItems/
+                // containerItems, so these chips would be inert there.
+                if (!shelfMode) {
+                    Spacer(Modifier.width(8.dp))
+                    SortChipRow(sort)
+                }
+            }
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
             // ---- Item panels: Shelf (grouped shelves) or Classic (two side-by-side lists) ----
@@ -4156,6 +4305,23 @@ private fun LootColumn(
     }
 }
 
+/* ---- Classic item-row geometry (looting + barter BOTTOM lists) ----
+ *
+ * These are FREE-SCROLLING LazyColumns, not fixed-row grids like the inventory tab's Cards style —
+ * so there is no row count to engineer; how many rows are visible simply falls out of the row
+ * height against the list's share of the panel.
+ *
+ * Tuned Aug 2026 ("feels cramped"): slightly more vertical padding, a slightly smaller icon, and
+ * item names may now wrap to TWO lines instead of truncating at one. [CLASSIC_ROW_MIN_HEIGHT] is
+ * what keeps that last change from making the list ragged — it reserves the two-line height on
+ * EVERY row, so a short name and a wrapped one occupy the same box and the rows stay aligned.
+ * Shared by both rows so the two Classic lists stay in step; barter's row was already 2dp tighter
+ * than looting's for no particular reason, and now they match.
+ */
+private val CLASSIC_ROW_ICON = 32.dp          // was 36 (loot) / 34 (barter)
+private val CLASSIC_ROW_PAD_V = 12.dp         // was 10 (loot) / 8 (barter)
+private val CLASSIC_ROW_MIN_HEIGHT = 74.dp    // ≈ padding + two name lines + sub-line
+
 /**
  * One item row in the looting overlay. Tap = transfer (put/take); long-press =
  * the fuller menu. A stack > 1 routes through QuantityRequestState so the shared
@@ -4213,13 +4379,15 @@ private fun LootRow(
                         onClick = { transfer() },
                         onLongClick = { menuOpen = true; DropdownState.open() }
                     )
-                    .padding(start = 8.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+                    // Uniform row box (see CLASSIC_ROW_MIN_HEIGHT) so one- and two-line names line up.
+                    .heightIn(min = CLASSIC_ROW_MIN_HEIGHT)
+                    .padding(start = 8.dp, end = 8.dp, top = CLASSIC_ROW_PAD_V, bottom = CLASSIC_ROW_PAD_V),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Icon box.
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(CLASSIC_ROW_ICON)
                         .clip(RoundedCornerShape(2.dp))
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
@@ -4242,7 +4410,10 @@ private fun LootRow(
                             label,
                             color = if (worn) BoneBright else BoneMuted,
                             fontSize = 13.sp, fontFamily = MwBody,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            // Two lines before ellipsis — these columns are ~175dp wide, so a name
+                            // like "Extravagant Robe of Deflection" used to truncate outright. The
+                            // row reserves the two-line height either way, so wrapping costs nothing.
+                            maxLines = 2, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
                         if (isFav) { Spacer(Modifier.width(4.dp)); FavStar() }
@@ -4369,6 +4540,24 @@ private fun moveOptimistic(
 
 // Gap between the two separate column boxes on the top screen. Single tweakable constant.
 private val LOOT_SPLIT_COLUMN_GAP = 8.dp
+
+/* ---- SPLIT grid geometry (looting + barter TOP-screen columns) ----
+ *
+ * Both grids are `GridCells.Fixed(3)` over the panel's height, so the CELL height is
+ * (grid height − 2×4dp spacing) / 3 — there is no per-cell height to set. The cells' name labels
+ * are already `maxLines = 2`, but at the old geometry the cell was ~65dp against the ~75dp that
+ * icon + two 8sp lines actually need, so the second line was simply clipped off and long names
+ * read as truncated (Aug 10 2026 report).
+ *
+ * Fixed by paying for it on both sides: a slightly taller panel and a slightly smaller icon. The
+ * panel is bottom-anchored and grows UPWARD over the game view, so this is a deliberate trade —
+ * a looting/barter session is modal anyway. Measured on the top screen (1920×1025 px app area at
+ * density 2.30625 = 832.6 × 444.4 dp): panel 292 → 329dp, cell ~65 → ~76dp, against ~71dp needed.
+ *
+ * SHELF keeps the original 0.675 fraction — it is a different layout and is out of scope.
+ */
+private const val SPLIT_PANEL_HEIGHT_FRACTION = 0.76f   // was 0.675 (Classic grids only)
+private val SPLIT_CELL_ICON = 44.dp                     // was 48
 
 // Each split-overlay column is its own boxed panel (dark fill, subtle border, rounded, padded);
 // the gap between the two boxes provides the visual separation (no divider line).
@@ -4526,10 +4715,21 @@ fun LootingTopOverlay() {
     var playerCat by remember { mutableStateOf<String?>(null) }
     var containerCat by remember { mutableStateOf<String?>(null) }
 
+    // Per-column sort state (Default / Weight / Value) — the same InvSortState + chips as the
+    // BOTTOM lists and the inventory tab. One per side because the chips live in each column's own
+    // header; see the `sort` param on LootGridColumn.
+    val playerSort = rememberInvSortState()
+    val containerSort = rememberInvSortState()
+
     // The VISIBLE (category-filtered + sorted) lists — shared by the controller focus index; each
-    // column re-derives the same via lootVisible for its display. Mirrors the barter overlay.
-    val playerVisible = remember(playerItems, playerCat) { lootVisible(playerItems, playerCat) { isWorn(it) } }
-    val containerVisible = remember(containerItems, containerCat) { lootVisible(containerItems, containerCat) }
+    // column re-derives the same via lootVisible for its display, so it is handed the SAME sort
+    // state (a different one there would desync the grid from the focus cursor).
+    val playerVisible = remember(playerItems, playerCat, playerSort.mode, playerSort.descending) {
+        lootVisible(playerItems, playerCat, playerSort.mode, playerSort.descending) { isWorn(it) }
+    }
+    val containerVisible = remember(containerItems, containerCat, containerSort.mode, containerSort.descending) {
+        lootVisible(containerItems, containerCat, containerSort.mode, containerSort.descending)
+    }
     // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X/Y fire here too even though
     // the Take All / Dispose buttons live on the bottom controls window — they're plain commands.
     // Classic mode only — the shelf layout runs its own nav (ShelfDualPanel).
@@ -4601,7 +4801,8 @@ fun LootingTopOverlay() {
         } else Row(
             modifier = Modifier
                 .fillMaxWidth(0.96f)
-                .fillMaxHeight(0.675f)
+                // Taller than Shelf's 0.675 so the 3-row grid's cells fit a two-line name.
+                .fillMaxHeight(SPLIT_PANEL_HEIGHT_FRACTION)
         ) {
             // LEFT: player.
             LootGridColumn(
@@ -4615,6 +4816,7 @@ fun LootingTopOverlay() {
                 onTransfer = { it, n -> put(it, n) },
                 onRequestQty = requestQty,
                 focusedIndex = if (focus!!.side == 0) focus.index else -1,
+                sort = playerSort,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
             Spacer(Modifier.width(LOOT_SPLIT_COLUMN_GAP))
@@ -4631,6 +4833,7 @@ fun LootingTopOverlay() {
                 onRequestQty = requestQty,
                 isPickpocket = session.isPickpocket,
                 focusedIndex = if (focus!!.side == 1) focus.index else -1,
+                sort = containerSort,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
         }
@@ -4687,15 +4890,27 @@ private fun LootGridColumn(
     /** Living NPC — a Take here opens the quantity picker at 1, not the stack (lootQtyInitial). */
     isPickpocket: Boolean = false,
     focusedIndex: Int = -1,
+    /** This column's sort. PER-COLUMN, not shared between the two sides: the chips sit in this
+     *  column's own header next to its own category tabs, so their scope reads as local — and
+     *  sorting the container by value while your own pack stays in its usual order is the useful
+     *  case. Owned by the parent so the SAME state also feeds the controller focus list. */
+    sort: InvSortState,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
-        Text(
-            header,
-            color = BronzeLight, fontSize = 14.sp,
-            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-            maxLines = 1, overflow = TextOverflow.Ellipsis
-        )
+        // Header + this column's sort chips on one line. The chips are `compact` because every dp
+        // spent here comes out of the item grid below (see SPLIT_PANEL_HEIGHT_FRACTION).
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                header,
+                color = BronzeLight, fontSize = 14.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(6.dp))
+            SortChipRow(sort, compact = true)
+        }
         Spacer(Modifier.height(4.dp))
         val presentCats = remember(items) { items.map { it.category }.toSet() }
         val tabs = remember(presentCats) { INV_CATEGORIES.filter { grp -> grp.cats.any { it in presentCats } } }
@@ -4713,17 +4928,20 @@ private fun LootGridColumn(
         Spacer(Modifier.height(6.dp))
 
         // Same filter+sort the controller focus index is computed against (lootVisible) — including the
-        // player-side worn-first float, so cell index maps 1:1 to the parent's focus index.
-        val visible = remember(items, selectedCategory) { lootVisible(items, selectedCategory) { isPlayerSide && isWorn(it) } }
+        // player-side worn-first float, so cell index maps 1:1 to the parent's focus index. The sort
+        // MUST be the same state the parent fed its focus list, or the two silently desync.
+        val visible = remember(items, selectedCategory, sort.mode, sort.descending) {
+            lootVisible(items, selectedCategory, sort.mode, sort.descending) { isPlayerSide && isWorn(it) }
+        }
         if (visible.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(emptyText, color = BoneDim, fontSize = 12.sp, fontFamily = MwBody)
             }
         } else {
             val gridState = rememberLazyGridState()
-            LaunchedEffect(focusedIndex) {
-                if (focusedIndex in visible.indices) gridState.animateScrollToItem(focusedIndex)
-            }
+            // Windowed, NOT pinned-to-the-left-edge: only scrolls when the focused cell would fall
+            // outside the viewport (see WindowedFocusScroll).
+            WindowedFocusScroll(gridState, focusedIndex, visible.size, visible)
             // Right stick left/right scrolls this horizontal grid while it's the focused side.
             ScrollByNav(gridState, active = focusedIndex >= 0, horizontal = true)
             LazyHorizontalGrid(
@@ -4808,7 +5026,7 @@ private fun LootGridCell(
             // Icon box — bronze highlight border when worn.
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(SPLIT_CELL_ICON)
                     .clip(RoundedCornerShape(3.dp))
                     .background(SlotBg)
                     .border(
@@ -6337,14 +6555,40 @@ private val BarterRed = Color(0xFFC75C5C)     // "player pays" / rejected (match
  *  side keeps plain category+name order (vendor items are never worn). Shared by both barter layouts
  *  (BarterGridCell / BarterRow) and the controller focus index so the D-pad index maps 1:1 to a visible
  *  cell/row. */
-private fun barterVisible(items: List<BarterItem>, category: String?, isPlayerSide: Boolean): List<BarterItem> {
+private fun barterVisible(
+    items: List<BarterItem>,
+    category: String?,
+    isPlayerSide: Boolean,
+    // DEFAULT keeps barter's own original order (worn-first player, then category + name). An
+    // explicit Value sort is a pure ordering over the whole side — no worn tier, no category tier —
+    // matching the inventory tab. Weight is NOT offered here: see BARTER_SORTS.
+    sortMode: InvSort = InvSort.DEFAULT,
+    sortDescending: Boolean = true
+): List<BarterItem> {
     val filtered = items.filter { category == null || it.category == category }
+    if (sortMode != InvSort.DEFAULT) {
+        return filtered.sortedWith(
+            invSortComparator(sortMode, sortDescending, { it.displayName() }, { 0f }, { it.value })
+        )
+    }
     val byCategoryThenName = compareBy<BarterItem>({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
     val comparator =
         if (isPlayerSide) compareByDescending<BarterItem> { it.worn }.then(byCategoryThenName)
         else byCategoryThenName
     return filtered.sortedWith(comparator)
 }
+
+/**
+ * The sort modes the barter overlay can offer: Default and Value, but NOT Weight.
+ *
+ * `COMPANION_BARTER_ITEM` (native, `companion-barter-export.patch`) carries `value` but no per-item
+ * weight, and `BarterItem` has no weight field to sort on. Player-side weights could be joined from
+ * the player's inventory, but VENDOR items exist nowhere else on the Kotlin side — so a Weight chip
+ * would order the vendor's whole stock as weightless while looking like it worked. Offering only
+ * what the data supports is the honest option; unlocking Weight needs one extra field on that
+ * native export (and therefore the patch/stamp dance).
+ */
+private val BARTER_SORTS = listOf(InvSort.DEFAULT, InvSort.PRICE)
 
 /** Current controller focus in the barter overlay: which [side] (0 = player/left,
  *  1 = vendor/right) and which [index] into that side's visible list. */
@@ -6443,7 +6687,11 @@ private fun rememberBarterNavFocus(
             }
         }
     }
-    return BarterFocus(side, index)
+    // Clamp the REPORTED focus in composition (see the same note in rememberLootNavFocus) — a
+    // category cycle or a list shrinking under the fixed index must not resolve focus to null for a
+    // pass and close a focus-linked info popup.
+    val n = (if (side == 0) visiblePlayer.size else visibleVendor.size)
+    return BarterFocus(side, index.coerceIn(0, (n - 1).coerceAtLeast(0)))
 }
 
 /**
@@ -6541,8 +6789,15 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
 
     // Controller focus (BOTTOM = two side-by-side lists → rows = 1). All state is co-located here,
     // so this collector also owns X (Offer) + the left-stick gold slider.
-    val visiblePlayer = remember(playerItems, playerCat) { barterVisible(playerItems, playerCat, true) }
-    val visibleVendor = remember(vendorItems, vendorCat) { barterVisible(vendorItems, vendorCat, false) }
+    // Sort controls (Default / Value) — the same InvSortState + chips as the inventory tab. Feeding
+    // barterVisible here keeps ONE source of order for both the display and the focus index.
+    val sort = rememberInvSortState()
+    val visiblePlayer = remember(playerItems, playerCat, sort.mode, sort.descending) {
+        barterVisible(playerItems, playerCat, true, sort.mode, sort.descending)
+    }
+    val visibleVendor = remember(vendorItems, vendorCat, sort.mode, sort.descending) {
+        barterVisible(vendorItems, vendorCat, false, sort.mode, sort.descending)
+    }
     // Flat 1g per left-stick tick. At the ~60ms native slider-poll cadence (~16 ticks/sec) that's
     // ~16g/sec when held — precise for fine adjustment, still reaches large values by holding. Tune
     // here (or add an accelerating hold) if needed.
@@ -6605,9 +6860,13 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                 .mwPanel()
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
-            // ---- Title bar: "Vendor — Barter" + disposition bar ----
+            // ---- Title bar: "Vendor — Barter" + (Classic only) sort chips + disposition bar ----
+            // Chips ride IN the title bar rather than on their own row — same reasoning as the
+            // looting overlay: this list is being made roomier, so a dedicated control strip would
+            // give back the height the row tuning just won. Padding 8 → 4 since the chips (which
+            // carry their own) now set the bar height.
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -6617,6 +6876,12 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+                // Classic only — Shelf builds its own lists from playerItems/vendorItems directly.
+                // Default/Value only (BARTER_SORTS): there is no per-item weight in the barter export.
+                if (!shelfMode) {
+                    Spacer(Modifier.width(8.dp))
+                    SortChipRow(sort, BARTER_SORTS)
+                }
                 if (disposition >= 0) {
                     Spacer(Modifier.width(12.dp))
                     Box(Modifier.width(120.dp)) { DispositionBar(disposition) }
@@ -6652,6 +6917,8 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     onSelectCategory = { playerCat = it },
                     onToggle = ::toggle,
                     focusedIndex = if (focus!!.side == 0) focus.index else -1,
+                    sortMode = sort.mode,
+                    sortDescending = sort.descending,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
                 // Dashed vertical divider.
@@ -6672,6 +6939,8 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     onSelectCategory = { vendorCat = it },
                     onToggle = ::toggle,
                     focusedIndex = if (focus!!.side == 1) focus.index else -1,
+                    sortMode = sort.mode,
+                    sortDescending = sort.descending,
                     modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp)
                 )
             }
@@ -7111,8 +7380,16 @@ fun BarterTopOverlay() {
     // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X (Offer) + the gold slider are
     // owned by the bottom controls window (BarterControlsOnly, its own collector) because the gold-
     // offset state lives there — passing no-ops here avoids a top/bottom desync.
-    val visiblePlayer = remember(playerCol, playerCat) { barterVisible(playerCol, playerCat, true) }
-    val visibleVendor = remember(vendorCol, vendorCat) { barterVisible(vendorCol, vendorCat, false) }
+    // Per-column sort state (Default / Value — no weight in the barter export, see BARTER_SORTS).
+    // Owned here so the SAME state drives both the grid display and this focus list.
+    val playerSort = rememberInvSortState()
+    val vendorSort = rememberInvSortState()
+    val visiblePlayer = remember(playerCol, playerCat, playerSort.mode, playerSort.descending) {
+        barterVisible(playerCol, playerCat, true, playerSort.mode, playerSort.descending)
+    }
+    val visibleVendor = remember(vendorCol, vendorCat, vendorSort.mode, vendorSort.descending) {
+        barterVisible(vendorCol, vendorCat, false, vendorSort.mode, vendorSort.descending)
+    }
     // Classic mode only — the shelf layout runs its own nav (ShelfDualPanel). Offer/slider stay
     // owned by the bottom controls window either way.
     val shelfMode = UiPreferences.inventoryLayoutFlow().collectAsState().value == InventoryLayout.SHELF
@@ -7165,7 +7442,8 @@ fun BarterTopOverlay() {
         } else Row(
             modifier = Modifier
                 .fillMaxWidth(0.96f)
-                .fillMaxHeight(0.675f)
+                // Taller than Shelf's 0.675 so the 3-row grid's cells fit a two-line name.
+                .fillMaxHeight(SPLIT_PANEL_HEIGHT_FRACTION)
         ) {
             // LEFT: player column (own inventory + bought vendor items, highlighted).
             BarterGridColumn(
@@ -7176,6 +7454,7 @@ fun BarterTopOverlay() {
                 onSelectCategory = { playerCat = it },
                 onToggle = ::toggle,
                 focusedIndex = if (focus!!.side == 0) focus.index else -1,
+                sort = playerSort,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
             Spacer(Modifier.width(BARTER_SPLIT_COLUMN_GAP))
@@ -7188,6 +7467,7 @@ fun BarterTopOverlay() {
                 onSelectCategory = { vendorCat = it },
                 onToggle = ::toggle,
                 focusedIndex = if (focus!!.side == 1) focus.index else -1,
+                sort = vendorSort,
                 modifier = Modifier.weight(1f).fillMaxHeight().splitColumnBox()
             )
         }
@@ -7250,15 +7530,24 @@ private fun BarterGridColumn(
     onSelectCategory: (String?) -> Unit,
     onToggle: (BarterItem) -> Unit,
     focusedIndex: Int = -1,
+    /** This column's sort — per-column, owned by the parent so the same state feeds the focus list.
+     *  See the matching note on [LootGridColumn]. Default/Value only (BARTER_SORTS). */
+    sort: InvSortState,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
-        Text(
-            header,
-            color = BronzeLight, fontSize = 14.sp,
-            fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-            maxLines = 1, overflow = TextOverflow.Ellipsis
-        )
+        // Header + this column's sort chips on one line (compact — see LootGridColumn).
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                header,
+                color = BronzeLight, fontSize = 14.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(6.dp))
+            SortChipRow(sort, BARTER_SORTS, compact = true)
+        }
         Spacer(Modifier.height(4.dp))
         val presentCats = remember(items) { items.map { it.category }.toSet() }
         val tabs = remember(presentCats) { BARTER_CATEGORIES.filter { it.cat in presentCats } }
@@ -7275,9 +7564,10 @@ private fun BarterGridColumn(
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
         Spacer(Modifier.height(6.dp))
 
-        // Same filter+sort the controller focus index is computed against (barterVisible).
-        val visible = remember(items, selectedCategory, isPlayerSide) {
-            barterVisible(items, selectedCategory, isPlayerSide)
+        // Same filter+sort the controller focus index is computed against (barterVisible). The sort
+        // MUST be the state the parent fed its focus list, or the grid and the cursor desync.
+        val visible = remember(items, selectedCategory, isPlayerSide, sort.mode, sort.descending) {
+            barterVisible(items, selectedCategory, isPlayerSide, sort.mode, sort.descending)
         }
         if (visible.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -7285,9 +7575,8 @@ private fun BarterGridColumn(
             }
         } else {
             val gridState = rememberLazyGridState()
-            LaunchedEffect(focusedIndex) {
-                if (focusedIndex in visible.indices) gridState.animateScrollToItem(focusedIndex)
-            }
+            // Windowed, NOT pinned-to-the-left-edge — same helper as the looting grid.
+            WindowedFocusScroll(gridState, focusedIndex, visible.size, visible)
             // Right stick left/right scrolls this horizontal grid while it's the focused side.
             ScrollByNav(gridState, active = focusedIndex >= 0, horizontal = true)
             LazyHorizontalGrid(
@@ -7363,7 +7652,7 @@ private fun BarterGridCell(
             val highlightIcon = selected || (isPlayerSide && item.worn)
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(SPLIT_CELL_ICON)
                     .clip(RoundedCornerShape(3.dp))
                     .background(if (selected) SlotWorn else SlotBg)
                     .border(
@@ -7468,6 +7757,10 @@ private fun BarterColumn(
     onSelectCategory: (String?) -> Unit,
     onToggle: (BarterItem) -> Unit,
     focusedIndex: Int = -1,
+    // MUST match what the parent fed rememberBarterNavFocus — this column re-derives the same
+    // visible list, so a different sort here would silently desync the display from the focus index.
+    sortMode: InvSort = InvSort.DEFAULT,
+    sortDescending: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Column(modifier) {
@@ -7494,8 +7787,8 @@ private fun BarterColumn(
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
 
         // Same filter+sort the controller focus index is computed against (barterVisible).
-        val visible = remember(items, selectedCategory, isPlayerSide) {
-            barterVisible(items, selectedCategory, isPlayerSide)
+        val visible = remember(items, selectedCategory, isPlayerSide, sortMode, sortDescending) {
+            barterVisible(items, selectedCategory, isPlayerSide, sortMode, sortDescending)
         }
         // weight(1f) so the list explicitly takes ALL remaining height in the column —
         // the item lists expand to fill the overlay (matching the looting overlay).
@@ -7563,13 +7856,15 @@ private fun BarterRow(
                         onClick = { onToggle(item) },
                         onLongClick = { menuOpen = true; DropdownState.open() }
                     )
-                    .padding(horizontal = 6.dp, vertical = 8.dp),
+                    // Uniform row box (see CLASSIC_ROW_MIN_HEIGHT) so one- and two-line names line up.
+                    .heightIn(min = CLASSIC_ROW_MIN_HEIGHT)
+                    .padding(horizontal = 6.dp, vertical = CLASSIC_ROW_PAD_V),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Icon box.
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(CLASSIC_ROW_ICON)
                         .clip(RoundedCornerShape(2.dp))
                         .background(SlotBg)
                         .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
@@ -7591,7 +7886,8 @@ private fun BarterRow(
                         label,
                         color = if (selected) BoneBright else Bone,
                         fontSize = 13.sp, fontFamily = MwBody,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                        // Two lines before ellipsis — see the matching note in LootRow.
+                        maxLines = 2, overflow = TextOverflow.Ellipsis
                     )
                     val sub = buildString {
                         if (item.count > 1) append("×${item.count}  ")
@@ -9166,11 +9462,12 @@ private fun FavSlotView(
 private fun InventoryPanel(state: GameState) {
     val tabStyle by UiPreferences.inventoryTabStyleFlow().collectAsState()
     val cards = tabStyle == InventoryTabStyle.CARDS
-    // Sort state is deliberately NOT persisted — it's a transient "let me find the heavy things"
-    // view, not a setting, and coming back to a remembered non-default order later would be
-    // surprising. Resets to Default whenever the tab is left.
-    var sortMode by remember { mutableStateOf(InvSort.DEFAULT) }
-    var sortDescending by remember { mutableStateOf(true) }
+    // Sort state (mode + direction + the tap/toggle rules) — shared with the looting and barter
+    // Classic lists via InvSortState, so all three behave identically. Resets to Default whenever
+    // the tab is left; see InvSortState for why it isn't persisted.
+    val sort = rememberInvSortState()
+    val sortMode = sort.mode
+    val sortDescending = sort.descending
     val hideEquippedBar by UiPreferences.hideEquippedBarFlow().collectAsState()
     val showEquippedInList by UiPreferences.showEquippedInListFlow().collectAsState()
     var selectedCategoryLabel by remember { mutableStateOf<String?>(null) }
@@ -9195,24 +9492,7 @@ private fun InventoryPanel(state: GameState) {
             .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        EquippedStrip(
-            state = state,
-            sortMode = sortMode,
-            sortDescending = sortDescending,
-            onSort = { mode ->
-                if (mode == InvSort.DEFAULT) {
-                    sortMode = InvSort.DEFAULT
-                } else if (sortMode == mode) {
-                    // Re-tapping the active sort flips direction rather than doing nothing.
-                    sortDescending = !sortDescending
-                } else {
-                    // A fresh sort starts high→low: "what's heaviest / most valuable" is the
-                    // question people actually open these for.
-                    sortMode = mode
-                    sortDescending = true
-                }
-            }
-        )
+        EquippedStrip(state = state, sort = sort)
         // Ordered filter tabs (All, [Equipped], then present categories) for swipe-cycling — same
         // order CategorySubTabs renders.
         val invTabOrder = buildList<String?> {
@@ -9244,12 +9524,7 @@ private fun InventoryPanel(state: GameState) {
 }
 
 @Composable
-private fun EquippedStrip(
-    state: GameState,
-    sortMode: InvSort,
-    sortDescending: Boolean,
-    onSort: (InvSort) -> Unit
-) {
+private fun EquippedStrip(state: GameState, sort: InvSortState) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -9271,37 +9546,10 @@ private fun EquippedStrip(
         // on the chip Row so the chips wrap their content and stay hard against the right edge
         // instead of stretching across the free space.
         Spacer(Modifier.weight(1f))
-        // Icon in place of a "SORT" caption + divider rule. Those cost ~55dp of a ~473dp strip,
-        // which the game font's larger text turned into a real squeeze — the chips crowded the
-        // Gold/Weight readouts on their left. The icon says the same thing in ~18dp.
-        //
-        // A VECTOR rather than a text glyph on purpose: MysticCards has no arrow/symbol coverage
-        // (no ▲ ▼ ◀ ▶ · ✓ …), so a typographic sort mark would be at the mercy of font fallback.
-        // An ImageVector renders identically whichever font role is active. Precedent: the
-        // favourite star is already Icons.Filled.Star.
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.Sort,
-            contentDescription = "Sort",
-            tint = BronzeLight,
-            modifier = Modifier.size(18.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            InvSort.entries.forEach { mode ->
-                SortChip(
-                    label = mode.label,
-                    active = sortMode == mode,
-                    // Default has no direction — an arrow on it would imply a toggle that isn't there.
-                    arrow = if (sortMode == mode && mode != InvSort.DEFAULT) {
-                        if (sortDescending) "▼" else "▲"
-                    } else null,
-                    onClick = { onSort(mode) }
-                )
-            }
-        }
+        // The chip cluster (icon + Default/Weight/Value) — shared with the looting and barter
+        // Classic lists. The flexible gap above pushes it hard against the strip's right edge,
+        // separating the read-only stats (left) from the controls (right).
+        SortChipRow(sort)
     }
 }
 
@@ -9313,10 +9561,127 @@ private enum class InvSort(val label: String) {
     DEFAULT("Default"), WEIGHT("Weight"), PRICE("Value")
 }
 
+/**
+ * The Weight/Value half of the sort order, generic over the item type so the inventory tab
+ * ([InventoryItem]) and the barter overlay ([BarterItem]) run the SAME code rather than two
+ * comparators that drift apart. DEFAULT is deliberately NOT handled here: each context's "default"
+ * is its own established order (inventory = category → favourite → name; looting = worn → category
+ * → name; barter = worn → category → name), and "Default restores the original order" means each
+ * screen's own original, so callers keep their existing comparator for that mode.
+ *
+ * Weight/Value are a PURE ordering — no category tier and no favourite tier (see the long note at
+ * the inventory call site for why). Name is the final tiebreak in every mode so equal weights or
+ * values don't shuffle between recompositions.
+ */
+private fun <T> invSortComparator(
+    mode: InvSort,
+    descending: Boolean,
+    name: (T) -> String,
+    weight: (T) -> Float,
+    value: (T) -> Int
+): Comparator<T> {
+    val base: Comparator<T> = when (mode) {
+        InvSort.WEIGHT ->
+            if (descending) compareByDescending { weight(it) } else compareBy { weight(it) }
+        // DEFAULT never reaches here (callers branch first); fall back to value so the function is
+        // total rather than throwing.
+        else ->
+            if (descending) compareByDescending { value(it) } else compareBy { value(it) }
+    }
+    return base.thenBy { name(it).lowercase() }
+}
+
+/**
+ * Tap/toggle behaviour for the sort chips, extracted so every screen that offers sorting behaves
+ * IDENTICALLY (tap a new mode → that mode, high→low; re-tap the active mode → flip direction;
+ * Default → back to the screen's own order, no direction). Hold it with [rememberInvSortState].
+ *
+ * Deliberately NOT persisted anywhere: it's a transient "let me find the heavy things" view, not a
+ * setting, and returning later to a remembered non-default order would be surprising.
+ */
+@Stable
+private class InvSortState {
+    var mode by mutableStateOf(InvSort.DEFAULT)
+        private set
+    var descending by mutableStateOf(true)
+        private set
+
+    fun onSort(tapped: InvSort) {
+        when {
+            tapped == InvSort.DEFAULT -> mode = InvSort.DEFAULT
+            // Re-tapping the active sort flips direction rather than doing nothing.
+            mode == tapped -> descending = !descending
+            else -> {
+                // A fresh sort starts high→low: "what's heaviest / most valuable" is the question
+                // people actually open these for.
+                mode = tapped
+                descending = true
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberInvSortState(): InvSortState = remember { InvSortState() }
+
+/**
+ * The sort chip cluster: an icon then one [SortChip] per offered mode. [modes] is a parameter
+ * rather than `InvSort.entries` because the barter overlay can only offer Default/Value — the
+ * native COMPANION_BARTER_ITEM export carries `value` but no per-item weight, so a Weight chip
+ * there would silently sort every vendor item as weightless.
+ */
+@Composable
+private fun SortChipRow(
+    state: InvSortState,
+    modes: List<InvSort> = InvSort.entries,
+    // Compact = the SPLIT grid columns, where the chips share a line with the column header and
+    // every dp they take comes straight out of the item grid below them. The chip's normal vertical
+    // padding was tuned for the inventory tab's 54dp strip, which had room to spare; here it does not.
+    compact: Boolean = false
+) {
+    // Icon in place of a "SORT" caption + divider rule. Those cost ~55dp of a ~473dp strip, which
+    // the game font's larger text turned into a real squeeze. The icon says the same thing in ~18dp.
+    //
+    // A VECTOR rather than a text glyph on purpose: MysticCards has no arrow/symbol coverage
+    // (no ▲ ▼ ◀ ▶ · ✓ …), so a typographic sort mark would be at the mercy of font fallback.
+    // An ImageVector renders identically whichever font role is active. Precedent: the favourite
+    // star is already Icons.Filled.Star.
+    Icon(
+        imageVector = Icons.AutoMirrored.Filled.Sort,
+        contentDescription = "Sort",
+        tint = BronzeLight,
+        modifier = Modifier.size(if (compact) 15.dp else 18.dp)
+    )
+    Spacer(Modifier.width(if (compact) 5.dp else 8.dp))
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        modes.forEach { mode ->
+            SortChip(
+                label = mode.label,
+                active = state.mode == mode,
+                // Default has no direction — an arrow on it would imply a toggle that isn't there.
+                arrow = if (state.mode == mode && mode != InvSort.DEFAULT) {
+                    if (state.descending) "▼" else "▲"
+                } else null,
+                compact = compact,
+                onClick = { state.onSort(mode) }
+            )
+        }
+    }
+}
+
 /** A sort control in the inventory strip. Styled like [CategoryTab] (the tab row directly below it)
  *  so the two rows of controls read as the same family, with a direction arrow when active. */
 @Composable
-private fun SortChip(label: String, active: Boolean, arrow: String?, onClick: () -> Unit) {
+private fun SortChip(
+    label: String,
+    active: Boolean,
+    arrow: String?,
+    compact: Boolean = false,
+    onClick: () -> Unit
+) {
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(2.dp))
@@ -9328,7 +9693,9 @@ private fun SortChip(label: String, active: Boolean, arrow: String?, onClick: ()
             // comfortably bigger touch target on the small panel. Horizontal padding trimmed 8->6
             // to claw back width for the wider game-font labels; the vertical padding (which is
             // what makes the target comfortable) is untouched.
-            .padding(horizontal = 6.dp, vertical = 11.dp),
+            // [compact] halves the vertical padding for the SPLIT column headers, where that height
+            // is taken directly from the item grid — still a ~24dp touch target.
+            .padding(horizontal = 6.dp, vertical = if (compact) 5.dp else 11.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -9483,18 +9850,13 @@ private fun InventoryItemList(
     // Name is the final tiebreak in every mode so equal weights/prices don't shuffle between
     // recompositions.
     val catNameSort = remember(favIds, sortMode, sortDescending) {
-        when (sortMode) {
-            InvSort.DEFAULT -> compareBy<InventoryItem> { itemCategoryRank(it.category) }
+        if (sortMode == InvSort.DEFAULT) {
+            compareBy<InventoryItem> { itemCategoryRank(it.category) }
                 .thenByDescending { it.id in favIds }
                 .thenBy { it.displayName().lowercase() }
-            InvSort.WEIGHT ->
-                (if (sortDescending) compareByDescending<InventoryItem> { it.weight }
-                else compareBy { it.weight })
-                    .thenBy { it.displayName().lowercase() }
-            InvSort.PRICE ->
-                (if (sortDescending) compareByDescending<InventoryItem> { it.value }
-                else compareBy { it.value })
-                    .thenBy { it.displayName().lowercase() }
+        } else {
+            // Weight/Value go through the shared comparator (also used by looting + barter).
+            invSortComparator(sortMode, sortDescending, { it.displayName() }, { it.weight }, { it.value })
         }
     }
     // Equipped items float to the front ONLY in the default order. With an explicit Weight/Price
@@ -9540,8 +9902,10 @@ private fun InventoryItemList(
                 isWorn = { isWorn(it) },
                 forceHighlight = equippedFilter,
                 chargeById = chargeById,
-                // Hiding the Equipped bar frees vertical room — use it for an extra row (5 vs 4).
-                rows = if (hideEquippedBar) INV_CARD_ROWS + 1 else INV_CARD_ROWS,
+                // ALWAYS 4 rows. Hiding the Equipped bar used to buy a 5th row; instead that freed
+                // height now goes into taller (and, via the card's own scaling, proportionally
+                // wider) cards — see the INV_CARD_* geometry block.
+                rows = INV_CARD_ROWS,
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
             )
         } else {
@@ -10212,14 +10576,28 @@ private fun ItemRow(
 /* ---- Inventory Cards layout (condensed card grid, horizontal scroll) ---- */
 
 // Card grid geometry, tuned for the 1240×1080 / 3.92" bottom screen (~473×412 dp, density ~2.62):
-// a fixed 4-row horizontal grid renders wide+short cards ~2 columns wide (see the confirmed density
-// math). The FIXED row count (over the grid's bounded height) is what keeps every card a uniform
-// height regardless of name/stat content — each card fills its evenly-divided grid cell. Width is
-// fixed so ~2 columns show at once. INV_CARD_HEIGHT is the per-card height target used only to size
-// the (bounded-height) equipped-section grid.
+// a fixed 4-row horizontal grid renders wide+short cards. The FIXED row count (over the grid's
+// bounded height) is what keeps every card a uniform height regardless of name/stat content — each
+// card fills its evenly-divided grid cell.
+//
+// [INV_CARD_ROWS] is ALWAYS 4 (Aug 2026). It used to be bumped to 5 whenever the Equipped bar was
+// hidden — which, since that pref defaults to hidden, meant 5 was what most players actually saw.
+// The freed height now makes the CARDS bigger instead of adding a row.
+//
+// The numbers below (width, icon size, font sizes, paddings — including the ones inside the shared
+// stat widgets) are all authored against [INV_CARD_HEIGHT] as the REFERENCE cell height. [ItemCard]
+// measures the height its grid cell actually hands it and scales everything by
+// `cellHeight / INV_CARD_HEIGHT` through a scaled [LocalDensity], so the card keeps its exact shape
+// at whatever size the row division produces — taller cell ⇒ proportionally wider card with
+// proportionally larger icon and text, no distortion and no hand-tuned second set of dimensions.
+// That also self-corrects for the two different grid heights (Equipped bar shown vs hidden) and for
+// the bounded-height equipped-section grid, which sizes its own rows from INV_CARD_HEIGHT directly.
 private val INV_CARD_WIDTH = 214.dp
 private val INV_CARD_HEIGHT = 54.dp
 private const val INV_CARD_ROWS = 4
+// Sanity rails on the derived scale, so an unexpected constraint can never produce an absurd card.
+private const val INV_CARD_MIN_SCALE = 0.85f
+private const val INV_CARD_MAX_SCALE = 1.6f
 // Fixed widths for the card's stat cluster (right-aligned), so weight + condition/charge always sit
 // in the same spot and the stat/effect column (widest; long effect names truncate) is left of them.
 private val INV_CARD_STAT_W = 74.dp
@@ -10272,63 +10650,86 @@ private fun ItemCard(
     val favs by FavouritesRepository.state.collectAsState()
     val isFav = favs.gear.any { it?.id == item.id }
 
-    Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
-        Row(
-            modifier = Modifier
-                .width(INV_CARD_WIDTH)
-                // Height comes from the grid's fixed-row division (uniform across all cards); fill it.
-                .fillMaxHeight()
-                .clip(RoundedCornerShape(3.dp))
-                // Equipped items get the same faint fill + BronzeLight outline as the List highlight;
-                // otherwise a plain slot panel so cards read as discrete tiles.
-                .background(if (highlight) BronzeLight.copy(alpha = 0.06f) else StoneDark)
-                .border(1.dp, if (highlight) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
-                .combinedClickable(
-                    onClick = { itemPrimaryAction(item, worn, equippable, usable, readable) },
-                    onLongClick = { menuOpen = true; DropdownState.open() }
-                )
-                .padding(horizontal = 6.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+    BoxWithConstraints(
+        modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }
+    ) {
+        // UNIFORM SCALE (see the INV_CARD_* geometry block). The grid hands every cell a FIXED
+        // height, so maxHeight here IS the card height; everything inside is authored against
+        // INV_CARD_HEIGHT. Scaling LocalDensity — rather than multiplying each dimension by hand —
+        // scales dp AND sp together, so the width, icon, paddings, name and the shared
+        // ItemStatColumn/ItemWeightColumn/ItemConditionColumn internals all grow by exactly the same
+        // factor. The card's shape and its internal proportions are therefore identical at any size,
+        // and the List style (which uses those same shared widgets outside this provider) is
+        // completely untouched.
+        val base = LocalDensity.current
+        val scale = if (constraints.hasBoundedHeight)
+            (maxHeight / INV_CARD_HEIGHT).coerceIn(INV_CARD_MIN_SCALE, INV_CARD_MAX_SCALE) else 1f
+        CompositionLocalProvider(
+            LocalDensity provides Density(base.density * scale, base.fontScale)
         ) {
-            ItemIconBox(item, iconBitmap, size = 34.dp, badgeFontSize = 8.sp)
-            Spacer(Modifier.width(6.dp))
-            // Right side: name over a compact stat row. The favourite star is a corner overlay (below)
-            // rather than inline, so it never steals width from the name.
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-                AutoShrinkItemName(
-                    item.displayName(),
-                    color = if (worn) BoneBright else BoneMuted,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(2.dp))
-                // Compact stat row: the same stat / condition-charge / weight widgets as the List, in
-                // cardStyle (label on TOP, value centred beneath). FIXED widths + right-aligned so every
-                // section sits in the SAME position on every card regardless of which are populated or
-                // how long an effect name is. WEIGHT is far right (every item has weight), condition/
-                // charge next, then the stat/effect column (widest, long effect names ellipsis-truncate
-                // within it). Empty sections still occupy their slot, keeping the others aligned.
+            // Plain Box so the fav-star overlay still has a BoxScope to align within (the
+            // provider's content lambda drops BoxWithConstraints' own scope).
+            Box {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
-                    verticalAlignment = Alignment.Top
+                    modifier = Modifier
+                        .width(INV_CARD_WIDTH)
+                        // Height comes from the grid's fixed-row division (uniform across all
+                        // cards); fill it.
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(3.dp))
+                        // Equipped items get the same faint fill + BronzeLight outline as the List
+                        // highlight; otherwise a plain slot panel so cards read as discrete tiles.
+                        .background(if (highlight) BronzeLight.copy(alpha = 0.06f) else StoneDark)
+                        .border(1.dp, if (highlight) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
+                        .combinedClickable(
+                            onClick = { itemPrimaryAction(item, worn, equippable, usable, readable) },
+                            onLongClick = { menuOpen = true; DropdownState.open() }
+                        )
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    ItemStatColumn(item.statVal, item.statKey, width = INV_CARD_STAT_W, cardStyle = true)
-                    ItemConditionColumn(item.cond, enchantCharge, width = INV_CARD_COND_W)
-                    ItemWeightColumn(item.weight, width = INV_CARD_WT_W, cardStyle = true)
+                    ItemIconBox(item, iconBitmap, size = 34.dp, badgeFontSize = 8.sp)
+                    Spacer(Modifier.width(6.dp))
+                    // Right side: name over a compact stat row. The favourite star is a corner
+                    // overlay (below) rather than inline, so it never steals width from the name.
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                        AutoShrinkItemName(
+                            item.displayName(),
+                            color = if (worn) BoneBright else BoneMuted,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        // Compact stat row: the same stat / condition-charge / weight widgets as the
+                        // List, in cardStyle (label on TOP, value centred beneath). FIXED widths +
+                        // right-aligned so every section sits in the SAME position on every card
+                        // regardless of which are populated or how long an effect name is. WEIGHT is
+                        // far right (every item has weight), condition/charge next, then the stat/
+                        // effect column (widest, long effect names ellipsis-truncate within it).
+                        // Empty sections still occupy their slot, keeping the others aligned.
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            ItemStatColumn(item.statVal, item.statKey, width = INV_CARD_STAT_W, cardStyle = true)
+                            ItemConditionColumn(item.cond, enchantCharge, width = INV_CARD_COND_W)
+                            ItemWeightColumn(item.weight, width = INV_CARD_WT_W, cardStyle = true)
+                        }
+                    }
                 }
+
+                // Favourite star, top-right corner of the card box (overlay, not inline with the name).
+                if (isFav) {
+                    Box(Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 3.dp)) { FavStar() }
+                }
+
+                ItemContextMenu(
+                    item = item, worn = worn, equippable = equippable, usable = usable, readable = readable,
+                    expanded = menuOpen,
+                    onDismiss = { menuOpen = false; DropdownState.closeAll() }
+                )
             }
         }
-
-        // Favourite star, top-right corner of the card box (overlay, not inline with the name).
-        if (isFav) {
-            Box(Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 3.dp)) { FavStar() }
-        }
-
-        ItemContextMenu(
-            item = item, worn = worn, equippable = equippable, usable = usable, readable = readable,
-            expanded = menuOpen,
-            onDismiss = { menuOpen = false; DropdownState.closeAll() }
-        )
     }
 }
 
@@ -14124,9 +14525,10 @@ private fun QuickSetRow() {
         Text("Presets", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
             // Names EVERY side effect. The old subtitle mentioned only the hint bar, so All DS
-            // silently overwriting two of the player's own layout choices was invisible here.
+            // silently overwriting the player's own layout choices was invisible here. (All DS no
+            // longer touches the Item List Style — keep this in step if a side effect is added.)
             "Sets every row in Game Menus at once. All DS also moves Conversation to the top " +
-                "screen and switches item lists to Shelf. Both presets change the controller hint bar.",
+                "screen. Both presets change the controller hint bar.",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
