@@ -188,6 +188,61 @@ const val ADAPTIVE_DIM_MIN_DEFAULT = 0.25f
 const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
 
 /**
+ * TOP-screen adaptive dimming. ONE pair of sliders drives BOTH screens — the player sets the
+ * dimming range once, in the ranges above — and the top screen re-projects those same positions
+ * through the constants here before they become an alpha. There is no second stored setting and no
+ * second pair of sliders; these are mapping targets, not preferences.
+ *
+ * TUNED ON DEVICE (Aug 2026), and the result was not what the original estimate assumed. The two
+ * screens were first given DIFFERENT brightness bands on the theory that a top-screen panel, being
+ * already thinned by the manual opacity slider and sitting over a dark scene, needs a gentler tint.
+ * Comparing a DS panel on each screen at once (Conversation top vs Persuasion bottom) showed the
+ * opposite: the top screen looked visibly UNDER-dimmed, and the screens only matched once its band
+ * was widened to equal the bottom's. So both projections below are now IDENTITY, and the entire
+ * difference between the screens has collapsed into [TOP_DIM_ABSOLUTE_MAX_ALPHA].
+ *
+ * The projection is kept (rather than folded away) because it is the seam any future retune needs,
+ * and because the ceiling alone cannot express "reach the cap sooner" — which is what the shared
+ * slider still does on the top screen.
+ */
+/**
+ * The readability guarantee for the top screen, and the ONLY thing that now distinguishes it from
+ * the bottom screen's mapping.
+ *
+ * WHERE 0.42 COMES FROM — it is the alpha the developer accepted as the edge of readability, not a
+ * round number. Tuning was done outside at 2am, whose ambient the engine reports at luminance
+ * ~0.127-0.137 (from the Weather_*_Ambient_Night_Color fallbacks, Rec.709), i.e. ramp position
+ * t ~= 0.82-0.85 — NOT the end of the ramp. The measured alpha there was 0.411 (clear night)
+ * to 0.427 (foggy). 0.42 sits inside that band.
+ *
+ * WHY A CAP WAS NEEDED AT ALL. A pitch-black INTERIOR reports luminance 0.08 — the engine's
+ * `Shaders/minimum interior brightness` floor, which is exactly what [DIM_LUMINANCE_DARK] is
+ * pinned to — so it reaches t = 1.0, further down the ramp than ANY night exterior can. Without
+ * this cap a cave would have rendered at alpha 0.50: ~22% more opaque than the point already
+ * described as borderline, in a scene tuning never visited.
+ *
+ * WHY IT IS A CLAMP AND NOT A NARROWER RANGE. Rescaling the band to end at 0.42 would have made
+ * the 2am scene itself lighter than the look that was approved. Clamping leaves the approved curve
+ * untouched everywhere below the cap and only refuses to go past it. Verified across every scene x
+ * slider combination: the top screen's alpha never exceeds 0.42.
+ *
+ * NOTE the bottom screen's `MIN_RANGE.start = 1 - ceiling` invariant deliberately does NOT hold up
+ * here, and must not be "fixed". There it exists so the slider's dark end is exactly reachable. On
+ * the top screen the ceiling is MEANT to be the binding constraint: the floor below sets how
+ * quickly the cap is reached, and the cap sets how dark it may ever get.
+ */
+const val TOP_DIM_ABSOLUTE_MAX_ALPHA = 0.42f
+/** Identity with [ADAPTIVE_DIM_MIN_RANGE] — see above; the screens matched only at parity. The
+ *  slider still does real work up top: at darker positions the [TOP_DIM_ABSOLUTE_MAX_ALPHA] cap is
+ *  reached in progressively less dark scenes. */
+val TOP_ADAPTIVE_DIM_MIN_RANGE = 0.15f..0.50f
+/** Identity with [ADAPTIVE_DIM_MAX_RANGE]. The bright end was never observable during tuning (at
+ *  the default "Brightest" position the projection returns this range's upper bound whatever its
+ *  start is), so it is set to parity with the bottom screen — the one relationship the tuning DID
+ *  establish — rather than to a value that was changed but never actually seen. */
+val TOP_ADAPTIVE_DIM_MAX_RANGE = 0.60f..1.00f
+
+/**
  * Level of the companion's own interface sounds, as a fraction of the device's media volume.
  *
  * Full range: unlike the adaptive-dimming sliders there is no floor to defend here — silencing the

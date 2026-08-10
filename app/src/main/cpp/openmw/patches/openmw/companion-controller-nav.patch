@@ -170,7 +170,7 @@
          if (mGuiCursorEnabled && !(mJoystickLastUsed && !mGamepadGuiCursorEnabled)
  #ifdef __ANDROID__
              // COMPANION: don't let the thumbstick move the GUI cursor while the "Game cursor" option
-@@ -273,6 +415,35 @@
+@@ -273,6 +415,36 @@
  
      bool ControllerManager::gamepadToGuiControl(const SDL_ControllerButtonEvent& arg)
      {
@@ -193,6 +193,7 @@
 +                case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:   Log(Debug::Info) << "COMPANION_NAV_L1:";      return true;
 +                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:  Log(Debug::Info) << "COMPANION_NAV_R1:";      return true;
 +                case SDL_CONTROLLER_BUTTON_RIGHTSTICK:     Log(Debug::Info) << "COMPANION_NAV_INFO:";    return true;
++                case SDL_CONTROLLER_BUTTON_LEFTSTICK:      Log(Debug::Info) << "COMPANION_NAV_SORT:";    return true;
 +                case SDL_CONTROLLER_BUTTON_B:
 +                    // Only intercept B while a quantity selector is up — then it CANCELS just the
 +                    // selector (COMPANION_NAV_CANCEL) instead of closing the whole overlay. Otherwise
@@ -206,7 +207,7 @@
          MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
  
          if (Settings::gui().mControllerMenus)
-@@ -383,6 +554,43 @@
+@@ -383,6 +555,43 @@
          };
  
          MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();

@@ -1,0 +1,33 @@
+Companion (bottom-screen barter) — per-item weight on COMPANION_BARTER_ITEM.
+
+The barter export carried `value` but no per-item weight, so the DS barter overlay could
+only offer Default/Value sorting while the inventory and looting screens offer
+Default/Weight/Value (BARTER_SORTS in CompanionScreen.kt existed solely to express that
+gap). Player-side weights could in principle have been joined from the player's inventory,
+but VENDOR items exist nowhere else on the Kotlin side — so the field has to come from here.
+
+Emits the per-unit record weight (`Class::getWeight`, the same value the vanilla tooltip and
+the encumbrance calculation use), mirroring the Lua `itemJson` "weight" field already on
+COMPANION_INVENTORY_ITEM / COMPANION_CONTAINER_ITEM so all four item contexts carry the same
+shape. Every barter item comes out of a container store, so its class always overrides
+getWeight (the base Class::getWeight throw is unreachable here).
+
+Authored as a DELTA against the already-patched tradewindow.cpp: that file is touched by
+companion-barter-export.patch, companion-ui-sounds.patch and companion-barter-instance-id.patch,
+so this is applied LAST in the chain rather than folded into the export patch — editing the
+export patch's emit block would have broken the later patches' context lines.
+
+diff --git a/apps/openmw/mwgui/tradewindow.cpp b/apps/openmw/mwgui/tradewindow.cpp
+--- a/apps/openmw/mwgui/tradewindow.cpp
++++ b/apps/openmw/mwgui/tradewindow.cpp
+@@ -890,6 +890,10 @@
+                 << ",\"name\":\"" << companionJsonEscape(name) << "\""
+                 << ",\"count\":" << stackCount
+                 << ",\"value\":" << unitValue
++                // Companion: per-unit record weight, mirroring the Lua itemJson "weight" field on
++                // COMPANION_INVENTORY_ITEM / COMPANION_CONTAINER_ITEM, so the DS barter overlay can
++                // offer the same Weight sort as the inventory and looting screens.
++                << ",\"weight\":" << base.getClass().getWeight(base)
+                 << ",\"cat\":\"" << companionBarterCategory(base) << "\""
+                 << ",\"icon\":\"" << companionJsonEscape(icon) << "\""
+                 << ",\"sellable\":" << (sellable ? "true" : "false")

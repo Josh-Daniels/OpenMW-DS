@@ -214,6 +214,7 @@ object LogParser {
     const val P_NAV_SCROLL_RIGHT = "COMPANION_NAV_SCROLL_RIGHT:" // right stick right (horizontal grids)
     const val P_NAV_CANCEL = "COMPANION_NAV_CANCEL:"             // B while a quantity selector is open
     const val P_NAV_INFO = "COMPANION_NAV_INFO:"                 // R3 (right stick click) — item info popup
+    const val P_NAV_SORT = "COMPANION_NAV_SORT:"                 // L3 (left stick click) — cycle sort mode
 
     /**
      * Maps a COMPANION_NAV_* line to a factory that builds the [NavEvent] once the repo stamps it
@@ -227,6 +228,7 @@ object LogParser {
         line.contains(P_NAV_SCROLL_RIGHT) -> { seq -> NavEvent.ScrollRight(seq) }
         line.contains(P_NAV_CANCEL) -> { seq -> NavEvent.Cancel(seq) }
         line.contains(P_NAV_INFO) -> { seq -> NavEvent.Info(seq) }
+        line.contains(P_NAV_SORT) -> { seq -> NavEvent.Sort(seq) }
         line.contains(P_NAV_SLIDER_LEFT) -> { seq -> NavEvent.SliderLeft(seq) }
         line.contains(P_NAV_SLIDER_RIGHT) -> { seq -> NavEvent.SliderRight(seq) }
         line.contains(P_NAV_LEFT) -> { seq -> NavEvent.Left(seq) }
@@ -452,6 +454,9 @@ object LogParser {
             name = o.optString("name", ""),
             count = o.optInt("count", 1),
             value = o.optInt("value", 0),
+            // Absent (engine predating companion-barter-weight.patch) → 0, which sorts as
+            // weightless rather than throwing; every current engine sends it.
+            weight = o.optDouble("weight", 0.0).toFloat(),
             category = o.optString("cat", "misc"),
             icon = o.optString("icon", ""),
             side = side,

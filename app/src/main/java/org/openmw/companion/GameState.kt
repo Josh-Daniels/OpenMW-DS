@@ -161,6 +161,9 @@ data class BarterItem(
     val name: String = "",
     val count: Int = 1,
     val value: Int = 0,
+    /** Per-unit record weight (native `Class::getWeight`), matching [InventoryItem.weight]. Backs
+     *  the Weight sort chip; 0 for an older engine that predates the field on the barter export. */
+    val weight: Float = 0f,
     val category: String = "misc",
     val icon: String = "",
     val side: BarterSide = BarterSide.VENDOR,
@@ -524,6 +527,9 @@ sealed class NavEvent {
     data class ScrollRight(override val seq: Long) : NavEvent()   // right stick right (horizontal grids)
     data class Cancel(override val seq: Long) : NavEvent()        // B while a quantity selector is open
     data class Info(override val seq: Long) : NavEvent()          // R3 (right stick click) — item info popup
+    /** L3 (left stick click) — cycle the focused column's sort mode/direction (looting + barter).
+     *  Drives the SAME InvSortState the on-screen sort chips do, so the two stay in sync. */
+    data class Sort(override val seq: Long) : NavEvent()
 }
 
 data class GameState(

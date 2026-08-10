@@ -94,7 +94,10 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -521,6 +524,12 @@ private val INV_CATEGORIES = listOf(
     InvCategory("Tools",   setOf("lockpick", "probe", "apparatus", "repair", "carried_left")),
     InvCategory("Books",       setOf("book", "scroll")),
     InvCategory("Consumables", setOf("potion", "ingredient")),
+    // Keys out of Misc — the one sub-bucket of Misc worth its own tab: a playthrough accumulates
+    // dozens, they are never sold or dropped, and they were previously buried among plates/cups/
+    // gems. `key` comes from the Lua itemCategory (types.Miscellaneous record `isKey` flag) and,
+    // on the barter side, from Class::isKey — see companion-barter-categories.patch. Misc keeps
+    // its meaning as "everything else", so this is purely additive.
+    InvCategory("Keys",        setOf("key")),
     InvCategory("Misc",        setOf("misc")),
 )
 
@@ -547,7 +556,10 @@ private fun itemCategoryRank(category: String): Int = when (category) {
     // (The old `else` comment claiming apparatus/repair/light fold into "misc" was stale: itemCategory
     // returns them as their own categories.)
     "tools", "lockpick", "probe", "apparatus", "repair", "carried_left" -> 7
-    else -> 8   // misc
+    // Keys sort as their own contiguous block just ahead of Misc (they used to BE misc, so
+    // without this they would interleave with it by name in the flattened "All" views).
+    "key" -> 8
+    else -> 9   // misc
 }
 
 /** Subtle gold backdrop behind an enchanted item's icon (mirrors vanilla's menu_icon_magic frame).
@@ -657,10 +669,13 @@ private fun InventoryItem.useVerb() = when (category) {
     else -> "Use"
 }
 
-// Barter overlay category tabs — one bucket per tab, matching the coarse `cat` the
-// engine emits on COMPANION_BARTER_ITEM (weapon/armor/apparel/tools/consumable/misc).
-// Deliberately NOT the inventory's fine slot categories: the barter screen groups into
-// these seven tabs directly.
+// Barter overlay category tabs — one bucket per tab, matching the coarse `cat` the engine emits on
+// COMPANION_BARTER_ITEM (weapon/armor/apparel/tools/book/consumable/key/misc). Deliberately NOT the
+// inventory's fine SLOT categories — the barter screen groups into these tabs directly — but the
+// BUCKETS deliberately mirror [INV_CATEGORIES], and in the same order, so an item lands under the
+// same tab name whether you are looting it or buying it. Books and Keys, plus apparatus/repair/
+// torches moving into Tools, came from companion-barter-categories.patch; before that everything
+// here except lockpicks/probes fell into Misc.
 private data class BarterCat(val label: String, val cat: String)
 
 private val BARTER_CATEGORIES = listOf(
@@ -668,7 +683,9 @@ private val BARTER_CATEGORIES = listOf(
     BarterCat("Armor", "armor"),
     BarterCat("Apparel", "apparel"),
     BarterCat("Tools", "tools"),
+    BarterCat("Books", "book"),
     BarterCat("Consumables", "consumable"),
+    BarterCat("Keys", "key"),
     BarterCat("Misc", "misc"),
 )
 
@@ -699,6 +716,136 @@ private fun cycleBarterCat(items: List<BarterItem>, current: String?, dir: Int):
  */
 private val LocalPanelOpacity = compositionLocalOf { 1f }
 
+/**
+ * Adaptive-dim TINT ALPHA for the CURRENT composition, 0f = untinted. Non-zero only inside a
+ * top-screen overlay window (supplied by [ProvideTopPanelOpacity]); the bottom screen leaves it at
+ * 0f because it is dimmed wholesale by [AdaptiveDimOverlay] instead.
+ *
+ * WHY A TINT AND NOT A SCRIM. The bottom screen can draw one opaque-ish black layer over
+ * everything because nothing is behind it. A top-screen overlay window is full-screen and
+ * TRANSLUCENT — the game shows through it — so a plain scrim would darken the GAME, which is
+ * already dark (that darkness is what drives this ramp) and would stack once per visible overlay
+ * window. Instead each panel tints ONLY the pixels it drew, via SrcAtop.
+ *
+ * WHY NOT FOLD IT INTO [LocalPanelOpacity]. That local is read by background FILLS only; the
+ * borders and every piece of text/bar/icon deliberately ignore it. Lowering it does not dim the UI,
+ * it makes the panel more TRANSPARENT — in a dark cave that would fade the fill toward invisible
+ * while leaving bone-white text at full brightness, i.e. more glare, not less. The two settings
+ * stay orthogonal: the slider decides how solid the fill is, this tints whatever that produced.
+ */
+private val LocalTopScreenDim = compositionLocalOf { 0f }
+
+/**
+ * Darken this element's OWN drawn pixels by the ambient dim ([LocalTopScreenDim]), leaving
+ * everything it did not draw untouched.
+ *
+ * `SrcAtop` is what makes that true: it paints the black only where the destination already has
+ * coverage. So a panel is tinted across its fill, border and text; a bare overlay with no
+ * background (the two combat HUD overlays) tints its bars and numbers and nothing else — no
+ * leftover dimmed rectangle when the overlay draws nothing, and no visible box added at 0% dim.
+ *
+ * COMPOSITING NOTE. Blend modes other than SrcOver need a bounded layer to composite against, so
+ * this attaches `CompositingStrategy.Offscreen` — but ONLY while the tint is actually non-zero, and
+ * only around the ELEMENT (a panel, or a combat overlay's small bar column), never around a whole
+ * overlay window. In daylight, or with dimming off, the modifier chain is returned unchanged and
+ * costs nothing at all.
+ *
+ * NESTING: apply this at panel ROOTS only. Two nested applications would tint the inner content
+ * twice (1-(1-a)² instead of a).
+ */
+@Composable
+private fun Modifier.adaptiveDimTint(): Modifier = dimTint(LocalTopScreenDim.current)
+
+/** The tint itself, at an explicit alpha. Shared by [adaptiveDimTint] (top-screen panels, whose
+ *  alpha comes from [LocalTopScreenDim]) and [CompanionDropdownMenu] (Popup windows, which have to
+ *  source their own via [rememberPopupDimAlpha]) so the two cannot drift. Returns the chain UNCHANGED when clear, so the common
+ *  daylight/disabled case allocates no layer and costs nothing. */
+private fun Modifier.dimTint(alpha: Float): Modifier {
+    if (alpha <= 0.001f) return this
+    return this
+        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            drawRect(Color.Black.copy(alpha = alpha), blendMode = BlendMode.SrcAtop)
+        }
+}
+
+/**
+ * True inside a TOP-screen overlay window's composition (set by [ProvideTopPanelOpacity]).
+ *
+ * Needed because [LocalTopScreenDim] alone cannot answer "which screen am I on" — it reads 0f both
+ * on the bottom screen AND on the top screen with dimming off. A Popup has to know, because the two
+ * screens dim by DIFFERENT amounts (the top screen's tighter ceiling) and the dimming preferences
+ * themselves are global.
+ */
+private val LocalIsTopScreen = compositionLocalOf { false }
+
+/**
+ * Adaptive-dim alpha that a Compose **Popup** must apply to itself.
+ *
+ * WHY POPUPS ARE A SPECIAL CASE: `DropdownMenu` (and anything else built on `Popup`) renders into
+ * its OWN Android window, not into the composition that declared it. So NEITHER dimming mechanism
+ * reaches it — not the bottom screen's full-screen [AdaptiveDimOverlay] scrim (a Box at zIndex 40f
+ * cannot cover a different window at any zIndex) nor a parent panel's [adaptiveDimTint] (the popup
+ * is not inside that element's draw). A popup that wants to dim has to dim itself.
+ *
+ * CompositionLocals DO cross into a popup's sub-composition, which is what makes this work.
+ */
+@Composable
+private fun rememberPopupDimAlpha(): Float {
+    val top = LocalTopScreenDim.current
+    val bottom = rememberBottomScreenDimAlpha()
+    return if (LocalIsTopScreen.current) top else bottom
+}
+
+/**
+ * The companion's DropdownMenu. Every menu in the companion UI shares the same styling, the same
+ * focus-critical [PopupProperties], and — since Aug 11 2026 — the same self-applied screen dim, so
+ * they are encapsulated here instead of being spelled out ten times.
+ *
+ * **The dimming is the reason this exists.** A DropdownMenu is a Compose Popup, i.e. its own Android
+ * window, so neither dimming mechanism reaches it: not the bottom screen's full-screen
+ * [AdaptiveDimOverlay] scrim (a Box cannot cover a different window at any zIndex) nor a parent
+ * panel's [adaptiveDimTint] (the popup is not inside that element's draw). Left alone, a menu opened
+ * in a pitch-dark cave glares at full brightness against a dimmed screen. Routing every menu through
+ * one composable means new menus are dimmed by construction rather than by remembering to.
+ *
+ * The dim is applied in two halves because a menu's Surface paints its container OUTSIDE any
+ * modifier its content can carry: [dimTint] on the content column (via `modifier`, which
+ * Material3 applies to that column, so no extra wrapper and no layout change), and [dimColor] on the
+ * container + border. For an opaque colour, lerping toward black IS compositing black over it, so
+ * the two halves land on exactly the value the scrim would have produced.
+ *
+ * `PopupProperties(focusable = false, dismissOnClickOutside = false)` is load-bearing and must not
+ * change — it is what stops a menu stealing game-window focus on the Thor; dismissal is handled by
+ * the screen-level scrim / [DropdownState].
+ */
+@Composable
+private fun CompanionDropdownMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val dim = rememberPopupDimAlpha()
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismissRequest,
+        modifier = Modifier.dimTint(dim),
+        properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+        containerColor = dimColor(StonePanel, dim),
+        shadowElevation = 0.dp,
+        border = BorderStroke(1.dp, dimColor(Bronze, dim)),
+        shape = RoundedCornerShape(3.dp),
+        content = content
+    )
+}
+
+/** Darken an OPAQUE colour as if the dim scrim were over it — for an opaque colour, compositing
+ *  black at [alpha] IS a lerp toward black, so this matches exactly what the rest of the screen
+ *  gets. Used for a popup's `containerColor`/border, which its own Surface paints. */
+private fun dimColor(color: Color, alpha: Float): Color =
+    if (alpha <= 0.001f) color else lerp(color, Color.Black, alpha)
+
 /** Wrap a TOP-screen overlay's content so it picks up the shared companion environment: panel
  *  opacity and the font setting. Public because EngineActivity applies it at each top-screen
  *  window root — that is the one place that reliably means "this composition is on the top
@@ -709,9 +856,43 @@ private val LocalPanelOpacity = compositionLocalOf { 1f }
 @Composable
 fun ProvideTopPanelOpacity(content: @Composable () -> Unit) {
     val opacity by UiPreferences.topPanelOpacityFlow().collectAsState()
-    CompositionLocalProvider(LocalPanelOpacity provides opacity) {
+    CompositionLocalProvider(
+        LocalPanelOpacity provides opacity,
+        LocalTopScreenDim provides rememberTopScreenDimAlpha(),
+        LocalIsTopScreen provides true
+    ) {
         ProvideCompanionFont(content)
     }
+}
+
+/**
+ * The current top-screen dim alpha: the SHARED dimming sliders, re-projected into the top screen's
+ * tighter band, run through the SHARED ramp, and animated with the same 800ms fade the bottom
+ * screen uses (so a cell transition reads as one adjustment across both screens rather than two).
+ *
+ * Returns 0f whenever the master switch is off — gated at the MAPPING stage, exactly like
+ * [AdaptiveDimOverlay], so turning it off animates back to clear instead of snapping and the switch
+ * still wins over any slider position.
+ */
+@Composable
+private fun rememberTopScreenDimAlpha(): Float {
+    val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
+    val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
+    val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
+    val luminance by GameStateRepository.ambientLuminance.collectAsState()
+
+    val target = if (!enabled) 0f else adaptiveDimAlpha(
+        luminance = luminance,
+        minBrightness = projectBrightness(minBrightness, ADAPTIVE_DIM_MIN_RANGE, TOP_ADAPTIVE_DIM_MIN_RANGE),
+        maxBrightness = projectBrightness(maxBrightness, ADAPTIVE_DIM_MAX_RANGE, TOP_ADAPTIVE_DIM_MAX_RANGE),
+        ceiling = TOP_DIM_ABSOLUTE_MAX_ALPHA
+    )
+    val alpha by animateFloatAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = DIM_ANIM_MS),
+        label = "topScreenDim"
+    )
+    return alpha
 }
 
 /**
@@ -721,6 +902,7 @@ fun ProvideTopPanelOpacity(content: @Composable () -> Unit) {
  */
 @Composable
 private fun Modifier.mwPanel(): Modifier = this
+    .adaptiveDimTint()
     .clip(RoundedCornerShape(3.dp))
     .background(StonePanel.copy(alpha = LocalPanelOpacity.current))
     .border(2.dp, Bronze, RoundedCornerShape(3.dp))
@@ -1486,6 +1668,7 @@ fun ConversationHistoryOverlay() {
             modifier = Modifier
                 .fillMaxWidth(0.75f)             // ~25% narrower than full width
                 .fillMaxHeight(0.51f)            // ~10% taller than the previous 0.46
+                .adaptiveDimTint()
                 .clip(RoundedCornerShape(3.dp))
                 // Hand-rolled rather than mwPanel() (different width/height), so it must apply the
                 // top-panel opacity itself or the SPLIT read-only history would stay opaque while
@@ -1568,6 +1751,11 @@ fun CombatTargetTopOverlay() {
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.30f)
+                // Adaptive dim on the BAR COLUMN, not the fillMaxSize parent: SrcAtop tints only
+                // pixels this element actually drew, so no background is needed (and none is added —
+                // that would change the look at 0% dim) and there is no full-screen layer. When the
+                // overlay draws nothing it is not composed at all, so no dimmed rectangle can linger.
+                .adaptiveDimTint()
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -1665,6 +1853,8 @@ fun PlayerCombatTopOverlay() {
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.15f)
+                // Same treatment as CombatTargetTopOverlay — tint the bars themselves, no panel.
+                .adaptiveDimTint()
                 .padding(horizontal = 8.dp, vertical = 6.dp)
         ) {
             // No labels — the bar colours communicate which vital is which. The "cur/max" value
@@ -3095,6 +3285,9 @@ private fun rememberLootNavFocus(
     // Cycle the focused column's category filter (L1 = -1 prev, R1 = +1 next). No-op in the
     // BOTTOM list layout (no category tabs there); wired to the per-side state in the SPLIT grids.
     onCycleCategory: (side: Int, dir: Int) -> Unit = { _, _ -> },
+    // Cycle the sort mode/direction (L3). Takes the focused side because SPLIT holds one
+    // InvSortState PER COLUMN; BOTTOM shares one across both sides and ignores the argument.
+    onCycleSort: (side: Int) -> Unit = { },
 ): LootFocus {
     var side by remember { mutableStateOf(if (containerSorted.isNotEmpty()) 1 else 0) }
     var index by remember { mutableStateOf(0) }
@@ -3108,6 +3301,7 @@ private fun rememberLootNavFocus(
     val snapshot = rememberUpdatedState(Triple(playerSorted, containerSorted, isCorpse))
     // Category-cycle callback reads the parent's live per-side category state, so keep it fresh.
     val cycleState = rememberUpdatedState(onCycleCategory)
+    val sortState = rememberUpdatedState(onCycleSort)
     // Session-scoped, but this collector outlives a session swap (LaunchedEffect(Unit)).
     val pickpocketState = rememberUpdatedState(isPickpocket)
     LaunchedEffect(Unit) {
@@ -3158,6 +3352,10 @@ private fun rememberLootNavFocus(
                 is NavEvent.Info -> (if (side == 0) pSorted else cSorted).getOrNull(index)?.let {
                     ItemInfoPopupState.toggle(it.id, it.displayName(), it.enchant, onTop = rows > 1)
                 }
+                // L3 re-orders the focused column. Focus is an index into that column's sorted
+                // list, so it must go back to the top — keeping it would leave the highlight on a
+                // different item than the one the player was looking at.
+                is NavEvent.Sort -> { sortState.value(side); index = 0 }
                 else -> Unit // Slider* / R2 handled above; nothing else used here
             }
             // While the info popup is open, D-pad focus moves follow to the newly focused item.
@@ -3229,8 +3427,12 @@ private fun shelfBucket(category: String): Pair<Int, String> = when (category) {
     "apparel", "amulet", "left_ring", "shirt", "pants", "skirt", "robe", "clothing" -> 2 to "Apparel"
     "consumable", "potion", "ingredient" -> 3 to "Consumables"
     "book", "scroll" -> 4 to "Books"
-    "tools", "lockpick", "probe" -> 5 to "Tools"
-    else -> 6 to "Misc"
+    // apparatus/repair/carried_left(torches) were missing here and fell through to Misc, so the
+    // shelves did NOT in fact mirror the Classic Tools tab they claim to. Same set as the
+    // INV_CATEGORIES "Tools" bucket and the native companionBarterCategory "tools".
+    "tools", "lockpick", "probe", "apparatus", "repair", "carried_left" -> 5 to "Tools"
+    "key" -> 6 to "Keys"
+    else -> 7 to "Misc"
 }
 
 /** Group a flat item list into category shelves (bucket order; within a shelf, selected items
@@ -3700,7 +3902,7 @@ private val SHELF_CENTER_DIVIDER_WIDTH_BOTTOM = 25.dp
 @Composable
 private fun ShelfCenterDivider(width: Dp = SHELF_CENTER_DIVIDER_WIDTH) {
     Box(
-        Modifier.fillMaxHeight().width(width),
+        Modifier.fillMaxHeight().width(width).adaptiveDimTint(),
         contentAlignment = Alignment.Center
     ) {
         Box(Modifier.width(2.dp).fillMaxHeight().background(BronzeDark))
@@ -4023,6 +4225,9 @@ private fun LootingOverlay(
         onTake = { it, n -> take(it, n) },
         onTakeAll = { takeAll() },
         onDispose = { CompanionActions.containerDispose() },
+        // BOTTOM has ONE sort shared by both lists (the chips live in the shared title bar), so the
+        // focused side is irrelevant here. Cycles the same modes the chips offer.
+        onCycleSort = { sort.cycle(InvSort.entries) },
     )
 
     // Bug 1: keep a focus-linked info popup on the CURRENTLY focused item when a take/put shrinks
@@ -4119,7 +4324,7 @@ private fun LootingOverlay(
                 )
             } else Row(Modifier.weight(1f).fillMaxWidth()) {
                 LootColumn(
-                    header = playerLootHeader(playerName, playerGold, liveEncumbrance),
+                    header = playerPackHeader(liveEncumbrance),
                     legend = "tap to put · long press for more",
                     items = playerSorted,
                     isPlayerSide = true,
@@ -4218,13 +4423,28 @@ private fun encumbranceColor(enc: Dynamic): Color = when {
     else -> BoneMuted                                   // normal — muted bone
 }
 
-/** Player loot/pickpocket column header: "Name (123g) 145/200kg" with the weight tinted by
- *  load (see [encumbranceColor]). The name+gold ride the base BronzeLight; only the weight
+/** Player loot/pickpocket column header: "You (123g) 145/200kg" with the weight tinted by
+ *  load (see [encumbranceColor]). "You" + gold ride the base BronzeLight; only the weight
  *  span overrides colour. NOTE: the sim is paused during GM_Container so [enc] is a snapshot
- *  from session open — it does not track optimistic take/put (unlike gold, recomputed live). */
-private fun playerLootHeader(name: String, gold: Int, enc: Dynamic): AnnotatedString =
+ *  from session open — it does not track optimistic take/put (unlike gold, recomputed live).
+ *
+ *  Deliberately "You" rather than the character's name: the name is the one part of this header
+ *  carrying no information the player doesn't already have, and in the SPLIT layout it shares a
+ *  single line with the compact sort chips — a long character name ellipsized the header while
+ *  crowding them. The encumbrance figure (which the opposite column never shows) is what actually
+ *  identifies this as your side, so the disambiguation survives losing the name. "You" is already
+ *  this file's idiom for the player — it is [rememberPlayerName]'s own fallback.
+ *
+ *  NO gold here, deliberately. Both screens already show it more prominently elsewhere — looting in
+ *  the shelf panel's right slot, barter in its gold/offer controls, where it is the number you are
+ *  actually transacting with — so repeating it in the column header only cost width that the sort
+ *  chips needed. Carried weight is the figure that belongs on the item column, because it is what
+ *  limits what you can take or buy.
+ *
+ *  Shared by looting AND barter so the two cannot drift: it is the same panel doing the same job. */
+private fun playerPackHeader(enc: Dynamic): AnnotatedString =
     buildAnnotatedString {
-        append("$name (${gold}g) ")
+        append("You ")
         withStyle(SpanStyle(color = encumbranceColor(enc))) {
             append("${dynValue(enc)}kg")
         }
@@ -4443,14 +4663,9 @@ private fun LootRow(
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
         }
 
-        DropdownMenu(
+        CompanionDropdownMenu(
             expanded = menuOpen,
-            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-            containerColor = StonePanel,
-            shadowElevation = 0.dp,
-            border = BorderStroke(1.dp, Bronze),
-            shape = RoundedCornerShape(3.dp)
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() }
         ) {
             Text(
                 label,
@@ -4573,6 +4788,7 @@ private val SplitBoxBg = Color(0xFF1A1410)
  */
 @Composable
 private fun Modifier.splitColumnBox(): Modifier = this
+    .adaptiveDimTint()
     .clip(RoundedCornerShape(6.dp))
     .background(SplitBoxBg.copy(alpha = LocalPanelOpacity.current))
     .border(1.dp, BronzeDark, RoundedCornerShape(6.dp))
@@ -4749,6 +4965,9 @@ fun LootingTopOverlay() {
             if (side == 0) playerCat = cycleLootCat(playerItems, playerCat, dir)
             else containerCat = cycleLootCat(containerItems, containerCat, dir)
         },
+        // SPLIT has one sort PER COLUMN, so L3 targets the focused one — the same rule L1/R1
+        // already follow for the category filter.
+        onCycleSort = { side -> (if (side == 0) playerSort else containerSort).cycle(InvSort.entries) },
     )
 
     // Bug 1: keep a focus-linked info popup (rendered on THIS top screen) on the focused item when a
@@ -4806,7 +5025,7 @@ fun LootingTopOverlay() {
         ) {
             // LEFT: player.
             LootGridColumn(
-                header = playerLootHeader(playerName, playerGold, liveEncumbrance),
+                header = playerPackHeader(liveEncumbrance),
                 items = playerItems,
                 isPlayerSide = true,
                 isWorn = { isWorn(it) },
@@ -4914,15 +5133,13 @@ private fun LootGridColumn(
         Spacer(Modifier.height(4.dp))
         val presentCats = remember(items) { items.map { it.category }.toSet() }
         val tabs = remember(presentCats) { INV_CATEGORIES.filter { grp -> grp.cats.any { it in presentCats } } }
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            CategoryTab("All", active = selectedCategory == null) { onSelectCategory(null) }
-            tabs.forEach { c ->
-                CategoryTab(c.label, active = selectedCategory == c.label) { onSelectCategory(c.label) }
-            }
-        }
+        CategoryTabStrip(
+            tabs = tabs,
+            selected = selectedCategory,
+            label = { it.label },
+            key = { it.label },          // looting filters by the INV_CATEGORIES label
+            onSelect = onSelectCategory
+        )
         Spacer(Modifier.height(4.dp))
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
         Spacer(Modifier.height(6.dp))
@@ -5068,14 +5285,9 @@ private fun LootGridCell(
             )
         }
 
-        DropdownMenu(
+        CompanionDropdownMenu(
             expanded = menuOpen,
-            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-            containerColor = StonePanel,
-            shadowElevation = 0.dp,
-            border = BorderStroke(1.dp, Bronze),
-            shape = RoundedCornerShape(3.dp)
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() }
         ) {
             Text(
                 label,
@@ -6560,15 +6772,15 @@ private fun barterVisible(
     category: String?,
     isPlayerSide: Boolean,
     // DEFAULT keeps barter's own original order (worn-first player, then category + name). An
-    // explicit Value sort is a pure ordering over the whole side — no worn tier, no category tier —
-    // matching the inventory tab. Weight is NOT offered here: see BARTER_SORTS.
+    // explicit Weight/Value sort is a pure ordering over the whole side — no worn tier, no category
+    // tier — matching the inventory tab.
     sortMode: InvSort = InvSort.DEFAULT,
     sortDescending: Boolean = true
 ): List<BarterItem> {
     val filtered = items.filter { category == null || it.category == category }
     if (sortMode != InvSort.DEFAULT) {
         return filtered.sortedWith(
-            invSortComparator(sortMode, sortDescending, { it.displayName() }, { 0f }, { it.value })
+            invSortComparator(sortMode, sortDescending, { it.displayName() }, { it.weight }, { it.value })
         )
     }
     val byCategoryThenName = compareBy<BarterItem>({ itemCategoryRank(it.category) }, { it.displayName().lowercase() })
@@ -6579,16 +6791,19 @@ private fun barterVisible(
 }
 
 /**
- * The sort modes the barter overlay can offer: Default and Value, but NOT Weight.
+ * The sort modes the barter overlay offers: Default, Weight and Value — the same three as the
+ * inventory and looting screens.
  *
- * `COMPANION_BARTER_ITEM` (native, `companion-barter-export.patch`) carries `value` but no per-item
- * weight, and `BarterItem` has no weight field to sort on. Player-side weights could be joined from
- * the player's inventory, but VENDOR items exist nowhere else on the Kotlin side — so a Weight chip
- * would order the vendor's whole stock as weightless while looking like it worked. Offering only
- * what the data supports is the honest option; unlocking Weight needs one extra field on that
- * native export (and therefore the patch/stamp dance).
+ * Weight was unavailable until `companion-barter-weight.patch` added a per-item `weight` to the
+ * native `COMPANION_BARTER_ITEM` export. It had to come from the engine: player-side weights could
+ * have been joined from the player's inventory, but VENDOR items exist nowhere else on the Kotlin
+ * side, so a chip fed from anything but the export would have sorted the vendor's whole stock as
+ * weightless while looking like it worked.
+ *
+ * Kept as an explicit list rather than defaulting to `InvSort.entries` so the set barter offers is
+ * a deliberate choice at this call site, not a side effect of adding a mode to the enum.
  */
-private val BARTER_SORTS = listOf(InvSort.DEFAULT, InvSort.PRICE)
+private val BARTER_SORTS = listOf(InvSort.DEFAULT, InvSort.WEIGHT, InvSort.PRICE)
 
 /** Current controller focus in the barter overlay: which [side] (0 = player/left,
  *  1 = vendor/right) and which [index] into that side's visible list. */
@@ -6619,6 +6834,9 @@ private fun rememberBarterNavFocus(
     onSlider: (Int) -> Unit,
     // Cycle the given side's category filter (L1 = -1 prev, R1 = +1 next).
     onCycleCategory: (side: Int, dir: Int) -> Unit,
+    // Cycle the sort mode/direction (L3). Takes the focused side because SPLIT holds one
+    // InvSortState PER COLUMN; BOTTOM shares one across both sides and ignores the argument.
+    onCycleSort: (side: Int) -> Unit = { },
 ): BarterFocus {
     var side by remember { mutableStateOf(1) } // start on the vendor side
     var index by remember { mutableStateOf(0) }
@@ -6633,6 +6851,7 @@ private fun rememberBarterNavFocus(
     val offerState = rememberUpdatedState(onOffer)
     val sliderState = rememberUpdatedState(onSlider)
     val cycleState = rememberUpdatedState(onCycleCategory)
+    val sortState = rememberUpdatedState(onCycleSort)
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (~8g/sec held)
@@ -6675,6 +6894,9 @@ private fun rememberBarterNavFocus(
                 is NavEvent.Info -> list(side).getOrNull(index)?.let {
                     ItemInfoPopupState.toggle(it.id, it.displayName(), it.enchant, onTop = r > 1)
                 }
+                // L3 re-orders the focused column — focus back to the top, same as a category
+                // cycle, since the index no longer points at the item the player was looking at.
+                is NavEvent.Sort -> { sortState.value(side); index = 0 }
                 is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) sliderState.value(-1)
                 is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) sliderState.value(1)
                 else -> Unit // Scroll* handled elsewhere
@@ -6789,7 +7011,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
 
     // Controller focus (BOTTOM = two side-by-side lists → rows = 1). All state is co-located here,
     // so this collector also owns X (Offer) + the left-stick gold slider.
-    // Sort controls (Default / Value) — the same InvSortState + chips as the inventory tab. Feeding
+    // Sort controls (Default / Weight / Value) — the same InvSortState + chips as the inventory tab. Feeding
     // barterVisible here keeps ONE source of order for both the display and the focus index.
     val sort = rememberInvSortState()
     val visiblePlayer = remember(playerItems, playerCat, sort.mode, sort.descending) {
@@ -6834,6 +7056,9 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
             if (side == 0) playerCat = cycleBarterCat(playerItems, playerCat, dir)
             else vendorCat = cycleBarterCat(vendorItems, vendorCat, dir)
         },
+        // BOTTOM has ONE sort shared by both lists (chips in the shared title bar) — focused side
+        // irrelevant. BARTER_SORTS so the cycle steps through exactly the chips shown.
+        onCycleSort = { sort.cycle(BARTER_SORTS) },
     )
 
     // Bug 1: keep a focus-linked info popup on the focused item when selecting an item re-sorts the
@@ -6877,7 +7102,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     modifier = Modifier.weight(1f)
                 )
                 // Classic only — Shelf builds its own lists from playerItems/vendorItems directly.
-                // Default/Value only (BARTER_SORTS): there is no per-item weight in the barter export.
+                // Default/Weight/Value (BARTER_SORTS).
                 if (!shelfMode) {
                     Spacer(Modifier.width(8.dp))
                     SortChipRow(sort, BARTER_SORTS)
@@ -6910,7 +7135,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                 )
             } else Row(Modifier.weight(1f).fillMaxWidth()) {
                 BarterColumn(
-                    header = "$playerName (${session.playerGold}g)",
+                    header = playerPackHeader(playerEnc),
                     items = playerItems,
                     isPlayerSide = true,
                     selectedCategory = playerCat,
@@ -6932,7 +7157,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                     )
                 }
                 BarterColumn(
-                    header = "${session.vendorName.ifBlank { "Merchant" }} (${session.vendorGold}g)",
+                    header = AnnotatedString("${session.vendorName.ifBlank { "Merchant" }} (${session.vendorGold}g)"),
                     items = vendorItems,
                     isPlayerSide = false,
                     selectedCategory = vendorCat,
@@ -7380,7 +7605,7 @@ fun BarterTopOverlay() {
     // Controller focus (SPLIT = two 3-row icon grids → rows = 3). X (Offer) + the gold slider are
     // owned by the bottom controls window (BarterControlsOnly, its own collector) because the gold-
     // offset state lives there — passing no-ops here avoids a top/bottom desync.
-    // Per-column sort state (Default / Value — no weight in the barter export, see BARTER_SORTS).
+    // Per-column sort state (Default / Weight / Value — see BARTER_SORTS).
     // Owned here so the SAME state drives both the grid display and this focus list.
     val playerSort = rememberInvSortState()
     val vendorSort = rememberInvSortState()
@@ -7404,6 +7629,8 @@ fun BarterTopOverlay() {
             if (side == 0) playerCat = cycleBarterCat(playerCol, playerCat, dir)
             else vendorCat = cycleBarterCat(vendorCol, vendorCat, dir)
         },
+        // SPLIT has one sort PER COLUMN → L3 targets the focused one, matching L1/R1's rule.
+        onCycleSort = { side -> (if (side == 0) playerSort else vendorSort).cycle(BARTER_SORTS) },
     )
 
     // Bug 1: keep a focus-linked info popup (rendered on THIS top screen) on the focused item when
@@ -7447,7 +7674,9 @@ fun BarterTopOverlay() {
         ) {
             // LEFT: player column (own inventory + bought vendor items, highlighted).
             BarterGridColumn(
-                header = playerName,
+                // Same "You <weight>kg" header the looting columns use — see playerPackHeader for
+                // why it is "You" rather than the character name, and why gold is not repeated here.
+                header = playerPackHeader(playerEnc),
                 items = playerCol,
                 isPlayerSide = true,
                 selectedCategory = playerCat,
@@ -7460,7 +7689,7 @@ fun BarterTopOverlay() {
             Spacer(Modifier.width(BARTER_SPLIT_COLUMN_GAP))
             // RIGHT: vendor column (own stock + sold player items, highlighted).
             BarterGridColumn(
-                header = session.vendorName.ifBlank { "Merchant" },
+                header = AnnotatedString(session.vendorName.ifBlank { "Merchant" }),
                 items = vendorCol,
                 isPlayerSide = false,
                 selectedCategory = vendorCat,
@@ -7523,7 +7752,7 @@ fun BarterTopOverlay() {
 /** One side of the SPLIT barter grids — header, per-side category tabs, 3-row icon grid. */
 @Composable
 private fun BarterGridColumn(
-    header: String,
+    header: AnnotatedString,
     items: List<BarterItem>,
     isPlayerSide: Boolean,
     selectedCategory: String?,
@@ -7531,7 +7760,7 @@ private fun BarterGridColumn(
     onToggle: (BarterItem) -> Unit,
     focusedIndex: Int = -1,
     /** This column's sort — per-column, owned by the parent so the same state feeds the focus list.
-     *  See the matching note on [LootGridColumn]. Default/Value only (BARTER_SORTS). */
+     *  See the matching note on [LootGridColumn]. Default/Weight/Value (BARTER_SORTS). */
     sort: InvSortState,
     modifier: Modifier = Modifier
 ) {
@@ -7551,15 +7780,13 @@ private fun BarterGridColumn(
         Spacer(Modifier.height(4.dp))
         val presentCats = remember(items) { items.map { it.category }.toSet() }
         val tabs = remember(presentCats) { BARTER_CATEGORIES.filter { it.cat in presentCats } }
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            CategoryTab("All", active = selectedCategory == null) { onSelectCategory(null) }
-            tabs.forEach { c ->
-                CategoryTab(c.label, active = selectedCategory == c.cat) { onSelectCategory(c.cat) }
-            }
-        }
+        CategoryTabStrip(
+            tabs = tabs,
+            selected = selectedCategory,
+            label = { it.label },
+            key = { it.cat },            // barter filters by the engine's category string
+            onSelect = onSelectCategory
+        )
         Spacer(Modifier.height(4.dp))
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
         Spacer(Modifier.height(6.dp))
@@ -7695,7 +7922,9 @@ private fun BarterGridCell(
             Spacer(Modifier.height(2.dp))
             Text(
                 label,
-                color = if (selected) BoneBright else Bone,
+                // BoneMuted, not Bone — the app-wide default for an un-highlighted item name
+                // (LootGridCell, LootRow, the inventory tab's rows and cards all use it).
+                color = if (selected) BoneBright else BoneMuted,
                 fontSize = 8.sp, fontFamily = MwBody,
                 textAlign = TextAlign.Center,
                 maxLines = 2, overflow = TextOverflow.Ellipsis,
@@ -7710,14 +7939,9 @@ private fun BarterGridCell(
             )
         }
 
-        DropdownMenu(
+        CompanionDropdownMenu(
             expanded = menuOpen,
-            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-            containerColor = StonePanel,
-            shadowElevation = 0.dp,
-            border = BorderStroke(1.dp, Bronze),
-            shape = RoundedCornerShape(3.dp)
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() }
         ) {
             Text(
                 label,
@@ -7750,7 +7974,7 @@ private fun BarterGridCell(
 /** One side of the barter overlay — header, per-side category tabs, scrolling item list. */
 @Composable
 private fun BarterColumn(
-    header: String,
+    header: AnnotatedString,
     items: List<BarterItem>,
     isPlayerSide: Boolean,
     selectedCategory: String?,
@@ -7774,15 +7998,13 @@ private fun BarterColumn(
         // Category tabs — All + only the buckets present on this side.
         val presentCats = remember(items) { items.map { it.category }.toSet() }
         val tabs = remember(presentCats) { BARTER_CATEGORIES.filter { it.cat in presentCats } }
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            CategoryTab("All", active = selectedCategory == null) { onSelectCategory(null) }
-            tabs.forEach { c ->
-                CategoryTab(c.label, active = selectedCategory == c.cat) { onSelectCategory(c.cat) }
-            }
-        }
+        CategoryTabStrip(
+            tabs = tabs,
+            selected = selectedCategory,
+            label = { it.label },
+            key = { it.cat },            // barter filters by the engine's category string
+            onSelect = onSelectCategory
+        )
         Spacer(Modifier.height(4.dp))
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
 
@@ -7858,7 +8080,9 @@ private fun BarterRow(
                     )
                     // Uniform row box (see CLASSIC_ROW_MIN_HEIGHT) so one- and two-line names line up.
                     .heightIn(min = CLASSIC_ROW_MIN_HEIGHT)
-                    .padding(horizontal = 6.dp, vertical = CLASSIC_ROW_PAD_V),
+                    // 8dp horizontal, matching LootRow — these two Classic rows are the same
+                    // component in two screens and were 2dp apart for no reason.
+                    .padding(horizontal = 8.dp, vertical = CLASSIC_ROW_PAD_V),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Icon box.
@@ -7880,22 +8104,37 @@ private fun BarterRow(
                     }
                 }
                 Spacer(Modifier.width(8.dp))
-                // Name + sub-line (qty · value).
-                Column(Modifier.weight(1f).padding(end = 6.dp)) {
-                    Text(
-                        label,
-                        color = if (selected) BoneBright else Bone,
-                        fontSize = 13.sp, fontFamily = MwBody,
-                        // Two lines before ellipsis — see the matching note in LootRow.
-                        maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
+                // Name + sub-line (qty · value). Same geometry as LootRow: 8dp end padding, and the
+                // WORN tag rides INLINE after the name rather than in the right column, so the two
+                // Classic rows line up and the right column is left to selection state alone.
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            label,
+                            color = if (selected) BoneBright else BoneMuted,
+                            fontSize = 13.sp, fontFamily = MwBody,
+                            // Two lines before ellipsis — see the matching note in LootRow.
+                            maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isPlayerSide && item.worn) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "WORN",
+                                color = BronzeLight, fontSize = 9.sp,
+                                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.8.sp
+                            )
+                        }
+                    }
                     val sub = buildString {
                         if (item.count > 1) append("×${item.count}  ")
                         append("${item.value}g")
                     }
                     Text(sub, color = BoneDim, fontSize = 9.sp, fontFamily = MwData)
                 }
-                // Right column: selection state / tap hint + worn tag.
+                // Right column: selection state, else the tap hint styled exactly like LootRow's
+                // (8sp + 0.3sp tracking). WORN moved inline next to the name — see above.
                 Column(horizontalAlignment = Alignment.End) {
                     if (selected) {
                         val n = if (item.selectedCount > 1) " ×${item.selectedCount}" else ""
@@ -7907,13 +8146,8 @@ private fun BarterRow(
                     } else {
                         Text(
                             if (isPlayerSide) "tap to sell" else "tap to buy",
-                            color = BoneDim.copy(alpha = 0.7f), fontSize = 9.sp, fontFamily = MwBody
-                        )
-                    }
-                    if (isPlayerSide && item.worn) {
-                        Text(
-                            "WORN", color = BronzeLight, fontSize = 8.sp,
-                            fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp
+                            color = BoneDim.copy(alpha = 0.7f), fontSize = 8.sp,
+                            fontFamily = MwBody, letterSpacing = 0.3.sp
                         )
                     }
                 }
@@ -7921,14 +8155,9 @@ private fun BarterRow(
             Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
         }
 
-        DropdownMenu(
+        CompanionDropdownMenu(
             expanded = menuOpen,
-            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-            containerColor = StonePanel,
-            shadowElevation = 0.dp,
-            border = BorderStroke(1.dp, Bronze),
-            shape = RoundedCornerShape(3.dp)
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() }
         ) {
             Text(
                 label,
@@ -8084,14 +8313,9 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(4.dp))
                     EffectsSummary(state.activeEffects)
                 }
-                DropdownMenu(
+                CompanionDropdownMenu(
                     expanded = effectsExpanded,
-                    onDismissRequest = { effectsExpanded = false; DropdownState.closeAll() },
-                    properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-                    containerColor = StonePanel,
-                    shadowElevation = 0.dp,
-                    border = BorderStroke(1.dp, Bronze),
-                    shape = RoundedCornerShape(3.dp)
+                    onDismissRequest = { effectsExpanded = false; DropdownState.closeAll() }
                 ) {
                     // Cap at ~7 rows then scroll, so a heavily-buffed character can't grow the
                     // dropdown to the full screen height. Same heightIn(max) + verticalScroll
@@ -9431,14 +9655,9 @@ private fun FavSlotView(
             }
         }
         if (menuItems != null) {
-            DropdownMenu(
+            CompanionDropdownMenu(
                 expanded = menuOpen,
-                onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-                properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-                containerColor = StonePanel,
-                shadowElevation = 0.dp,
-                border = BorderStroke(1.dp, Bronze),
-                shape = RoundedCornerShape(3.dp)
+                onDismissRequest = { menuOpen = false; DropdownState.closeAll() }
             ) {
                 menuSlot?.let { s ->
                     Text(
@@ -9619,6 +9838,34 @@ private class InvSortState {
             }
         }
     }
+
+    /**
+     * Advance one step through the full sort cycle — the L3 (left stick click) shortcut, an
+     * ALTERNATE INPUT to this same state rather than a parallel mechanism, so a chip tap and an L3
+     * press always agree on where the cycle resumes from.
+     *
+     * The sequence is derived from [modes] rather than hardcoded: Default, then each non-default
+     * mode descending-then-ascending, wrapping back to Default. For the three-mode screens (looting
+     * and, since `companion-barter-weight.patch`, barter) that is Default → Weight ▼ → Weight ▲ →
+     * Value ▼ → Value ▲ → Default; a screen that offered fewer modes would get the correspondingly
+     * shorter cycle for free instead of stepping through chips it does not show.
+     *
+     * Descending-first matches [onSort]'s "a fresh sort starts high→low".
+     */
+    fun cycle(modes: List<InvSort>) {
+        val steps = buildList {
+            add(InvSort.DEFAULT to true)
+            modes.filter { it != InvSort.DEFAULT }.forEach { add(it to true); add(it to false) }
+        }
+        // DEFAULT has no direction, so match it on mode alone — otherwise a Default reached with a
+        // stale `descending == false` would not be found and the cycle would restart from step 0.
+        val at = steps.indexOfFirst { (m, d) ->
+            m == mode && (m == InvSort.DEFAULT || d == descending)
+        }
+        val (nextMode, nextDesc) = steps[(at + 1) % steps.size]  // at = -1 (mode not offered) → step 0
+        mode = nextMode
+        descending = nextDesc
+    }
 }
 
 @Composable
@@ -9626,9 +9873,10 @@ private fun rememberInvSortState(): InvSortState = remember { InvSortState() }
 
 /**
  * The sort chip cluster: an icon then one [SortChip] per offered mode. [modes] is a parameter
- * rather than `InvSort.entries` because the barter overlay can only offer Default/Value — the
- * native COMPANION_BARTER_ITEM export carries `value` but no per-item weight, so a Weight chip
- * there would silently sort every vendor item as weightless.
+ * rather than a hardcoded `InvSort.entries` so each screen states the set it offers explicitly —
+ * a chip is only honest if the underlying data supports it (barter's Weight chip, for one, needs
+ * the per-item weight that `companion-barter-weight.patch` added to COMPANION_BARTER_ITEM; see
+ * [BARTER_SORTS]). The default covers screens that offer all of them.
  */
 @Composable
 private fun SortChipRow(
@@ -9781,6 +10029,49 @@ private fun CategorySubTabs(
         categories.forEach { cat ->
             CategoryTab(label = cat.label, active = selected == cat.label) { onSelect(cat.label) }
         }
+    }
+}
+
+/**
+ * The horizontal category-filter strip shared by the looting and barter columns: an "All" tab
+ * followed by one tab per present category, kept SCROLLED SO THE SELECTED TAB IS VISIBLE.
+ *
+ * WHY IT IS A LazyRow. These strips were `Row(horizontalScroll(...))`, which has no per-item layout
+ * information and so nothing to scroll *to*. With the strip now long enough to overflow the ~260dp
+ * split column (All + up to 8 categories), cycling the filter with L1/R1 walked the selection
+ * straight off the edge and there was no way to see which filter was active. A LazyRow's
+ * [LazyListState.layoutInfo] is exactly what [WindowedFocusScroll] needs, so this reuses that
+ * helper rather than adding a second scroll-into-view mechanism — meaning the strip inherits the
+ * same windowed behaviour as the item grids: no scroll at all while the selected tab is fully
+ * visible, and otherwise a scroll by just the overhang, so tabs are never yanked to the left edge.
+ *
+ * [key] is the value compared against [selected] and handed to [onSelect] — the looting strip keys
+ * tabs by their display label ([InvCategory.label]) while barter keys them by the engine's category
+ * string ([BarterCat.cat]), which is the only difference between the three call sites.
+ */
+@Composable
+private fun <T> CategoryTabStrip(
+    tabs: List<T>,
+    selected: String?,
+    label: (T) -> String,
+    key: (T) -> String,
+    onSelect: (String?) -> Unit
+) {
+    val state = rememberLazyListState()
+    // Index 0 is "All", so a real category sits at its position in [tabs] + 1. A selection that is
+    // no longer present (its last item was taken/sold) resolves to 0 = All, which is also where the
+    // list itself falls back to — so the strip and the filter agree rather than scrolling nowhere.
+    val selectedIndex = if (selected == null) 0 else tabs.indexOfFirst { key(it) == selected } + 1
+    // contentKey = tabs: re-run when the tab SET changes under an unchanged selection (a category
+    // emptying out shifts every later tab's index), not just when the selection moves.
+    WindowedFocusScroll(state, selectedIndex, tabs.size + 1, tabs)
+    LazyRow(
+        state = state,
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        item { CategoryTab("All", active = selected == null) { onSelect(null) } }
+        items(tabs) { c -> CategoryTab(label(c), active = selected == key(c)) { onSelect(key(c)) } }
     }
 }
 
@@ -10407,14 +10698,9 @@ private fun ItemContextMenu(
 ) {
     val context = LocalContext.current
     val label = item.displayName()
-    DropdownMenu(
+    CompanionDropdownMenu(
         expanded = expanded,
-        onDismissRequest = { onDismiss() },
-        properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-        containerColor = StonePanel,
-        shadowElevation = 0.dp,
-        border = BorderStroke(1.dp, Bronze),
-        shape = RoundedCornerShape(3.dp)
+        onDismissRequest = { onDismiss() }
     ) {
         Text(
             label,
@@ -11092,14 +11378,9 @@ private fun SpellRow(
         if (isFav) {
             Box(Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 3.dp)) { FavStar() }
         }
-        DropdownMenu(
+        CompanionDropdownMenu(
             expanded = menuOpen,
-            onDismissRequest = { menuOpen = false; DropdownState.closeAll() },
-            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-            containerColor = StonePanel,
-            shadowElevation = 0.dp,
-            border = BorderStroke(1.dp, Bronze),
-            shape = RoundedCornerShape(3.dp)
+            onDismissRequest = { menuOpen = false; DropdownState.closeAll() }
         ) {
             Text(
                 title,
@@ -12298,6 +12579,10 @@ private fun JournalPageHalf(
     // Pages are stacked, so a half must be opaque or the spread beneath reads through it. Matches
     // the panel it sits in, including the top-screen opacity setting.
     val pageFill = StonePanel.copy(alpha = LocalPanelOpacity.current)
+    // The .adaptiveDimTint() below is for the same reason the fill honours the opacity setting:
+    // this half is its own drawn surface, not part of an enclosing tinted panel. Currently INERT —
+    // the journal spread is a bottom-screen tab, where LocalTopScreenDim is 0 and the whole screen
+    // is dimmed by AdaptiveDimOverlay instead — but it keeps the page in step if it ever moves up.
 
     // This half's content, recorded so JournalLeafOverlay can replay it OUTSIDE every clip in this
     // subtree. rememberGraphicsLayer releases it automatically when this half leaves composition
@@ -12326,6 +12611,7 @@ private fun JournalPageHalf(
                 if (abs(turnDegrees(offset())) <= JOURNAL_LEAF_FLAT_EPSILON) drawLayer(leafLayer)
             }
             .background(pageFill)
+            .adaptiveDimTint()
     ) {
         content()
         // Crease shadow + page edges, drawn OVER the text (later child wins). drawBehind on an
@@ -12729,14 +13015,9 @@ private fun QuestContextMenu(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    DropdownMenu(
+    CompanionDropdownMenu(
         expanded = expanded,
-        onDismissRequest = { onDismiss() },
-        properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-        containerColor = StonePanel,
-        shadowElevation = 0.dp,
-        border = BorderStroke(1.dp, Bronze),
-        shape = RoundedCornerShape(3.dp)
+        onDismissRequest = { onDismiss() }
     ) {
         Text(
             title,
@@ -12886,14 +13167,9 @@ private fun ManualEntryContextMenu(
     expanded: Boolean,
     onDismiss: () -> Unit
 ) {
-    DropdownMenu(
+    CompanionDropdownMenu(
         expanded = expanded,
-        onDismissRequest = { onDismiss() },
-        properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-        containerColor = StonePanel,
-        shadowElevation = 0.dp,
-        border = BorderStroke(1.dp, Bronze),
-        shape = RoundedCornerShape(3.dp)
+        onDismissRequest = { onDismiss() }
     ) {
         Text(
             MANUAL_QUEST_NAME,
@@ -13862,6 +14138,10 @@ private const val SECTION_GAME_MENUS = "Game Menus"
 private const val SECTION_TOP_SCREEN = "Top Screen"
 /** How the companion screen itself looks. */
 private const val SECTION_BOTTOM_SCREEN = "Bottom Screen"
+/** Settings that span BOTH screens rather than belonging to either — currently just Screen
+ *  Dimming, which drives the bottom screen, the top screen's DS panels and the options menu from
+ *  one control. (Game Font is arguably a second candidate; left in Bottom Screen for now.) */
+private const val SECTION_DISPLAY = "Display"
 /** How the game is controlled from the two screens. */
 private const val SECTION_CONTROLS = "Controls"
 private const val SECTION_DEVELOPER_TOOLS = "Developer Tools"
@@ -14311,6 +14591,14 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
             }
         }
 
+        // DISPLAY: cross-screen appearance. Sits ahead of the two per-screen sections because it
+        // governs both of them; Screen Dimming moved here from "Bottom Screen" when it grew to
+        // cover the top screen's DS panels and the options menu too.
+        item { CollapsibleSection(SECTION_DISPLAY) }
+        if (OptionsSectionState.isExpanded(SECTION_DISPLAY)) {
+            item { AdaptiveDimmingRow() }
+        }
+
         // TOP SCREEN: everything drawn on the game's screen — the game's own HUD elements, then the
         // DS overlays drawn over them.
         item { CollapsibleSection(SECTION_TOP_SCREEN) }
@@ -14324,11 +14612,10 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
             item { TopPanelOpacityRow() }
         }
 
-        // BOTTOM SCREEN: how the companion screen itself looks. Adaptive Dimming leads because it
-        // is the setting with the largest visible effect here; the rest are per-tab appearance.
+        // BOTTOM SCREEN: how the companion screen itself looks. (Screen Dimming used to lead here;
+        // it moved to DISPLAY once it stopped being bottom-screen-only.)
         item { CollapsibleSection(SECTION_BOTTOM_SCREEN) }
         if (OptionsSectionState.isExpanded(SECTION_BOTTOM_SCREEN)) {
-            item { AdaptiveDimmingRow() }
             item { GameFontRow() }
             item { UiSoundsRow() }
             item { OptionsSubLabel("Inventory tab") }
@@ -15010,6 +15297,83 @@ private const val DIM_ABSOLUTE_MAX_ALPHA = 0.85f
 private const val DIM_ANIM_MS = 800
 
 /**
+ * The adaptive-dimming ramp, shared by BOTH screens so their response to the same scene can never
+ * drift: the bottom screen's full-screen [AdaptiveDimOverlay] and the top screen's per-panel tint
+ * ([ProvideTopPanelOpacity] → [LocalTopScreenDim]) differ only in the [ceiling] and the two
+ * brightness ends they pass in.
+ *
+ * Linear between the two luminance anchors, inverted (darker scene → more opacity). The sliders are
+ * the ENDS of that ramp expressed as screen BRIGHTNESS (what the player sees), not as opacity (what
+ * we draw) — hence the inversion here: t = 0 (brightest scene) lands on [maxBrightness], t = 1
+ * (darkest scene) on [minBrightness].
+ *
+ * The [ceiling] clamp is a BACKSTOP. Each screen's slider range and setter already enforce its own
+ * cap, so reaching it here means something upstream was bypassed (a corrupt stored value, a future
+ * call site) — keeping it means the readability guarantee holds even then.
+ */
+private fun adaptiveDimAlpha(
+    luminance: Float,
+    minBrightness: Float,
+    maxBrightness: Float,
+    ceiling: Float
+): Float {
+    val t = ((DIM_LUMINANCE_BRIGHT - luminance) /
+            (DIM_LUMINANCE_BRIGHT - DIM_LUMINANCE_DARK)).coerceIn(0f, 1f)
+    val alphaAtBright = 1f - maxBrightness
+    val alphaAtDark = 1f - minBrightness
+    return (alphaAtBright + t * (alphaAtDark - alphaAtBright)).coerceIn(0f, ceiling)
+}
+
+/**
+ * Re-project a slider position from its BOTTOM-screen range into the corresponding TOP-screen one.
+ *
+ * There is ONE pair of dimming sliders and it governs both screens, but the two screens must not
+ * turn the same position into the same alpha: a top-screen panel is already thinned by the manual
+ * opacity slider and already sits over a dark scene, so the bottom screen's 0.85-alpha extreme
+ * would make it unreadable. Instead the position is normalised within [from] and re-expanded into
+ * [to] — proportional, so the two screens always move together and each range's extreme still means
+ * "as dark as THIS screen is allowed to go".
+ *
+ * Degenerate [from] (a future single-point range) falls back to the top range's bright end rather
+ * than dividing by zero — the safe direction.
+ */
+private fun projectBrightness(
+    value: Float,
+    from: ClosedFloatingPointRange<Float>,
+    to: ClosedFloatingPointRange<Float>
+): Float {
+    val span = from.endInclusive - from.start
+    if (span <= 0f) return to.endInclusive
+    val t = ((value - from.start) / span).coerceIn(0f, 1f)
+    return to.start + t * (to.endInclusive - to.start)
+}
+
+/**
+ * The BOTTOM screen's current dim alpha. Extracted from [AdaptiveDimOverlay] so the overlay and any
+ * Popup that has to dim itself ([rememberPopupDimAlpha]) run the SAME computation and the SAME
+ * 800ms animation. Two copies would drift, and a popup lagging the screen behind it is exactly the
+ * kind of mismatch this feature exists to remove.
+ *
+ * Gated at the MAPPING stage (target = 0 when off) rather than by the caller skipping it, so the
+ * master switch animates back to clear instead of snapping and wins over any slider position.
+ */
+@Composable
+private fun rememberBottomScreenDimAlpha(): Float {
+    val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
+    val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
+    val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
+    val luminance by GameStateRepository.ambientLuminance.collectAsState()
+    val target = if (!enabled) 0f else
+        adaptiveDimAlpha(luminance, minBrightness, maxBrightness, DIM_ABSOLUTE_MAX_ALPHA)
+    val alpha by animateFloatAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = DIM_ANIM_MS),
+        label = "adaptiveDim"
+    )
+    return alpha
+}
+
+/**
  * Full-screen adaptive dimming layer.
  *
  * WHY IT EXISTS: the companion renders UI at a fixed brightness, so with both screens set to the
@@ -15030,50 +15394,47 @@ private const val DIM_ANIM_MS = 800
  * dropdown scrim nearby has to add `pointerInput` explicitly to intercept taps). Adding
  * `clickable`/`pointerInput`/`focusable` here would silently swallow every touch on the companion.
  */
+/**
+ * Wrap a BOTTOM-screen window that lives OUTSIDE [CompanionScreen]'s composition so it dims with
+ * the rest of that screen.
+ *
+ * The options/pause menu is its own `TYPE_APPLICATION_PANEL` window on the Presentation, so
+ * [CompanionScreen]'s own [AdaptiveDimOverlay] cannot reach it — it used to stay at full brightness
+ * while everything around it dimmed, which is exactly the "somewhat blinding" case this fixes.
+ *
+ * It gets the BOTTOM screen's dim (not the top screen's tighter one) because that is the screen it
+ * is drawn on, and the full-screen scrim (not the SrcAtop tint) because the menu is an opaque
+ * full-screen surface with nothing behind it — the same situation the bottom screen's own overlay
+ * is built for.
+ */
+@Composable
+fun AdaptiveDimmedWindow(content: @Composable () -> Unit) {
+    Box(Modifier.fillMaxSize()) {
+        content()
+        AdaptiveDimOverlay()
+    }
+}
+
 @Composable
 private fun AdaptiveDimOverlay() {
-    val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
-    val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
-    val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
-    val luminance by GameStateRepository.ambientLuminance.collectAsState()
+    val alpha = rememberBottomScreenDimAlpha()
 
-    // Gate at the mapping stage rather than skipping the composable, so switching the option off
-    // animates smoothly back to clear instead of snapping. This is also what makes the option a
-    // true master switch: it wins over any slider position.
-    val target = if (!enabled) 0f else {
-        // Linear ramp between the two luminance anchors, inverted (darker scene -> more opacity).
-        val t = ((DIM_LUMINANCE_BRIGHT - luminance) /
-                (DIM_LUMINANCE_BRIGHT - DIM_LUMINANCE_DARK)).coerceIn(0f, 1f)
-        // The sliders are the two ENDS of that ramp, given as screen brightness (what the player
-        // sees) rather than overlay opacity (what we draw) — hence the inversion. t = 0 (brightest
-        // scene) lands on maxBrightness, t = 1 (darkest scene) on minBrightness.
-        val alphaAtBright = 1f - maxBrightness
-        val alphaAtDark = 1f - minBrightness
-        // Backstop clamp: the slider range and the setter already enforce this, so reaching it here
-        // means something upstream was bypassed. Keeping it means the readability guarantee holds
-        // even then. See [DIM_ABSOLUTE_MAX_ALPHA].
-        (alphaAtBright + t * (alphaAtDark - alphaAtBright))
-            .coerceIn(0f, DIM_ABSOLUTE_MAX_ALPHA)
-    }
-
-    // The luminance anchors above are estimates; what real cells report is the only way to tune
-    // them properly (e.g. whether a clear day really is above DIM_LUMINANCE_BRIGHT). Debug builds
-    // only, and keyed on luminance rounded to 2dp so it logs on real change, not per frame —
-    // the native side already throttles to ~4Hz.
+    // The luminance anchors are estimates; what real cells report is the only way to tune them
+    // properly (e.g. whether a clear day really is above DIM_LUMINANCE_BRIGHT). Debug builds only,
+    // keyed on luminance rounded to 2dp so it logs on real change, not per frame — the native side
+    // already throttles to ~4Hz. Kept HERE rather than inside [rememberBottomScreenDimAlpha]:
+    // that helper is now also called by any self-dimming popup, and logging from it would emit a
+    // duplicate line while a dropdown is open.
     if (BuildConfig.DEBUG) {
-        LaunchedEffect(kotlin.math.round(luminance * 100f), enabled, minBrightness, maxBrightness) {
+        val luminance by GameStateRepository.ambientLuminance.collectAsState()
+        val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
+        LaunchedEffect(kotlin.math.round(luminance * 100f), enabled, alpha) {
             Log.d(
                 "AdaptiveDim",
-                "luminance=${"%.3f".format(luminance)} -> alpha=${"%.2f".format(target)} (on=$enabled)"
+                "luminance=${"%.3f".format(luminance)} -> alpha=${"%.2f".format(alpha)} (on=$enabled)"
             )
         }
     }
-
-    val alpha by animateFloatAsState(
-        targetValue = target,
-        animationSpec = tween(durationMillis = DIM_ANIM_MS),
-        label = "adaptiveDim"
-    )
 
     // Skip the draw entirely when clear, so the common outdoor/disabled case costs nothing.
     if (alpha > 0.001f) {
@@ -15161,15 +15522,19 @@ private fun JournalPageTurnRow() {
     }
 }
 
-// Adaptive dimming — darken the companion screen to match how dark the game scene is. The bottom
-// screen draws UI at a fixed brightness, so at equal manual brightness it reads as much brighter
-// than the top screen once the player is somewhere dark. This is a translucent black overlay only;
-// it never touches the device's real screen brightness (both physical displays share one brightness
-// group, so per-display control isn't possible anyway). "Bottom Screen" section, first row.
-// The two sliders below the On/Off pills set the ENDS of the dimming ramp. They are shown only
-// while the feature is on: off, they control nothing, and a live-looking slider that does nothing
-// reads as broken. Off remains a true master switch — the overlay's mapping zeroes on it before
-// either slider is consulted.
+// Screen dimming — darken the DS UI to match how dark the game scene is. UI drawn at a fixed
+// brightness reads as glaring once the player is somewhere dark. Covers BOTH screens as of Aug 2026:
+// the bottom screen via one full-screen translucent layer, the top screen's DS panels via a per-panel
+// tint (see LocalTopScreenDim), and the options menu via AdaptiveDimmedWindow. Never touches the
+// device's real screen brightness — both physical displays share one brightness group, so per-display
+// control isn't possible anyway. Lives in its own "Display" section because it now spans both screens.
+//
+// ONE pair of sliders governs both screens. They set the ENDS of the dimming ramp, and each screen
+// re-projects the same positions through its own range: the top screen's is deliberately tighter
+// (see TOP_DIM_ABSOLUTE_MAX_ALPHA), because a top-screen panel is already thinned by the manual
+// opacity slider and already sits over a dark scene. Shown only while the feature is on: off, they
+// control nothing, and a live-looking slider that does nothing reads as broken. Off remains a true
+// master switch — both mappings zero on it before either slider is consulted.
 @Composable
 private fun AdaptiveDimmingRow() {
     val context = LocalContext.current
@@ -15178,10 +15543,10 @@ private fun AdaptiveDimmingRow() {
     val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text("Adaptive Dimming", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text("Screen Dimming", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Spacer(Modifier.height(2.dp))
         Text(
-            "Dims this screen in dark places to match the game.",
+            "Dims both screens in dark places to match the game. Top-screen panels dim more gently.",
             color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
         )
         Spacer(Modifier.height(6.dp))
@@ -15206,13 +15571,13 @@ private fun AdaptiveDimmingRow() {
             OptionsSubLabel("Dimming range")
             PercentSlider(
                 label = "Darkest (in dark places)",
-                blurb = "How dark this screen goes in the darkest interiors and at night.",
+                blurb = "How dark the UI goes in the darkest interiors and at night.",
                 value = minBrightness,
                 range = ADAPTIVE_DIM_MIN_RANGE
             ) { UiPreferences.setAdaptiveDimMinBrightness(context, it) }
             PercentSlider(
                 label = "Brightest (in bright places)",
-                blurb = "How bright this screen stays outdoors in daylight. 100% = untouched.",
+                blurb = "How bright the UI stays outdoors in daylight. 100% = untouched.",
                 value = maxBrightness,
                 range = ADAPTIVE_DIM_MAX_RANGE
             ) { UiPreferences.setAdaptiveDimMaxBrightness(context, it) }

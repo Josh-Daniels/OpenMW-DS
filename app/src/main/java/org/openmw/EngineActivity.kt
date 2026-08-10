@@ -9,6 +9,7 @@ import android.hardware.display.DisplayManager
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import org.openmw.companion.AdaptiveDimmedWindow
 import org.openmw.companion.BarterTopOverlay
 import org.openmw.companion.CombatTargetTopOverlay
 import org.openmw.companion.CompanionScreen
@@ -1479,7 +1480,13 @@ class EngineActivity : SDLActivity() {
                 setViewTreeViewModelStoreOwner(this@EngineActivity)
                 setViewTreeSavedStateRegistryOwner(this@EngineActivity)
                 setContent {
-                    OptionsMenuOverlay()
+                    // This window is on the Presentation (bottom screen) but OUTSIDE
+                    // CompanionScreen's composition, so the companion's own adaptive-dim layer
+                    // cannot reach it — without this the options menu stayed at full brightness
+                    // while the screen around it dimmed. Deliberately NOT wrapped in
+                    // ProvideTopPanelOpacity: that is the top-screen environment (and would also
+                    // pull in the game font, which this menu is deliberately excluded from).
+                    AdaptiveDimmedWindow { OptionsMenuOverlay() }
                 }
             }
             val lp = WindowManager.LayoutParams(

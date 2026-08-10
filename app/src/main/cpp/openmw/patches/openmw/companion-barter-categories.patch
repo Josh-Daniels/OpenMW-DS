@@ -1,0 +1,86 @@
+Companion (bottom-screen barter) — bring companionBarterCategory to parity with the
+Lua itemCategory used by the inventory and looting screens.
+
+The barter categoriser only ever emitted six buckets (weapon/armor/apparel/tools/
+consumable/misc), so relative to looting it was missing a Books tab entirely and was
+mis-filing three item types into Misc that looting files under Tools:
+
+  Books        ESM::Book        -> was "misc", now "book"   (NEW barter tab; scrolls are
+                                   Books in ESM, so they land here too, matching looting's
+                                   Books = book + scroll)
+  Apparatus    ESM::Apparatus   -> was "misc", now "tools"  (looting: Tools)
+  Repair       ESM::Repair      -> was "misc", now "tools"  (looting: Tools)
+  Light        ESM::Light       -> was "misc", now "tools"  (looting: Tools — torches were
+                                   deliberately moved out of Misc there; this matches it)
+  Keys         Class::isKey     -> was "misc", now "key"    (NEW tab on both screens)
+
+Keys use the virtual Class::isKey rather than testing the ESM flag directly: the base
+Class::isKey returns false, so non-Miscellaneous types answer correctly with no type check,
+and MWClass::Miscellaneous::isKey reads the same ESM::Miscellaneous::Key flag the Lua
+`isKey` record property exposes — which ESMStore additionally sets at load for anything a
+door/container references as its key. So the two screens agree on what a key is. Gold is
+Miscellaneous but not a key, so it still falls through to "misc".
+
+Applied AFTER companion-barter-export / -instance-id / -weight rather than folded into the
+export patch: the new #includes sit in the same include block that companion-barter-instance-id
+quotes as context for its own <unordered_map> hunk, so editing the export patch there would
+break that patch's context lines.
+
+diff --git a/apps/openmw/mwgui/tradewindow.cpp b/apps/openmw/mwgui/tradewindow.cpp
+--- a/apps/openmw/mwgui/tradewindow.cpp
++++ b/apps/openmw/mwgui/tradewindow.cpp
+@@ -11,12 +11,16 @@
+ #include <unordered_map>
+
+ #include <components/esm3/loadalch.hpp>
++#include <components/esm3/loadappa.hpp>
+ #include <components/esm3/loadarmo.hpp>
++#include <components/esm3/loadbook.hpp>
+ #include <components/esm3/loadclot.hpp>
+ #include <components/esm3/loadench.hpp>
+ #include <components/esm3/loadingr.hpp>
++#include <components/esm3/loadligh.hpp>
+ #include <components/esm3/loadlock.hpp>
+ #include <components/esm3/loadmgef.hpp>
+ #include <components/esm3/loadprob.hpp>
++#include <components/esm3/loadrepa.hpp>
+ #include <components/esm3/loadskil.hpp>
+ #include <components/esm3/loadweap.hpp>
+@@ -106,20 +110,31 @@
+-    // Companion: coarse category matching the bottom-screen barter tabs
+-    // (All / Weapons / Armor / Apparel / Tools / Consumables / Misc). Deliberately
+-    // coarser than the inventory's fine slot categories — the barter screen groups
+-    // into these seven buckets only. Books/lights/apparatus/repair/misc all fall to
+-    // "misc" (there is no Books tab on the barter screen).
++    // Companion: coarse category matching the bottom-screen barter tabs
++    // (All / Weapons / Armor / Apparel / Tools / Books / Consumables / Keys / Misc).
++    // Still coarser than the inventory's fine SLOT categories, but the BUCKETS now line
++    // up with the Lua itemCategory behind the inventory/looting tabs, so an item files
++    // under the same tab name on every screen. Anything unclassified falls to "misc".
+     const char* companionBarterCategory(const MWWorld::Ptr& item)
+     {
+         const auto type = item.getType();
+         if (type == ESM::Weapon::sRecordId)
+             return "weapon";
+         if (type == ESM::Armor::sRecordId)
+             return "armor";
+         if (type == ESM::Clothing::sRecordId)
+             return "apparel";
+-        if (type == ESM::Lockpick::sRecordId || type == ESM::Probe::sRecordId)
++        // Tools = "carried, not worn, has a use" — the same practical grouping the Lua
++        // itemCategory feeds the inventory/looting Tools tab (lockpick/probe/apparatus/
++        // repair/light), NOT a vanilla taxonomy. Vanilla files torches under Misc.
++        if (type == ESM::Lockpick::sRecordId || type == ESM::Probe::sRecordId
++            || type == ESM::Apparatus::sRecordId || type == ESM::Repair::sRecordId
++            || type == ESM::Light::sRecordId)
+             return "tools";
+         if (type == ESM::Potion::sRecordId || type == ESM::Ingredient::sRecordId)
+             return "consumable";
++        if (type == ESM::Book::sRecordId)
++            return "book";
++        // Keys before the misc fallback: Class::isKey is false on the base class, so this is
++        // safe to ask of any item and only Miscellaneous records with the Key flag answer true.
++        if (item.getClass().isKey(item))
++            return "key";
+         return "misc";
+     }

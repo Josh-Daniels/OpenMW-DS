@@ -428,6 +428,13 @@ local function itemCategory(item)
     -- categories so they're separable from generic misc.
     elseif types.Apparatus.objectIsInstance(item) then return "apparatus"
     elseif types.Repair.objectIsInstance(item) then return "repair"
+    -- Keys out of the generic misc bucket: they accumulate all game and are pure clutter
+    -- among plates/cups/gems. isKey is a real record flag (ESM::Miscellaneous::Key) and the
+    -- engine ALSO sets it at load for anything a door/container actually references as its
+    -- key (esmstore.cpp), so it catches mod keys whose record flag was never set. Gold is
+    -- Miscellaneous too but is not a key, so it still falls through to misc.
+    elseif types.Miscellaneous.objectIsInstance(item) and types.Miscellaneous.record(item).isKey then
+        return "key"
     else return "misc" end
 end
 
