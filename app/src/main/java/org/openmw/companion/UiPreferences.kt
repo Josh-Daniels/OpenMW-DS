@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * NOTE: distinct from [GameUiMode]. This only chooses which screen the (DS) conversation is
  * drawn on; whether the companion draws conversation at all is the "game_ui_conversation"
- * [GameUiMode]. Selectable via the Screen Layout "Conversation" row; defaults to [TOP], and
+ * [GameUiMode]. Both are chosen on the one Game Menus "Conversation" row; defaults to [TOP], and
  * the "All DS" quick-set forces it back to [TOP].
  */
 enum class ConversationLocation { BOTTOM, SPLIT, TOP }
@@ -72,12 +72,14 @@ enum class PersuasionLocation { BOTTOM, TOP }
  * Per-element rendering mode for a "Game UI" element (a menu/overlay the companion can take
  * over from native OpenMW).
  * - [DS]: the companion draws it on the bottom screen; the native top-screen version is suppressed.
- * - [VANILLA]: native OpenMW handles it on the top screen as normal.
+ * - [VANILLA]: native OpenMW handles it on the top screen as normal. **Shown to the player as
+ *   "Native"** — the constant keeps the name VANILLA because `name` is what gets persisted into
+ *   SharedPreferences, so renaming it would orphan every stored setting.
  */
 enum class GameUiMode { DS, VANILLA }
 
 /**
- * One "Game UI" element in the options menu's GAME UI section, in display order.
+ * One "Game UI" element in the options menu's GAME MENUS section, in display order.
  * [pending] elements have no companion (DS) replacement yet: they are locked to [VANILLA]
  * and their DS pill renders greyed with "not yet available".
  */
@@ -89,12 +91,13 @@ data class GameUiElement(
     /** First-launch default mode. The app ships in an "all Vanilla" state (native OpenMW handles
      *  every menu on the top screen) — the player opts into DS per element, or all at once via the
      *  All-DS quick-set. Pending elements are locked to VANILLA regardless. (This mirrors a fresh
-     *  install immediately having "All Vanilla" pressed.) */
+     *  install immediately having "All Native" pressed.) */
     val defaultMode: GameUiMode get() = GameUiMode.VANILLA
 }
 
 /** Catalogue of every Game UI element, in display order — the single source of truth the
- *  GAME UI section renders from and [UiPreferences] persists. */
+ *  GAME MENUS section renders from and [UiPreferences] persists. Non-pending entries get a
+ *  merged [Native][Bottom][…] row; pending ones get a single muted "not yet available" line. */
 val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     GameUiElement("game_ui_conversation", "Conversation"),
     GameUiElement("game_ui_looting", "Looting"),
@@ -132,7 +135,7 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
 )
 
 /**
- * One native top-screen HUD element that the "Vanilla HUD" section can show/hide. [pending]
+ * One native top-screen HUD element that the "Top Screen" section can show/hide. [pending]
  * elements have no native gate implemented yet: their On/Off pills render greyed and locked to On.
  */
 data class UiElement(val key: String, val label: String, val pending: Boolean = false)
@@ -149,7 +152,9 @@ val HUD_ELEMENTS: List<UiElement> = listOf(
     UiElement("hud_minimap", "Minimap"),
     UiElement("hud_effects", "Active effects"),
     UiElement("hud_sneak", "Sneak indicator"),
-    UiElement("hud_enemy", "Target health"),
+    // "Native target health bar", not "Target health": the Top Screen section also carries the DS
+    // bar's own location row, and the two used to share a label while meaning different things.
+    UiElement("hud_enemy", "Native target health bar"),
     UiElement("hud_crosshair", "Crosshair"),
     // The controller button-hint bar (bottom of the top screen). Gated natively in
     // WindowManager::updateControllerButtonsOverlay via companionHudControllerTooltips()
@@ -188,7 +193,7 @@ object UiPreferences {
     private const val GAME_CURSOR = "game_cursor"
     private const val TOUCH_INPUT = "touch_input"
     // Snapshot of the last hand-made ("Custom") Game UI layout, so [Custom] can restore it after
-    // switching to All DS / All Vanilla. Stored as "key=MODE,key=MODE,…" of non-pending elements.
+    // switching to All DS / All Native. Stored as "key=MODE,key=MODE,…" of non-pending elements.
     private const val GAME_UI_CUSTOM = "game_ui_custom"
     private const val CONVERSATION_LOCATION = "conversation_location"
     private const val INVENTORY_LAYOUT = "inventory_layout"
@@ -239,8 +244,8 @@ object UiPreferences {
     private const val HUD_ON_PREFIX = "hud_on_"
     private const val ALPHA3_OVERLAY = "alpha3_overlay"
 
-    // The controller button-hint bar is a native (Vanilla HUD) element, but it only makes sense
-    // alongside native menus, so it follows the DS/Vanilla quick-set: All DS hides it, All Vanilla
+    // The controller button-hint bar is a native (Native HUD) element, but it only makes sense
+    // alongside native menus, so it follows the DS/Native quick-set: All DS hides it, All Native
     // shows it. See [setAllGameUi].
     private const val CONTROLLER_TOOLTIPS_KEY = "hud_controller_tooltips"
 
@@ -380,7 +385,7 @@ object UiPreferences {
     // first launch). Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
     private val alpha3OverlayFlow = MutableStateFlow(false)
 
-    /** Default On/Off for a Vanilla HUD element on first launch. The crosshair and the controller
+    /** Default On/Off for a Native HUD element on first launch. The crosshair and the controller
      *  button-hint bar default On (the app ships in the all-Vanilla state, which shows the hint bar
      *  alongside the native menus); the companion draws every other HUD element on the bottom
      *  screen, so their native versions default Off. */
@@ -502,19 +507,19 @@ object UiPreferences {
         gameUiModeFlows.getValue(key).value = mode
         editor(context).putString(GAME_UI_PREFIX + key, mode.name).apply()
         // An individual row change that leaves the layout MIXED is a "Custom" layout — snapshot it so
-        // [Custom] can restore it after the user later switches to All DS / All Vanilla. Skipped
+        // [Custom] can restore it after the user later switches to All DS / All Native. Skipped
         // during a bulk setAllGameUi() (its mid-loop states are transient, and its final state is
         // uniform anyway, so the snapshot keeps holding the last real mix).
         if (!bulkGameUi && gameUiIsMixed()) saveCustomSnapshot(context)
     }
 
-    /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Vanilla" quick-set
+    /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Native" quick-set
      *  buttons). Pending elements stay locked to VANILLA. Also flips the controller button-hint bar
      *  ([CONTROLLER_TOOLTIPS_KEY]): DS -> Off, Vanilla -> On (only useful when navigating native
      *  menus). DS additionally forces the Conversation Screen Layout to TOP (the other per-window
      *  layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at their own settings).
      *  The Input section (Touch input / Game cursor) is deliberately NOT touched by either preset —
-     *  it's the player's own choice and survives a quick-set. All other Vanilla HUD toggles are left
+     *  it's the player's own choice and survives a quick-set. All other Native HUD toggles are left
      *  untouched too; individual rows can still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
         // Snapshot the current layout first if it's a Custom mix, so [Custom] can restore it even if
@@ -526,7 +531,7 @@ object UiPreferences {
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
         // All DS also drops the DS conversation onto the top screen (Conversation layout -> TOP) and
         // uses the Shelf item-list layout (the DS-native look; irrelevant under Vanilla, where the
-        // native windows render instead). All Vanilla changes nothing beyond the elements themselves.
+        // native windows render instead). All Native changes nothing beyond the elements themselves.
         if (mode == GameUiMode.DS) {
             setConversationLocation(context, ConversationLocation.TOP)
             setInventoryLayout(context, InventoryLayout.SHELF)
@@ -829,7 +834,7 @@ object UiPreferences {
      *  which composes fine with no coordination: a tap SETS it absolutely, the thumbstick ADDS to it
      *  relatively, last input wins — ordinary mouse-plus-trackpad behaviour.
      *
-     *  NOTE turning this on also changes what **A** does in NATIVE (Vanilla) menus: with a cursor
+     *  NOTE turning this on also changes what **A** does in NATIVE menus: with a cursor
      *  present the engine treats A as a mouse click at the cursor instead of "activate the
      *  highlighted item" (the `mGamepadGuiCursorEnabled` branches in `controllermanager.cpp`). D-pad
      *  highlight navigation is unaffected. That is pre-existing engine behaviour tied to the cursor,

@@ -10814,7 +10814,7 @@ private fun JournalChronological(
             pagerState.animateScrollToPage(pages.size - 1)
     }
 
-    // The spine-hinged page turn is optional and OFF by default (Companion Tabs → "Journal Page
+    // The spine-hinged page turn is optional (Bottom Screen → "Journal Page
     // Turn"). Off is the original plain pager slide — same spread, same swipe, same grouping; only
     // the transition differs, so nothing outside the pager body branches on this.
     val pageTurn by UiPreferences.journalPageTurnFlow().collectAsState()
@@ -12361,15 +12361,30 @@ private object OptionsMenuScrollState {
  * independently, so returning to the menu lands where you left it.
  */
 // Section titles double as their expansion-state keys — one string per section, so a title
-// change can't silently desync from a separate key constant.
-private const val SECTION_SCREEN_LAYOUT = "DS Screen Layout"
-// Renamed from "Game UI" — every row here is a DS-vs-Vanilla choice, which the old name did not
-// convey. NOTE the title doubles as the expansion-state key, so this rename resets that one
-// section to collapsed exactly once (the old key is simply never looked up again). Harmless.
-private const val SECTION_DS_OR_VANILLA = "DS or Vanilla"
-private const val SECTION_VANILLA_HUD = "Vanilla HUD"
-private const val SECTION_INPUT = "Input"
-private const val SECTION_COMPANION_TABS = "Companion Tabs"
+// change can't silently desync from a separate key constant. (A retitled section therefore starts
+// collapsed exactly once, since its old key is never looked up again. Harmless — every section
+// defaults to collapsed anyway.)
+//
+// The five sections are grouped by the QUESTION the player is asking, not by the mechanism:
+// which menus do I want ‧ what is on the top screen ‧ how does the bottom screen look ‧ how do I
+// control it ‧ developer stuff. The predecessors ("DS Screen Layout", "DS or Native", "Native HUD",
+// "Input", "Companion Tabs") cut across each other: the same twelve menus were configured twice in
+// two different sections, a typeface switch lived under "Screen Layout", and a whole-screen dimming
+// effect lived under "Companion Tabs".
+//
+// "Native" (not "Vanilla") is the player-facing word for "OpenMW draws it itself": "vanilla" is
+// modding jargon, and the menu was using it for a plain who-draws-this distinction. The
+// [GameUiMode.VANILLA] enum constant is deliberately NOT renamed — its `name` is what gets written
+// into SharedPreferences, so renaming it would orphan every stored setting.
+
+/** Per-menu: who draws it, and (when the companion does) on which screen — one row per menu. */
+private const val SECTION_GAME_MENUS = "Game Menus"
+/** What appears on the top screen: the game's own HUD, plus the DS overlays drawn over it. */
+private const val SECTION_TOP_SCREEN = "Top Screen"
+/** How the companion screen itself looks. */
+private const val SECTION_BOTTOM_SCREEN = "Bottom Screen"
+/** How the game is controlled from the two screens. */
+private const val SECTION_CONTROLS = "Controls"
 private const val SECTION_DEVELOPER_TOOLS = "Developer Tools"
 
 private object OptionsSectionState {
@@ -12665,10 +12680,11 @@ private fun DsControlsPage(onBack: () -> Unit) {
 }
 
 /**
- * The display-settings menu. A quick-set row ([All DS]/[All Vanilla]), then three sections:
- * SCREEN LAYOUT, GAME UI (per-element DS/Vanilla), VANILLA HUD (native top-screen HUD element
- * On/Off toggles), and INPUT. Full-screen, scrollable, BronzeLight-themed. Writes to
- * [UiPreferences] live on every tap (no save/cancel).
+ * The display-settings menu. A DS Controls button and a Presets row ([All DS]/[Custom]/[All
+ * Native]), then five collapsible sections: GAME MENUS (one merged row per game menu — who draws it
+ * and on which screen), TOP SCREEN (the game's own HUD + the DS overlays drawn over it), BOTTOM
+ * SCREEN (how the companion looks), CONTROLS, and DEVELOPER TOOLS. Full-screen, scrollable,
+ * BronzeLight-themed. Writes to [UiPreferences] live on every tap (no save/cancel).
  *
  * Public because [org.openmw.EngineActivity] hosts it in a WindowManager panel window on
  * the companion Presentation when the pause/options menu opens.
@@ -12779,106 +12795,94 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
             .padding(horizontal = 16.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
     ) {
-        // Controls reference. Sits ABOVE Quick Set because it is the one entry a new player needs
+        // Controls reference. Sits ABOVE Presets because it is the one entry a new player needs
         // before they can use anything else on this screen.
         item { DsControlsButton(onOpen = onOpenControls) }
 
-        // Quick-set row: bulk-set every (non-pending) Game UI element. Never touches HUD.
-        // Deliberately left unheaded/always-visible — it is a single row, not a section.
+        // Presets row: bulk-set every (non-pending) Game UI element. Never touches HUD except the
+        // controller hint bar. Deliberately left unheaded/always-visible — a single row, not a section.
         item { QuickSetRow() }
 
         // Each section below: a collapsible header, then its rows emitted ONLY while expanded.
         // Conditional emission (rather than wrapping the rows in a card) keeps every row a real
-        // lazy item with its own key — the `"layout_"` prefix on ScreenLayoutPendingRow's reuse of
-        // GAME_UI_ELEMENTS is what stops it colliding with the Game UI section's keys, and both
-        // sections can now be expanded at once, so that prefix is still load-bearing.
+        // lazy item with its own key.
 
-        // SCREEN LAYOUT: which screen each element is drawn on.
-        item { CollapsibleSection(SECTION_SCREEN_LAYOUT) }
-        if (OptionsSectionState.isExpanded(SECTION_SCREEN_LAYOUT)) {
-            // Typeface for both screens. First because it restyles everything at once, where the
-            // rest of this section moves individual elements between screens.
-            item { GameFontRow() }
-            // One cross-cutting switch (Classic grid / Shelf) for ALL two-panel item screens
-            // (looting, pickpocket, barter). Sits above the per-element location rows.
+        // GAME MENUS: one row per game menu, answering "who draws this, and where?" as a single
+        // decision. This replaces the old pair of sections ("DS or Native" for the mode + "DS Screen
+        // Layout" for the location), which asked the same question twice, pages apart, with the
+        // location row dimmed until the mode row further down the page was set to DS.
+        item { CollapsibleSection(SECTION_GAME_MENUS) }
+        if (OptionsSectionState.isExpanded(SECTION_GAME_MENUS)) {
+            item { ConversationMenuRow() }
+            item { LootingMenuRow() }
+            item { BarteringMenuRow() }
+            // Directly under the two rows it governs — its dim condition is now adjacent to its cause.
             item { InventoryLayoutRow() }
-            // Combat top-screen options. These are "which screen?" picks, not DS/Vanilla toggles,
-            // so they belong here rather than in DS-or-Vanilla — deliberately reversing the
-            // Jul 2026 move that put them under the old "Game UI" header.
+            item { PersuasionMenuRow() }
+            item { RepairMenuRow() }
+            item { TravelMenuRow() }
+            item { SpellBuyingMenuRow() }
+            item { TrainingMenuRow() }
+            item { RestwaitMenuRow() }
+            item { CrimeMenuRow() }
+            // The menus with no companion version yet: one muted line each rather than two locked
+            // pill rows apiece (which is what they cost across the two old sections).
+            items(GAME_UI_ELEMENTS.filter { it.pending }, key = { "unavail_" + it.key }) {
+                UnavailableMenuRow(it.label)
+            }
+        }
+
+        // TOP SCREEN: everything drawn on the game's screen — the game's own HUD elements, then the
+        // DS overlays drawn over them.
+        item { CollapsibleSection(SECTION_TOP_SCREEN) }
+        if (OptionsSectionState.isExpanded(SECTION_TOP_SCREEN)) {
+            item { TopScreenBlurb() }
+            item { OptionsSubLabel("The game's own HUD") }
+            items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
+            item { OptionsSubLabel("DS overlays on the top screen") }
             item { TargetHealthLocationRow() }
             item { PlayerCombatRow() }
-            item { ConversationLocationRow() }
-            item { LootingLocationRow() }
-            item { BarteringLocationRow() }
-            item { PersuasionLocationRow() }
-            item { RepairLocationRow() }
-            item { TravelLocationRow() }
-            item { SpellBuyingLocationRow() }
-            item { TrainingLocationRow() }
-            item { RestwaitLocationRow() }
-            item { CrimeLocationRow() }
             item { TopPanelOpacityRow() }
-            items(
-                GAME_UI_ELEMENTS.filter {
-                    it.key != "game_ui_conversation" &&
-                        it.key != "game_ui_persuasion" &&
-                        it.key != "game_ui_looting" &&
-                        it.key != "game_ui_bartering" &&
-                        it.key != "game_ui_spellbuying" &&
-                        it.key != "game_ui_training" &&
-                        it.key != "game_ui_repair" &&
-                        it.key != "game_ui_travel" &&
-                        // Now have real [Bottom][Top] rows above, so they must NOT also appear as
-                        // greyed PENDING rows here (that would be a duplicate key AND a duplicate row).
-                        it.key != "game_ui_restwait" &&
-                        it.key != "game_ui_crime"
-                },
-                key = { "layout_" + it.key }
-            ) { ScreenLayoutPendingRow(it) }
         }
 
-        // DS OR VANILLA: per-element, is this drawn by the companion or by native OpenMW?
-        item { CollapsibleSection(SECTION_DS_OR_VANILLA) }
-        if (OptionsSectionState.isExpanded(SECTION_DS_OR_VANILLA)) {
-            items(GAME_UI_ELEMENTS, key = { it.key }) { GameUiRow(it) }
-        }
-
-        // VANILLA HUD: whether each native top-screen HUD element is shown.
-        item { CollapsibleSection(SECTION_VANILLA_HUD) }
-        if (OptionsSectionState.isExpanded(SECTION_VANILLA_HUD)) {
-            items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
-            item { Alpha3OverlayRow() }
-        }
-
-        item { CollapsibleSection(SECTION_INPUT) }
-        if (OptionsSectionState.isExpanded(SECTION_INPUT)) {
-            item { TouchInputRow() }
-            item { GameCursorRow() }
-        }
-
-        // COMPANION TABS: density/appearance of the bottom-screen companion tabs. Kept in its own
-        // section — deliberately NOT near the "DS Screen Layout" Inventory Layout (Classic/Shelf)
-        // row, which governs a different (two-panel looting/barter) screen.
-        item { CollapsibleSection(SECTION_COMPANION_TABS) }
-        if (OptionsSectionState.isExpanded(SECTION_COMPANION_TABS)) {
+        // BOTTOM SCREEN: how the companion screen itself looks. Adaptive Dimming leads because it
+        // is the setting with the largest visible effect here; the rest are per-tab appearance.
+        item { CollapsibleSection(SECTION_BOTTOM_SCREEN) }
+        if (OptionsSectionState.isExpanded(SECTION_BOTTOM_SCREEN)) {
+            item { AdaptiveDimmingRow() }
+            item { GameFontRow() }
+            item { OptionsSubLabel("Inventory tab") }
             item { InventoryTabStyleRow() }
             item { EquippedBarRow() }
             item { EquippedInListRow() }
+            item { OptionsSubLabel("Journal") }
             item { JournalPageTurnRow() }
-            item { AdaptiveDimmingRow() }
         }
         // "Spells Display" (Standard / Compact) removed — the compact spell list is now the only
         // version. The old SpellsListStyleRow composable is commented out below for reference.
 
-        // DEVELOPER TOOLS: cheats / test helpers. Placed last so it is the least prominent
-        // section, and the action panel is gated behind the "Developer mode" toggle (default off)
-        // so a fresh install never puts these one tap from the pause menu.
+        // CONTROLS: how the game is driven from the two screens. The Alpha3 launcher overlay lives
+        // here rather than under TOP SCREEN because it is a cluster of touch BUTTONS, not a HUD
+        // readout — its subtitle names where it sits, so it is still findable from "what is that
+        // thing on my top screen".
+        item { CollapsibleSection(SECTION_CONTROLS) }
+        if (OptionsSectionState.isExpanded(SECTION_CONTROLS)) {
+            item { TouchInputRow() }
+            item { GameCursorRow() }
+            item { InputPairNote() }
+            item { Alpha3OverlayRow() }
+            item { ControlsReferenceRow(onOpen = onOpenControls) }
+        }
+
+        // DEVELOPER TOOLS: cheats / test helpers. Placed last so it is the least prominent section,
+        // and EVERYTHING in it (the console included) is gated behind the "Developer mode" toggle
+        // (default off) so a fresh install never puts any of it one tap from the pause menu.
         item { CollapsibleSection(SECTION_DEVELOPER_TOOLS) }
         if (OptionsSectionState.isExpanded(SECTION_DEVELOPER_TOOLS)) {
             item { DeveloperToolsBlurb() }
-            item { OpenConsoleRow() }
             item { DeveloperModeRow() }
             if (developerMode) {
+                item(key = "dev_console") { OpenConsoleRow() }
                 item(key = "dev_actions") { DeveloperActionsPanel() }
             }
         }
@@ -13000,8 +13004,8 @@ private fun OptionsWelcomeBlock() {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "New here? Options are set to Vanilla by default but with touch screen enabled instead of mouse controls.\n" +
-            "Want your old UI (health, minimap) back? See the Vanilla HUD section.\n",
+            "New here? Options are set to Native by default but with touch screen enabled instead of mouse controls.\n" +
+            "Want your old UI (health, minimap) back? See the Native HUD section.\n",
             color = BoneDim,
             fontSize = 17.sp,
             fontFamily = MwBody,
@@ -13020,14 +13024,14 @@ private fun OptionsWelcomeBlock() {
     }
 }
 
-/** The quick-set row: [All DS] [All Vanilla]. Bulk-sets every non-pending Game UI element and the
- *  controller-tooltips HUD toggle (DS -> Off, Vanilla -> On); other Vanilla HUD toggles are left
+/** The quick-set row: [All DS] [All Native]. Bulk-sets every non-pending Game UI element and the
+ *  controller-tooltips HUD toggle (DS -> Off, Native -> On); other Native HUD toggles are left
  *  untouched. Individual rows can be overridden afterwards. */
 @Composable
 private fun QuickSetRow() {
     val context = LocalContext.current
     // Aggregate state of every non-pending Game UI element, so the pills reflect the current mode:
-    // all DS -> [All DS], all Vanilla -> [All Vanilla], mixed -> [Custom]. (Pending elements are
+    // all DS -> [All DS], all Native -> [All Native], mixed -> [Custom]. (Pending elements are
     // locked to Vanilla and excluded so they never force a permanent "mixed" reading.)
     val nonPending = remember { GAME_UI_ELEMENTS.filter { !it.pending } }
     val modes = nonPending.map { UiPreferences.gameUiModeFlow(it.key).collectAsState().value }
@@ -13038,14 +13042,16 @@ private fun QuickSetRow() {
     val hasCustom by UiPreferences.customSnapshotFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
-        Text("Quick set", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text("Presets", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            // Names the section it acts on — kept in step with the "DS or Vanilla" rename, or the
-            // menu would refer to a header that no longer exists.
-            "Set every DS or Vanilla row at once (also sets the controller hint bar)",
+            // Names EVERY side effect. The old subtitle mentioned only the hint bar, so All DS
+            // silently overwriting two of the player's own layout choices was invisible here.
+            "Sets every row in Game Menus at once. All DS also moves Conversation to the top " +
+                "screen and switches item lists to Shelf. Both presets change the controller hint bar.",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
+            lineHeight = 13.sp,
             modifier = Modifier.padding(top = 1.dp)
         )
         Spacer(Modifier.height(6.dp))
@@ -13053,99 +13059,336 @@ private fun QuickSetRow() {
             OptionPill(Modifier.weight(1f), label = "All DS", active = allDs, enabled = true) {
                 UiPreferences.setAllGameUi(context, GameUiMode.DS)
             }
-            // "Custom" lights up when the rows are a mix of DS and Vanilla. It's tappable once a
+            // "Custom" lights up when the rows are a mix of DS and Native. It's tappable once a
             // custom layout has been saved (snapshotted when you hand-tweak into a mix, or before
             // switching to a preset), restoring that layout so you can bounce back to it.
             OptionPill(Modifier.weight(1f), label = "Custom", active = mixed, enabled = hasCustom) {
                 UiPreferences.restoreCustomGameUi(context)
             }
-            OptionPill(Modifier.weight(1f), label = "All Vanilla", active = allVanilla, enabled = true) {
+            OptionPill(Modifier.weight(1f), label = "All Native", active = allVanilla, enabled = true) {
                 UiPreferences.setAllGameUi(context, GameUiMode.VANILLA)
             }
         }
+        // Custom is BOTH an indicator and a button, which is why the label stays "Custom" (it has to
+        // read correctly when it merely lights up) and the behaviour is spelled out here instead.
+        Text(
+            "Custom lights up when your menus are a mix. Tap it to bring back your last saved mix.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 4.dp)
+        )
         Spacer(Modifier.height(8.dp))
         Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
     }
 }
 
-/** A GAME UI row: element name (+ PENDING tag) over a [DS][Vanilla] pill selector. Pending elements
- *  are locked to Vanilla — their DS pill is disabled and labelled "Not yet available". Writes a
- *  GameUiMode to UiPreferences on every tap. */
+/**
+ * One screen choice on a [GameMenuRow] — a pill after [Native].
+ *
+ * [available] false = the screen has no build yet: the pill renders greyed and inert under a
+ * "PENDING" caption, exactly as the old separate location rows did. It is deliberately still SHOWN
+ * rather than omitted, so the row advertises where the feature is going. The one exception is a
+ * location that is not merely unbuilt but meaningless (see Rest / Wait and Crime alerts), which
+ * passes no option at all.
+ */
+private data class MenuScreenOption(
+    val label: String,
+    val selected: Boolean,
+    val available: Boolean = true,
+    val onSelect: () -> Unit,
+)
+
+/**
+ * One game menu as a SINGLE decision: `[Native] [Bottom] [Split] [Top]`.
+ *
+ * This replaces the two rows every menu used to have — a `[DS][Native]` mode row in one section and
+ * a `[Bottom][Split][Top]` location row in another — which asked the same question twice and made
+ * the location row *depend* on the mode row: it sat dimmed, with no explanation, until you found the
+ * other section further down the page and set that menu to DS. Merging them removes the dependency
+ * outright: there is nothing left to dim and nothing pointing at another section.
+ *
+ * Both existing preferences are still written behind the scenes — the `game_ui_*` mode (which is
+ * what native suppression reads) and the element's own `layout_*` location. There is deliberately NO
+ * new combined enum: nothing stored changes, so no migration exists to get wrong, and the presets
+ * keep working unchanged because they still just write the mode.
+ */
 @Composable
-private fun GameUiRow(el: GameUiElement) {
+private fun GameMenuRow(
+    label: String,
+    gameUiKey: String,
+    screens: List<MenuScreenOption>,
+    subtitle: String? = null,
+) {
     val context = LocalContext.current
+    val mode by UiPreferences.gameUiModeFlow(gameUiKey).collectAsState()
+    val isNative = mode == GameUiMode.VANILLA
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        if (subtitle != null) {
             Text(
-                el.label,
-                color = if (el.pending) BoneDim else Bone,
-                fontSize = 14.sp,
-                fontFamily = MwBody,
-                modifier = Modifier.weight(1f)
+                subtitle,
+                color = BoneDim, fontSize = 10.sp, fontFamily = MwBody,
+                modifier = Modifier.padding(top = 1.dp)
             )
-            if (el.pending) {
-                Text(
-                    "PENDING",
-                    color = BoneDim.copy(alpha = 0.7f),
-                    fontSize = 9.sp,
-                    fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
-            }
         }
         Spacer(Modifier.height(6.dp))
+        // "PENDING" caption column-aligned over each unbuilt pill: same weight-1f spacer trick the
+        // old service rows used, extended to leave a gap over [Native] as well.
+        if (screens.any { !it.available }) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Spacer(Modifier.weight(1f)) // over [Native]
+                screens.forEach { s ->
+                    if (s.available) {
+                        Spacer(Modifier.weight(1f))
+                    } else {
+                        Text(
+                            "PENDING",
+                            color = BoneDim.copy(alpha = 0.7f),
+                            fontSize = 9.sp,
+                            fontFamily = MwDisplay,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (el.pending) {
-                // No companion replacement yet — DS disabled, Vanilla locked active.
-                OptionPill(Modifier.weight(1f), label = "Not yet available", active = false, enabled = false) {}
-                OptionPill(Modifier.weight(1f), label = "Vanilla", active = true, enabled = false) {}
-            } else {
-                val mode by UiPreferences.gameUiModeFlow(el.key).collectAsState()
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Native",
+                active = isNative,
+                enabled = true
+            ) { UiPreferences.setGameUiMode(context, gameUiKey, GameUiMode.VANILLA) }
+            screens.forEach { s ->
                 OptionPill(
                     Modifier.weight(1f),
-                    label = "DS",
-                    active = mode == GameUiMode.DS,
-                    enabled = true
-                ) { UiPreferences.setGameUiMode(context, el.key, GameUiMode.DS) }
-                OptionPill(
-                    Modifier.weight(1f),
-                    label = "Vanilla",
-                    active = mode == GameUiMode.VANILLA,
-                    enabled = true
-                ) { UiPreferences.setGameUiMode(context, el.key, GameUiMode.VANILLA) }
+                    label = s.label,
+                    // A screen pill is only lit when the companion is actually drawing this menu —
+                    // otherwise Native and a screen would both read as selected.
+                    active = !isNative && s.selected,
+                    enabled = s.available
+                ) {
+                    // Location FIRST, then the mode: the reverse order would briefly hand the menu
+                    // to the companion while it still carried the previous screen choice.
+                    s.onSelect()
+                    UiPreferences.setGameUiMode(context, gameUiKey, GameUiMode.DS)
+                }
             }
         }
     }
 }
 
-/** The Conversation location row: a three-option [Bottom][Split][Top] pill selector.
- *  BOTTOM = original two-column layout; SPLIT = history top / topics bottom (default);
- *  TOP = full conversation on top (not yet implemented — selectable, behaves like SPLIT).
- *  Writes ConversationLocation to UiPreferences on every tap. Dimmed and inert when the
- *  Conversation Game UI element is Vanilla (native handles it, so there's no layout to pick). */
-/** The "Looting & Barter Layout" row: a [Classic][Shelf] selector controlling how ALL two-panel
- *  item screens (looting/pickpocket, barter) render their item lists. One switch, all those
- *  contexts. Always enabled (not gated on any per-element DS/Vanilla mode). Default Classic.
- *  Named to stay distinct from the Companion Tabs "Inventory Tab Style" row — the underlying
- *  pref key (`inventory_layout`) is unchanged, so no migration is involved. */
+/** A game menu with no companion version yet: one muted line. These stay locked to Native in
+ *  prefs (`setGameUiMode` no-ops for pending elements), so there is nothing to tap — and a row of
+ *  disabled pills would be four times the height to say exactly this much. */
+@Composable
+private fun UnavailableMenuRow(label: String) {
+    Text(
+        "$label — not yet available",
+        color = BoneDim.copy(alpha = 0.7f),
+        fontSize = 12.sp,
+        fontFamily = MwBody,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)
+    )
+}
+
+/** Conversation: all three screens are built, so no pill is pending. */
+@Composable
+private fun ConversationMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.conversationLocationFlow().collectAsState()
+    GameMenuRow(
+        label = "Conversation",
+        gameUiKey = "game_ui_conversation",
+        screens = listOf(
+            MenuScreenOption("Bottom", loc == ConversationLocation.BOTTOM) {
+                UiPreferences.setConversationLocation(context, ConversationLocation.BOTTOM)
+            },
+            MenuScreenOption("Split", loc == ConversationLocation.SPLIT) {
+                UiPreferences.setConversationLocation(context, ConversationLocation.SPLIT)
+            },
+            MenuScreenOption("Top", loc == ConversationLocation.TOP) {
+                UiPreferences.setConversationLocation(context, ConversationLocation.TOP)
+            },
+        )
+    )
+}
+
+/**
+ * The shared shape for the service menus, all of which store a [ScreenLocation].
+ *
+ * [showSplit] = an icon grid on the top screen with controls on the bottom (built for looting and
+ * bartering only). [showTop] = offer a Top pill at all; it is always greyed/pending where offered,
+ * and is omitted entirely for the menus where a top-screen version would be meaningless.
+ */
+@Composable
+private fun ServiceMenuRow(
+    label: String,
+    gameUiKey: String,
+    loc: ScreenLocation,
+    showSplit: Boolean,
+    showTop: Boolean = true,
+    subtitle: String? = null,
+    onSelect: (ScreenLocation) -> Unit,
+) {
+    GameMenuRow(
+        label = label,
+        gameUiKey = gameUiKey,
+        subtitle = subtitle,
+        screens = buildList {
+            add(MenuScreenOption("Bottom", loc == ScreenLocation.BOTTOM) { onSelect(ScreenLocation.BOTTOM) })
+            if (showSplit) {
+                add(MenuScreenOption("Split", loc == ScreenLocation.SPLIT) { onSelect(ScreenLocation.SPLIT) })
+            }
+            if (showTop) {
+                add(MenuScreenOption("Top", loc == ScreenLocation.TOP, available = false) {})
+            }
+        }
+    )
+}
+
+@Composable
+private fun LootingMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.lootingLocationFlow().collectAsState()
+    ServiceMenuRow("Looting", "game_ui_looting", loc, showSplit = true) {
+        UiPreferences.setLootingLocation(context, it)
+    }
+}
+
+@Composable
+private fun BarteringMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.barterLocationFlow().collectAsState()
+    ServiceMenuRow("Bartering", "game_ui_bartering", loc, showSplit = true) {
+        UiPreferences.setBarterLocation(context, it)
+    }
+}
+
+/** Persuasion is the one service whose Top IS built, so neither pill is pending. It stores its own
+ *  [PersuasionLocation] rather than a [ScreenLocation], hence not going through [ServiceMenuRow]. */
+@Composable
+private fun PersuasionMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.persuasionLocationFlow().collectAsState()
+    GameMenuRow(
+        label = "Persuasion",
+        gameUiKey = "game_ui_persuasion",
+        subtitle = "Which screen the persuasion popup opens on",
+        screens = listOf(
+            MenuScreenOption("Bottom", loc == PersuasionLocation.BOTTOM) {
+                UiPreferences.setPersuasionLocation(context, PersuasionLocation.BOTTOM)
+            },
+            MenuScreenOption("Top", loc == PersuasionLocation.TOP) {
+                UiPreferences.setPersuasionLocation(context, PersuasionLocation.TOP)
+            },
+        )
+    )
+}
+
+@Composable
+private fun RepairMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.repairLocationFlow().collectAsState()
+    ServiceMenuRow("Repair", "game_ui_repair", loc, showSplit = false) {
+        UiPreferences.setRepairLocation(context, it)
+    }
+}
+
+@Composable
+private fun TravelMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.travelLocationFlow().collectAsState()
+    ServiceMenuRow("Travel", "game_ui_travel", loc, showSplit = false) {
+        UiPreferences.setTravelLocation(context, it)
+    }
+}
+
+@Composable
+private fun SpellBuyingMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.spellBuyingLocationFlow().collectAsState()
+    ServiceMenuRow("Spell buying", "game_ui_spellbuying", loc, showSplit = false) {
+        UiPreferences.setSpellBuyingLocation(context, it)
+    }
+}
+
+@Composable
+private fun TrainingMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.trainingLocationFlow().collectAsState()
+    ServiceMenuRow("Training", "game_ui_training", loc, showSplit = false) {
+        UiPreferences.setTrainingLocation(context, it)
+    }
+}
+
+/**
+ * Rest / Wait and Crime alerts get NO Top pill at all — not even a greyed one.
+ *
+ * Their overlays are hardcoded to the bottom screen and do not read `layout_restwait` /
+ * `layout_crime`, so the Top pill they used to show was not "pending" in the sense the others are:
+ * it was a control that silently did nothing. Since neither has a top-screen variant on the way,
+ * the honest row is `[Native] [Bottom]`. The prefs are still written (Bottom is the only value
+ * either can hold), so wiring a real top-screen version later is just re-adding a pill.
+ */
+@Composable
+private fun RestwaitMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.restwaitLocationFlow().collectAsState()
+    ServiceMenuRow("Rest / Wait", "game_ui_restwait", loc, showSplit = false, showTop = false) {
+        UiPreferences.setRestwaitLocation(context, it)
+    }
+}
+
+@Composable
+private fun CrimeMenuRow() {
+    val context = LocalContext.current
+    val loc by UiPreferences.crimeLocationFlow().collectAsState()
+    ServiceMenuRow(
+        "Crime alerts", "game_ui_crime", loc, showSplit = false, showTop = false,
+        subtitle = "The \"crime reported\" alert"
+    ) { UiPreferences.setCrimeLocation(context, it) }
+}
+
+/**
+ * The "Item list style" row: a [Classic][Shelf] selector controlling how the two-panel item screens
+ * (looting/pickpocket, barter) render their item lists. One switch, all those contexts. Default
+ * Classic. The underlying pref key (`inventory_layout`) is unchanged, so no migration is involved.
+ *
+ * Lives in GAME MENUS directly beneath Looting and Bartering — it is a property of those two menus,
+ * not of screen layout, and sitting next to them is what makes its dimmed state self-explanatory.
+ *
+ * The dim condition is scoped to **Looting or Bartering** being DS. It used to be "not every element
+ * is Native", which meant an unrelated menu (Travel, say) being DS kept this row live even though
+ * nothing it governs would render.
+ */
 @Composable
 private fun InventoryLayoutRow() {
     val context = LocalContext.current
     val layout by UiPreferences.inventoryLayoutFlow().collectAsState()
-    // The Classic/Shelf switch only affects the DS two-panel item screens (looting/pickpocket,
-    // barter). When every Game UI element is Vanilla, none of those overlays render, so the choice
-    // is meaningless — dim the row and swallow taps (same aggregate as QuickSetRow's [All Vanilla]).
-    val nonPending = remember { GAME_UI_ELEMENTS.filter { !it.pending } }
-    val modes = nonPending.map { UiPreferences.gameUiModeFlow(it.key).collectAsState().value }
-    val enabled = !(modes.isNotEmpty() && modes.all { it == GameUiMode.VANILLA })
+    val lootingMode by UiPreferences.gameUiModeFlow("game_ui_looting").collectAsState()
+    val barterMode by UiPreferences.gameUiModeFlow("game_ui_bartering").collectAsState()
+    val enabled = lootingMode == GameUiMode.DS || barterMode == GameUiMode.DS
 
     Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        // "Looting & Barter Layout", NOT "Inventory Layout" — the old name collided with the
-        // Companion Tabs section's "Inventory Tab Style" row (which governs the companion's own
-        // Inventory tab). This one governs only the two-panel looting/pickpocket/barter screens.
-        Text("Looting & Barter Layout", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        // "Item list style", NOT "Inventory Layout"/"Looting & Barter Layout" — the old names
+        // collided with the Bottom Screen section's "Inventory Tab Style" row (which governs the
+        // companion's own Inventory tab). This one governs only the two-panel screens above it.
+        Text("Item list style", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            // When dimmed, the subtitle IS the explanation — a greyed row with a generic
+            // description tells you nothing about how to un-grey it.
+            if (enabled) "How items are listed while looting, pickpocketing and bartering."
+            else "Enabled when Looting or Bartering is set to a DS screen.",
+            color = BoneDim, fontSize = 10.sp, fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
@@ -13166,7 +13409,7 @@ private fun InventoryLayoutRow() {
 
 // Layout of the single-panel Inventory tab (List / Cards). Distinct from InventoryLayoutRow
 // (Classic/Shelf, for looting/bartering) — a different part of the UI — and lives in the
-// "Companion Tabs" section.
+// "Bottom Screen" section.
 @Composable
 private fun InventoryTabStyleRow() {
     val context = LocalContext.current
@@ -13193,7 +13436,7 @@ private fun InventoryTabStyleRow() {
 }
 
 // Whether the pinned "Equipped (N)" bar at the bottom of the Inventory tab is shown or hidden.
-// Hiding it frees space for an extra row of items (worn items then show inline). "Companion Tabs".
+// Hiding it frees space for an extra row of items (worn items then show inline). "Bottom Screen".
 @Composable
 private fun EquippedBarRow() {
     val context = LocalContext.current
@@ -13363,9 +13606,9 @@ private fun AdaptiveDimOverlay() {
 }
 
 // Game font — render the companion and the DS overlays in the game's own typeface instead of the
-// Android system serif/monospace. First row of "DS Screen Layout" because it is the broadest
-// visual change on that page: it restyles every text site on both screens at once, where every
-// other row there moves one element around.
+// Android system serif/monospace. Lives in "Bottom Screen" (below Adaptive Dimming) because it
+// is an appearance setting for the companion, not a layout one — it restyles every text site on
+// both screens at once rather than moving anything between them.
 //
 // The face is MysticCards (OpenMW's SIL-OFL Magic Cards replacement, already in the APK) — see
 // GameFont.kt for why Morrowind's own bitmap font cannot be used here. The subtitle says
@@ -13406,7 +13649,7 @@ private fun GameFontRow() {
 
 // Journal page turn — whether the chronological journal turns pages as a spine-hinged 3D leaf or
 // simply slides the next spread in. Purely a transition: the two-column spread, the swipe gesture
-// and the day grouping are identical either way. Default Off. "Companion Tabs" section.
+// and the day grouping are identical either way. Default On. "Bottom Screen" section.
 @Composable
 private fun JournalPageTurnRow() {
     val context = LocalContext.current
@@ -13441,7 +13684,7 @@ private fun JournalPageTurnRow() {
 // screen draws UI at a fixed brightness, so at equal manual brightness it reads as much brighter
 // than the top screen once the player is somewhere dark. This is a translucent black overlay only;
 // it never touches the device's real screen brightness (both physical displays share one brightness
-// group, so per-display control isn't possible anyway). "Companion Tabs" section.
+// group, so per-display control isn't possible anyway). "Bottom Screen" section, first row.
 // The two sliders below the On/Off pills set the ENDS of the dimming ramp. They are shown only
 // while the feature is on: off, they control nothing, and a live-looking slider that does nothing
 // reads as broken. Off remains a true master switch — the overlay's mapping zeroes on it before
@@ -13477,6 +13720,9 @@ private fun AdaptiveDimmingRow() {
         }
 
         if (enabled) {
+            // Named so the two sliders read as one paired control (the ends of the ramp) rather
+            // than as loose settings that happen to sit under a toggle.
+            OptionsSubLabel("Dimming range")
             BrightnessSlider(
                 label = "Darkest (in dark places)",
                 blurb = "How dark this screen goes in the darkest interiors and at night.",
@@ -13585,238 +13831,14 @@ private fun SpellsListStyleRow() {
 }
 */
 
-@Composable
-private fun ConversationLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.conversationLocationFlow().collectAsState()
-    val convMode by UiPreferences.gameUiModeFlow("game_ui_conversation").collectAsState()
-    val enabled = convMode == GameUiMode.DS
-
-    // Dim the whole row and swallow taps (onClick guarded on `enabled`) when Conversation is
-    // Vanilla; pills stay enabled=true so they don't double-dim under the column alpha.
-    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        Text("Conversation", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Bottom",
-                active = loc == ConversationLocation.BOTTOM,
-                enabled = true
-            ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.BOTTOM) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Split",
-                active = loc == ConversationLocation.SPLIT,
-                enabled = true
-            ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.SPLIT) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Top",
-                active = loc == ConversationLocation.TOP,
-                enabled = true
-            ) { if (enabled) UiPreferences.setConversationLocation(context, ConversationLocation.TOP) }
-        }
-    }
-}
-
-/** The Persuasion location row: a [Bottom][Top] selector (both implemented — the popup is hosted at
- *  the CompanionScreen root for Bottom, or a top-screen panel window for Top). Gated on the
- *  Persuasion Game UI element being DS; dimmed + inert when Vanilla (native handles persuasion). */
-@Composable
-private fun PersuasionLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.persuasionLocationFlow().collectAsState()
-    val mode by UiPreferences.gameUiModeFlow("game_ui_persuasion").collectAsState()
-    val enabled = mode == GameUiMode.DS
-
-    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        Text("Persuasion", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Text(
-            "Which screen the persuasion popup opens on",
-            color = BoneDim,
-            fontSize = 10.sp,
-            fontFamily = MwBody,
-            modifier = Modifier.padding(top = 1.dp)
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Bottom",
-                active = loc == PersuasionLocation.BOTTOM,
-                enabled = true
-            ) { if (enabled) UiPreferences.setPersuasionLocation(context, PersuasionLocation.BOTTOM) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Top",
-                active = loc == PersuasionLocation.TOP,
-                enabled = true
-            ) { if (enabled) UiPreferences.setPersuasionLocation(context, PersuasionLocation.TOP) }
-        }
-    }
-}
-
-/** A service location row: a pill selector ending in a greyed, not-yet-implemented Top pill with a
- *  small "PENDING" caption above it. Looting / Bartering use the full [Bottom][Split][Top]
- *  ([showSplit] = true); Spell buying / Training use [Bottom][Top] ([showSplit] = false — only the
- *  centred bottom card is built, no Split, matching Repair). BOTTOM = classic bottom-screen overlay;
- *  SPLIT = icon grid on top, controls on the bottom; TOP = pending. Writes a [ScreenLocation] on
- *  every tap. Dimmed and inert when the element's Game UI mode is Vanilla (native handles it). */
-@Composable
-private fun ServiceLocationRow(
-    label: String,
-    gameUiKey: String,
-    loc: ScreenLocation,
-    showSplit: Boolean = true,
-    onSelect: (ScreenLocation) -> Unit
-) {
-    val mode by UiPreferences.gameUiModeFlow(gameUiKey).collectAsState()
-    val enabled = mode == GameUiMode.DS
-
-    // Dim the whole row and swallow taps (onClick guarded on `enabled`) when the element is
-    // Vanilla; the Bottom/Split pills stay enabled=true so they don't double-dim under the
-    // column alpha. The Top pill is always enabled=false (pending → greyed).
-    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        Text(label, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Spacer(Modifier.height(6.dp))
-        // "PENDING" caption aligned above the greyed Top pill (Top isn't implemented for any of these
-        // rows yet). Same weight-1f column layout as the pills below, so it centres over the Top pill;
-        // styled like the persuasion/level-up pending tag.
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Spacer(Modifier.weight(1f)) // over Bottom
-            if (showSplit) Spacer(Modifier.weight(1f)) // over Split
-            Text(
-                "PENDING",
-                color = BoneDim.copy(alpha = 0.7f),
-                fontSize = 9.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.weight(1f)
-            )
-        }
-        Spacer(Modifier.height(2.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Bottom",
-                active = loc == ScreenLocation.BOTTOM,
-                enabled = true
-            ) { if (enabled) onSelect(ScreenLocation.BOTTOM) }
-            if (showSplit) {
-                OptionPill(
-                    Modifier.weight(1f),
-                    label = "Split",
-                    active = loc == ScreenLocation.SPLIT,
-                    enabled = true
-                ) { if (enabled) onSelect(ScreenLocation.SPLIT) }
-            }
-            // TOP is not implemented yet — greyed and inert (see the PENDING caption above).
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Top",
-                active = loc == ScreenLocation.TOP,
-                enabled = false
-            ) {}
-        }
-    }
-}
-
-/** The Looting location row (Bottom/Split, Top pending). Gated on the Looting Game UI element. */
-@Composable
-private fun LootingLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.lootingLocationFlow().collectAsState()
-    ServiceLocationRow("Looting", "game_ui_looting", loc) {
-        UiPreferences.setLootingLocation(context, it)
-    }
-}
-
-/** The Bartering location row (Bottom/Split, Top pending). Gated on the Bartering Game UI element. */
-@Composable
-private fun BarteringLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.barterLocationFlow().collectAsState()
-    ServiceLocationRow("Bartering", "game_ui_bartering", loc) {
-        UiPreferences.setBarterLocation(context, it)
-    }
-}
-
-/** The Spell-buying location row (Bottom/Split, Top pending). Gated on the Spell buying Game UI
- *  element. Only Bottom + Split are implemented (there's no top-screen SpellBuyingOverlay). */
-@Composable
-private fun SpellBuyingLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.spellBuyingLocationFlow().collectAsState()
-    ServiceLocationRow("Spell buying", "game_ui_spellbuying", loc, showSplit = false) {
-        UiPreferences.setSpellBuyingLocation(context, it)
-    }
-}
-
-/** The Training location row (Bottom/Split, Top pending). Gated on the Training Game UI element.
- *  Only Bottom + Split are implemented (there's no top-screen TrainingOverlay). */
-@Composable
-private fun TrainingLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.trainingLocationFlow().collectAsState()
-    ServiceLocationRow("Training", "game_ui_training", loc, showSplit = false) {
-        UiPreferences.setTrainingLocation(context, it)
-    }
-}
-
-/** The Repair location row (Bottom; Top pending). Gated on the Repair Game UI element.
- *  Bottom = the centred RepairOverlay card; no Split / Top yet. */
-@Composable
-private fun RepairLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.repairLocationFlow().collectAsState()
-    ServiceLocationRow("Repair", "game_ui_repair", loc, showSplit = false) {
-        UiPreferences.setRepairLocation(context, it)
-    }
-}
-
-/** The Travel location row (Bottom; Top pending). Gated on the Travel Game UI element.
- *  Bottom = the centred TravelOverlay card; no Split / Top yet. */
-@Composable
-private fun TravelLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.travelLocationFlow().collectAsState()
-    ServiceLocationRow("Travel", "game_ui_travel", loc, showSplit = false) {
-        UiPreferences.setTravelLocation(context, it)
-    }
-}
-
-/** Rest/Wait location row — [Bottom][Top], Top pending. Presentational for now: RestWaitOverlay is
- *  hardcoded to the bottom screen and does not read this flow (see the pref's note). */
-@Composable
-private fun RestwaitLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.restwaitLocationFlow().collectAsState()
-    ServiceLocationRow("Rest / Wait", "game_ui_restwait", loc, showSplit = false) {
-        UiPreferences.setRestwaitLocation(context, it)
-    }
-}
-
-/** Crime-alert location row — [Bottom][Top], Top pending. Presentational for now: the CrimeToast is
- *  hardcoded to the bottom screen and does not read this flow (see the pref's note). */
-@Composable
-private fun CrimeLocationRow() {
-    val context = LocalContext.current
-    val loc by UiPreferences.crimeLocationFlow().collectAsState()
-    ServiceLocationRow("Crime alerts", "game_ui_crime", loc, showSplit = false) {
-        UiPreferences.setCrimeLocation(context, it)
-    }
-}
-
 /**
  * Opacity of DS overlay panel BACKGROUNDS on the top screen, 0–100%.
  *
  * No floor: only the panel fill fades, never the text/bars drawn on it (and the Bronze border stays
  * opaque), so even 0% leaves the content fully legible over the game rather than stranding anyone.
- * Bottom-screen companion panels are deliberately unaffected — Adaptive Dimming (Companion Tabs) is
- * the separate bottom-screen concept.
+ * Bottom-screen companion panels are deliberately unaffected — Adaptive Dimming (Bottom Screen) is
+ * the separate bottom-screen concept. The two now sit one section apart rather than five, but they
+ * remain distinct settings and should not be merged.
  */
 @Composable
 private fun TopPanelOpacityRow() {
@@ -13863,17 +13885,21 @@ private fun TopPanelOpacityRow() {
     }
 }
 
-/** The Target-health location row: a [Bottom][Top] pill selector. BOTTOM (default) = the
- *  bottom-screen HUD combat-target bar; TOP = an additional top-screen overlay (top-centre). */
+/** The DS target-health bar's location: a [Bottom][Top] pill selector. BOTTOM = the bottom-screen
+ *  HUD combat-target bar; TOP (default) = a top-screen overlay (top-centre).
+ *
+ *  Named "DS target health bar" against the HUD list's "Native target health bar" — the two used to
+ *  both read "Target health" in different sections while meaning different things (whether the
+ *  GAME's bar is shown, vs which screen DS draws ITS bar on). */
 @Composable
 private fun TargetHealthLocationRow() {
     val context = LocalContext.current
     val loc by UiPreferences.targetHealthLocationFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text("Target health", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text("DS target health bar", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Shows enemy health bar on the top screen during combat",
+            "Which screen the companion draws the enemy's health bar on during combat",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -13931,32 +13957,92 @@ private fun PlayerCombatRow() {
     }
 }
 
-/** A pending Screen Layout row: element name + PENDING tag over a locked [Bottom][Top] selector
- *  (Bottom active, both pills disabled). Per-screen routing isn't implemented for these yet. */
+/**
+ * Leading blurb for the TOP SCREEN section's native-HUD list.
+ *
+ * Without it, "Minimap → Off" reads as "remove my minimap" rather than "stop the GAME drawing one,
+ * the companion still has it". That reassurance previously existed only in the title-screen welcome
+ * text, which a player who opens Options from the in-game pause menu never sees.
+ */
 @Composable
-private fun ScreenLayoutPendingRow(el: GameUiElement) {
+private fun TopScreenBlurb() {
+    Text(
+        "The companion always shows these on the bottom screen. These switches control whether the " +
+            "game also shows them on the top screen.",
+        color = BoneDim,
+        fontSize = 11.sp,
+        fontFamily = MwBody,
+        lineHeight = 15.sp,
+        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+    )
+}
+
+/** Small muted grouping label INSIDE a section, for when a section has two distinct halves
+ *  (the game's HUD vs the DS overlays over it; the inventory tab vs the journal). */
+@Composable
+private fun OptionsSubLabel(text: String) {
+    Text(
+        text.uppercase(),
+        color = BoneDim,
+        fontSize = 9.sp,
+        fontFamily = MwDisplay,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
+    )
+}
+
+/** Explains the one thing the Touch input / Game cursor pills cannot show: they are independent
+ *  EXCEPT that both-off is disallowed, so turning the last one off flips the other back on
+ *  ([UiPreferences.setTouchInput] / [UiPreferences.setGameCursor]). Without this the auto-flip looks
+ *  like a bug — you tap Off and the other row visibly changes by itself. */
+@Composable
+private fun InputPairNote() {
+    Text(
+        "Either or both can be on, but at least one always stays on — turning the last one off " +
+            "switches the other back on, so the top screen is never left with no pointer input.",
+        color = BoneDim.copy(alpha = 0.8f),
+        fontSize = 10.sp,
+        fontFamily = MwBody,
+        lineHeight = 13.sp,
+        modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
+    )
+}
+
+/** A second way into the DS Controls reference, from the CONTROLS section. Worth the duplication
+ *  with the pinned button at the top of the list: sections are collapsible, so with CONTROLS open
+ *  the pinned button is usually scrolled off — and the Game cursor row immediately above repeats a
+ *  caveat that page explains in full. Same title/description/button shape as [OpenConsoleRow]. */
+@Composable
+private fun ControlsReferenceRow(onOpen: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Button and gesture reference", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "What every button, tap and swipe does on the DS screens.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(PillActiveBg.copy(alpha = 0.94f))
+                .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                .clickable { onOpen() }
+                .padding(vertical = 9.dp),
+            contentAlignment = Alignment.Center
+        ) {
             Text(
-                el.label,
-                color = BoneDim,
+                "Open DS Controls",
+                color = BronzeLight,
                 fontSize = 14.sp,
-                fontFamily = MwBody,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                "PENDING",
-                color = BoneDim.copy(alpha = 0.7f),
-                fontSize = 9.sp,
                 fontFamily = MwDisplay,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(Modifier.weight(1f), label = "Bottom", active = true, enabled = false) {}
-            OptionPill(Modifier.weight(1f), label = "Top", active = false, enabled = false) {}
         }
     }
 }
@@ -14006,8 +14092,11 @@ private fun openNativeConsole() {
     }.onFailure { Log.w("CompanionScreen", "could not inject console key", it) }
 }
 
-/** Developer Tools action: open the native console for manual testing. Full-width tappable row,
- *  visually distinct from the locked pending row below it so it doesn't read as disabled too. */
+/** Developer Tools action: open the native console for manual testing. Full-width tappable row.
+ *
+ *  Gated behind "Developer mode" along with everything else in the section (it used to sit ABOVE the
+ *  gate, which made the gate look partial). The console is not a mild exception to the cheat warning
+ *  — it is the most powerful cheat surface in the app, since it accepts any command at all. */
 @Composable
 private fun OpenConsoleRow() {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
@@ -14054,7 +14143,7 @@ private fun DeveloperModeRow() {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Developer mode", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Show the testing actions below",
+            "Show the console and testing actions below",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -14203,19 +14292,10 @@ private fun DeveloperActionsPanel() {
     }
 }
 
-/** Small grouping label inside the Developer Tools action panel. */
+/** Small grouping label inside the Developer Tools action panel — the same treatment the section
+ *  sub-labels use, so the two never drift apart. */
 @Composable
-private fun DevSectionLabel(text: String) {
-    Text(
-        text.uppercase(),
-        color = BoneDim,
-        fontSize = 9.sp,
-        fontFamily = MwDisplay,
-        fontWeight = FontWeight.Bold,
-        letterSpacing = 1.sp,
-        modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
-    )
-}
+private fun DevSectionLabel(text: String) = OptionsSubLabel(text)
 
 /**
  * A one-shot Developer Tools action, presented exactly like [OpenConsoleRow]: a short heading, a
@@ -14400,17 +14480,22 @@ private fun OptionsSectionHeader(title: String, dimmed: Boolean = false) {
 }
 
 /** Toggle for the Alpha3 launcher overlay (the gear + arrow cluster on the top screen).
- *  [On][Off] pill selector (default On). On = shown; Off hides the whole cluster including the
- *  arrow's expanded quick-action row (one composable). Purely Kotlin-side; writes on every tap. */
+ *  [On][Off] pill selector (default Off). On = shown; Off hides the whole cluster including the
+ *  arrow's expanded quick-action row (one composable). Purely Kotlin-side; writes on every tap.
+ *
+ *  Labelled "Launcher touch overlay", not "Alpha3 overlay": "Alpha3" names a DIFFERENT app, which
+ *  means nothing to an OpenMW-DS player. Filed under CONTROLS rather than TOP SCREEN because it is a
+ *  cluster of touch buttons rather than a HUD readout — the subtitle names where it sits so it stays
+ *  findable from "what is that thing in the corner of my top screen". */
 @Composable
 private fun Alpha3OverlayRow() {
     val context = LocalContext.current
     val shown by UiPreferences.alpha3OverlayFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text("Alpha3 overlay", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text("Launcher touch overlay", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "The gear + arrow menu cluster in the top corner",
+            "The gear + arrow button cluster in the top corner of the top screen",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
