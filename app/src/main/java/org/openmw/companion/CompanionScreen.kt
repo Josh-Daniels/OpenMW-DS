@@ -230,6 +230,23 @@ private object JournalQuestNavState {
 }
 
 /**
+ * Whether the manual-journal-entry composer is open, raised by the "+ Add Entry" button at the foot
+ * of the most recent journal column.
+ *
+ * A global holder for the same reason [JournalQuestNavState] is one: the button lives deep inside
+ * JournalColumn (nested in a pager page, itself inside JournalPanel) while the composer must be
+ * hosted at the CompanionScreen ROOT so it covers the tab bar and every panel. Threading a callback
+ * down through JournalChronological → JournalPageHalf → JournalColumn purely to raise one boolean
+ * would be a lot of plumbing for nothing.
+ */
+private object ManualJournalComposerState {
+    var visible by mutableStateOf(false)
+        private set
+    fun open() { visible = true }
+    fun close() { visible = false }
+}
+
+/**
  * "Send the Journal back to its default view" request, raised by the BOTTOM tab bar's JOURNAL
  * button. Needed because that button is the one case the panel can't detect on its own: switching
  * to the Journal tab from elsewhere destroys and rebuilds JournalPanel (so its state is fresh
@@ -744,6 +761,10 @@ private fun CompanionScreenContent() {
     // Same first-frame treatment for the per-character quest prefs (hidden set + followed quest),
     // so the HUD's followed-quest label and the quest list's stars are right on the first frame.
     remember(context) { QuestPrefsRepository.init(context); true }
+    // Manual journal entries: same first-frame treatment, so opening the Journal immediately after
+    // launch shows the last-known save's notes rather than filling them in a moment later. Reads
+    // external storage (not SharedPreferences) — see CustomJournalRepository for why.
+    remember { CustomJournalRepository.init(); true }
     // Load persisted UI routing (which screen the conversation lives on, etc.).
     remember(context) { UiPreferences.init(context); true }
 
@@ -773,14 +794,22 @@ private fun CompanionScreenContent() {
     // without re-running favourites' reconcile on every inventory tick. Same ordering rule: switch
     // character first, then prune — and pass null while the journal is still empty (the save-load
     // window) so a transient blank state can't wipe the hidden set.
-    LaunchedEffect(state.character.name, state.journalEntries) {
+    //
+    // The id set passed to reconcile is the MERGED one (game entries + the manual pseudo-quest).
+    // Passing the raw journal would silently un-hide "Manual Entries" on the next journal tick:
+    // reconcile prunes any id it doesn't see, and the reserved id is never in the game's export.
+    // The non-empty GATE still tests the REAL journal, though — a save-load window where only
+    // manual entries exist must not look like "the journal loaded", or reconcile would wipe the
+    // hidden/followed state of every genuine quest.
+    val mergedJournal = rememberMergedJournal(state.journalEntries)
+    LaunchedEffect(state.character.name, mergedJournal, state.journalEntries) {
         val name = state.character.name
         if (name.isNotBlank()) {
             QuestPrefsRepository.setCharacter(context, name)
             QuestPrefsRepository.reconcile(
                 context,
                 questIds = state.journalEntries.takeIf { it.isNotEmpty() }
-                    ?.map { it.questId }?.toSet()
+                    ?.let { mergedJournal.map { e -> e.questId }.toSet() }
             )
         }
     }
@@ -1110,6 +1139,40 @@ private fun CompanionScreenContent() {
                 onConfirm = { text ->
                     CompanionActions.submitTextInput(text)
                     GameStateRepository.dismissTextInput()
+                }
+            )
+        }
+
+        // Manual journal-entry composer — the SECOND, independent use of the same keyboard. Hosted
+        // at the root (like the native one above) so it covers the tab bar and every panel, and
+        // kept entirely separate from that instance: this one is cancellable and prose-shaped,
+        // while the native one must keep its no-escape behaviour for prompts the game won't let you
+        // dismiss. Nothing about the native path changes.
+        if (ManualJournalComposerState.visible) {
+            val gameDate by GameStateRepository.gameDate.collectAsState()
+            // Publish an empty draft the moment the composer opens, so the TOP-screen preview
+            // appears together with the card rather than only on the first keystroke; clear it on
+            // both exits (confirm and cancel) via onDispose, which cannot be missed.
+            DisposableEffect(Unit) {
+                GameStateRepository.setManualJournalDraft("")
+                onDispose { GameStateRepository.setManualJournalDraft(null) }
+            }
+            TextInputOverlay(
+                initialText = "",
+                title = "JOURNAL ENTRY",
+                prose = true,
+                onTextChange = { GameStateRepository.setManualJournalDraft(it) },
+                onCancel = { ManualJournalComposerState.close() },
+                onConfirm = { text ->
+                    // Stamped from the live COMPANION_GAMEDATE and nothing else — never from the
+                    // last journal entry (arbitrarily stale) and never from a sentinel (which would
+                    // strand the entry on a phantom page). The button that opens this is gated on
+                    // the same value, so the null branch is only reachable if the date vanished
+                    // mid-compose; dropping the entry beats filing it under a guessed day.
+                    gameDate?.let { d ->
+                        CustomJournalRepository.add(text, d.day, d.month, d.dayOfMonth)
+                    }
+                    ManualJournalComposerState.close()
                 }
             )
         }
@@ -1486,6 +1549,62 @@ fun CombatTargetTopOverlay() {
                 target.name,
                 color = BronzeLight, fontSize = 10.sp, fontFamily = MwDisplay,
                 fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * Top-screen live preview of a manual journal entry as it is typed on the bottom screen.
+ *
+ * Non-interactive by construction — EngineActivity adds it with FLAG_NOT_TOUCHABLE, so every touch
+ * still reaches the game; all input happens on the bottom-screen keyboard. Styled as a page of the
+ * journal (the same date header + body treatment as [JournalColumn]) so what the player sees while
+ * writing is what the entry will look like once it is filed.
+ *
+ * Renders nothing when no draft is in progress; [GameStateRepository.manualJournalDraft] is null
+ * except while the composer is open.
+ */
+@Composable
+fun ManualJournalDraftTopOverlay() {
+    val draft by GameStateRepository.manualJournalDraft.collectAsState()
+    val text = draft ?: return
+    val gameDate by GameStateRepository.gameDate.collectAsState()
+    // The date this entry WILL be stamped with, rendered through the same helper the real journal
+    // uses — so the preview cannot drift from the filed entry's header.
+    val dateLabel = gameDate?.let {
+        journalDateLabel(
+            JournalEntry(
+                questId = MANUAL_QUEST_ID, questName = MANUAL_QUEST_NAME, text = "",
+                day = it.day, month = it.month, dayOfMonth = it.dayOfMonth
+            )
+        )
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize().padding(top = 40.dp),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.46f)
+                .mwPanel()
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            if (dateLabel != null) {
+                Text(
+                    dateLabel,
+                    color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+            }
+            Text(
+                // An empty draft would collapse the panel to a sliver the instant it appeared, so
+                // show the prompt until the first keystroke.
+                text.ifEmpty { "…" },
+                color = if (text.isEmpty()) BoneDim else Bone,
+                fontSize = 14.sp, fontFamily = MwBody, lineHeight = 18.sp
             )
         }
     }
@@ -4984,6 +5103,17 @@ private val KB_SYMBOLS = listOf(
     listOf(".", ",", "?", "!", "+", "_"),
 )
 
+// Letters page for PROSE entry (manual journal notes). An apostrophe is appended to the home row —
+// which brings it to ten keys, the same as the top row, so nothing is narrowed — and comma/period
+// flank the space bar below, exactly where a phone keyboard puts them. Writing a sentence should
+// not require a trip to the symbols page for every contraction and full stop. Deliberately NOT
+// applied to the native-triggered instance, where the field is a character/class/save NAME.
+private val KB_LETTERS_PROSE = listOf(
+    KB_LETTERS[0],
+    KB_LETTERS[1] + "'",
+    KB_LETTERS[2],
+)
+
 private fun shiftLabel(k: String, shift: Boolean): String = if (shift) k.uppercase() else k
 
 /**
@@ -5002,16 +5132,35 @@ private fun shiftLabel(k: String, shift: Boolean): String = if (shift) k.upperca
 @Composable
 private fun TextInputOverlay(
     initialText: String,
-    onConfirm: (String) -> Unit
+    onConfirm: (String) -> Unit,
+    // --- Everything below is for the SECOND call site (manual journal entries). Every default
+    // reproduces the original native-triggered behaviour exactly, so that path is untouched. ---
+    title: String = "ENTER TEXT",
+    /** Long-form entry: a taller scrolling field, prose sizing, and the punctuation letters page. */
+    prose: Boolean = false,
+    /**
+     * Non-null makes the overlay cancellable — a Cancel button appears in the header and a tap
+     * outside the card dismisses. Null keeps the original behaviour of swallowing outside taps with
+     * no escape, which is correct there: some in-game prompts genuinely cannot be dismissed.
+     */
+    onCancel: (() -> Unit)? = null,
+    /** Called on every keystroke. Backs the top-screen live preview; null for the native path. */
+    onTextChange: ((String) -> Unit)? = null
 ) {
     var text by remember(initialText) { mutableStateOf(initialText) }
     // One-shot shift: capitalises the next letter then resets. Starts on for an empty field so names
-    // begin with a capital.
+    // (and sentences) begin with a capital.
     var shift by remember(initialText) { mutableStateOf(initialText.isEmpty()) }
     var symbols by remember(initialText) { mutableStateOf(false) }
 
+    // Single choke point so the preview can never drift from the field — every mutation below goes
+    // through this rather than assigning `text` directly.
+    val setText: (String) -> Unit = { next ->
+        text = next
+        onTextChange?.invoke(next)
+    }
     val typeKey: (String) -> Unit = { k ->
-        text += shiftLabel(k, shift)
+        setText(text + shiftLabel(k, shift))
         if (shift) shift = false
     }
 
@@ -5020,48 +5169,80 @@ private fun TextInputOverlay(
             .fillMaxSize()
             .zIndex(22f)
             .background(Color(0xCC0B0906))
-            // Swallow taps outside the card — no cancel/escape (in-game prompts can't always be
-            // escaped; cancelling, when possible, is done on the top screen).
-            .pointerInput(Unit) { detectTapGestures(onTap = {}) },
+            // Outside taps: dismiss when cancellable, otherwise swallowed (see [onCancel]).
+            .pointerInput(onCancel) {
+                detectTapGestures(onTap = { onCancel?.invoke() })
+            },
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth(0.97f)
                 .mwPanel()
+                // Always swallow taps on the card itself, so a stray tap between keys can't fall
+                // through to the scrim and cancel a half-written note.
                 .pointerInput(Unit) { detectTapGestures(onTap = {}) }
                 .padding(horizontal = 12.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(
-                "ENTER TEXT",
-                color = BronzeLight,
-                fontSize = 14.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
-            )
+            // Header. Cancel sits here rather than in the key grid: the bottom row is already full
+            // in prose mode, and a destructive action next to Enter invites mis-taps.
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(
+                    title,
+                    color = BronzeLight,
+                    fontSize = 14.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.sp
+                )
+                if (onCancel != null) {
+                    Text(
+                        "Cancel",
+                        color = BoneDim,
+                        fontSize = 12.sp,
+                        fontFamily = MwBody,
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .clickable { onCancel() }
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
             Spacer(Modifier.height(8.dp))
             // Read-only display of the current text (the keys edit [text]).
+            val fieldScroll = rememberScrollState()
+            // Keep the newest text in view as it grows past the field. Without this, prose entry
+            // types off the bottom edge and the player is writing blind.
+            LaunchedEffect(text) { if (prose) fieldScroll.animateScrollTo(fieldScroll.maxValue) }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(4.dp))
                     .background(SlotBg)
                     .border(1.dp, Bronze, RoundedCornerShape(4.dp))
+                    .then(
+                        if (prose) Modifier.height(TEXT_INPUT_PROSE_FIELD_HEIGHT)
+                                           .verticalScroll(fieldScroll)
+                        else Modifier
+                    )
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 Text(
                     text.ifEmpty { " " },
                     color = BoneBright,
-                    fontSize = 20.sp,
-                    fontFamily = MwData,
-                    maxLines = 1
+                    // Prose wraps at journal-ish sizing; the name field keeps its original single
+                    // large line.
+                    fontSize = if (prose) 15.sp else 20.sp,
+                    fontFamily = if (prose) MwBody else MwData,
+                    lineHeight = if (prose) 20.sp else TextUnit.Unspecified,
+                    maxLines = if (prose) Int.MAX_VALUE else 1
                 )
             }
             Spacer(Modifier.height(10.dp))
 
-            val rows = if (symbols) KB_SYMBOLS else KB_LETTERS
+            val letters = if (prose) KB_LETTERS_PROSE else KB_LETTERS
+            val rows = if (symbols) KB_SYMBOLS else letters
             KbRow { rows[0].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } } }
             KbRow { rows[1].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } } }
             KbRow {
@@ -5071,16 +5252,28 @@ private fun TextInputOverlay(
                     KbKey("⇧", weight = 1.6f, active = shift) { shift = !shift }
                 }
                 rows[2].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } }
-                KbKey("⌫", weight = 1.6f) { if (text.isNotEmpty()) text = text.dropLast(1) }
+                KbKey("⌫", weight = 1.6f) { if (text.isNotEmpty()) setText(text.dropLast(1)) }
             }
             KbRow {
                 KbKey(if (symbols) "ABC" else "123", weight = 1.6f) { symbols = !symbols }
-                KbKey("space", weight = 4.4f) { text += " " }
+                if (prose && !symbols) {
+                    // Comma and period flank the space bar, as on a phone keyboard. Only on the
+                    // letters page — the symbols page already carries both.
+                    KbKey(",") { typeKey(",") }
+                    KbKey("space", weight = 2.4f) { setText("$text ") }
+                    KbKey(".") { typeKey(".") }
+                } else {
+                    KbKey("space", weight = 4.4f) { setText("$text ") }
+                }
                 KbKey("Enter", weight = 2.2f, primary = true) { onConfirm(text) }
             }
         }
     }
 }
+
+// Height of the prose field: roughly six lines at 20sp line height, which is as much as can be
+// given to the field before the key grid starts to crowd on the 1240x1080 bottom panel.
+private val TEXT_INPUT_PROSE_FIELD_HEIGHT = 120.dp
 
 @Composable
 private fun KbRow(content: @Composable RowScope.() -> Unit) {
@@ -8272,8 +8465,12 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         val questPrefs by QuestPrefsRepository.state.collectAsState()
         val followedId = questPrefs.followed
         if (!targetOverlayShowing && followedId != null) {
-            val followedEntry = remember(followedId, state.journalEntries) {
-                state.journalEntries.lastOrNull { it.questId == followedId }
+            // Resolved against the MERGED journal so following "Manual Entries" shows its real
+            // name. The raw list never contains the reserved id, so this would otherwise fall
+            // through to prettifyQuestId("__openmw_ds_manual__") and print garbage on the HUD.
+            val mergedForLabel = rememberMergedJournal(state.journalEntries)
+            val followedEntry = remember(followedId, mergedForLabel) {
+                mergedForLabel.lastOrNull { it.questId == followedId }
             }
             FollowedQuestLabel(
                 questId = followedId,
@@ -10462,11 +10659,38 @@ private fun morrowindMonthName(month: Int): String = listOf(
 private fun journalDateLabel(entry: JournalEntry): String =
     "${entry.dayOfMonth} ${morrowindMonthName(entry.month)} (Day ${entry.day})"
 
+/**
+ * The journal as the DS presents it: the game's own entries followed by the player's manual ones.
+ *
+ * MERGED HERE rather than injected into `GameState.journalEntries`, because that list is rebuilt
+ * wholesale from the COMPANION_JOURNAL_* buffer on every journal tick — anything written into it
+ * would be wiped moments later, and it would blur the line between "what the game exported" and
+ * "what the player wrote".
+ *
+ * CUSTOM ENTRIES ARE APPENDED AT THE END, and that single choice gets both orderings right:
+ * - `JournalChronological` groups with `getOrPut(e.day)` into a LinkedHashMap, so a manual entry
+ *   joins the bottom of its own day's column, or — if it is the first entry of a new day — creates
+ *   the last column, which is correct since it can only ever be written "now".
+ * - `JournalQuestList` builds from `entries.reversed()` + `putIfAbsent`, i.e. most-recently-active
+ *   first, so appending is exactly what floats "Manual Entries" to the TOP of the quest list.
+ */
+@Composable
+private fun rememberMergedJournal(entries: List<JournalEntry>): List<JournalEntry> {
+    val custom by CustomJournalRepository.state.collectAsState()
+    return remember(entries, custom) {
+        if (custom.isEmpty()) entries else entries + custom.map { it.toJournalEntry() }
+    }
+}
+
 @Composable
 private fun JournalPanel() {
     val state by GameStateRepository.state.collectAsState()
     val finishedQuestIds by GameStateRepository.finishedQuestIds.collectAsState()
     val topics by GameStateRepository.journalTopics.collectAsState()
+    // The game's entries plus the player's manual ones. Every view below reads THIS, never
+    // state.journalEntries — the three of them already take a List<JournalEntry>, so merging once
+    // here is the whole integration.
+    val journalEntries = rememberMergedJournal(state.journalEntries)
     var selectedJournalTab by remember { mutableStateOf(JournalTab.Journal) }
     // Sub-navigation within the QUESTS tab: null = quest list, non-null = detail.
     var selectedQuestId by remember { mutableStateOf<String?>(null) }
@@ -10566,13 +10790,13 @@ private fun JournalPanel() {
                             )
                     }
                     JournalTab.Journal ->
-                        if (state.journalEntries.isEmpty()) JournalEmptyState()
-                        else JournalChronological(state.journalEntries, topicNames, openTopic)
+                        if (journalEntries.isEmpty()) JournalEmptyState()
+                        else JournalChronological(journalEntries, topicNames, openTopic)
                     JournalTab.Quests -> {
                         val qid = selectedQuestId
                         if (qid == null)
                             JournalQuestList(
-                                entries = state.journalEntries,
+                                entries = journalEntries,
                                 finishedQuestIds = finishedQuestIds,
                                 showAll = showAllQuests,
                                 showHidden = showHiddenQuests,
@@ -10584,7 +10808,7 @@ private fun JournalPanel() {
                         else
                             JournalQuestDetail(
                                 questId = qid,
-                                entries = state.journalEntries.filter { it.questId == qid },
+                                entries = journalEntries.filter { it.questId == qid },
                                 onBack = { selectedQuestId = null },
                                 topicNames = topicNames,
                                 onTopicLink = openTopic
@@ -10840,15 +11064,21 @@ private fun JournalChronological(
             }
         ) { pageIdx ->
             val pageDays = pages.getOrElse(pageIdx) { emptyList() }
+            // The most recent day is the last column of the last page — which is the RIGHT half on
+            // a full spread but the LEFT half when the final page holds a single day (odd day
+            // count). Comparing against pageDays.size - 1 covers both without a special case, and
+            // yields nothing at all for an empty page.
+            val lastColIdx = pageDays.size - 1
+            val isNewestPage = pageIdx == pages.size - 1
             if (!pageTurn) {
                 // Plain slide: the pager's own translation carries the whole spread sideways, so
                 // there is no stacking, no leaf, and no per-frame draw work at all.
                 Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 4.dp)) {
                     JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.weight(1f),
-                        topicNames, onTopicLink)
+                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 0)
                     Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
                     JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.weight(1f),
-                        topicNames, onTopicLink)
+                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 1)
                 }
                 return@HorizontalPager
             }
@@ -10881,14 +11111,14 @@ private fun JournalChronological(
                 JournalPageHalf(offset, spineAtRight = true, pageIdx = pageIdx,
                     modifier = Modifier.weight(1f)) {
                     JournalColumn(pageDays.getOrElse(0) { emptyList() }, Modifier.fillMaxSize(),
-                        topicNames, onTopicLink)
+                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 0)
                 }
                 // The spine itself stays flat — it is the hinge the leaf swings from.
                 Box(Modifier.width(JOURNAL_SPINE_WIDTH).fillMaxHeight().background(BronzeDark))
                 JournalPageHalf(offset, spineAtRight = false, pageIdx = pageIdx,
                     modifier = Modifier.weight(1f)) {
                     JournalColumn(pageDays.getOrElse(1) { emptyList() }, Modifier.fillMaxSize(),
-                        topicNames, onTopicLink)
+                        topicNames, onTopicLink, showAddEntry = isNewestPage && lastColIdx == 1)
                 }
             }
         }
@@ -11234,7 +11464,13 @@ private fun JournalColumn(
     items: List<Pair<String?, JournalEntry?>>,
     modifier: Modifier,
     topicNames: List<String>,
-    onTopicLink: (String) -> Unit
+    onTopicLink: (String) -> Unit,
+    /**
+     * True for the single column holding the most recent day, where the "+ Add Entry" button is
+     * drawn. Passed in rather than derived here: only [JournalChronological] knows which page and
+     * which half that is.
+     */
+    showAddEntry: Boolean = false
 ) {
     // verticalScroll lets long entries overflow cleanly rather than clip.
     Column(modifier.padding(horizontal = 6.dp).verticalScroll(rememberScrollState())) {
@@ -11250,6 +11486,42 @@ private fun JournalColumn(
                     modifier = Modifier.padding(bottom = 4.dp))
             }
         }
+        if (showAddEntry) AddJournalEntryButton()
+    }
+}
+
+/**
+ * "+ Add Entry" — opens the manual journal composer. Sits at the foot of the most recent day's
+ * column, i.e. directly below the newest entry, which is where a reader who has just caught up
+ * would reach for it.
+ *
+ * Gated on a real in-game date being known: an entry can only be filed under the day the engine
+ * reports (COMPANION_GAMEDATE), so with no date there is nothing correct to write. It arrives
+ * within a second of gameplay starting and does not go away again, so in practice this is only the
+ * first moment after a load.
+ *
+ * Uses "+" rather than a symbol glyph on purpose: the bundled MysticCards game font is missing the
+ * arrow/chevron block, which is why FavStar is a vector icon. "+" is plain ASCII and safe.
+ */
+@Composable
+private fun AddJournalEntryButton() {
+    val gameDate by GameStateRepository.gameDate.collectAsState()
+    if (gameDate == null) return
+    Box(
+        Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "+ Add Entry",
+            color = BronzeLight,
+            fontSize = 12.sp,
+            fontFamily = MwBody,
+            modifier = Modifier
+                .clip(RoundedCornerShape(3.dp))
+                .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+                .clickable { ManualJournalComposerState.open() }
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+        )
     }
 }
 
@@ -11463,21 +11735,133 @@ private fun JournalQuestDetail(
     onTopicLink: (String) -> Unit
 ) {
     val title = entries.firstOrNull()?.let { questDisplayName(it) } ?: prettifyQuestId(questId)
+    // The manual pseudo-quest renders from the CustomJournalEntry list rather than the projected
+    // JournalEntry one, purely so each row carries its own stable id to delete by. Resolving the id
+    // positionally against the merged list would work today but only because both happen to be in
+    // the same order — an invariant nothing enforces.
+    val isManual = questId == MANUAL_QUEST_ID
+    val customEntries by CustomJournalRepository.state.collectAsState()
+
     Column(Modifier.fillMaxSize().mwPanel()) {
         JournalNavBar(left = "Quests", onLeft = onBack, center = title, right = null, onRight = null)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
-            items(entries, key = { e -> "e:${e.day}:${e.dayOfMonth}:${e.text.length}" }) { entry ->
-                val date = journalDateLabel(entry)
-                Text(date, color = BronzeLight, fontSize = 12.sp, fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
-                Text(journalAnnotated(entry.text, topicNames, onTopicLink),
-                    color = Bone, fontSize = 14.sp, fontFamily = MwBody,
-                    lineHeight = 20.sp,
-                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp))
+            if (isManual) {
+                items(customEntries, key = { it.id }) { custom ->
+                    JournalEntryBlock(
+                        entry = custom.toJournalEntry(),
+                        topicNames = topicNames,
+                        onTopicLink = onTopicLink,
+                        customEntryId = custom.id
+                    )
+                }
+            } else {
+                items(entries, key = { e -> "e:${e.day}:${e.dayOfMonth}:${e.text.length}" }) { entry ->
+                    // customEntryId null ⇒ no long-press menu. Real journal entries are the game's
+                    // record and must never be deletable.
+                    JournalEntryBlock(entry, topicNames, onTopicLink, customEntryId = null)
+                }
             }
             item { Spacer(Modifier.height(8.dp)) }
         }
+    }
+}
+
+/**
+ * One dated entry in a quest's detail page: date header + body, with topic links.
+ *
+ * When [customEntryId] is non-null the entry is one the PLAYER wrote, and a long press opens
+ * [ManualEntryContextMenu] to delete it — following QuestRow's idiom (combinedClickable +
+ * DropdownState, so the root-level scrim handles tap-outside dismissal for free). A null id means a
+ * real game entry: no long press, nothing to delete.
+ *
+ * NOTE the long press is attached to the whole block, which includes the non-link date header and
+ * the padding around the text — so there is always somewhere reliable to press even though a topic
+ * link inside the body may swallow the gesture over its own span.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun JournalEntryBlock(
+    entry: JournalEntry,
+    topicNames: List<String>,
+    onTopicLink: (String) -> Unit,
+    customEntryId: String?
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(DropdownState.closeRequest) {
+        if (DropdownState.closeRequest > 0) menuOpen = false
+    }
+
+    Box {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .then(
+                    if (customEntryId == null) Modifier
+                    else Modifier.combinedClickable(
+                        // Tap does nothing: these are read-only notes, and the only action is the
+                        // long-press menu. onClick is required by combinedClickable.
+                        onClick = {},
+                        onLongClick = { menuOpen = true; DropdownState.open() }
+                    )
+                )
+        ) {
+            Text(journalDateLabel(entry), color = BronzeLight, fontSize = 12.sp,
+                fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 2.dp))
+            Text(journalAnnotated(entry.text, topicNames, onTopicLink),
+                color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                lineHeight = 20.sp,
+                modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 6.dp))
+        }
+
+        if (customEntryId != null) {
+            ManualEntryContextMenu(
+                entryId = customEntryId,
+                expanded = menuOpen,
+                onDismiss = { menuOpen = false; DropdownState.closeAll() }
+            )
+        }
+    }
+}
+
+/**
+ * Long-press menu for a player-written journal entry. Delete only — editing is deliberately not
+ * built yet; delete-and-retype covers the same ground until it is. Styled as QuestContextMenu.
+ */
+@Composable
+private fun ManualEntryContextMenu(
+    entryId: String,
+    expanded: Boolean,
+    onDismiss: () -> Unit
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = { onDismiss() },
+        properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+        containerColor = StonePanel,
+        shadowElevation = 0.dp,
+        border = BorderStroke(1.dp, Bronze),
+        shape = RoundedCornerShape(3.dp)
+    ) {
+        Text(
+            MANUAL_QUEST_NAME,
+            color = BronzeLight,
+            fontSize = 12.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 220.dp).padding(horizontal = 12.dp, vertical = 8.dp)
+        )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+        DropdownMenuItem(
+            text = { Text("Delete Entry", fontFamily = MwBody, fontSize = 13.sp) },
+            onClick = {
+                onDismiss()
+                CustomJournalRepository.delete(entryId)
+            },
+            colors = MenuDefaults.itemColors(textColor = Bone)
+        )
     }
 }
 

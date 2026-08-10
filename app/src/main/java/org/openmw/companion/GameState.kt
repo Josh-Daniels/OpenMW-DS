@@ -468,6 +468,18 @@ data class DevToggleState(
     val noclip: Boolean = false
 )
 
+/**
+ * The current in-game date (COMPANION_GAMEDATE), read from the same three MWScript globals the
+ * engine stamps real journal entries with. [day] is the monotonic DaysPassed counter — the value
+ * the chronological journal groups pages by — while [month] (1-based) and [dayOfMonth] are the
+ * display date. Manual journal entries are stamped from this and nothing else.
+ */
+data class GameDate(
+    val day: Int,
+    val month: Int,
+    val dayOfMonth: Int
+)
+
 data class JournalEntry(
     val questId: String,
     val questName: String = "",  // display name from core.dialogue; empty = fall back to prettified ID

@@ -18,6 +18,7 @@ import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
 import org.openmw.companion.LootingTopOverlay
+import org.openmw.companion.ManualJournalDraftTopOverlay
 import org.openmw.companion.PersuasionLocation
 import org.openmw.companion.PersuasionTopOverlay
 import org.openmw.companion.PlayerCombatTopOverlay
@@ -168,6 +169,7 @@ class EngineActivity : SDLActivity() {
     // Screen Layout option == TOP; player vitals (top-left) on the "Player status in combat" == On.
     private var combatTargetTopView: View? = null
     private var playerCombatTopView: View? = null
+    private var manualJournalTopView: View? = null
 
     // INTERACTIVE looting grids on the TOP screen (this activity's own window / Display 0), shown
     // while a container session is active AND Looting is routed to SPLIT (game_ui_looting == DS).
@@ -313,6 +315,7 @@ class EngineActivity : SDLActivity() {
         hidePersuasionTopOverlay()
         hideCombatTargetTopOverlay()
         hidePlayerCombatTopOverlay()
+        hideManualJournalTopOverlay()
         hideLootingTopOverlay()
         hideBarterTopOverlay()
 
@@ -1115,6 +1118,19 @@ class EngineActivity : SDLActivity() {
                 }
         }
 
+        // Top-screen live preview of a manual journal entry being typed on the bottom screen.
+        // Non-interactive (FLAG_NOT_TOUCHABLE), so all touch still reaches the game while the
+        // bottom-screen keyboard does the input. No Screen Layout option gates this: the preview is
+        // the point of writing on the top screen, not a routable element.
+        lifecycleScope.launch {
+            GameStateRepository.manualJournalDraft
+                .map { it != null }
+                .distinctUntilChanged()
+                .collect { show ->
+                    if (show) showManualJournalTopOverlay() else hideManualJournalTopOverlay()
+                }
+        }
+
         // Top-screen INTERACTIVE looting grids: shown while a container session is active AND
         // Looting is routed to SPLIT AND the Looting element is DS (companion draws it). The
         // bottom screen shows only the terminal controls (LootingControlsOnly).
@@ -1361,6 +1377,17 @@ class EngineActivity : SDLActivity() {
         val overlay = playerCombatTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         playerCombatTopView = null
+    }
+
+    private fun showManualJournalTopOverlay() = showTopScreenOverlay(
+        alreadyShown = { manualJournalTopView != null },
+        onAdded = { manualJournalTopView = it },
+    ) { ProvideTopPanelOpacity { ManualJournalDraftTopOverlay() } }
+
+    private fun hideManualJournalTopOverlay() {
+        val overlay = manualJournalTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        manualJournalTopView = null
     }
 
     /**

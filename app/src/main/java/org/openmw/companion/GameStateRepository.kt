@@ -245,8 +245,29 @@ object GameStateRepository {
     val persuasionVisible: StateFlow<Boolean> = _persuasionVisible.asStateFlow()
     fun setPersuasionVisible(visible: Boolean) { _persuasionVisible.value = visible }
 
+    // Live text of a manual journal entry being composed on the bottom screen. null = the composer
+    // is closed. Drives the TOP-screen preview overlay, which is the only reason this is repository
+    // state rather than local composable state: the two screens are separate windows in separate
+    // compositions, so the draft has to travel through something both can see (the same reason
+    // persuasionVisible above is here).
+    private val _manualJournalDraft = MutableStateFlow<String?>(null)
+    val manualJournalDraft: StateFlow<String?> = _manualJournalDraft.asStateFlow()
+    fun setManualJournalDraft(text: String?) { _manualJournalDraft.value = text }
+
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
+
+    // Current in-game date (COMPANION_GAMEDATE, change-detected on day rollover in
+    // companion_global.lua). null until the first line arrives, which is deliberate: a manual
+    // journal entry must be stamped with a REAL date or not written at all, so the UI gates on
+    // this being non-null rather than falling back to a guess.
+    private val _gameDate = MutableStateFlow<GameDate?>(null)
+    val gameDate: StateFlow<GameDate?> = _gameDate.asStateFlow()
+
+    // Per-save identity token (COMPANION_SAVE_ID), emitted by companion.lua on every onActive —
+    // game start and every load. Buckets the manual journal entries.
+    private val _saveId = MutableStateFlow<String?>(null)
+    val saveId: StateFlow<String?> = _saveId.asStateFlow()
 
     // Known dialogue topics (with their seen responses), exported natively on
     // CMP:refreshTopics. Empty = not yet loaded; native side emits alphabetically
@@ -577,6 +598,23 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_CRIME_MSG) -> {
                 val text = trimmed.substring(trimmed.indexOf(LogParser.P_CRIME_MSG) + LogParser.P_CRIME_MSG.length).trim()
                 if (text.isNotEmpty()) _crimeMessage.value = text to crimeSeq++
+            }
+            // Current in-game date + save token. Both are small standalone lines and neither
+            // prefix collides with the JOURNAL_* family under contains(), but they are matched
+            // ahead of it anyway so the cheap cases short-circuit first.
+            trimmed.contains(LogParser.P_GAMEDATE) -> {
+                val idx = trimmed.indexOf(LogParser.P_GAMEDATE) + LogParser.P_GAMEDATE.length
+                LogParser.parseGameDate(trimmed.substring(idx).trim())?.let { _gameDate.value = it }
+            }
+            trimmed.contains(LogParser.P_SAVE_ID) -> {
+                val idx = trimmed.indexOf(LogParser.P_SAVE_ID) + LogParser.P_SAVE_ID.length
+                val token = trimmed.substring(idx).trim()
+                if (token.isNotEmpty()) {
+                    _saveId.value = token
+                    // Re-bucket immediately rather than via a UI effect: the journal may not be
+                    // composed at load time, and the entries must be right the moment it is.
+                    CustomJournalRepository.setSaveId(token)
+                }
             }
             trimmed.contains(LogParser.P_JOURNAL_START) -> {
                 journalBuffer = mutableListOf()

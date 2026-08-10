@@ -111,6 +111,13 @@ object LogParser {
     const val P_JOURNAL_FINISHED_START = "COMPANION_JOURNAL_FINISHED_START:"
     const val P_JOURNAL_FINISHED_QUEST = "COMPANION_JOURNAL_FINISHED_QUEST:"
     const val P_JOURNAL_FINISHED_END = "COMPANION_JOURNAL_FINISHED_END:"
+    // Current in-game date, from companion_global.lua (the MWScript globals the engine itself
+    // stamps journal entries with). Change-detected on day rollover, so this arrives rarely.
+    // Backs the date stamp on manual journal entries.
+    const val P_GAMEDATE = "COMPANION_GAMEDATE:"
+    // Per-save identity token, minted in companion.lua and round-tripped through the .omwsave.
+    // Buckets the manual journal entries (see CustomJournalRepository).
+    const val P_SAVE_ID = "COMPANION_SAVE_ID:"
     // Known dialogue topics with their seen responses, exported natively
     // (androidmain.cpp) on CMP:refreshTopics. Streamed one small line each so a
     // long topic list / long response never trips the engine's 4096-byte stdout
@@ -644,6 +651,23 @@ object LogParser {
         )
     } catch (e: Exception) {
         Log.e(TAG, "Journal entry parse failed: $json", e)
+        null
+    }
+
+    /**
+     * Parses a COMPANION_GAMEDATE payload. Same three fields, with the same meanings, that a real
+     * journal entry carries: `day` is the monotonic DaysPassed counter, `dayOfMonth`/`month` are
+     * the display date (month 1-based, as the Lua journal binding also returns it).
+     */
+    fun parseGameDate(json: String): GameDate? = try {
+        val o = JSONObject(json)
+        GameDate(
+            day = o.getInt("day"),
+            month = o.optInt("month", 1),
+            dayOfMonth = o.optInt("dayOfMonth", 1)
+        )
+    } catch (e: Exception) {
+        Log.e(TAG, "Game date parse failed: $json", e)
         null
     }
 

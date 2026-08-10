@@ -1,5 +1,69 @@
 local types = require('openmw.types')
 local world = require('openmw.world')
+local core = require('openmw.core')
+
+-- ===== COMPANION_GAMEDATE (current in-game date) =====
+--
+-- The date the companion stamps MANUAL journal entries with, read from exactly the three MWScript
+-- globals the engine itself stamps real journal entries with: StampedJournalEntry::makeFromQuest
+-- (mwdialogue/journalentry.cpp) reads sDaysPassed -> day, sMonth -> month, sDay -> dayOfMonth.
+-- Reading the same source is what makes a manual entry group onto the same journal page as the
+-- real entries of that day.
+--
+-- WHY THIS LIVES IN THE GLOBAL SCRIPT: world.mwscript.getGlobalVariables() is global-script-only.
+-- The player script cannot read `day`/`month` at all. It COULD derive DaysPassed alone from
+-- core.getGameTime()/86400 (getGameTime() is literally (mDaysPassed * 24 + mGameHour) * 3600,
+-- datetimemanager.hpp), but day-of-month and month are separately settable by MWScript
+-- (SetDay/SetMonth) and so cannot be reconstructed from elapsed time. openmw_aux.calendar is
+-- player-context-legal but has the same flaw — it rebuilds the calendar from getGameTime plus a
+-- fixed startingYearDay, so it desyncs the moment content sets those globals directly.
+--
+-- core.companionPush is registered in EVERY Lua context (companion-core-push.patch registers it
+-- in initCorePackage unconditionally, not just for the player), so this script emits directly
+-- rather than round-tripping the value through the player script.
+local GAMEDATE_INTERVAL = 1.0
+-- Primed to the interval so the very first onUpdate emits, rather than leaving Kotlin without a
+-- date for a second after every load.
+local gameDateTimer = GAMEDATE_INTERVAL
+-- nil until the first successful read, so a freshly (re)created script always emits once. Global
+-- scripts are destroyed and rebuilt by LuaManager::clear() on a game load, which resets this and
+-- gives the newly loaded save its own emit for free.
+local lastGameDateKey = nil
+
+-- CHANGE-DETECTED ON DAY ROLLOVER, not per tick: the payload only changes when the day advances,
+-- so an unchanged tick does no JNI call and no Kotlin parse at all.
+local function exportGameDate(dt)
+    -- dt is 0 while the game is paused (LuaManager::synchronizedUpdate), so this stalls in menus.
+    -- That is correct rather than a limitation: the date cannot advance while paused either.
+    gameDateTimer = gameDateTimer + dt
+    if gameDateTimer < GAMEDATE_INTERVAL then return end
+    gameDateTimer = 0
+
+    local day, month, dayOfMonth
+    local ok = pcall(function()
+        local g = world.mwscript.getGlobalVariables()
+        day = math.floor(g.dayspassed or 0)
+        -- 'month' is the engine's 0-BASED month index. +1 here so the emitted value matches the
+        -- 1-based month the Lua journal-entry binding returns (mwlua/types/player.cpp returns
+        -- mMonth + 1), which is what the companion's morrowindMonthName() expects to index.
+        month = math.floor(g.month or 0) + 1
+        -- The 'day' global is the DAY OF MONTH; 'dayspassed' is the monotonic counter. The naming
+        -- is the engine's, and getting them the wrong way round would silently reintroduce the
+        -- year-collision bug the journal's day grouping was fixed for.
+        dayOfMonth = math.floor(g.day or 1)
+    end)
+    if not ok or not day then return end
+
+    local key = day .. '|' .. month .. '|' .. dayOfMonth
+    if key == lastGameDateKey then return end
+    lastGameDateKey = key
+    core.companionPush(string.format(
+        'COMPANION_GAMEDATE:{"day":%d,"month":%d,"dayOfMonth":%d}', day, month, dayOfMonth))
+end
+
+local function onUpdate(dt)
+    exportGameDate(dt)
+end
 
 local function onDropItem(data)
     local inv = types.Actor.inventory(data.actor)
@@ -211,6 +275,9 @@ local function onDevSetHour(data)
 end
 
 return {
+    engineHandlers = {
+        onUpdate = onUpdate,
+    },
     eventHandlers = {
         CompanionDropItem = onDropItem,
         CompanionContainerTransfer = onContainerTransfer,

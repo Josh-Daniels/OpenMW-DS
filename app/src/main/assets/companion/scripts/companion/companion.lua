@@ -110,6 +110,70 @@ local function emit(line)
     core.companionPush(line)
 end
 
+-- ===== Save identity (COMPANION_SAVE_ID) =====
+--
+-- A token minted per PLAYTHROUGH and stored INSIDE the save file, giving the companion true
+-- per-save identity for the first time.
+--
+-- Everything save-scoped on the companion side has until now been keyed by CHARACTER NAME
+-- (FavouritesRepository, QuestPrefsRepository), because the character name was the only identity
+-- the companion had — so two saves of the same character share one bucket. That is merely untidy
+-- for a favourites slot, but it would be plainly WRONG for manual journal entries: entries from
+-- one playthrough would surface, dated to days that never happened, inside a parallel save of the
+-- same character.
+--
+-- MECHANISM: onSave/onLoad are engine handlers (components/lua/scriptscontainer.cpp — the returned
+-- table is serialized into the .omwsave and handed straight back on load), so the token travels
+-- with the save FILE. That also means it survives an app uninstall for the same reason the saves
+-- themselves do: they live under /storage/emulated/0/OpenMW-DS/, not in app-private storage.
+--
+-- KNOWN AND ACCEPTED: a save branched from another (save-as, or a copied file) inherits the token,
+-- so two branches of one playthrough share a bucket. That is usually the desired reading of "the
+-- same playthrough", and is strictly better than keying on character name in either case.
+--
+-- KNOWN AND ONE-TIME: for a save created BEFORE this feature existed, onLoad is NOT called (the
+-- script did not exist when that game was saved — see the engine_handlers docs) and onInit runs
+-- instead, minting a fresh token. That token only becomes durable at the next save, so notes
+-- written in that first session before saving end up under a bucket the following load will not
+-- reuse. One-time cost per pre-existing save, and nothing is destroyed — those entries remain in
+-- the JSON, just unreferenced.
+local saveId = nil
+
+-- math.random is seeded ONCE by the engine at startup from std::time(nullptr), after which
+-- randomseed is deliberately stubbed out (components/lua/luastate.cpp) — so it is usable here but
+-- must never be re-seeded. os.time() is pinned in as well: the sandbox exposes only os.date /
+-- os.difftime / os.time, and the wall-clock prefix means two characters created in the same
+-- session cannot collide even if the RNG stream were to repeat.
+local function mintSaveId()
+    local parts = {}
+    for _ = 1, 4 do parts[#parts + 1] = string.format('%04x', math.random(0, 0xffff)) end
+    -- Guarded: a missing `os` would raise "attempt to index global 'os'" and take the whole script
+    -- down at load time. Four random chunks are unique enough on their own if it ever comes to it.
+    local stamp = 0
+    pcall(function() stamp = os.time() end)
+    return string.format('%x-%s', stamp, table.concat(parts))
+end
+
+-- Emitted from onActive, which fires both at game start and on the freshly recreated player script
+-- after every load — so Kotlin always learns the live save's token without polling for it.
+local function emitSaveId()
+    if saveId then emit('COMPANION_SAVE_ID:' .. saveId) end
+end
+
+local function onInit()
+    saveId = mintSaveId()
+end
+
+local function onSave()
+    return { saveId = saveId }
+end
+
+local function onLoad(data)
+    -- A save written by an older companion build carries no token; mint one now so the rest of the
+    -- feature always has an identity to key on.
+    saveId = (data and data.saveId) or mintSaveId()
+end
+
 -- Change-detection: only emit (→ JNI → parse) when the line actually changed.
 -- Same pattern as exportCharacter/exportContainer/etc. During genuinely static play
 -- (standing still, full stats) this skips the whole 10 Hz emit; movement/regen still
@@ -2600,6 +2664,10 @@ local function onActive()
     -- is a no-op on the Kotlin side. (A tracking boolean would not survive the
     -- load — clear() destroys this script instance, so locals reset.)
     emit('COMPANION_PAUSE_MENU_CLOSED:')
+    -- Tell Kotlin which save this is. onActive is the right moment: it runs after onInit/onLoad
+    -- (script creation always precedes activation), and it fires again on the recreated script
+    -- after every load, so switching saves at runtime re-buckets the manual journal automatically.
+    emitSaveId()
 end
 
 -- Global-script callback: the bulk transfer (take-all / dispose) has been queued in
@@ -2619,6 +2687,11 @@ return {
         onFrame = onFrame,
         onActive = onActive,
         onConsoleCommand = onConsoleCommand,
+        -- Save-identity token (see mintSaveId): minted on a new game, round-tripped through the
+        -- .omwsave on save/load. Backs the per-save bucketing of manual journal entries.
+        onInit = onInit,
+        onSave = onSave,
+        onLoad = onLoad,
     },
     eventHandlers = {
         CompanionCombatTarget = onCombatTarget,
