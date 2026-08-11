@@ -474,6 +474,34 @@ local function effectArgName(e)
     return nil
 end
 
+-- Remaining time on a timed effect, QUANTIZED to the granularity the UI actually draws:
+-- whole seconds under a minute, whole minutes above (matching the engine's own
+-- ToolTips::getDurationString unit convention, which truncates rather than rounds).
+--
+-- The quantization is load-bearing, not cosmetic. exportActiveEffects is change-detected on the
+-- joined effect string, so emitting the raw float would make that string differ on EVERY 0.2s slow
+-- tick for as long as any timed effect is active — defeating change detection entirely and putting
+-- a 5 Hz emit + GameState churn on the wire to express a countdown nothing can read faster than
+-- 1 Hz. Quantized, the string changes only when a DISPLAYED value changes (~1 Hz typical, and 0 Hz
+-- when only permanent effects are active). Sampling still happens at the normal slow tick, so a
+-- newly-applied effect still appears within ~200ms; only emission is gated.
+--
+-- Returns nil for anything that must NOT show a timer. That test is the engine's, not ours:
+-- ActiveSpellEffect.durationLeft (magicbindings.cpp) already returns nil when the effect's
+-- mDuration < 0 — which is how abilities, diseases/blight/curses and constant-effect worn
+-- enchantments are stored — or when the effect record carries the NoDuration flag. Do NOT
+-- reimplement this from the spell-level `fromEquipment`/`temporary` flags: those are per-SPELL, so
+-- they would wrongly suppress the timer on a cast-on-strike enchantment's effect, which is timed
+-- even though its source is a worn item.
+local function quantizeRemaining(secs)
+    if secs == nil then return nil end
+    -- mTimeLeft is decremented by the frame dt and can dip slightly below zero in the frame before
+    -- the effect is removed; clamp so the last tick reads "0s" rather than a negative.
+    if secs < 0 then secs = 0 end
+    if secs < 60 then return math.floor(secs) end
+    return math.floor(secs / 60) * 60
+end
+
 -- Active magic effects for the HUD/Stats display. We iterate ACTIVE SPELLS
 -- (types.Actor.activeSpells — the spells/abilities/enchantments/potions currently
 -- in force), NOT the aggregate types.Actor.activeEffects query object. activeSpells
@@ -501,10 +529,16 @@ local function exportActiveEffects()
                     -- `magnitudeThisFrame` (there is NO `.magnitude` on this usertype);
                     -- it's nil for NoMagnitude effects (water walking, etc.) → 0 = no "pts".
                     local mag = math.floor((e.magnitudeThisFrame or 0) + 0.5)
+                    -- Remaining time, OMITTED entirely for permanent effects (see
+                    -- quantizeRemaining) so those lines stay byte-identical to before — the same
+                    -- convention the optional `ench` object uses on item lines.
+                    local remaining = quantizeRemaining(e.durationLeft)
+                    local remainingJson = remaining and
+                        string.format(',"remaining":%d', remaining) or ''
                     parts[#parts+1] = string.format(
-                        '{"name":"%s","source":"%s","harmful":%s,"icon":"%s","magnitude":%d}',
+                        '{"name":"%s","source":"%s","harmful":%s,"icon":"%s","magnitude":%d%s}',
                         jsonEscape(name), jsonEscape(source),
-                        harmful and 'true' or 'false', jsonEscape(icon), mag)
+                        harmful and 'true' or 'false', jsonEscape(icon), mag, remainingJson)
                 end)
             end
         end
@@ -1277,6 +1311,64 @@ local function exportEquipment()
     if line == lastEquipmentStr then return end
     lastEquipmentStr = line
     emit(line)
+end
+
+-- The ammo type a weapon FIRES, or nil if it uses no separate ammo. Mirrors the engine's
+-- per-weapon-type `mAmmoType` table (mwmechanics/weapontype.cpp): MarksmanBow -> Arrow,
+-- MarksmanCrossbow -> Bolt, and EVERYTHING else -> None.
+--
+-- MarksmanThrown is the case worth stating explicitly: throwing stars/knives are Marksman-skill
+-- ranged weapons, so they look like they should qualify, but the engine gives them ammo type None
+-- because a thrown weapon consumes ITSELF from its own stack — there is no ammo slot involved and
+-- nothing to count separately. Arrow/Bolt records are likewise not ammo USERS, they are the ammo.
+local function weaponAmmoType(weapon)
+    if weapon == nil then return nil end
+    local ok, wt = pcall(function() return types.Weapon.record(weapon).type end)
+    if not ok or wt == nil then return nil end
+    local WT = types.Weapon.TYPE
+    if wt == WT.MarksmanBow then return WT.Arrow end
+    if wt == WT.MarksmanCrossbow then return WT.Bolt end
+    return nil
+end
+
+local lastAmmoStr = nil
+
+-- The EQUIPPED ammo stack for the HUD's ammo counter: `{"id","count"}`, or `{}` whenever no
+-- counter should be shown.
+--
+-- Deliberately reads the ammo SLOT object (slot 18) and reports that one stack's own `count` —
+-- not a sum over every arrow in the pack. A player carrying three kinds of arrow has three
+-- separate stacks; only the one in the slot is the one that will actually be loosed, so summing
+-- them would report a number the next shot does not draw from.
+--
+-- Emits `{}` — i.e. no counter — in every case where a count would be misleading:
+--   * the equipped weapon fires no ammo (melee, thrown, unarmed, or no weapon at all);
+--   * the ammo slot is empty (reachable: firing the last arrow removes the stack and clears it);
+--   * the equipped ammo does not MATCH the weapon (also reachable — arrows equip into slot 18
+--     regardless of what is in the weapon slot, so longsword+arrows and bow+bolts are both real
+--     states). This is the same `ammoType != None && slot occupied && record type == ammoType`
+--     test the engine itself applies before letting an attack go through
+--     (character.cpp), so the counter is present exactly when a shot is actually possible.
+--
+-- Change-detected like every other slow-tick export, so it costs one ~40-byte line per actual
+-- change (i.e. per shot) rather than five a second. No new tick and no throttle of its own: the
+-- count is bounded by how fast a bow can fire, which is far below the 0.2s sampling interval.
+local function exportAmmo()
+    local str = '{}'
+    pcall(function()
+        local equipped = types.Actor.getEquipment(self)
+        local want = weaponAmmoType(equipped[16])
+        if want == nil then return end
+        local ammo = equipped[18]
+        if ammo == nil or not types.Weapon.objectIsInstance(ammo) then return end
+        if types.Weapon.record(ammo).type ~= want then return end
+        str = string.format('{"id":"%s","count":%d}',
+            jsonEscape(ammo.recordId), ammo.count)
+    end)
+
+    if str == lastAmmoStr then return end
+    lastAmmoStr = str
+    emit('COMPANION_AMMO:' .. str)
 end
 
 -- Lazy per-questId lookup from core.dialogue.journal.records.
@@ -2604,6 +2696,7 @@ local function onUpdate(dt)
         exportSelectedSpell()
         exportInventory()
         exportEquipment()
+        exportAmmo()
         exportActiveEffects()
         exportCharacter()
         exportCharacterDetail()

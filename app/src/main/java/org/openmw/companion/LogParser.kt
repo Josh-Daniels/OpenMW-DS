@@ -96,6 +96,7 @@ object LogParser {
     const val P_TEXT_INPUT_OPEN = "COMPANION_TEXT_INPUT_OPEN:"
     const val P_TEXT_INPUT_CLOSED = "COMPANION_TEXT_INPUT_CLOSED"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
+    private const val P_AMMO = "COMPANION_AMMO:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
     // Player standing (reputation/bounty/factions). Single small line, merged onto
@@ -259,6 +260,8 @@ object LogParser {
                     current.copy(inventory = parseInventory(after(line, P_INVENTORY)))
                 line.contains(P_EQUIPMENT) ->
                     current.copy(equipment = parseEquipment(after(line, P_EQUIPMENT)))
+                line.contains(P_AMMO) ->
+                    current.copy(ammo = parseAmmo(after(line, P_AMMO)))
                 line.contains(P_ACTIVE_EFFECTS) ->
                     current.copy(activeEffects = parseActiveEffects(after(line, P_ACTIVE_EFFECTS)))
                 line.contains(P_CHARACTER) ->
@@ -594,6 +597,15 @@ object LogParser {
         return map
     }
 
+    /** `{}` — the exporter's "no counter here" form — parses to null, as does a count of 0 or a
+     *  malformed payload. See [EquippedAmmo] for why absence covers several distinct game states. */
+    private fun parseAmmo(json: String): EquippedAmmo? {
+        val o = JSONObject(json)
+        val count = o.optInt("count", 0)
+        if (count <= 0) return null
+        return EquippedAmmo(id = o.optString("id", ""), count = count)
+    }
+
     private fun parseActiveEffects(json: String): List<ActiveEffect> {
         val arr = JSONArray(json)
         return (0 until arr.length()).map {
@@ -603,7 +615,15 @@ object LogParser {
                 harmful = o.optBoolean("harmful", false),
                 icon = o.optString("icon", ""),
                 magnitude = o.optInt("magnitude", 0),
-                source = o.optString("source", "")
+                source = o.optString("source", ""),
+                // Absent for permanent effects (and for any older Lua that predates the field),
+                // which is exactly the "no timer" signal — so this must stay a real null rather
+                // than an optInt default. See ActiveEffect.remainingSeconds.
+                remainingSeconds = if (o.has("remaining") && !o.isNull("remaining")) {
+                    o.optInt("remaining", 0)
+                } else {
+                    null
+                }
             )
         }
     }

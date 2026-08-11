@@ -150,6 +150,10 @@
     <string name="simplified_launcher_settings_title">Settings</string>
     <string name="simplified_launcher_more_coming">More settings are coming to this screen.</string>
     <string name="simplified_no_content_files">No content files yet. Use “Add Mods” to add a Data Files folder.</string>
+    <plurals name="simplified_mods_added">
+        <item quantity="one">Add Mods (%1$d folder added)</item>
+        <item quantity="other">Add Mods (%1$d folders added)</item>
+    </plurals>
     <string name="simplified_transfer_from_alpha3">Transfer from Alpha3</string>
     <string name="simplified_load_order">Load Order</string>
     <string name="simplified_copy_mod_order">Copy mod order from Alpha3</string>

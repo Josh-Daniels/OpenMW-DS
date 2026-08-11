@@ -286,6 +286,7 @@ object UiPreferences {
     private const val ADAPTIVE_DIM_MIN_BRIGHTNESS = "adaptive_dim_min_brightness"
     private const val ADAPTIVE_DIM_MAX_BRIGHTNESS = "adaptive_dim_max_brightness"
     private const val JOURNAL_PAGE_TURN = "journal_page_turn"
+    private const val EFFECT_TIMERS = "effect_timers"
     // Master switch + level for the companion's own interface sounds (keyboard, options pills and
     // sliders, Developer Tools buttons). See UiSounds.
     private const val UI_SOUNDS = "ui_sounds"
@@ -398,6 +399,18 @@ object UiPreferences {
     // by default once the overlay rewrite landed and it was approved on device. Change at BOTH this
     // init and the getBoolean load fallback.
     private val journalPageTurnFlow = MutableStateFlow(true)
+
+    // Whether a remaining-duration countdown is shown beside each TIMED active effect (HUD effects
+    // dropdown, Stats page list, effect detail popup). Permanent effects — abilities, diseases,
+    // constant-effect worn enchantments — never show one regardless, because the exporter omits
+    // the value for them entirely; this switch only governs the timed ones.
+    //
+    // Default TRUE, DELIBERATELY unlike OpenMW's own `show effect duration` setting (default
+    // false). That default is a vanilla-fidelity choice for a HUD that has no room for it; the
+    // companion screen exists precisely to show more than the game does out of the box, so this
+    // ships visible and the switch is there for players who want the plainer list. Change at BOTH
+    // this init and the getBoolean load fallback.
+    private val effectTimersFlow = MutableStateFlow(true)
     // Interface sounds. Default ON — the feature exists because Developer Tools buttons gave no
     // sign a tap had registered, so shipping it off by default would leave that unfixed for anyone
     // who never finds the row.
@@ -532,6 +545,7 @@ object UiPreferences {
             p.getFloat(ADAPTIVE_DIM_MAX_BRIGHTNESS, ADAPTIVE_DIM_MAX_DEFAULT)
                 .coerceIn(ADAPTIVE_DIM_MAX_RANGE)
         journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, true)
+        effectTimersFlow.value = p.getBoolean(EFFECT_TIMERS, true)
         uiSoundsFlow.value = p.getBoolean(UI_SOUNDS, true)
         uiSoundVolumeFlow.value = p.getFloat(UI_SOUND_VOLUME, UI_SOUND_VOLUME_DEFAULT)
             .coerceIn(UI_SOUND_VOLUME_RANGE)
@@ -787,6 +801,16 @@ object UiPreferences {
     fun setJournalPageTurn(context: Context, enabled: Boolean) {
         journalPageTurnFlow.value = enabled
         editor(context).putBoolean(JOURNAL_PAGE_TURN, enabled).apply()
+    }
+
+    /** Whether timed active effects show a remaining-duration countdown. Permanent effects never
+     *  do, independently of this. */
+    fun effectTimersFlow(): StateFlow<Boolean> = effectTimersFlow.asStateFlow()
+
+    /** Set whether active-effect timers are shown and persist. */
+    fun setEffectTimers(context: Context, enabled: Boolean) {
+        effectTimersFlow.value = enabled
+        editor(context).putBoolean(EFFECT_TIMERS, enabled).apply()
     }
 
     /** Whether the companion + DS overlays use the game's typeface (MysticCards) instead of the

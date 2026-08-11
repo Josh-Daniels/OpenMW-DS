@@ -91,6 +91,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Density
@@ -158,6 +159,69 @@ import java.io.File
  *  when the file actually changed. */
 private const val CFG_SETTLE_ATTEMPTS = 10
 private const val CFG_SETTLE_DELAY_MS = 200L
+
+/**
+ * Reads openmw.cfg immediately, then WATCHES it for [CFG_SETTLE_ATTEMPTS] × [CFG_SETTLE_DELAY_MS]
+ * and re-reads whenever it actually changes, handing every read to [onValues].
+ *
+ * Shared by the mod load-order panel and the Add-Mods button's count, because both face the same
+ * race: the writes behind a refresh trigger (`processSelectedFolder`, `modPathSelection`) are
+ * fire-and-forget, so "the selection was made" does not mean "the cfg is on disk yet". Watching the
+ * FILE rather than retrying-while-empty also covers switching from one valid folder to another,
+ * where the stale read is non-empty and a retry-on-empty would never fire.
+ */
+private suspend fun collectSettledModValues(onValues: (List<ModValue>) -> Unit) {
+    val cfg = File(Constants.USER_OPENMW_CFG)
+    fun cfgStamp() = cfg.lastModified() to cfg.length()
+
+    var stamp = cfgStamp()
+    onValues(readModValues())
+
+    repeat(CFG_SETTLE_ATTEMPTS) {
+        delay(CFG_SETTLE_DELAY_MS)
+        val current = cfgStamp()
+        if (current != stamp) {
+            stamp = current
+            onValues(readModValues())
+        }
+    }
+}
+
+/**
+ * How many MOD data folders have been added, i.e. the `data=` lines in the user openmw.cfg that are
+ * not the base game's own `Data Files` and not a folder the app manages for itself.
+ *
+ * There is no "the selected mods folder" to report the way game files have one saved path:
+ * [ModAssistantViewModel.modPathSelection] APPENDS a `data="<folder>"` line (plus a `content=` line
+ * per plugin it finds) and nothing anywhere records a single most-recent choice, so the cfg is the
+ * only state there is — and it is a list, not a slot.
+ *
+ * Excluded from the count:
+ *  - `<game files>/Data Files`, written by the game-files selection itself. It is the base game, not
+ *    a mod, and counting it would show "1 added" before the player has added anything.
+ *  - the app's own resources/delta/companion paths, which are written by the launcher and the Delta
+ *    merge tool rather than chosen by the player.
+ * Duplicates collapse, because adding the same folder twice appends nothing the second time.
+ */
+private fun countAddedModFolders(values: List<ModValue>, savedPath: String?): Int {
+    fun norm(path: String) = path.trim().trim('"').trimEnd('/')
+
+    val gameDataFiles = savedPath?.takeIf { it.isNotBlank() }?.let { norm("$it/Data Files") }
+    val appManaged = listOfNotNull(
+        gameDataFiles,
+        norm(Constants.USER_RESOURCES),
+        norm("${Constants.USER_RESOURCES}/vfs-mw"),
+        norm(Constants.USER_DELTA),
+        norm("${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion"),
+    )
+
+    return values.asSequence()
+        .filter { it.category == "data" }
+        .map { norm(it.value) }
+        .filter { it.isNotEmpty() }
+        .distinct()
+        .count { candidate -> appManaged.none { it.equals(candidate, ignoreCase = true) } }
+}
 
 /** Bounded retry for giving the Play button initial focus, so the controller's confirm button
  *  starts the game on the FIRST press. One pass is the normal case — the retry only covers a
@@ -461,6 +525,17 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
     val savedPath by gameFilesFlow.collectAsState(initial = null)
     val gameFilesMissing = savedPath.isNullOrEmpty() || savedPath == "Game Files: "
 
+    // How many mod folders have been added, for the Add-Mods button's own label. Read from
+    // openmw.cfg on the SAME triggers as the load-order panel below and through the same settling
+    // helper, because `modPathSelection` writes the cfg on its own IO coroutine — `refreshKey` is
+    // bumped from its completion callback, but the game-files path can still land late.
+    var addedModFolders by remember { mutableStateOf(0) }
+    LaunchedEffect(refreshKey, savedPath) {
+        collectSettledModValues { values ->
+            addedModFolders = countAddedModFolders(values, savedPath)
+        }
+    }
+
     // Play state, read exactly as the Alpha3 Play FAB reads it and handed to the shared
     // attemptLaunchGame() preamble — see that function for why Play must not call startGame() bare.
     val codeGroupOption by codeGroupFlow.collectAsState(initial = "OpenMW")
@@ -526,7 +601,17 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
             )
             LauncherActionButton(
                 modifier = Modifier.weight(1f),
-                text = stringResource(R.string.select_data_files),
+                // Unlike game files there is no single "selected" path to echo back — every tap
+                // APPENDS another data folder to openmw.cfg — so the feedback is a running count of
+                // what has been added. A path would have to pick one of several arbitrarily, and
+                // would silently stop changing on every add after the first.
+                text = if (addedModFolders > 0) {
+                    pluralStringResource(
+                        R.plurals.simplified_mods_added, addedModFolders, addedModFolders
+                    )
+                } else {
+                    stringResource(R.string.select_data_files)
+                },
                 onClick = {
                     showModsBrowser = true
                     MToast(stringRes(R.string.add_mod))
@@ -924,24 +1009,12 @@ private fun ModLoadOrderPanel(
     // `savedPath` always emits before the write — which showed an empty list that never recovered.
     // The "No" path only appeared to work because it happens to fire two triggers.
     //
-    // So: read immediately, then WATCH the cfg file for a bounded window and re-read whenever it
-    // actually changes. Watching the file (not just retrying while empty) also covers switching from
-    // one valid folder to another, where the stale read is non-empty and a retry-on-empty would
-    // never fire. Bounded and self-limiting, in the spirit of the icon pipeline's bounded retry.
+    // So the read goes through collectSettledModValues, which re-reads for a bounded window while
+    // the cfg is still settling. Bounded and self-limiting, in the spirit of the icon pipeline's
+    // bounded retry.
     LaunchedEffect(refreshKey, savedPath) {
-        val cfg = File(Constants.USER_OPENMW_CFG)
-        fun cfgStamp() = cfg.lastModified() to cfg.length()
-
-        var stamp = cfgStamp()
-        items = readModValues().filter { it.category == contentKey }
-
-        repeat(CFG_SETTLE_ATTEMPTS) {
-            delay(CFG_SETTLE_DELAY_MS)
-            val current = cfgStamp()
-            if (current != stamp) {
-                stamp = current
-                items = readModValues().filter { it.category == contentKey }
-            }
+        collectSettledModValues { values ->
+            items = values.filter { it.category == contentKey }
         }
     }
 

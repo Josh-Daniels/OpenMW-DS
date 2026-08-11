@@ -8276,6 +8276,12 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
         if (DropdownState.closeRequest > 0) effectsExpanded = false
     }
     val hasEffects = state.activeEffects.isNotEmpty()
+    // Collected ONCE here, not inside the per-effect row: this bar recomposes at the stats tick
+    // rate (~10 Hz while playing), so a per-row collectAsState would restart one collector per
+    // effect per frame. Remembered for the same reason — effectTimersFlow() returns a new wrapper
+    // per call, and collectAsState keys on the instance.
+    val effectTimersFlow = remember { UiPreferences.effectTimersFlow() }
+    val showEffectTimer by effectTimersFlow.collectAsState()
 
     Row(
         modifier = modifier
@@ -8364,7 +8370,7 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                                     fontFamily = MwBody,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis
                                 )
-                                val subtitle = effectSubtitle(effect)
+                                val subtitle = effectSubtitle(effect, showEffectTimer)
                                 if (subtitle.isNotEmpty()) {
                                     Text(
                                         subtitle,
@@ -8834,7 +8840,11 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             label = "WEAPON",
             iconPath = weaponIcon,
             showName = showWeaponName,
-            onToggle = { showWeaponName = !showWeaponName }
+            onToggle = { showWeaponName = !showWeaponName },
+            // Ammo count for a bow/crossbow. Null for everything else — the exporter decides that
+            // (see EquippedAmmo), so there is no weapon-type test here to drift out of step with
+            // the engine's own rule.
+            ammoCount = state.ammo?.count
         )
 
         // Sneak indicator — vanilla stealth icon (sneaking && undetected), shown just below the
@@ -9232,6 +9242,10 @@ private fun EquippedCornerIcon(
     // Drawn as a thin meter across the bottom of the icon, same colours as the spells-tab charge bar.
     charge: Int = 0,
     maxCharge: Int = 0,
+    // Remaining rounds in the equipped ammo stack, for a bow/crossbow in the WEAPON slot.
+    // null = no counter, which is the normal case for every other weapon (and for a bow with
+    // nothing loaded) — see EquippedAmmo.
+    ammoCount: Int? = null,
 ) {
     val icon = rememberItemIcon(iconPath)
     Column(
@@ -9284,6 +9298,26 @@ private fun EquippedCornerIcon(
                     )
                 }
             }
+        }
+        // Ammo count, in a chip directly BELOW the icon box. Inside the same Column so it stays
+        // centred under the icon and the Column simply grows downward — the corner name label is an
+        // absolutely-positioned sibling anchored to the box's own top, so it does not move, and
+        // the only other corner element (the sneak icon at top+64dp) is on the opposite side.
+        // The × is one of the few symbols the game typeface actually carries; see the glyph note
+        // on MysticCards before using any other decorative mark here.
+        if (ammoCount != null) {
+            Text(
+                "×$ammoCount",
+                color = Bone,
+                fontSize = 10.sp,
+                fontFamily = MwData,
+                maxLines = 1,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(SlotBg)
+                    .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp)
+            )
         }
     }
 }
@@ -13281,7 +13315,7 @@ private data class StatProgress(val label: String, val ratio: Float, val caption
 private fun capWord(s: String): String =
     if (s.isBlank()) s else s.replaceFirstChar { it.uppercase() }
 
-private fun StatInfo.toContent(): StatPopupContent = when (this) {
+private fun StatInfo.toContent(showEffectTimer: Boolean = true): StatPopupContent = when (this) {
     is StatInfo.AttributeInfo -> StatPopupContent(
         title = attr.name.ifBlank { attr.id },
         rows = listOf(
@@ -13400,6 +13434,11 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
             add("Type" to if (effect.harmful) "Harmful" else "Beneficial")
             if (effect.source.isNotBlank()) add("Source" to effect.source)
             if (effect.magnitude > 0) add("Magnitude" to "${effect.magnitude} pts")
+            // Its own row rather than tacked onto the subtitle, because this popup renders rows
+            // and never calls effectSubtitle. Absent for permanent effects (null remaining).
+            if (showEffectTimer) {
+                effect.remainingSeconds?.let { add("Time remaining" to formatRemaining(it)) }
+            }
         },
         sections = emptyList(),
         description = "",
@@ -13410,14 +13449,41 @@ private fun StatInfo.toContent(): StatPopupContent = when (this) {
 }
 
 /**
+ * Remaining time on a timed effect, from the already-quantized seconds the exporter sends: "45s"
+ * below a minute, "12m" above. The unit split mirrors the engine's own `ToolTips::getDurationString`
+ * — a per-second countdown on a twenty-minute buff is noise, not information.
+ *
+ * The value is rendered exactly as received, never extrapolated locally: its underlying counter
+ * stops while the game is paused, and this UI is read over paused screens constantly. See
+ * [ActiveEffect.remainingSeconds].
+ */
+private fun formatRemaining(seconds: Int): String =
+    if (seconds < 60) "${seconds}s" else "${seconds / 60}m"
+
+/**
  * Vanilla-style effect subtitle: "<source>: <mag> pts", or just the source / just
  * the magnitude when only one is available; "" when neither is.
+ *
+ * With [showTimer] on, a timed effect appends its remaining duration ("Warwyrd: 10 pts — 45s").
+ * A PERMANENT effect appends nothing whatever the toggle says, because `remainingSeconds` is null
+ * for it — so the switch only ever changes what timed effects show.
+ *
+ * The separator is an em dash: the game typeface (MysticCards) has no `·` glyph, and `—` is one of
+ * the few punctuation marks it does carry.
  */
-private fun effectSubtitle(e: ActiveEffect): String = when {
-    e.source.isNotBlank() && e.magnitude > 0 -> "${e.source}: ${e.magnitude} pts"
-    e.source.isNotBlank() -> e.source
-    e.magnitude > 0 -> "${e.magnitude} pts"
-    else -> ""
+private fun effectSubtitle(e: ActiveEffect, showTimer: Boolean = true): String {
+    val base = when {
+        e.source.isNotBlank() && e.magnitude > 0 -> "${e.source}: ${e.magnitude} pts"
+        e.source.isNotBlank() -> e.source
+        e.magnitude > 0 -> "${e.magnitude} pts"
+        else -> ""
+    }
+    val timer = if (showTimer) e.remainingSeconds?.let(::formatRemaining) else null
+    return when {
+        timer == null -> base
+        base.isEmpty() -> timer
+        else -> "$base — $timer"
+    }
 }
 
 /**
@@ -13428,7 +13494,12 @@ private fun effectSubtitle(e: ActiveEffect): String = when {
  */
 @Composable
 private fun StatInfoPopup(info: StatInfo, onDismiss: () -> Unit) {
-    val content = info.toContent()
+    // Remembered so collectAsState keys on ONE flow instance: effectTimersFlow() returns a fresh
+    // asStateFlow() wrapper per call, which would otherwise restart the collection on every
+    // recomposition (the documented inline-accessor trap).
+    val effectTimersFlow = remember { UiPreferences.effectTimersFlow() }
+    val showEffectTimer by effectTimersFlow.collectAsState()
+    val content = info.toContent(showEffectTimer)
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -13791,9 +13862,17 @@ private fun AttributesAndEffectsPanel(
                 modifier = Modifier.padding(top = 6.dp, start = 2.dp)
             )
         } else {
+            // Collected once for the whole list rather than per row — see the same note in
+            // TopStatBar.
+            val effectTimersFlow = remember { UiPreferences.effectTimersFlow() }
+            val showEffectTimer by effectTimersFlow.collectAsState()
             Column(Modifier.padding(top = 4.dp)) {
                 state.activeEffects.forEach { effect ->
-                    ActiveEffectRow(effect, onTap = { onSelectStat(StatInfo.ActiveEffectInfo(effect)) })
+                    ActiveEffectRow(
+                        effect,
+                        showTimer = showEffectTimer,
+                        onTap = { onSelectStat(StatInfo.ActiveEffectInfo(effect)) }
+                    )
                 }
             }
         }
@@ -13893,11 +13972,15 @@ private fun AttributeRow(attr: AttributeStat, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ActiveEffectRow(effect: ActiveEffect, onTap: (() -> Unit)? = null) {
+private fun ActiveEffectRow(
+    effect: ActiveEffect,
+    showTimer: Boolean = true,
+    onTap: (() -> Unit)? = null
+) {
     // Vanilla layout: effect icon, then the effect name, with "<source>: <mag> pts"
     // beneath it (e.g. "Fortify Attack" / "Warwyrd: 10 pts").
     val icon = rememberItemIcon(effect.icon)
-    val subtitle = effectSubtitle(effect)
+    val subtitle = effectSubtitle(effect, showTimer)
     Row(
         Modifier
             .fillMaxWidth()
@@ -14622,6 +14705,8 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
             item { InventoryTabStyleRow() }
             item { EquippedBarRow() }
             item { EquippedInListRow() }
+            item { OptionsSubLabel("Active effects") }
+            item { EffectTimersRow() }
             item { OptionsSubLabel("Journal") }
             item { JournalPageTurnRow() }
         }
@@ -15485,6 +15570,43 @@ private fun GameFontRow() {
                 active = !enabled,
                 enabled = true
             ) { UiPreferences.setVanillaFont(context, false) }
+        }
+    }
+}
+
+// Effect timers — whether a timed active effect shows how long it has left, beside its source and
+// magnitude. Reaches all three places effects are listed (HUD effects dropdown, Stats page list,
+// effect detail popup) because they all render from the same ActiveEffect. Permanent effects
+// (abilities, diseases, constant-effect worn enchantments) never show a timer either way — the
+// exporter sends no remaining time for them at all — so this row only governs the timed ones.
+// Default On, unlike OpenMW's own default-off `show effect duration`; see UiPreferences.
+// "Bottom Screen" section: both places this is drawn are bottom-screen surfaces.
+@Composable
+private fun EffectTimersRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.effectTimersFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Effect Timers", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Show how long each timed effect has left. Permanent effects never show one.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setEffectTimers(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setEffectTimers(context, false) }
         }
     }
 }

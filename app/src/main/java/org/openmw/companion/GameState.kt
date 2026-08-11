@@ -77,8 +77,38 @@ data class ActiveEffect(
     /** Rounded effect magnitude for display; 0 = unknown/not applicable. */
     val magnitude: Int = 0,
     /** Display name of the source spell/ability/item (e.g. "Warwyrd"); "" if unknown. */
-    val source: String = ""
+    val source: String = "",
+    /**
+     * Remaining time in seconds, already QUANTIZED by the exporter to what the UI draws — whole
+     * seconds below a minute, whole minutes (a multiple of 60) above. See `quantizeRemaining` in
+     * companion.lua for why the quantization happens there rather than here.
+     *
+     * **null means this effect has no timer**, and that is the engine's own determination, not a
+     * heuristic: the exporter omits the field exactly when `ActiveSpellEffect.durationLeft` is nil,
+     * i.e. for abilities, diseases, curses and constant-effect worn enchantments (`mDuration < 0`)
+     * and for NoDuration effect records. Treat null as "permanent / not applicable" and render no
+     * timer; never substitute 0, which is a real value meaning "expiring this second".
+     *
+     * NOT to be extrapolated locally against a wall clock. The underlying counter is decremented by
+     * the simulation frame dt, which stops while the game is paused — and the companion is used
+     * over paused screens constantly (looting, dialogue, barter, the pause menu). A local countdown
+     * would drift for as long as any of those stays open and then snap back on the next export.
+     */
+    val remainingSeconds: Int? = null
 )
+
+/**
+ * The ammo stack currently loaded in the ammunition slot, as reported by `exportAmmo`.
+ *
+ * [count] is that ONE stack's count — deliberately not a total across every arrow the player owns,
+ * since only the stack in the slot is what the next shot draws from.
+ *
+ * The exporter sends this only when the weapon/ammo pairing is one the engine would actually let
+ * you fire, so its mere presence is the "show a counter" signal — the UI does not (and must not)
+ * re-derive which weapons use ammo. Absence covers melee, thrown, unarmed, an empty ammo slot and
+ * a weapon/ammo mismatch alike.
+ */
+data class EquippedAmmo(val id: String, val count: Int)
 
 /** One effect row in an item/spell info popup. */
 data class InfoEffect(val text: String, val harmful: Boolean)
@@ -553,6 +583,12 @@ data class GameState(
     val spells: List<SpellEntry> = emptyList(),
     val inventory: List<InventoryItem> = emptyList(),
     val equipment: Map<String, String> = emptyMap(),
+    /**
+     * The equipped ammo stack, when the equipped weapon actually fires ammo and the equipped ammo
+     * matches it; null in every other case (melee/thrown/unarmed, empty ammo slot, or ammo that
+     * does not match the weapon). Backs the HUD's ammo counter — see [EquippedAmmo].
+     */
+    val ammo: EquippedAmmo? = null,
     val selectedSpell: String? = null,
     val activeEffects: List<ActiveEffect> = emptyList(),
     val journalEntries: List<JournalEntry> = emptyList(),
