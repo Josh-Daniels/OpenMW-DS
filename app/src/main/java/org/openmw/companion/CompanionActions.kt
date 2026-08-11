@@ -171,12 +171,14 @@ object CompanionActions {
     // --- Developer Tools ------------------------------------------------------------------
     // Cheats / test helpers behind the Developer Tools "Developer mode" opt-in. All of these are
     // handled in companion.lua (dispatchCommand's "dev_" branch) — see the note there for why the
-    // Lua APIs are used rather than raw console commands. The ONE exception is devResurrect, which
-    // is intercepted NATIVELY in drainCompanionCommands: MechanicsManager::resurrect has no Lua
-    // binding at all.
+    // Lua APIs are used rather than raw console commands. Nothing here is intercepted natively:
+    // the one action that was (devResurrect, which needed MechanicsManager::resurrect for want of
+    // a Lua binding) was removed Aug 11 2026, so drainCompanionCommands now has no CMP:dev_ branch.
     private fun dev(action: String) = runCommand("CMP:dev_$action")
 
+    // Two amounts for different test needs — see DEV_GOLD_SMALL/DEV_GOLD_LARGE in companion.lua.
     fun devAddGold() = dev("gold")
+    fun devAddGold10k() = dev("gold10k")
 
     // One per vital rather than a single "max everything" — each is independently useful when
     // testing (e.g. magicka only, to exercise casting without also removing damage pressure).
@@ -197,10 +199,6 @@ object CompanionActions {
     fun devAddBulkItems() = dev("bulkitems")
     fun devSetDay() = dev("day")
     fun devSetNight() = dev("night")
-
-    /** Revive the player after death. Native-only (no Lua binding for MechanicsManager::resurrect);
-     *  also resumes the game if death had already put the state manager in State_Ended. */
-    fun devResurrect() = dev("resurrect")
 
     fun exportIconToPng(iconPath: String, outputPath: String) {
         Log.d(TAG, "exportIconToPng iconPath='$iconPath'")

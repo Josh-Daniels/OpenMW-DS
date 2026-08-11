@@ -14857,7 +14857,7 @@ private fun OptionsWelcomeBlock() {
         Spacer(Modifier.height(12.dp))
         Text(
             "New here? Options are set to Native by default but with touch screen enabled instead of mouse controls.\n" +
-            "Want your old UI (health, minimap) back? See the Native HUD section.\n",
+            "Want your old UI (health, minimap) back? See the Top Screen section.\n",
             color = BoneDim,
             fontSize = 17.sp,
             fontFamily = MwBody,
@@ -16193,9 +16193,9 @@ private fun DeveloperModeRow() {
 /**
  * The Developer Tools action panel, shown only while "Developer mode" is on.
  *
- * Every button sends one `CMP:dev_*` command; all but Resurrect are handled in companion.lua
- * using ordinary Lua APIs (see the Developer Tools block there for why that is preferred over
- * raw console commands). Emitted as a SINGLE lazy item rather than one per button — they are a
+ * Every button sends one `CMP:dev_*` command, and all of them are handled in companion.lua using
+ * ordinary Lua APIs (see the Developer Tools block there for why that is preferred over raw
+ * console commands). Emitted as a SINGLE lazy item rather than one per button — they are a
  * unit, they appear and disappear together, and keeping them in one item avoids ~14 more keys in
  * a list whose key collisions are already a documented hazard.
  *
@@ -16265,16 +16265,22 @@ private fun DeveloperActionsPanel() {
             description = "Fills the level-up bar and opens the level-up screen",
             button = "Trigger Level Up"
         ) { CompanionActions.devTriggerLevelUp() }
-        DevActionButton(
-            title = "Resurrect",
-            description = "Brings you back after death, without reloading a save.",
-            button = "Resurrect"
-        ) { CompanionActions.devResurrect() }
 
         DevSectionLabel("Items")
+        // Two gold amounts, titled by the amount rather than both being "Gold" — the same reason
+        // the Daytime/Night-time pair below is titled that way, so the rows are told apart by
+        // their heading and not only by their button text. Smaller first: it is the one that
+        // leaves prices and merchant gold limits meaningful, so it is the usual choice.
         DevActionButton(
-            title = "Gold",
-            description = "Puts 100,000 gold in your inventory.",
+            title = "10,000 gold",
+            description = "Puts 10,000 gold in your inventory. Enough to buy and train freely " +
+                "while merchant gold limits and prices still mean something.",
+            button = "Add 10,000 Gold"
+        ) { CompanionActions.devAddGold10k() }
+        DevActionButton(
+            title = "100,000 gold",
+            description = "Puts 100,000 gold in your inventory. For pushing six-figure values " +
+                "through the gold display and barter.",
             button = "Add 100,000 Gold"
         ) { CompanionActions.devAddGold() }
         DevActionButton(

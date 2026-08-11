@@ -2132,15 +2132,23 @@ end
 -- These deliberately use ordinary Lua APIs rather than raw console commands. Every stat setter
 -- in mwlua/stats.cpp calls ObjectVariant::asSelfObject(), which throws for a global-script
 -- object ("Allowed only in local scripts for 'openmw.self'") — so the stat writes MUST live
--- here in the player script, not in companion_global.lua. Only the two things Lua genuinely
--- cannot do from this context are delegated: item creation (world.createObject is global-only →
--- CompanionDevGiveItems) and resurrect (no Lua binding at all → handled natively in
--- drainCompanionCommands). There is no raw-console-command channel and deliberately so.
+-- here in the player script, not in companion_global.lua. The one thing Lua genuinely cannot do
+-- from this context is delegated: item creation (world.createObject is global-only →
+-- CompanionDevGiveItems). There is no raw-console-command channel and deliberately so.
+--
+-- Every dev action now lands here; nothing is intercepted natively. The sole exception used to be
+-- dev_resurrect (MechanicsManager::resurrect has no Lua binding), removed Aug 11 2026 — it needed
+-- the game paused to reach, and that interaction left the session broken afterwards.
 --
 -- Stat writes are DELAYED (cached and applied at the end of the frame, see SelfObject::cacheStat),
 -- so a read immediately after a write still returns the old value. Nothing here depends on that.
 
-local DEV_GOLD_AMOUNT = 100000
+-- Two gold amounts, not one, because they answer different test questions: 10,000 is a plausible
+-- wealthy-player purse (merchant gold limits still bite, prices still mean something), while
+-- 100,000 exists to push six-digit values through the gold display, barter and encumbrance.
+-- Both are additive per press, like every other dev give.
+local DEV_GOLD_SMALL = 10000
+local DEV_GOLD_LARGE = 100000
 local DEV_MAX_VITAL = 99999
 -- How much the attribute / skill buttons ADD per press. Deliberately additive rather than a set-to
 -- ceiling: pressing repeatedly keeps stacking, which is what makes the buttons useful for pushing a
@@ -2339,9 +2347,12 @@ local function devBulkItems()
 end
 
 local function devDispatch(action)
-    if action == "gold" then
+    if action == "gold" or action == "gold10k" then
         -- createObject lowercases ESM3 ids, so 'gold_001' is the canonical form of Gold_001.
-        devGiveItems({ { id = 'gold_001', count = DEV_GOLD_AMOUNT } })
+        -- One branch for both amounts, mirroring the day/night pair below: the only difference is
+        -- the count, so splitting them would duplicate the id comment and the give call.
+        local amount = (action == "gold10k") and DEV_GOLD_SMALL or DEV_GOLD_LARGE
+        devGiveItems({ { id = 'gold_001', count = amount } })
 
     elseif action == "maxhealth" or action == "maxmagicka" or action == "maxfatigue" then
         -- One button per vital (health / magicka / fatigue are independently useful when testing).
@@ -2443,7 +2454,6 @@ local function devDispatch(action)
         emit("COMPANION_DEBUG: dev set " .. action .. " (hour " .. hour .. ")")
 
     else
-        -- dev_resurrect never reaches Lua (intercepted natively in drainCompanionCommands).
         emit("COMPANION_DEBUG: dev unknown action " .. tostring(action))
     end
 end
