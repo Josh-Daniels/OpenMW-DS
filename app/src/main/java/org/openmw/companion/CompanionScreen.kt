@@ -14699,7 +14699,7 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
         // cover the top screen's DS panels and the options menu too.
         item { CollapsibleSection(SECTION_DISPLAY) }
         if (OptionsSectionState.isExpanded(SECTION_DISPLAY)) {
-            item { AdaptiveDimmingRow() }
+            item { GameBrightnessRow() }
         }
 
         // TOP SCREEN: everything drawn on the game's screen — the game's own HUD elements, then the
@@ -14754,6 +14754,9 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
             item { DeveloperToolsBlurb() }
             item { DeveloperModeRow() }
             if (developerMode) {
+                // Tuning, not a cheat — kept ahead of the action rows so it does not interrupt
+                // their grouping. Here rather than in Display: see AdaptiveDimmingRow.
+                item(key = "dev_dimming") { AdaptiveDimmingRow() }
                 item(key = "dev_console") { OpenConsoleRow() }
                 item(key = "dev_actions") { DeveloperActionsPanel() }
             }
@@ -15669,7 +15672,16 @@ private fun JournalPageTurnRow() {
 // the bottom screen via one full-screen translucent layer, the top screen's DS panels via a per-panel
 // tint (see LocalTopScreenDim), and the options menu via AdaptiveDimmedWindow. Never touches the
 // device's real screen brightness — both physical displays share one brightness group, so per-display
-// control isn't possible anyway. Lives in its own "Display" section because it now spans both screens.
+// control isn't possible anyway.
+//
+// LIVES IN DEVELOPER TOOLS, switch and sliders together (moved there in full Aug 19 2026; it had its
+// own row in the "Display" section before that). Two reasons, and the second is the load-bearing one:
+//   * Game Brightness now occupies Display, and two neighbouring brightness controls that mean
+//     OPPOSITE things — this dims the companion UI, that lightens the game world — is a real trap.
+//   * It is on by default and correct by default. It reacts to the game's own ambient luminance, so
+//     there is nothing a player needs to set; the sliders exist for taste and for re-tuning against
+//     a different panel, which is exactly the "advanced, leave it alone" category.
+// Do NOT promote it back to a main section without solving the adjacency problem some other way.
 //
 // ONE pair of sliders governs both screens. They set the ENDS of the dimming ramp, and each screen
 // re-projects the same positions through its own range: the top screen's is deliberately tighter
@@ -15724,6 +15736,56 @@ private fun AdaptiveDimmingRow() {
                 range = ADAPTIVE_DIM_MAX_RANGE
             ) { UiPreferences.setAdaptiveDimMaxBrightness(context, it) }
         }
+    }
+}
+
+/**
+ * Game-world brightness floors — the two sliders that make DARK scenes lighter without touching
+ * bright ones. Distinct from [AdaptiveDimmingRow], which dims the COMPANION'S own UI and never
+ * touches world rendering; these change what the engine actually renders. That row used to sit
+ * directly above this one — the confusion between the two pairs of brightness sliders is exactly
+ * why it moved to Developer Tools (Aug 19 2026), so do not bring it back alongside.
+ *
+ * Two sliders because the engine genuinely has two separate ambient paths and neither can reach the
+ * other's cells:
+ *  - **Interiors** — a pass-through to OpenMW's own `Shaders/minimum interior brightness`, pushed
+ *    natively (see `EngineActivity.setMinimumInteriorBrightness`). It was always there and already
+ *    did exactly the right thing; it was just buried in the game's own settings window.
+ *  - **Exteriors** — our own night ambient lift, applied from `companion.lua` to every weather
+ *    record's night colour. `RenderingManager::configureAmbient` (which implements the interior
+ *    floor) is never called for an exterior cell, so the interior slider cannot cover night.
+ *
+ * Both are expressed in the same relative-luminance units so the numbers are comparable.
+ *
+ * These compose with Screen Dimming rather than fighting it: both ambient paths flow through
+ * `RenderingManager::setAmbientColour`, which is where `COMPANION_AMBIENT` is exported from, so
+ * raising either floor automatically reports a brighter scene and the companion dims itself LESS.
+ */
+@Composable
+private fun GameBrightnessRow() {
+    val context = LocalContext.current
+    val night by UiPreferences.nightBrightnessFlow().collectAsState()
+    val interior by UiPreferences.interiorBrightnessFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Game Brightness", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Lifts dark scenes in the game world. Daytime is never affected at any setting.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        PercentSlider(
+            label = "Night brightness (outdoors)",
+            blurb = "Brightens outdoor nights. 0% = unchanged; dawn and dusk taper off smoothly.",
+            value = night,
+            range = NIGHT_BRIGHTNESS_RANGE
+        ) { UiPreferences.setNightBrightness(context, it) }
+        PercentSlider(
+            label = "Interior brightness",
+            blurb = "The game's own minimum interior light. 8% is Morrowind's default.",
+            value = interior,
+            range = INTERIOR_BRIGHTNESS_RANGE
+        ) { UiPreferences.setInteriorBrightness(context, it) }
     }
 }
 

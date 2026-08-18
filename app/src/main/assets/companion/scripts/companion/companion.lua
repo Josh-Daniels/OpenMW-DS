@@ -2529,6 +2529,120 @@ local function devDispatch(action)
     end
 end
 
+
+-- ===== Exterior night ambient floor =====
+--
+-- Raises the AMBIENT light of exterior NIGHT so dark outdoor scenes are not pitch black, without
+-- touching daytime at all. Companion to the engine's own `Shaders/minimum interior brightness`,
+-- which does the same job for interiors and cannot reach exteriors: interior ambient comes from
+-- RenderingManager::configureAmbient (cell mood), exterior ambient from the weather system, and
+-- configureAmbient is simply never called for an exterior cell.
+--
+-- WHY THIS IS FLOOR-ONLY BY CONSTRUCTION, not by tuning. Each weather record carries FOUR separate
+-- ambient colours (sunrise/day/sunset/night) in a TimeOfDayInterpolator, and its getValue() returns
+-- a bare `mDayValue` for the whole day window. So a change to the NIGHT value provably cannot reach
+-- midday — there is no blend between them to leak through. Dawn and dusk lerp between the sunrise/
+-- sunset value and night, so the lift tapers smoothly across those windows and has vanished by the
+-- midpoint where the lerp switches over to the day value.
+--
+-- WHY IT COMPOSES WITH ADAPTIVE DIMMING FOR FREE: the values written here feed
+-- WeatherManager::update -> RenderingManager::setAmbientColour, which is the exact function
+-- companion-ambient-export.patch reads COMPANION_AMBIENT from. So a brighter night automatically
+-- reports a higher luminance and the companion dims itself LESS, with no extra plumbing. (A
+-- post-processing shader would have changed the picture without changing that signal, leaving the
+-- bottom screen dimmed for a darkness that is no longer on screen — which is why it was rejected.)
+--
+-- SEMANTICS: a hue-preserving additive LIFT of the night ambient's Rec.709 relative luminance --
+-- scale the colour by (lum + lift)/lum, so the RATIO between channels is untouched. Two properties
+-- are deliberate:
+--   * Hue-preserving. Adding a flat grey instead would wash the blue out of moonlight, which is
+--     exactly what "losing the moonlit look" means in practice. Verified: the b/r ratio is
+--     bit-identical before and after at every lift value.
+--   * A LIFT, not a hard floor (which is what the interior setting uses). Measured across the ten
+--     vanilla weathers, night ambient luminance only spans 0.126 (Blight) to 0.213 (Snow) -- so any
+--     floor big enough to be useful would clamp eight or nine of them to the SAME value and erase
+--     night weather variety altogether. A lift moves them together and keeps their spacing exact.
+-- A lift of 0 leaves every weather bit-identical to vanilla, so the feature is fully off at 0.
+local nightLift = 0.0
+-- Original night colour per weather recordId, captured BEFORE we ever write. Every application
+-- recomputes from this, never from the current value, so repeatedly applying (or LOWERING) the
+-- slider can never compound or ratchet. Weather records are engine data and are not stored in the
+-- .omwsave, so this snapshot is the vanilla value for the session.
+local nightAmbientOriginals = {}
+local nightLiftVerified = nil   -- nil = not yet probed, true/false = read-back result
+
+local function relLuminance(c)
+    return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+end
+
+-- Applies `nightLift` to every weather record. Safe to call repeatedly.
+local function applyNightAmbientFloor()
+    local ok, err = pcall(function()
+        for _, weather in pairs(core.weather.records) do
+            local id = weather.recordId
+            local interp = weather.ambientColor
+            if id and interp then
+                -- Snapshot once. Guarded by presence so a re-application never re-captures a value
+                -- we already modified.
+                if nightAmbientOriginals[id] == nil then
+                    local n = interp.night
+                    nightAmbientOriginals[id] = { r = n.r, g = n.g, b = n.b, a = n.a }
+                end
+                local orig = nightAmbientOriginals[id]
+                local lum = relLuminance(orig)
+                local target = orig
+                if nightLift > 0 then
+                    if lum > 0.0001 then
+                        local k = (lum + nightLift) / lum
+                        target = { r = orig.r * k, g = orig.g * k, b = orig.b * k, a = orig.a }
+                    else
+                        -- Pure black night: no hue to preserve, so a neutral grey is the only
+                        -- sensible target. Mirrors configureAmbient's own black special case.
+                        target = { r = nightLift, g = nightLift, b = nightLift, a = orig.a }
+                    end
+                end
+                interp.night = util.color.rgba(
+                    math.min(target.r, 1), math.min(target.g, 1), math.min(target.b, 1), target.a)
+
+                -- READ-BACK PROBE (one-shot, first weather record only). The engine hands weather
+                -- records to Lua as `const MWWorld::Weather*` while the interpolator's setters take
+                -- a non-const ref, so whether sol permits this write at all is worth PROVING at
+                -- runtime rather than assuming. (Static answer: sol3's pointer pusher keys the
+                -- metatable on meta::unqualified_t<T>, which strips const, so the write is allowed.
+                -- This confirms it on the actual device.)
+                -- Only meaningful when the write actually CHANGES something: at lift 0 the value
+                -- written equals the value already there, so a read-back would compare the original
+                -- against itself and report success even if the write silently did nothing. Skip
+                -- until a lift is set (at which point the very next application probes).
+                if nightLiftVerified == nil and math.abs(math.min(target.r, 1) - orig.r) > 0.0005 then
+                    local back = interp.night
+                    local want = math.min(target.r, 1)
+                    nightLiftVerified = math.abs(back.r - want) < 0.002
+                    emit('COMPANION_NIGHT_AMBIENT_OK:' .. tostring(nightLiftVerified))
+                    emit(string.format(
+                        'COMPANION_DEBUG: night ambient lift %.3f - %s: lum %.4f -> %.4f (wrote r=%.4f, read r=%.4f)',
+                        nightLift, tostring(id), lum, relLuminance(back), want, back.r))
+                end
+            end
+        end
+    end)
+    if not ok then
+        emit('COMPANION_DEBUG: night ambient lift FAILED: ' .. tostring(err))
+        if nightLiftVerified == nil then
+            nightLiftVerified = false
+            emit('COMPANION_NIGHT_AMBIENT_OK:false')
+        end
+    end
+end
+
+local function setNightLift(value)
+    local v = tonumber(value)
+    if v == nil then return end
+    if v < 0 then v = 0 elseif v > 1 then v = 1 end
+    nightLift = v
+    applyNightAmbientFloor()
+end
+
 local function dispatchCommand(command)
     if string.sub(command, 1, 4) ~= "CMP:" then return end
     local payload = string.sub(command, 5)
@@ -2615,7 +2729,12 @@ local function dispatchCommand(command)
     local action, arg = string.match(payload, "^(%S+)%s+(.+)$")
     if not action then return end
 
-    if action == "spell" then
+    if action == "night_brightness" then
+        -- Exterior night ambient lift (0 = off, exact vanilla). Pushed from the DS options slider; also
+        -- re-sent on load, so this is the only place the value enters Lua.
+        setNightLift(arg)
+        return
+    elseif action == "spell" then
         local spell = core.magic.spells.records[arg]
         if spell then
             types.Actor.setSelectedSpell(self, spell)
@@ -2834,6 +2953,17 @@ local function onActive()
     -- reading the console window's own mConsoleMode. So the `mode ~= "Companion"` guard below still
     -- matches injected commands, and now correctly ignores anything the player types.
     exportJournal()
+    -- Re-apply the exterior night ambient floor. Weather records are engine data rebuilt from
+    -- content files on every game start and are NOT stored in the .omwsave, so the write has to be
+    -- redone each session; onActive also fires on the script recreated after a load. Kotlin pushes
+    -- the current slider value right after this, which is what actually sets a non-zero floor --
+    -- this call re-establishes whatever value this Lua state already knows about.
+    applyNightAmbientFloor()
+    -- ...and ask Kotlin to re-push it. This script's locals do NOT survive a load (LuaManager::
+    -- clear() destroys the player script and a fresh one is built), so nightLift is back at 0 here
+    -- and the call above would otherwise silently restore vanilla nights until the slider is next
+    -- touched. Kotlin answers with CMP:night_brightness.
+    emit('COMPANION_REQUEST_SETTINGS:')
     -- Force-dismiss the bottom-screen options overlay after a game LOAD.
     -- Loading from the pause menu tears down GM_MainMenu, but the resulting
     -- UiModeChanged Lua event is queued via sendEvent and then wiped by the

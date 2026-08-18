@@ -91,6 +91,22 @@ object GameStateRepository {
     private val _pauseMenuVisible = MutableStateFlow(false)
     val pauseMenuVisible: StateFlow<Boolean> = _pauseMenuVisible.asStateFlow()
 
+    /**
+     * Bumped every time the game asks Kotlin to re-push settings that live in Lua state.
+     *
+     * Needed because `companion.lua`'s locals do NOT survive a game LOAD — LuaManager::clear()
+     * destroys the player script and a fresh one is created, so anything Kotlin pushed earlier in
+     * the session (currently the exterior night ambient lift) is silently back at its default. A
+     * plain "push once at activity start" collector cannot cover that; the game has to ask. Lua
+     * emits the request from onActive, which fires both at game start and on the script recreated
+     * after every load.
+     *
+     * A monotonically increasing counter rather than a Boolean/Unit so that two identical requests
+     * still register as two distinct events (a StateFlow would dedupe them).
+     */
+    private val _settingsRequest = MutableStateFlow(0L)
+    val settingsRequest: StateFlow<Long> = _settingsRequest.asStateFlow()
+
     // COMPANION_TITLE_MENU_OPEN / _CLOSED lines from the ENGINE (mainmenu.cpp) — the TITLE-screen
     // main menu (no game loaded), which companion.lua can't see (it doesn't run before a game
     // exists). Also gates the options overlay (EngineActivity) so the player can set up before
@@ -785,6 +801,11 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_TEXT_INPUT_OPEN) -> {
                 val idx = trimmed.indexOf(LogParser.P_TEXT_INPUT_OPEN) + LogParser.P_TEXT_INPUT_OPEN.length
                 _textInputRequest.value = trimmed.substring(idx)
+            }
+            // The game (re)activated and wants its Lua-side settings pushed again. See
+            // [settingsRequest] for why a load makes this mandatory rather than belt-and-braces.
+            trimmed.contains("COMPANION_REQUEST_SETTINGS") -> {
+                _settingsRequest.value = _settingsRequest.value + 1
             }
             trimmed.contains("COMPANION_PAUSE_MENU_OPEN") -> {
                 _pauseMenuVisible.value = true

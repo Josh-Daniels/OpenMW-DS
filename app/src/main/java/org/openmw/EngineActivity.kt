@@ -791,6 +791,15 @@ class EngineActivity : SDLActivity() {
          * companionHud*() (companion-hud-elements.patch). Pushed on change + at startup.
          * "Equipped" gates both the weapon and spell boxes.
          */
+        /**
+         * Pushes OpenMW's own `Shaders/minimum interior brightness` (the engine's interior ambient
+         * FLOOR) so the DS options slider can drive it live. The native side parks the value and
+         * applies it on the ENGINE thread via the same processChangedSettings path the game's own
+         * settings window uses, so the current cell re-lights immediately rather than on next load.
+         * There is no Lua API for engine settings, which is why this needs a native bridge at all.
+         */
+        @JvmStatic external fun setMinimumInteriorBrightness(value: Float)
+
         @JvmStatic external fun setCompanionHudHms(on: Boolean)
         @JvmStatic external fun setCompanionHudEquipped(on: Boolean)
         @JvmStatic external fun setCompanionHudMinimap(on: Boolean)
@@ -1018,6 +1027,33 @@ class EngineActivity : SDLActivity() {
                 UiPreferences.hudOnFlow(key).collect { on ->
                     runCatching { push(on) }.onFailure { Log.e(TAG, "setCompanionHud[$key] failed", it) }
                 }
+            }
+        }
+
+        // Push the exterior night ambient lift into Lua. Two triggers, and BOTH are needed:
+        //   * the pref flow, so moving the slider applies live;
+        //   * settingsRequest, because a game LOAD destroys the Lua script and its stored lift —
+        //     see GameStateRepository.settingsRequest. Without the second, loading a save quietly
+        //     reverted nights to vanilla until the slider was next touched.
+        // Sent as a raw luminance value; companion.lua clamps and re-applies to every weather.
+        lifecycleScope.launch {
+            combine(
+                UiPreferences.nightBrightnessFlow(),
+                GameStateRepository.settingsRequest
+            ) { v, _ -> v }.collect { v ->
+                runCatching { sendCompanionCommand("CMP:night_brightness %.4f".format(v)) }
+                    .onFailure { Log.e(TAG, "night_brightness push failed", it) }
+            }
+        }
+
+        // Push the engine's minimum interior brightness (see setMinimumInteriorBrightness). Fires
+        // once with the persisted value, then on every slider move. Unlike the HUD pushes this is
+        // an ENGINE setting rather than a companion flag, so the engine also persists its own copy
+        // to settings.cfg — pushing at startup is what re-asserts our value over that.
+        lifecycleScope.launch {
+            UiPreferences.interiorBrightnessFlow().collect { v ->
+                runCatching { setMinimumInteriorBrightness(v) }
+                    .onFailure { Log.e(TAG, "setMinimumInteriorBrightness failed", it) }
             }
         }
 

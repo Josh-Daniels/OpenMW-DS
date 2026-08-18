@@ -263,6 +263,33 @@ val TOP_ADAPTIVE_DIM_MAX_RANGE = 0.60f..1.00f
 val UI_SOUND_VOLUME_RANGE = 0f..1f
 const val UI_SOUND_VOLUME_DEFAULT = 0.5f
 
+/**
+ * Range for the exterior NIGHT ambient lift ("Night brightness"), expressed in the same Rec.709
+ * relative-luminance units the engine's own interior floor uses, so the two sliders in the Display
+ * section speak one language and their numbers are directly comparable.
+ *
+ * Measured across the ten vanilla weathers, night ambient luminance spans 0.126 (Blight) to 0.213
+ * (Snow). The 0.20 ceiling therefore roughly doubles the darkest nights at most — enough to be
+ * clearly useful without washing the scene out. 0 is exact vanilla, so the bottom of the slider is
+ * a true off.
+ */
+val NIGHT_BRIGHTNESS_RANGE = 0f..0.20f
+
+/** Conservative default: about +29% luminance on a clear night (0.174 -> 0.224). Visible, but well
+ *  short of flattening the moonlit look. The slider goes further for anyone who wants it. */
+const val NIGHT_BRIGHTNESS_DEFAULT = 0.05f
+
+/**
+ * Range for OpenMW's own `Shaders/minimum interior brightness`. This is a pass-through to the
+ * engine setting, NOT a companion invention, so the value stored here is the literal engine value
+ * and [MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT] is the engine's own shipped default.
+ */
+val INTERIOR_BRIGHTNESS_RANGE = 0f..0.35f
+
+/** OpenMW's shipped default for `Shaders/minimum interior brightness` (files/settings-default.cfg).
+ *  Keep in step with the engine if it ever changes upstream. */
+const val MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT = 0.08f
+
 object UiPreferences {
     private const val PREFS = "companion_ui_settings"
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
@@ -291,6 +318,8 @@ object UiPreferences {
     // sliders, Developer Tools buttons). See UiSounds.
     private const val UI_SOUNDS = "ui_sounds"
     private const val UI_SOUND_VOLUME = "ui_sound_volume"
+    private const val NIGHT_BRIGHTNESS = "exterior_night_brightness"
+    private const val INTERIOR_BRIGHTNESS = "minimum_interior_brightness"
     private const val VANILLA_FONT = "vanilla_font"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
@@ -416,6 +445,8 @@ object UiPreferences {
     // who never finds the row.
     private val uiSoundsFlow = MutableStateFlow(true)
     private val uiSoundVolumeFlow = MutableStateFlow(UI_SOUND_VOLUME_DEFAULT)
+    private val nightBrightnessFlow = MutableStateFlow(NIGHT_BRIGHTNESS_DEFAULT)
+    private val interiorBrightnessFlow = MutableStateFlow(MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT)
 
     // Whether the companion + DS overlays render in the game's own typeface instead of the Android
     // system serif/monospace. The face is MysticCards.ttf — OpenMW's SIL-OFL replacement for
@@ -548,6 +579,11 @@ object UiPreferences {
         effectTimersFlow.value = p.getBoolean(EFFECT_TIMERS, true)
         uiSoundsFlow.value = p.getBoolean(UI_SOUNDS, true)
         uiSoundVolumeFlow.value = p.getFloat(UI_SOUND_VOLUME, UI_SOUND_VOLUME_DEFAULT)
+        nightBrightnessFlow.value =
+            p.getFloat(NIGHT_BRIGHTNESS, NIGHT_BRIGHTNESS_DEFAULT).coerceIn(NIGHT_BRIGHTNESS_RANGE)
+        interiorBrightnessFlow.value =
+            p.getFloat(INTERIOR_BRIGHTNESS, MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT)
+                .coerceIn(INTERIOR_BRIGHTNESS_RANGE)
             .coerceIn(UI_SOUND_VOLUME_RANGE)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
@@ -792,6 +828,42 @@ object UiPreferences {
         val v = value.coerceIn(ADAPTIVE_DIM_MAX_RANGE)
         adaptiveDimMaxBrightnessFlow.value = v
         editor(context).putFloat(ADAPTIVE_DIM_MAX_BRIGHTNESS, v).apply()
+    }
+
+    /**
+     * Exterior NIGHT ambient lift, in relative-luminance units (0 = exact vanilla).
+     *
+     * Applied by `companion.lua`'s `applyNightAmbientFloor` via `CMP:night_brightness`, which
+     * rewrites each weather record's night ambient colour. Floor-only correctness is structural,
+     * not tuned: a weather's day ambient is a SEPARATE value that `TimeOfDayInterpolator::getValue`
+     * returns unblended across the whole day window, so nothing set here can reach midday.
+     */
+    fun nightBrightnessFlow(): StateFlow<Float> = nightBrightnessFlow.asStateFlow()
+
+    /** Set the exterior night ambient lift and persist. Clamped to [NIGHT_BRIGHTNESS_RANGE]. */
+    fun setNightBrightness(context: Context, value: Float) {
+        val v = value.coerceIn(NIGHT_BRIGHTNESS_RANGE)
+        nightBrightnessFlow.value = v
+        editor(context).putFloat(NIGHT_BRIGHTNESS, v).apply()
+    }
+
+    /**
+     * OpenMW's `Shaders/minimum interior brightness` — the engine's own interior ambient FLOOR.
+     *
+     * A pass-through, not a reimplementation: the value is pushed to the engine by
+     * `EngineActivity.setMinimumInteriorBrightness`, which parks it for the engine thread to apply
+     * through the same `processChangedSettings` path the game's own settings window uses. Stored
+     * here only so the DS options menu can show and restore it — the engine persists its own copy
+     * to settings.cfg independently.
+     */
+    fun interiorBrightnessFlow(): StateFlow<Float> = interiorBrightnessFlow.asStateFlow()
+
+    /** Set the engine's minimum interior brightness and persist. Clamped to
+     *  [INTERIOR_BRIGHTNESS_RANGE]. */
+    fun setInteriorBrightness(context: Context, value: Float) {
+        val v = value.coerceIn(INTERIOR_BRIGHTNESS_RANGE)
+        interiorBrightnessFlow.value = v
+        editor(context).putFloat(INTERIOR_BRIGHTNESS, v).apply()
     }
 
     /** Whether the journal's chronological view uses the spine-hinged page-turn animation. */

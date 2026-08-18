@@ -19,6 +19,8 @@ int stderr = 0; // Hack: fix linker error
 #include <SDL_hints.h>
 #include <SDL_mouse.h>
 #include <components/vfs/pathutil.hpp>
+#include <components/settings/settings.hpp>
+#include <components/settings/values.hpp>
 #include <components/debug/debugging.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/imagemanager.hpp>
@@ -146,6 +148,34 @@ static std::atomic<bool> g_companionResetAxes{ false };
 // Inventory, leaving the map open-but-parked-off-screen. std::atomic: written/read on the engine
 // thread only (drainCompanionCommands), atomic for consistency with the sibling flags.
 static std::atomic<bool> g_companionPendingMapActive{ false };
+
+// Pending value for the engine's own `Shaders/minimum interior brightness` (the vanilla interior
+// ambient floor), pushed from the DS options slider. NEGATIVE = nothing pending.
+//
+// It cannot be applied straight from the JNI setter: that runs on the Android UI thread, while
+// Settings::Manager and RenderingManager::configureAmbient are engine-thread state. So the setter
+// only parks the value here and the per-frame poll in drainCompanionCommands (which IS the engine
+// main thread) applies it -- the same deferral the map-activation flag above uses.
+static std::atomic<float> g_companionPendingInteriorBrightness{ -1.f };
+
+// Applies a pending interior-brightness change on the ENGINE thread. Mirrors what
+// MWGui::SettingsWindow::apply() does for this setting: write it, then hand the changed key to the
+// world so RenderingManager re-runs configureAmbient for the current cell and the player sees it
+// immediately instead of on the next cell load.
+static void companionApplyPendingInteriorBrightness()
+{
+    const float v = g_companionPendingInteriorBrightness.exchange(-1.f, std::memory_order_relaxed);
+    if (v < 0.f)
+        return;
+
+    Settings::shaders().mMinimumInteriorBrightness.set(v);
+
+    // Consume ONLY our own key. resetPendingChanges() with no argument clears the whole pending
+    // set, which would swallow an unrelated change some other system had queued and not yet seen.
+    const Settings::CategorySettingVector ours{ { "Shaders", "minimum interior brightness" } };
+    MWBase::Environment::get().getWorld()->processChangedSettings(ours);
+    Settings::Manager::resetPendingChanges(ours);
+}
 
 // --- Companion command queue -------------------------------------------------
 // JNI thread pushes commands here; engine thread drains via drainCompanionCommands().
@@ -307,6 +337,10 @@ void drainCompanionCommands()
     // char-gen-suppressed open) harmlessly no-ops on the next all-tabs native inventory open.
     if (g_companionPendingMapActive.load(std::memory_order_relaxed) && companionTryActivateMap())
         g_companionPendingMapActive.store(false, std::memory_order_relaxed);
+
+    // Same rationale: runs before the queue-empty early-return below, so it is a true per-frame
+    // poll rather than something that only fires on frames carrying a command.
+    companionApplyPendingInteriorBrightness();
 
     std::deque<std::string> pending;
     {
@@ -740,6 +774,13 @@ extern "C" bool companionHudSneak() { return g_companionHudSneak.load(); }
 extern "C" bool companionHudCrosshair() { return g_companionHudCrosshair.load(); }
 extern "C" bool companionHudEnemy() { return g_companionHudEnemy.load(); }
 extern "C" bool companionHudControllerTooltips() { return g_companionHudControllerTooltips.load(); }
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setMinimumInteriorBrightness(JNIEnv*, jclass, jfloat value)
+{
+    // Parked for the engine thread to pick up; see companionApplyPendingInteriorBrightness.
+    g_companionPendingInteriorBrightness.store(value < 0.f ? 0.f : value, std::memory_order_relaxed);
+}
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionHudHms(JNIEnv*, jclass, jboolean on)
