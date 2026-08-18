@@ -9,8 +9,8 @@ import kotlinx.coroutines.flow.asStateFlow
 data class FavSlot(val id: String, val name: String)
 
 data class Favourites(
-    val gear: List<FavSlot?> = listOf(null, null),
-    val magic: List<FavSlot?> = listOf(null, null)
+    val gear: List<FavSlot?> = emptyList(),
+    val magic: List<FavSlot?> = emptyList()
 )
 
 /**
@@ -35,11 +35,51 @@ object FavouritesRepository {
     private const val LAST_CHARACTER = "last_character"
     private const val LEGACY_MIGRATED = "legacy_migrated"
 
-    // The four persisted slot keys (per character).
+    // The legacy (pre-per-character) slot keys. Deliberately still just the original two per
+    // category: this list is ONLY used by migrateLegacyIfNeeded, and the old global scheme never
+    // had more than two. It is not the current storage width — that is FAV_SLOTS_MAX.
     private val SLOT_KEYS = listOf("gear_0", "gear_1", "magic_0", "magic_1")
 
-    private val _state = MutableStateFlow(Favourites())
+    // FULL-WIDTH model: always FAV_SLOTS_MAX per category, regardless of what is shown.
+    private var all = Favourites(blank(), blank())
+
+    // Visible counts, applied as a truncation of `all` when publishing to [state].
+    private var gearVisible = FAV_SLOTS_DEFAULT
+    private var magicVisible = FAV_SLOTS_DEFAULT
+
+    // Seeded with the SAME truncation publish() applies, not the full width: `state` is read before
+    // init() on the very first frame, and an untruncated seed would briefly let the favourite menu
+    // offer more slots than the HUD is showing.
+    private val _state = MutableStateFlow(
+        Favourites(all.gear.take(gearVisible), all.magic.take(magicVisible))
+    )
+
+    /** Favourites as the UI should see them — already truncated to the visible counts. */
     val state: StateFlow<Favourites> = _state.asStateFlow()
+
+    private fun blank(): List<FavSlot?> = List(FAV_SLOTS_MAX) { null }
+
+    /** Re-publish `all` truncated to the visible counts. */
+    private fun publish() {
+        _state.value = Favourites(
+            gear = all.gear.take(gearVisible),
+            magic = all.magic.take(magicVisible)
+        )
+    }
+
+    /**
+     * Set how many slots each category shows. Cheap and idempotent, so it can be driven straight
+     * from the preference flows. Does NOT touch storage — see the class note on why lowering the
+     * count must not delete anything.
+     */
+    fun setVisibleCounts(gear: Int, magic: Int) {
+        val g = gear.coerceIn(0, FAV_SLOTS_MAX)
+        val m = magic.coerceIn(0, FAV_SLOTS_MAX)
+        if (g == gearVisible && m == magicVisible) return
+        gearVisible = g
+        magicVisible = m
+        publish()
+    }
 
     // The character whose favourites are currently loaded into _state. Empty
     // until a real name is known; assigns/clears/reconcile no-op while empty so
@@ -54,7 +94,8 @@ object FavouritesRepository {
     fun init(context: Context) {
         val p = prefs(context)
         currentCharacter = p.getString(LAST_CHARACTER, "") ?: ""
-        _state.value = loadFor(p, currentCharacter)
+        all = loadFor(p, currentCharacter)
+        publish()
     }
 
     /**
@@ -70,13 +111,15 @@ object FavouritesRepository {
         migrateLegacyIfNeeded(p, character)
         currentCharacter = character
         p.edit().putString(LAST_CHARACTER, character).apply()
-        _state.value = loadFor(p, character)
+        all = loadFor(p, character)
+        publish()
     }
 
-    /** Index of the first free gear slot, or -1 when both are occupied. */
+    /** Index of the first free VISIBLE gear slot, or -1 when they are all occupied (or none are
+     *  shown). Searches the visible range only, so a hidden slot is never auto-filled. */
     fun firstEmptyGearIndex(): Int = _state.value.gear.indexOfFirst { it == null }
 
-    /** Index of the first free magic slot, or -1 when both are occupied. */
+    /** Index of the first free VISIBLE magic slot, or -1. See [firstEmptyGearIndex]. */
     fun firstEmptyMagicIndex(): Int = _state.value.magic.indexOfFirst { it == null }
 
     /**
@@ -86,34 +129,34 @@ object FavouritesRepository {
      */
     fun assignGear(context: Context, slot: FavSlot, index: Int) {
         if (currentCharacter.isBlank()) return
-        val idx = index.coerceIn(0, 1)
-        val updated = _state.value.gear.toMutableList().also { it[idx] = slot }
-        _state.value = _state.value.copy(gear = updated)
+        val idx = index.coerceIn(0, FAV_SLOTS_MAX - 1)
+        all = all.copy(gear = all.gear.toMutableList().also { it[idx] = slot })
+        publish()
         save(prefs(context), currentCharacter, "gear_$idx", slot)
     }
 
     fun assignMagic(context: Context, slot: FavSlot, index: Int) {
         if (currentCharacter.isBlank()) return
-        val idx = index.coerceIn(0, 1)
-        val updated = _state.value.magic.toMutableList().also { it[idx] = slot }
-        _state.value = _state.value.copy(magic = updated)
+        val idx = index.coerceIn(0, FAV_SLOTS_MAX - 1)
+        all = all.copy(magic = all.magic.toMutableList().also { it[idx] = slot })
+        publish()
         save(prefs(context), currentCharacter, "magic_$idx", slot)
     }
 
     /** Clear a gear favourite slot (Unfavourite). */
     fun clearGear(context: Context, index: Int) {
         if (currentCharacter.isBlank()) return
-        val idx = index.coerceIn(0, 1)
-        val updated = _state.value.gear.toMutableList().also { it[idx] = null }
-        _state.value = _state.value.copy(gear = updated)
+        val idx = index.coerceIn(0, FAV_SLOTS_MAX - 1)
+        all = all.copy(gear = all.gear.toMutableList().also { it[idx] = null })
+        publish()
         clear(prefs(context), currentCharacter, "gear_$idx")
     }
 
     fun clearMagic(context: Context, index: Int) {
         if (currentCharacter.isBlank()) return
-        val idx = index.coerceIn(0, 1)
-        val updated = _state.value.magic.toMutableList().also { it[idx] = null }
-        _state.value = _state.value.copy(magic = updated)
+        val idx = index.coerceIn(0, FAV_SLOTS_MAX - 1)
+        all = all.copy(magic = all.magic.toMutableList().also { it[idx] = null })
+        publish()
         clear(prefs(context), currentCharacter, "magic_$idx")
     }
 
@@ -128,7 +171,10 @@ object FavouritesRepository {
      */
     fun reconcile(context: Context, inventoryIds: Set<String>?, spellIds: Set<String>?) {
         if (currentCharacter.isBlank()) return
-        val cur = _state.value
+        // Operates on the FULL width, not the visible view: a favourite in a hidden slot can still
+        // be sold or unlearned, and if it were skipped here it would reappear stale the moment the
+        // player raised the slot count again.
+        val cur = all
         var gear = cur.gear
         var magic = cur.magic
         if (inventoryIds != null) {
@@ -138,23 +184,28 @@ object FavouritesRepository {
             magic = magic.map { s -> if (s != null && s.id !in spellIds) null else s }
         }
         if (gear == cur.gear && magic == cur.magic) return
-        _state.value = Favourites(gear, magic)
+        all = Favourites(gear, magic)
+        publish()
         // Persist the pruned slots.
         val p = prefs(context)
-        listOf("gear_0" to gear[0], "gear_1" to gear[1],
-               "magic_0" to magic[0], "magic_1" to magic[1]).forEach { (key, slot) ->
-            if (slot == null) clear(p, currentCharacter, key)
-            else save(p, currentCharacter, key, slot)
+        gear.forEachIndexed { i, slot ->
+            if (slot == null) clear(p, currentCharacter, "gear_$i") else save(p, currentCharacter, "gear_$i", slot)
+        }
+        magic.forEachIndexed { i, slot ->
+            if (slot == null) clear(p, currentCharacter, "magic_$i") else save(p, currentCharacter, "magic_$i", slot)
         }
     }
 
     // ---- storage helpers ----
 
+    /** Loads the FULL width (FAV_SLOTS_MAX per category), never the visible count — see the class
+     *  note. Slots beyond what is currently shown are still read, so raising the count restores
+     *  them without a reload. */
     private fun loadFor(p: SharedPreferences, character: String): Favourites {
-        if (character.isBlank()) return Favourites()
+        if (character.isBlank()) return Favourites(blank(), blank())
         return Favourites(
-            gear  = listOf(load(p, character, "gear_0"),  load(p, character, "gear_1")),
-            magic = listOf(load(p, character, "magic_0"), load(p, character, "magic_1"))
+            gear  = List(FAV_SLOTS_MAX) { load(p, character, "gear_$it") },
+            magic = List(FAV_SLOTS_MAX) { load(p, character, "magic_$it") }
         )
     }
 

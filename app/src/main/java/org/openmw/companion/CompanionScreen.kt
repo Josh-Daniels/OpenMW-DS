@@ -986,6 +986,15 @@ private fun CompanionScreenContent() {
     // A category is pruned only when its source list is non-empty; passing null
     // while inventory/spells are still empty (the save-load window) prevents a
     // transient blank state from wiping favourites.
+    // Keep the favourites repository's visible slot counts in step with the options. Truncation
+    // happens inside the repository so the HUD groups, the star indicators and the long-press
+    // favourite menu can never disagree about whether a hidden slot counts.
+    val favGearSlots by UiPreferences.favGearSlotsFlow().collectAsState()
+    val favMagicSlots by UiPreferences.favMagicSlotsFlow().collectAsState()
+    LaunchedEffect(favGearSlots, favMagicSlots) {
+        FavouritesRepository.setVisibleCounts(favGearSlots, favMagicSlots)
+    }
+
     LaunchedEffect(state.character.name, state.inventory, state.spells) {
         val name = state.character.name
         if (name.isNotBlank()) {
@@ -1319,6 +1328,18 @@ private fun CompanionScreenContent() {
         val trainingSession by GameStateRepository.trainingSession.collectAsState()
         if (trainingDs == GameUiMode.DS) {
             TrainingOverlayHost(session = trainingSession)
+        }
+
+        // Level-up overlay. Driven by COMPANION_LEVELUP_* — display data from Lua, selection state
+        // and the coin count from the NATIVE LevelupDialog. Shown while Level up is DS. zIndex 18f:
+        // one above the dialogue-service tier because level-up is modal in a way those are not —
+        // there is no cancel, and nothing else can legitimately sit over it.
+        val levelUpDs by UiPreferences.gameUiModeFlow("game_ui_levelup").collectAsState()
+        val levelUpSession by GameStateRepository.levelUpSession.collectAsState()
+        if (levelUpDs == GameUiMode.DS) {
+            levelUpSession?.let { session ->
+                LevelUpOverlay(session = session)
+            }
         }
 
         // Spell-buying overlay. Driven by COMPANION_SPELLBUYING_* (native SpellBuyingWindow). Shown
@@ -1790,6 +1811,62 @@ fun CombatTargetTopOverlay() {
  * Renders nothing when no draft is in progress; [GameStateRepository.manualJournalDraft] is null
  * except while the composer is open.
  */
+/**
+ * TOP-screen half of the DS level-up screen: the class image and the flavour paragraph.
+ *
+ * These live up here because the top screen is otherwise idle during this modal moment, and
+ * because they are the two purely-decorative parts — putting them on the bottom screen would push
+ * the attribute grid, which is what the player actually has to interact with, into a scroll.
+ *
+ * Non-interactive (hosted with FLAG_NOT_TOUCHABLE), so it never takes touch away from the game.
+ *
+ * The image is genuinely dynamic: the name is derived from the lifetime specialization counters,
+ * exactly as MWGui::LevelupDialog does, and resolves to textures/levelup/<name>.dds — the same
+ * asset vanilla would have shown. It is NOT simplified to a static picture.
+ */
+@Composable
+fun LevelUpTopOverlay() {
+    val session by GameStateRepository.levelUpSession.collectAsState()
+    val s = session ?: return
+    val image = rememberItemIcon(if (s.image.isBlank()) "" else "textures/levelup/${s.image}.dds")
+
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.62f)
+                .clip(RoundedCornerShape(4.dp))
+                .background(StonePanel.copy(alpha = LocalPanelOpacity.current))
+                .border(2.dp, BronzeLight, RoundedCornerShape(4.dp))
+                .adaptiveDimTint()
+                .padding(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (image != null) {
+                Image(
+                    bitmap = image,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 190.dp)
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+            Text(
+                "You have ascended to level ${s.level}",
+                color = BronzeLight, fontSize = 17.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold, textAlign = TextAlign.Center
+            )
+            if (s.flavour.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    s.flavour,
+                    color = Bone, fontSize = 12.sp, fontFamily = MwBody,
+                    textAlign = TextAlign.Center, lineHeight = 16.sp
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun ManualJournalDraftTopOverlay() {
     val draft by GameStateRepository.manualJournalDraft.collectAsState()
@@ -6068,6 +6145,304 @@ private fun RepairButton(
 
 /* ---- Training overlay (bottom screen) ---- */
 
+
+/**
+ * Bottom-screen LEVEL UP window — the attribute picker.
+ *
+ * PRESENTATION ONLY. Every rule it appears to enforce is actually enforced by the native
+ * LevelupDialog: a tap sends `CMP:levelup_pick:<id>` and the resulting selection comes back on
+ * COMPANION_LEVELUP_SELECTION, so the toggle / replace-last-at-quota semantics are the game's and
+ * this composable never computes them. Done sends `CMP:levelup_ok`, which lands on the native OK
+ * handler — so even if the gate here were wrong, the commit would still refuse under quota and
+ * show vanilla's own message.
+ *
+ * There is deliberately NO dismiss path: no scrim tap, no cancel button, and the back/B handler is
+ * a consuming no-op. That mirrors how vanilla actually enforces it — the native window does not
+ * refuse to close, its controller handler simply swallows B.
+ *
+ * The coin row is a small addition over vanilla, which only shows spent coins moving to the
+ * attributes: here the count of filled vs required is explicit. Presentation, not behaviour.
+ */
+@Composable
+private fun LevelUpOverlay(session: LevelUpSession) {
+    var infoAttr by remember { mutableStateOf<LevelUpAttribute?>(null) }
+
+    // NOTE there is deliberately no BackHandler here. The companion renders inside a Presentation,
+    // which has no OnBackPressedDispatcherOwner, so BackHandler would not work; and B never reaches
+    // Compose anyway. The no-exit rule is enforced on the ENGINE side, where the button actually
+    // arrives: LevelupDialog::exit() refuses while Level up is DS, and windowmanagerimp's
+    // escape-hatch is suppressed for that case, so B is a true no-op. See
+    // companion-levelup-export.patch.
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .zIndex(18f)
+            // Swallow every tap that misses a control: no tap-outside-to-dismiss here.
+            .pointerInput(Unit) { detectTapGestures { } }
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.96f)
+                .clip(RoundedCornerShape(4.dp))
+                .background(StonePanel.copy(alpha = 0.98f))
+                .border(2.dp, BronzeLight, RoundedCornerShape(4.dp))
+                .padding(14.dp)
+        ) {
+            Text(
+                "You have ascended to level ${session.level}",
+                color = BronzeLight, fontSize = 15.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Bronze))
+            Spacer(Modifier.height(8.dp))
+
+            // Coins: one per REQUIRED pick. coinCount comes from the native window and is
+            // min(3, attributes below 100) — it really does drop below 3 late-game, so this row is
+            // sized from the session, never from a literal 3.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                repeat(session.coinCount) { i ->
+                    val filled = i < session.selected.size
+                    Box(
+                        Modifier
+                            .padding(end = 6.dp)
+                            .size(14.dp)
+                            .clip(CircleShape)
+                            .background(if (filled) BronzeLight else Color(0xFF0E0B07))
+                            .border(1.dp, if (filled) BronzeLight else BronzeDark, CircleShape)
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "${session.selected.size} of ${session.coinCount} chosen",
+                    color = if (session.canConfirm) BoneBright else BoneDim,
+                    fontSize = 11.sp, fontFamily = MwBody
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+
+            // Two-column attribute grid, sized from the exported list rather than a hardcoded 8 —
+            // the exporter walks the attribute record store, so a mod that adds attributes flows
+            // through to both columns.
+            val attrs = session.attributes
+            val perCol = (attrs.size + 1) / 2
+            // Capped and scrollable so the Done button can never be pushed off-screen. With the
+            // stock 8 attributes the grid is ~200dp and never scrolls; the cap only engages if a
+            // mod adds enough attributes to overflow, which is exactly the case a fixed layout
+            // would have clipped silently. Both columns scroll as ONE unit.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = LEVELUP_GRID_MAX_HEIGHT)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                listOf(0, 1).forEach { col ->
+                    Column(Modifier.weight(1f).padding(end = if (col == 0) 6.dp else 0.dp)) {
+                        val from = col * perCol
+                        val to = minOf(from + perCol, attrs.size)
+                        if (from < to) attrs.subList(from, to).forEach { attr ->
+                            LevelUpAttributeRow(
+                                attr = attr,
+                                selected = session.isSelected(attr.id),
+                                onTap = {
+                                    if (!attr.disabled) {
+                                        UiSounds.play(UiSounds.Cue.TOGGLE)
+                                        CompanionActions.levelUpPick(attr.id)
+                                    }
+                                },
+                                onInfo = { infoAttr = attr }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            // Done. Gated on the session's own canConfirm, which is exactly the native condition
+            // (selected >= coinCount) evaluated against the native coin count.
+            val enabled = session.canConfirm
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(if (enabled) PillActiveBg else Color(0xFF15120F))
+                    .border(1.dp, if (enabled) BronzeLight else BronzeDark, RoundedCornerShape(4.dp))
+                    .then(
+                        if (enabled) Modifier.clickable {
+                            UiSounds.play(UiSounds.Cue.ACTION)
+                            CompanionActions.levelUpConfirm()
+                        } else Modifier
+                    )
+                    .padding(vertical = 11.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "Done",
+                    color = if (enabled) BoneBright else BoneMuted,
+                    fontSize = 14.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // Info panel for a tapped attribute. Shows the count, the resulting multiplier and the
+        // skills that GOVERN the attribute — deliberately not a per-skill contribution breakdown,
+        // which the engine does not record (it stores only the bare count).
+        infoAttr?.let { attr ->
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .zIndex(1f)
+                    .pointerInput(attr.id) { detectTapGestures { infoAttr = null } }
+                    .background(Color.Black.copy(alpha = 0.55f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    Modifier
+                        .fillMaxWidth(0.8f)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(StonePanel.copy(alpha = 0.98f))
+                        .border(2.dp, BronzeDark, RoundedCornerShape(3.dp))
+                        .pointerInput(attr.id) { detectTapGestures { } }
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        attr.name, color = BronzeLight, fontSize = 14.sp,
+                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                    )
+                    if (attr.description.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(attr.description, color = Bone, fontSize = 11.sp, fontFamily = MwBody)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (attr.count > 0)
+                            "${attr.count} skill increase${if (attr.count == 1) "" else "s"} " +
+                                "since your last level — worth x${attr.mult} here."
+                        else
+                            "No skill increases since your last level, so this rises by 1.",
+                        color = BoneBright, fontSize = 11.sp, fontFamily = MwBody
+                    )
+                    if (attr.skills.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "GOVERNS", color = BronzeLight, fontSize = 9.sp,
+                            fontFamily = MwDisplay, letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            attr.skills.joinToString(", "),
+                            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One attribute row: coin marker, icon, name, current→projected value, and the multiplier caption.
+ *
+ * Sized as a real button rather than a list row — [LEVELUP_ROW_MIN_HEIGHT] with Rest/Wait's own
+ * `vertical = 9.dp` padding, so the eight of them are as easy to hit as the service overlays'
+ * buttons. The containing panel simply grows to suit.
+ *
+ * SELECTED STATE IS SHOWN FOUR WAYS, deliberately: a filled coin at the left, a bronze-tinted fill,
+ * a bright border, and the value switching to `base→projected`. The coin is the one that carries
+ * it — vanilla moves an actual coin next to the attribute you spend it on, and the fill/border
+ * alone read as "focused" more than "chosen". A tick glyph was NOT used: MysticCards has no U+2713
+ * (see the missing-glyph list under "Game font"), so it would render as tofu with the game font on.
+ */
+private val LEVELUP_ROW_MIN_HEIGHT = 44.dp
+
+/** Cap on the attribute grid's height, past which it scrolls. Sized so the stock 8 attributes
+ *  (4 rows per column, ~200dp) never scroll — it exists only so a modded attribute list cannot
+ *  push the Done button off the 468dp-tall companion panel. */
+private val LEVELUP_GRID_MAX_HEIGHT = 300.dp
+
+@Composable
+private fun LevelUpAttributeRow(
+    attr: LevelUpAttribute,
+    selected: Boolean,
+    onTap: () -> Unit,
+    onInfo: () -> Unit
+) {
+    val icon = rememberItemIcon(attr.icon)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp)
+            .heightIn(min = LEVELUP_ROW_MIN_HEIGHT)
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (selected) SlotWorn else Color(0xC0151210))
+            .border(
+                if (selected) 2.dp else 1.dp,
+                if (selected) BronzeLight else BronzeDark,
+                RoundedCornerShape(3.dp)
+            )
+            .combinedClickable(
+                enabled = !attr.disabled,
+                onClick = onTap,
+                onLongClick = onInfo
+            )
+            .padding(horizontal = 7.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Coin marker. Always occupies its slot so the icons stay column-aligned whether or not a
+        // row is selected — an appearing/disappearing coin would shuffle every name sideways.
+        Box(
+            Modifier
+                .size(12.dp)
+                .clip(CircleShape)
+                .background(if (selected) BronzeLight else Color.Transparent)
+                .border(
+                    1.dp,
+                    if (selected) BronzeLight else BronzeDark.copy(alpha = 0.5f),
+                    CircleShape
+                )
+        )
+        Spacer(Modifier.width(6.dp))
+        Box(Modifier.size(22.dp)) {
+            if (icon != null) {
+                Image(
+                    bitmap = icon, contentDescription = null,
+                    contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(
+            attr.name,
+            color = when {
+                attr.disabled -> BoneMuted
+                selected -> BoneBright
+                else -> Bone
+            },
+            fontSize = 12.sp, fontFamily = MwBody,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        // Multiplier caption: shown ONLY above x1, exactly as vanilla. `mult` arrives already
+        // clamped to 100 - base, so an attribute near the cap advertises what it can really gain.
+        if (attr.mult > 1 && !attr.disabled) {
+            Text(
+                "x${attr.mult}",
+                color = BronzeLight, fontSize = 12.sp, fontFamily = MwData,
+                modifier = Modifier.padding(end = 6.dp)
+            )
+        }
+        Text(
+            if (selected) "${attr.base}→${attr.projected}" else "${attr.base}",
+            color = if (selected) BoneBright else if (attr.disabled) BoneMuted else Bone,
+            fontSize = 12.sp, fontFamily = MwData, maxLines = 1
+        )
+    }
+}
+
 // Tweakable timings for the training completion flow (see TrainingOverlayHost).
 private const val TRAINING_SAFETY_MS = 5000L         // force-dismiss if CLOSED never arrives
 private const val TRAINING_COMPLETE_DWELL_MS = 1200L // how long "…training complete" shows
@@ -8570,6 +8945,11 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     val favs by FavouritesRepository.state.collectAsState()
     val context = LocalContext.current
 
+    // How many favourite slots each group shows (0..FAV_SLOTS_MAX). These drive the LAYOUT only —
+    // the repository has already truncated `favs` to the same counts, so the two cannot disagree.
+    val favGearSlots by UiPreferences.favGearSlotsFlow().collectAsState()
+    val favMagicSlots by UiPreferences.favMagicSlotsFlow().collectAsState()
+
     // Native sneak indicator (sneaking && undetected). Drives the stealth icon below.
     val sneakVisible by GameStateRepository.sneakVisible.collectAsState()
 
@@ -8953,6 +9333,11 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         // margin keeps the visible group at its original 8dp from the corner). Un-handled taps here —
         // the label, the inter-slot gap, and just around/below the slots — become no-ops instead of
         // falling through to the map canvas below and opening the world map.
+        //
+        // At a count of 0 the whole group -- label, slots AND its tap-catcher -- is skipped, so the
+        // screen space is genuinely freed and taps there fall through to the map as they would if
+        // the group had never existed. Slots stack in a Column, so 1..4 needs no layout maths.
+        if (favGearSlots > 0) {
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
@@ -8971,7 +9356,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 letterSpacing = 1.sp
             )
             Spacer(Modifier.height(FAV_LABEL_GAP))
-            repeat(2) { idx ->
+            repeat(favGearSlots) { idx ->
                 if (idx > 0) Spacer(Modifier.height(FAV_SLOT_SPACING))
                 val slot = favs.gear.getOrNull(idx)
                 val slotItem = slot?.let { s -> state.inventory.find { it.id == s.id } }
@@ -8987,7 +9372,10 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     equipped = slotWorn,
                     // C: extend the tap target outward only — top slot (idx 0) up, bottom slot down.
                     hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
-                    hitPadBottom = if (idx == 1) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    // LAST slot, not "slot 1" — the group is 1..4 tall now, and hardcoding index 1
+                    // would have left the bottom slot without its downward tap extension at any
+                    // count above 2 (and given it to a middle slot).
+                    hitPadBottom = if (idx == favGearSlots - 1) FAV_SLOT_HIT_EXTEND else 0.dp,
                     menuItems = { s, dismiss ->
                         val item = state.inventory.find { it.id == s.id }
                         val readable = item?.category == "book" || item?.category == "scroll"
@@ -9057,9 +9445,12 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             }
         }
         }
+        }
 
         // Magic favourites — bottom-left, stacked vertically. Wrapped in the same tap-catcher (A)
-        // + margin so near-miss taps around the group don't open the map. See the gear group above.
+        // + margin so near-miss taps around the group don't open the map. See the gear group above,
+        // including why a count of 0 skips the tap-catcher too.
+        if (favMagicSlots > 0) {
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -9076,7 +9467,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                 letterSpacing = 1.sp
             )
             Spacer(Modifier.height(FAV_LABEL_GAP))
-            repeat(2) { idx ->
+            repeat(favMagicSlots) { idx ->
                 if (idx > 0) Spacer(Modifier.height(FAV_SLOT_SPACING))
                 val slot = favs.magic.getOrNull(idx)
                 val slotSelected = slot != null && state.selectedSpell == slot.id
@@ -9084,9 +9475,9 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     slot = slot,
                     borderColor = BronzeLight,
                     equipped = slotSelected,
-                    // C: extend the tap target outward only — top slot (idx 0) up, bottom slot down.
+                    // C: extend the tap target outward only — top slot (idx 0) up, LAST slot down.
                     hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
-                    hitPadBottom = if (idx == 1) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    hitPadBottom = if (idx == favMagicSlots - 1) FAV_SLOT_HIT_EXTEND else 0.dp,
                     menuItems = { s, dismiss ->
                         val colors = MenuDefaults.itemColors(textColor = Bone)
                         DropdownMenuItem(
@@ -9104,6 +9495,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     slot?.let { CompanionActions.selectSpell(it.id) }
                 }
             }
+        }
         }
         }
 
@@ -9588,9 +9980,13 @@ private fun FavStar() {
  * Favourites section for an item/spell long-press dropdown (rendered inside a
  * DropdownMenu's ColumnScope). Shows "Unfavourite" when the record already
  * occupies a slot; otherwise "Add to favourites" when a slot is free, or an
- * explicit two-slot picker when BOTH are full — the old auto-pick always
+ * explicit slot picker when they are ALL full — the old auto-pick always
  * clobbered slot 1, so slot 2 could never be replaced. `isGear` selects the
- * gear vs magic slot pair; `makeSlot` builds the FavSlot with the live name.
+ * gear vs magic slot list; `makeSlot` builds the FavSlot with the live name.
+ *
+ * Works at any configured slot count without change: it reads the repository's already-truncated
+ * list and indexes into it, so 1..FAV_SLOTS_MAX all behave identically and only the number of
+ * "Slot N" rows in the replace picker differs. A count of 0 renders nothing.
  */
 @Composable
 private fun ColumnScope.FavouriteMenuItems(
@@ -9601,7 +9997,13 @@ private fun ColumnScope.FavouriteMenuItems(
     onDone: () -> Unit
 ) {
     val favs by FavouritesRepository.state.collectAsState()
+    // Already truncated to the configured visible count by the repository, so this section scales
+    // to 1..FAV_SLOTS_MAX with no arithmetic of its own.
     val slots = if (isGear) favs.gear else favs.magic
+    // Count 0 = the category's HUD group is off, so offer nothing at all. Without this the
+    // "both slots full" branch below would render its "Replace favourite…" header over an empty
+    // slot list — a heading with no options under it.
+    if (slots.isEmpty()) return
     val colors = MenuDefaults.itemColors(textColor = Bone)
     val favIdx = slots.indexOfFirst { it?.id == itemId }
 
@@ -9630,7 +10032,7 @@ private fun ColumnScope.FavouriteMenuItems(
                 colors = colors
             )
         } else {
-            // Both slots full — let the user choose which one to overwrite.
+            // Every visible slot is full — let the user choose which one to overwrite.
             Text(
                 "Replace favourite…",
                 color = BoneDim, fontSize = 10.sp, fontFamily = MwDisplay,
@@ -14787,6 +15189,9 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
             item { InventoryTabStyleRow() }
             item { EquippedBarRow() }
             item { EquippedInListRow() }
+            item { OptionsSubLabel("HUD favourites") }
+            item { FavSlotCountRow(isGear = false) }
+            item { FavSlotCountRow(isGear = true) }
             item { OptionsSubLabel("Active effects") }
             item { EffectTimersRow() }
             item { OptionsSubLabel("Journal") }
@@ -15823,6 +16228,52 @@ private fun AdaptiveDimmingRow() {
  * `RenderingManager::setAmbientColour`, which is where `COMPANION_AMBIENT` is exported from, so
  * raising either floor automatically reports a brighter scene and the companion dims itself LESS.
  */
+/**
+ * How many HUD favourite quick-slots one category shows (0..[FAV_SLOTS_MAX]).
+ *
+ * A pill per count rather than a slider: the range is five discrete values, and the pill row is the
+ * options menu's existing idiom for a small closed set.
+ *
+ * **Lowering the count HIDES favourites, it does not delete them** — [FAV_SLOTS_MAX] slots are
+ * always persisted and raising the count again brings the same ones back. The subtitle says so,
+ * because the alternative reading (that turning it down throws work away) would make people afraid
+ * to try the setting.
+ */
+@Composable
+private fun FavSlotCountRow(isGear: Boolean) {
+    val context = LocalContext.current
+    val count by (if (isGear) UiPreferences.favGearSlotsFlow() else UiPreferences.favMagicSlotsFlow())
+        .collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text(
+            if (isGear) "Favourite gear slots" else "Favourite spell slots",
+            color = Bone, fontSize = 14.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            if (count == 0) "Hidden — the group is removed from the HUD, freeing the space."
+            else "Shown bottom-${if (isGear) "right" else "left"} on the HUD. " +
+                "Lowering this hides extra favourites rather than clearing them.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            (0..FAV_SLOTS_MAX).forEach { n ->
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = n.toString(),
+                    active = count == n,
+                    enabled = true
+                ) {
+                    if (isGear) UiPreferences.setFavGearSlots(context, n)
+                    else UiPreferences.setFavMagicSlots(context, n)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun GameBrightnessRow() {
     val context = LocalContext.current

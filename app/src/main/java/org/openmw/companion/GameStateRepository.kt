@@ -410,6 +410,22 @@ object GameStateRepository {
     // "Training…" popup, and CLOSED (after the native fade/advance) clears the whole session.
     private val _trainingSession = MutableStateFlow<TrainingSession?>(null)
     val trainingSession: StateFlow<TrainingSession?> = _trainingSession.asStateFlow()
+
+    private var levelUpBuffer: MutableList<LevelUpAttribute>? = null
+    private var levelUpHeader: LevelUpSession? = null
+
+    /**
+     * The live DS level-up screen; null when GM_Levelup is not open.
+     *
+     * Assembled from the Lua START/ATTR/END batch, then kept in step by the NATIVE
+     * COMPANION_LEVELUP_SELECTION line, which is the source of truth for the coin count and the
+     * picks. A SELECTION can arrive BEFORE the Lua batch (the native window emits one from
+     * onOpen), so it is stashed and applied when the batch commits — otherwise the first coin
+     * count would be lost and the Done gate would briefly use the wrong number.
+     */
+    private val _levelUpSession = MutableStateFlow<LevelUpSession?>(null)
+    val levelUpSession: StateFlow<LevelUpSession?> = _levelUpSession.asStateFlow()
+    private var pendingLevelUpSelection: Pair<Int, List<String>>? = null
     private var trainingSkillBuffer: MutableList<TrainingSkill>? = null
     private var trainingNpcName: String = ""
     private var trainingPlayerGold: Int = 0
@@ -777,6 +793,47 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_SPELL_CHANCES_END) -> {
                 spellChanceBuffer?.let { _spellChances.value = it.toMap() }
                 spellChanceBuffer = null
+            }
+            // Level up. ATTR first (most frequent within a batch), then START/END, then the
+            // native SELECTION echo, then CLOSED. None of these prefixes is a substring of
+            // another (END/CLOSED differ from the ':' forms), so ordering is for clarity only.
+            trimmed.contains(LogParser.P_LEVELUP_ATTR) -> {
+                levelUpBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_LEVELUP_ATTR) + LogParser.P_LEVELUP_ATTR.length
+                    LogParser.parseLevelUpAttr(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_LEVELUP_START) -> {
+                val idx = trimmed.indexOf(LogParser.P_LEVELUP_START) + LogParser.P_LEVELUP_START.length
+                levelUpHeader = LogParser.parseLevelUpStart(trimmed.substring(idx).trim())
+                levelUpBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_LEVELUP_END) -> {
+                val header = levelUpHeader
+                val buf = levelUpBuffer
+                if (header != null && buf != null) {
+                    val sel = pendingLevelUpSelection
+                    _levelUpSession.value = header.copy(
+                        attributes = buf.toList(),
+                        coinCount = sel?.first ?: header.coinCount,
+                        selected = sel?.second ?: emptyList()
+                    )
+                }
+                levelUpBuffer = null
+                levelUpHeader = null
+            }
+            trimmed.contains(LogParser.P_LEVELUP_SELECTION) -> {
+                val idx = trimmed.indexOf(LogParser.P_LEVELUP_SELECTION) + LogParser.P_LEVELUP_SELECTION.length
+                LogParser.parseLevelUpSelection(trimmed.substring(idx).trim())?.let { (count, ids) ->
+                    pendingLevelUpSelection = count to ids
+                    _levelUpSession.value = _levelUpSession.value?.copy(coinCount = count, selected = ids)
+                }
+            }
+            trimmed.contains(LogParser.P_LEVELUP_CLOSED) -> {
+                _levelUpSession.value = null
+                levelUpBuffer = null
+                levelUpHeader = null
+                pendingLevelUpSelection = null
             }
             trimmed.contains(LogParser.P_INFO) -> {
                 val idx = trimmed.indexOf(LogParser.P_INFO) + LogParser.P_INFO.length

@@ -19,6 +19,7 @@ import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.UiSounds
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
+import org.openmw.companion.LevelUpTopOverlay
 import org.openmw.companion.LootingTopOverlay
 import org.openmw.companion.ManualJournalDraftTopOverlay
 import org.openmw.companion.PersuasionLocation
@@ -172,6 +173,7 @@ class EngineActivity : SDLActivity() {
     private var combatTargetTopView: View? = null
     private var playerCombatTopView: View? = null
     private var manualJournalTopView: View? = null
+    private var levelUpTopView: View? = null
 
     // INTERACTIVE looting grids on the TOP screen (this activity's own window / Display 0), shown
     // while a container session is active AND Looting is routed to SPLIT (game_ui_looting == DS).
@@ -318,6 +320,7 @@ class EngineActivity : SDLActivity() {
         hideCombatTargetTopOverlay()
         hidePlayerCombatTopOverlay()
         hideManualJournalTopOverlay()
+        hideLevelUpTopOverlay()
         hideLootingTopOverlay()
         hideBarterTopOverlay()
 
@@ -1174,6 +1177,19 @@ class EngineActivity : SDLActivity() {
                 }
         }
 
+        // Top-screen level-up flavour + class image: shown while a level-up session is live AND
+        // Level up is DS. Non-interactive; the attribute grid and every control stay on the bottom
+        // screen. The session flow is nulled by COMPANION_LEVELUP_CLOSED, which the Lua close edge
+        // emits for every exit path, so this can't be left stranded after the commit.
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.levelUpSession,
+                UiPreferences.gameUiModeFlow("game_ui_levelup"),
+            ) { session, mode -> session != null && mode == GameUiMode.DS }
+                .distinctUntilChanged()
+                .collect { show -> if (show) showLevelUpTopOverlay() else hideLevelUpTopOverlay() }
+        }
+
         // Top-screen INTERACTIVE looting grids: shown while a container session is active AND
         // Looting is routed to SPLIT AND the Looting element is DS (companion draws it). The
         // bottom screen shows only the terminal controls (LootingControlsOnly).
@@ -1420,6 +1436,17 @@ class EngineActivity : SDLActivity() {
         val overlay = playerCombatTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         playerCombatTopView = null
+    }
+
+    private fun showLevelUpTopOverlay() = showTopScreenOverlay(
+        alreadyShown = { levelUpTopView != null },
+        onAdded = { levelUpTopView = it },
+    ) { ProvideTopPanelOpacity { LevelUpTopOverlay() } }
+
+    private fun hideLevelUpTopOverlay() {
+        val overlay = levelUpTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        levelUpTopView = null
     }
 
     private fun showManualJournalTopOverlay() = showTopScreenOverlay(

@@ -198,6 +198,12 @@ extern "C" void companionBarterReturn(const char* side, const char* refId, int c
 extern "C" void companionBarterSetGold(int extra);
 extern "C" void companionBarterOffer();
 extern "C" void companionBarterCancel();
+// Bottom-screen LEVEL UP (levelupdialog.cpp). The pick takes the attribute's serialized ID rather
+// than an ordinal so the bottom screen's grid order (core.stats.Attribute.records) cannot silently
+// desync from the native window's (the ESM attribute store). Both bridges forward to the window's
+// OWN handlers, so selection semantics, the coin-count gate and the entire commit stay native.
+extern "C" void companionLevelupPick(const char* attrId);
+extern "C" void companionLevelupOk();
 // Bottom-screen merchant repair (merchantrepair.cpp). Items addressed by ordinal index.
 extern "C" void companionRepairItem(int index);
 extern "C" void companionRepairAll();
@@ -476,6 +482,18 @@ void drainCompanionCommands()
         // pricing + getBarterOffer, the skill/attribute caps, skillLevelUp and the timed fade/advance
         // all live in the C++ TrainingWindow, none reachable from Lua. See
         // companion-trainingwindow-open-signal.patch. Check _cancel before the colon-arg form.
+        // Level up (CMP:levelup_*) is driven natively: the ordered commit in LevelupDialog --
+        // level-progress reduction, clearing the per-attribute skill-increase counters, the
+        // Endurance-dependent health gain and setLevel(+1) -- must not be reimplemented in Lua.
+        // Check _ok before the colon-arg pick form.
+        else if (cmd.rfind("CMP:levelup_ok", 0) == 0)
+        {
+            companionLevelupOk();
+        }
+        else if (cmd.rfind("CMP:levelup_pick:", 0) == 0)
+        {
+            companionLevelupPick(cmd.c_str() + (sizeof("CMP:levelup_pick:") - 1));
+        }
         else if (cmd.rfind("CMP:training_cancel", 0) == 0)
         {
             companionTrainingCancel();

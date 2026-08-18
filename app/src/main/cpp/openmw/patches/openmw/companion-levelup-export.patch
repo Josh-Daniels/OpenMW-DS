@@ -1,0 +1,221 @@
+--- a/apps/openmw/mwgui/levelupdialog.hpp
++++ b/apps/openmw/mwgui/levelupdialog.hpp
+@@ -15,6 +15,12 @@
+ 
+         void onOpen() override;
+ 
++#ifdef __ANDROID__
++        // COMPANION: refuses to close while Level up is in DS mode -- see the .cpp for why the
++        // native controller swallow cannot cover that case.
++        bool exit() override;
++#endif
++
+         std::string_view getWindowIdForLua() const override { return "LevelUpDialog"; }
+ 
+     private:
+@@ -43,6 +49,18 @@
+         void onOkButtonClicked(MyGUI::Widget* sender);
+         void onAttributeClicked(MyGUI::Widget* sender);
+ 
++#ifdef __ANDROID__
++    public:
++        // COMPANION: bottom-screen bridges. Public so the extern "C" wrappers in the .cpp can
++        // reach them; they only forward to the private handlers above, so the native window keeps
++        // ownership of selection state, the coin-count gate and the commit.
++        void companionPickAttribute(std::string_view attrId);
++        void companionConfirm();
++        void companionEmitSelection() const;
++
++    private:
++#endif
++
+         void assignCoins();
+         void resetCoins();
+ 
+--- a/apps/openmw/mwgui/levelupdialog.cpp
++++ b/apps/openmw/mwgui/levelupdialog.cpp
+@@ -25,6 +25,10 @@
+ 
+ #include "../mwsound/constants.hpp"
+ 
++#ifdef __ANDROID__
++#include <components/debug/debugging.hpp>
++#endif
++
+ #include "class.hpp"
+ 
+ namespace
+@@ -32,6 +36,17 @@
+     constexpr unsigned int sMaxCoins = 3;
+     constexpr int sColumnOffsets[] = { 32, 218 };
+ }
++#ifdef __ANDROID__
++namespace
++{
++    // COMPANION: the live LevelupDialog, so the CMP:levelup_* bridges below can drive the REAL
++    // window while it is hidden in DS mode. Set in onOpen (not the ctor): the dialog is built once
++    // at startup and reused, so the ctor fires long before any level-up. Cleared on commit.
++    // Mirrors gCompanionDialogueWindow in dialogue.cpp.
++    MWGui::LevelupDialog* gCompanionLevelupDialog = nullptr;
++}
++#endif
++
+ namespace MWGui
+ {
+     LevelupDialog::LevelupDialog()
+@@ -236,6 +251,16 @@
+ 
+         // Play LevelUp Music
+         MWBase::Environment::get().getSoundManager()->streamMusic(MWSound::triumphMusic, MWSound::MusicType::Normal);
++
++#ifdef __ANDROID__
++        // COMPANION: publish the window for the CMP:levelup_* bridges, and emit the opening
++        // (empty) selection so the bottom screen learns mCoinCount -- which is
++        // min(3, attributes below 100) and genuinely drops below 3 late-game. Taking it from here
++        // rather than re-deriving it Lua-side means the DS gate uses the SAME number the native
++        // gate in onOkButtonClicked compares against.
++        gCompanionLevelupDialog = this;
++        companionEmitSelection();
++#endif
+     }
+ 
+     void LevelupDialog::onOkButtonClicked(MyGUI::Widget* /*sender*/)
+@@ -260,6 +285,9 @@
+ 
+             pcStats.levelUp();
+ 
++#ifdef __ANDROID__
++            gCompanionLevelupDialog = nullptr;
++#endif
+             MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Levelup);
+         }
+     }
+@@ -279,8 +307,110 @@
+                 mSpentAttributes.push_back(attribute);
+         }
+         assignCoins();
++
++#ifdef __ANDROID__
++        companionEmitSelection();
++#endif
++    }
++
++#ifdef __ANDROID__
++    // COMPANION: the AUTHORITATIVE selection, echoed after every pick (and on open). The bottom
++    // screen renders from this rather than mirroring the toggle/replace-last rules itself, so the
++    // two can never disagree about what is actually selected -- this window remains the single
++    // source of truth for selection state, exactly as it is for the commit.
++    // Payload: "<coinCount>|<attrId>,<attrId>,..." (the id list may be empty).
++    void LevelupDialog::companionEmitSelection() const
++    {
++        std::string ids;
++        for (const auto& attribute : mSpentAttributes)
++        {
++            if (!ids.empty())
++                ids += ',';
++            // serializeText(), NOT getValue(): RefId::serializeText LOWERCASES a StringRefId
++            // (refid.cpp), and that is the form the bottom screen's own attribute ids arrive in
++            // (Lua's Attribute.record.id is serializeText too). getValue() returns the ESM's
++            // original casing ("Strength"), which never matched Lua's "strength" -- so the picks
++            // worked (the id is resolved case-insensitively) while nothing ever showed as selected.
++            ids += ESM::RefId{ attribute }.serializeText();
++        }
++        Log(Debug::Info) << "COMPANION_LEVELUP_SELECTION:" << mCoinCount << "|" << ids;
++    }
++
++    // COMPANION: pick by attribute id. Routes through the window's own onAttributeClicked so the
++    // toggle / replace-last-at-quota semantics are the native ones, not a copy.
++    void LevelupDialog::companionPickAttribute(std::string_view attrId)
++    {
++        // StringRefId interns case-insensitively, so this matches whatever casing the bottom
++        // screen sent.
++        const ESM::Attribute::AttributeID id{ attrId };
++        const auto it = mAttributeWidgets.find(id);
++        if (it == mAttributeWidgets.end() || it->second.mButton == nullptr)
++            return;
++        // An attribute already at 100 has its button disabled in onOpen, and MyGUI would never
++        // deliver a click to it. Re-check here so a stray command cannot do what a tap cannot.
++        if (!it->second.mButton->getEnabled())
++            return;
++        onAttributeClicked(it->second.mButton);
+     }
+ 
++    // COMPANION: confirm. Deliberately the SAME entry point as the native OK button, so the
++    // under-quota case still shows the vanilla "#{sNotifyMessage36}" message box and refuses,
++    // and the commit runs untouched.
++    void LevelupDialog::companionConfirm()
++    {
++        onOkButtonClicked(mOkButton);
++    }
++#endif
++
++#ifdef __ANDROID__
++extern "C" bool companionDsLevelUp();
++
++    // COMPANION: the no-exit rule, for DS mode only.
++    //
++    // Vanilla never needs this: LevelupDialog::onControllerButtonEvent returns true for EVERY
++    // button, so B is swallowed before it can reach exitCurrentGuiMode. But controllermanager only
++    // calls that handler when `topWin->isVisible()`, and DS mode HIDES this window -- so in DS mode
++    // B would fall straight through to exit(), whose base implementation returns true, and the
++    // player would silently lose the level-up. Refusing here restores "B does nothing".
++    //
++    // Returning false normally makes exitCurrentGuiMode fall back to opening the pause menu; that
++    // escape hatch is suppressed for this case in windowmanagerimp.cpp, so B is a true no-op rather
++    // than a way to bounce out to the main menu.
++    //
++    // VANILLA mode is unaffected: the window is visible, the controller handler still eats B first,
++    // and this returns true exactly as the base class did.
++    bool LevelupDialog::exit()
++    {
++        return !companionDsLevelUp();
++    }
++#endif
++
++#ifdef __ANDROID__
++// COMPANION: bottom-screen level-up bridges, driven from drainCompanionCommands (androidmain.cpp)
++// on the engine main thread. These call the window's OWN handlers, so selection semantics (toggle,
++// replace-last-at-quota), the coin-count gate and the whole ordered commit -- level-progress
++// reduction, clearing the per-attribute skill-increase counters, the Endurance-dependent health
++// gain and setLevel(+1) -- all stay exactly where they were. Nothing about levelling is
++// reimplemented on the companion side.
++//
++// The pick takes the attribute's serialized ID rather than an ordinal on purpose: the bottom screen
++// builds its grid from core.stats.Attribute.records while this window builds from the ESM attribute
++// store, and an ID cannot silently pick the wrong attribute if those two ever iterate differently.
++extern "C" void companionLevelupPick(const char* attrId)
++{
++    if (!gCompanionLevelupDialog || !attrId)
++        return;
++    gCompanionLevelupDialog->companionPickAttribute(attrId);
++}
++
++extern "C" void companionLevelupOk()
++{
++    if (!gCompanionLevelupDialog)
++        return;
++    gCompanionLevelupDialog->companionConfirm();
++}
++#endif
++
+     std::string_view LevelupDialog::getLevelupClassImage(
+         const int combatIncreases, const int magicIncreases, const int stealthIncreases)
+     {
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -929,8 +929,14 @@
+                 // companion. DS mode suppresses the window via companionDsConversation()
+                 // independently of mHudEnabled, so both flags must be checked. Start still
+                 // opens the pause menu (separate input path).
++                // COMPANION: also skip it for a DS LEVEL UP. LevelupDialog::exit() refuses while
++                // Level up is DS (the native controller swallow cannot fire on a hidden window),
++                // and without this the refusal would bounce the player out to the pause menu
++                // instead of doing nothing. Gated on the MODE as well as the element so it only
++                // affects the level-up screen.
++                const bool companionDsLevelupModal = getMode() == GM_Levelup && companionDsLevelUp();
+                 if (!MyGUI::InputManager::getInstance().isModalAny() && getMode() != GM_MainMenu
+-                    && companionHudEnabled() && !companionDsConversation())
++                    && companionHudEnabled() && !companionDsConversation() && !companionDsLevelupModal)
+                     pushGuiMode(GM_MainMenu);
+                 return;
+             }

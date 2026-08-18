@@ -1,0 +1,32 @@
+--- a/apps/openmw/mwlua/corebindings.cpp
++++ b/apps/openmw/mwlua/corebindings.cpp
+@@ -13,6 +13,8 @@
+ #include <components/settings/values.hpp>
+ #include <components/version/version.hpp>
+ 
++#include <components/fallback/fallback.hpp>
++
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/statemanager.hpp"
+ #include "../mwbase/world.hpp"
+@@ -138,6 +140,20 @@
+ 
+             const MWWorld::Store<ESM::GameSetting>* gmstStore
+                 = &MWBase::Environment::get().getESMStore()->get<ESM::GameSetting>();
++            // COMPANION: read a `fallback=` parameter (the Morrowind.ini values openmw.cfg
++            // carries). These are NOT in the GMST store -- nothing merges them in -- so getGMST
++            // below cannot see them, despite what its doc comment implies. The engine's own
++            // getFallbacks() lives on openmw.content, which is registered ONLY in the load context
++            // and is therefore unreachable from a player script. Returns nil when absent.
++            //
++            // Values come back as the raw string, exactly as Morrowind.ini stores them: a colour is
++            // "r,g,b" in 0-255 (see Fallback::Map::getColour), text is text.
++            api["getFallback"] = [lua](const std::string& name) -> sol::object {
++                const std::string_view value = Fallback::Map::getString(name);
++                if (value.empty())
++                    return sol::nil;
++                return sol::make_object<std::string>(lua, std::string(value));
++            };
+             api["getGMST"] = [lua, gmstStore](const std::string& setting) -> sol::object {
+                 const ESM::GameSetting* gmst = gmstStore->search(setting);
+                 if (gmst == nullptr)

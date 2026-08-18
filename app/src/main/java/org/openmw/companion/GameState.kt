@@ -373,6 +373,68 @@ data class TrainingSkill(
  * train command is sent and drives the in-progress "Training…" popup; the engine runs the actual
  * 2-hour fade + time advance on the top screen, then emits COMPANION_TRAINING_CLOSED.
  */
+/**
+ * One attribute row on the DS level-up screen.
+ *
+ * [mult] is ALREADY clamped to what is reachable (`100 - base`), matching what the native window
+ * puts in its caption — an attribute at 98 shows x2 even when the raw GMST table says x5. A value
+ * of 1 or less means NO caption is drawn, again as vanilla. [count] is the raw per-attribute skill
+ * increase tally that produced it.
+ *
+ * [skills] are the skills that GOVERN this attribute — deliberately not a per-skill contribution
+ * breakdown, because the engine stores only [count] and naming the actual contributors would be
+ * invented (see the level-up notes in CLAUDE.md).
+ */
+data class LevelUpAttribute(
+    val id: String,
+    val name: String,
+    val description: String = "",
+    val icon: String = "",
+    val base: Int = 0,
+    val count: Int = 0,
+    val mult: Int = 1,
+    val disabled: Boolean = false,
+    val skills: List<String> = emptyList()
+) {
+    /** Value after spending a coin here, clamped exactly as the commit clamps it. */
+    val projected: Int get() = (base + mult).coerceAtMost(100)
+}
+
+/**
+ * A live level-up screen.
+ *
+ * [coinCount] and [selected] both come from the NATIVE window (COMPANION_LEVELUP_SELECTION), not
+ * from anything derived here. That is deliberate: coinCount is `min(3, attributes below 100)` and
+ * genuinely drops below 3 late-game, and it is the same number the native gate compares against, so
+ * taking it from there removes any chance of the DS gate and the real gate disagreeing.
+ * [selected] is echoed after every pick, so the toggle / replace-last-at-quota semantics are the
+ * native ones rather than a re-implementation.
+ */
+data class LevelUpSession(
+    val level: Int = 0,
+    val flavour: String = "",
+    /** Level-up image NAME (e.g. "warrior"); the VFS path is textures/levelup/<name>.dds. */
+    val image: String = "",
+    val attributes: List<LevelUpAttribute> = emptyList(),
+    val coinCount: Int = 3,
+    val selected: List<String> = emptyList()
+) {
+    /** The Done gate: exactly the native condition (`mSpentAttributes.size() < mCoinCount`). */
+    val canConfirm: Boolean get() = selected.size >= coinCount
+
+    /**
+     * Is this attribute currently picked?
+     *
+     * Compared CASE-INSENSITIVELY on purpose. Attribute ids reach the two sides through different
+     * accessors — Lua's `Attribute.record.id` is `RefId::serializeText()`, which LOWERCASES a
+     * StringRefId, while the native echo originally used `StringRefId::getValue()`, which keeps the
+     * ESM's own casing ("Strength"). A plain `==` silently never matched, so picks registered
+     * natively but nothing ever rendered as selected. The native side now sends the lowercase form
+     * too; this stays as the backstop so a future accessor change cannot resurrect that bug.
+     */
+    fun isSelected(attrId: String): Boolean = selected.any { it.equals(attrId, ignoreCase = true) }
+}
+
 data class TrainingSession(
     val npcName: String,
     val playerGold: Int,

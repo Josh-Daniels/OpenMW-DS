@@ -2682,12 +2682,30 @@ end
 --     night weather variety altogether. A lift moves them together and keeps their spacing exact.
 -- A lift of 0 leaves every weather bit-identical to vanilla, so the feature is fully off at 0.
 local nightLift = 0.0
--- Original night colour per weather recordId, captured BEFORE we ever write. Every application
--- recomputes from this, never from the current value, so repeatedly applying (or LOWERING) the
--- slider can never compound or ratchet. Weather records are engine data and are not stored in the
--- .omwsave, so this snapshot is the vanilla value for the session.
-local nightAmbientOriginals = {}
+-- The vanilla night colour is read from the `fallback=` parameter every time
+-- (Weather_<Name>_Ambient_Night_Color), NOT snapshotted from the live record.
+--
+-- THIS IS THE FIX FOR A REAL COMPOUNDING BUG (Aug 19 2026): the first version cached the "original"
+-- in a Lua local the first time it ran. But a game LOAD destroys the player script while
+-- WeatherManager SURVIVES -- it is only rebuilt in World::init and World::startNewGame, and
+-- WeatherManager::clear() never touches the ambient interpolators. So after a load the script
+-- re-snapshotted the ALREADY-LIFTED value as "original" and applied the lift on top of it again:
+-- nights got brighter with every load. Reading the immutable content value instead makes this
+-- stateless and idempotent -- applying it any number of times, in any order, lands on the same
+-- colour, and lowering the slider genuinely lowers it.
 local nightLiftVerified = nil   -- nil = not yet probed, true/false = read-back result
+
+-- Parses a fallback colour ("r,g,b", 0-255) the way Fallback::Map::getColour does. Returns nil when
+-- the parameter is missing or malformed; the caller then leaves that weather ALONE, because the
+-- engine substitutes middle grey in that case and writing that back would wreck the night.
+local function fallbackColour(name)
+    local raw = nil
+    pcall(function() raw = core.getFallback(name) end)
+    if type(raw) ~= "string" then return nil end
+    local r, g, b = string.match(raw, "^%s*(%-?%d+)%s*,%s*(%-?%d+)%s*,%s*(%-?%d+)%s*$")
+    if not r then return nil end
+    return { r = tonumber(r) / 255, g = tonumber(g) / 255, b = tonumber(b) / 255, a = 1 }
+end
 
 local function relLuminance(c)
     return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
@@ -2697,16 +2715,11 @@ end
 local function applyNightAmbientFloor()
     local ok, err = pcall(function()
         for _, weather in pairs(core.weather.records) do
-            local id = weather.recordId
             local interp = weather.ambientColor
-            if id and interp then
-                -- Snapshot once. Guarded by presence so a re-application never re-captures a value
-                -- we already modified.
-                if nightAmbientOriginals[id] == nil then
-                    local n = interp.night
-                    nightAmbientOriginals[id] = { r = n.r, g = n.g, b = n.b, a = n.a }
-                end
-                local orig = nightAmbientOriginals[id]
+            -- weather.name is the same string the engine builds this key from (Weather::Weather
+            -- stores mName and reads Weather_<name>_Ambient_Night_Color).
+            local orig = fallbackColour("Weather_" .. tostring(weather.name) .. "_Ambient_Night_Color")
+            if interp and orig then
                 local lum = relLuminance(orig)
                 local target = orig
                 if nightLift > 0 then
@@ -2739,7 +2752,7 @@ local function applyNightAmbientFloor()
                     emit('COMPANION_NIGHT_AMBIENT_OK:' .. tostring(nightLiftVerified))
                     emit(string.format(
                         'COMPANION_DEBUG: night ambient lift %.3f - %s: lum %.4f -> %.4f (wrote r=%.4f, read r=%.4f)',
-                        nightLift, tostring(id), lum, relLuminance(back), want, back.r))
+                        nightLift, tostring(weather.name), lum, relLuminance(back), want, back.r))
                 end
             end
         end
@@ -2951,6 +2964,165 @@ local function onConsoleCommand(mode, command)
     dispatchCommand(command)
 end
 
+
+-- ===== Level up (DS screen) =====
+--
+-- Read-only display data for the bottom-screen level-up window. The native LevelupDialog stays the
+-- source of truth for SELECTION state, the coin-count gate and the whole commit (see
+-- companion-levelup-export.patch and CMP:levelup_*); nothing here changes how levelling works.
+--
+-- Emitted once when GM_Levelup opens (onUiModeChanged), never on a tick: the underlying values
+-- cannot move while the screen is up -- the game is paused and only the player's picks change, and
+-- picks are echoed by the NATIVE COMPANION_LEVELUP_SELECTION line rather than re-derived here.
+
+-- Multiplier table, read LIVE from the GMSTs rather than hardcoded. iLevelUp01Mult..iLevelUp10Mult
+-- are content data: OpenCS's built-in defaults do NOT match Morrowind.esm's shipped values, and a
+-- mod can change them, so any baked-in table would be wrong somewhere. Cached per session because
+-- GMSTs cannot change mid-session.
+local levelUpMultCache = nil
+local function levelUpMultiplierFor(count)
+    if count == nil or count <= 0 then return 1 end
+    if levelUpMultCache == nil then
+        levelUpMultCache = {}
+        for i = 1, 10 do
+            local v = 1
+            pcall(function() v = math.floor(core.getGMST(string.format("iLevelUp%02dMult", i))) end)
+            levelUpMultCache[i] = v
+        end
+    end
+    -- Engine: num = min(10, count), then look up iLevelUp<NN>Mult. A table lookup keyed by the
+    -- count and capped at 10 -- not a formula.
+    local num = count
+    if num > 10 then num = 10 end
+    return levelUpMultCache[num] or 1
+end
+
+-- Replicates MWGui::LevelupDialog::getLevelupClassImage. The three switches run in SEQUENCE and
+-- each may overwrite the result, so stealth wins over magic wins over combat where they overlap --
+-- order is load-bearing, do not collapse them into elseifs.
+-- NOTE the two `== 3` tests compare the RAW increase counts, not the fractions, unlike everything
+-- around them. That asymmetry is vanilla's; it is replicated deliberately.
+local function levelUpClassImage(combatIncreases, magicIncreases, stealthIncreases)
+    local ret = "acrobat"
+    local total = combatIncreases + magicIncreases + stealthIncreases
+    if total == 0 then return ret end
+
+    -- int() truncation, matching the C++ static_cast<int>.
+    local combatFraction = math.floor(combatIncreases / total * 10)
+    local magicFraction = math.floor(magicIncreases / total * 10)
+    local stealthFraction = math.floor(stealthIncreases / total * 10)
+
+    if combatFraction > 7 then ret = "warrior"
+    elseif magicFraction > 7 then ret = "mage"
+    elseif stealthFraction > 7 then ret = "thief" end
+
+    if combatFraction == 7 then ret = "warrior"
+    elseif combatFraction == 6 then
+        if stealthFraction == 1 then ret = "barbarian"
+        elseif stealthFraction == 3 then ret = "crusader"
+        else ret = "knight" end
+    elseif combatFraction == 5 then
+        if stealthFraction == 3 then ret = "scout" else ret = "archer" end
+    elseif combatFraction == 4 then ret = "rogue" end
+
+    if magicFraction == 7 then ret = "mage"
+    elseif magicFraction == 6 then
+        if combatFraction == 2 then ret = "sorcerer"
+        elseif combatIncreases == 3 then ret = "healer"
+        else ret = "battlemage" end
+    elseif magicFraction == 5 then ret = "witchhunter"
+    elseif magicFraction == 4 then ret = "spellsword" end
+
+    if stealthFraction == 7 then ret = "thief"
+    elseif stealthFraction == 6 then
+        if magicFraction == 1 then ret = "agent"
+        elseif magicIncreases == 3 then ret = "assassin"
+        else ret = "acrobat" end
+    elseif stealthFraction == 5 then
+        if magicIncreases == 3 then ret = "monk" else ret = "pilgrim" end
+    elseif stealthFraction == 3 then
+        if magicFraction == 3 then ret = "bard" end
+    end
+
+    return ret
+end
+
+local function exportLevelUp()
+    local ok, err = pcall(function()
+        local levelStat = types.NPC.stats.level(self)
+        -- The level being ASCENDED TO, matching the native caption (getLevel() + 1).
+        local newLevel = math.floor(levelStat.current) + 1
+
+        -- Flavour text: Level_Up_Level<N>, falling back to Level_Up_Default. These are fallback=
+        -- parameters, not GMSTs proper, but core.getGMST reads those too (documented in core.lua).
+        -- Deterministic per level -- not race, class or random.
+        -- core.getFallback, NOT core.getGMST: these are `fallback=` parameters and are NOT in the
+        -- GMST store, so getGMST returns nil for them (its doc comment implies otherwise; nothing
+        -- merges the fallback map in, and the engine's own getFallbacks() is on openmw.content,
+        -- which exists only in the load context). Same order the native window uses.
+        local flavour = ""
+        pcall(function() flavour = core.getFallback("Level_Up_Level" .. newLevel) or "" end)
+        if flavour == "" then
+            pcall(function() flavour = core.getFallback("Level_Up_Default") or "" end)
+        end
+
+        -- Class image, from the SPECIALIZATION counters. Unlike the per-attribute counters these
+        -- accumulate over the whole game and are never reset at level-up.
+        local spec = { combat = 0, magic = 0, stealth = 0 }
+        pcall(function()
+            local s = levelStat.skillIncreasesForSpecialization
+            spec.combat = math.floor(s.combat or 0)
+            spec.magic = math.floor(s.magic or 0)
+            spec.stealth = math.floor(s.stealth or 0)
+        end)
+        local image = levelUpClassImage(spec.combat, spec.magic, spec.stealth)
+
+        emit(string.format(
+            'COMPANION_LEVELUP_START:{"level":%d,"flavour":"%s","image":"%s",' ..
+                '"combat":%d,"magic":%d,"stealth":%d}',
+            newLevel, jsonEscape(flavour), jsonEscape(image), spec.combat, spec.magic, spec.stealth))
+
+        -- One line per attribute. Iterated from the RECORD STORE, so a mod that adds attributes is
+        -- carried through instead of being cut off at a hardcoded 8.
+        for _, rec in ipairs(core.stats.Attribute.records) do
+            local id = rec.id
+            local base, count = 0, 0
+            pcall(function() base = math.floor(types.Actor.stats.attributes[id](self).base) end)
+            pcall(function() count = math.floor(levelStat.skillIncreasesForAttribute[id] or 0) end)
+
+            local mult = levelUpMultiplierFor(count)
+            -- Engine clamps the DISPLAYED multiplier to what is actually reachable, so an attribute
+            -- at 98 shows x2 even if the raw table says x5.
+            local room = 100 - base
+            if mult > room then mult = room end
+            if mult < 0 then mult = 0 end
+            local disabled = (base >= 100)
+
+            -- Which skills GOVERN this attribute, for the info panel. Deliberately NOT a per-skill
+            -- contribution breakdown: the engine stores only a bare per-attribute count, so naming
+            -- which skills actually fed it is not recoverable and would be invented.
+            local skills = {}
+            for _, srec in ipairs(core.stats.Skill.records) do
+                if srec.attribute == id then
+                    skills[#skills + 1] = string.format('"%s"', jsonEscape(srec.name or srec.id))
+                end
+            end
+
+            emit(string.format(
+                'COMPANION_LEVELUP_ATTR:{"id":"%s","name":"%s","desc":"%s","icon":"%s",' ..
+                    '"base":%d,"count":%d,"mult":%d,"disabled":%s,"skills":[%s]}',
+                jsonEscape(id), jsonEscape(rec.name or id), jsonEscape(rec.description or ""),
+                jsonEscape(rec.icon or ""), base, count, mult,
+                disabled and "true" or "false", table.concat(skills, ',')))
+        end
+
+        emit('COMPANION_LEVELUP_END')
+    end)
+    if not ok then
+        emit('COMPANION_DEBUG: level up export FAILED: ' .. tostring(err))
+    end
+end
+
 -- Container open/close, driven by the omw/ui.lua UiModeChanged event
 -- ({oldMode, newMode, arg}). arg is the container/corpse/NPC being opened.
 local function onUiModeChanged(data)
@@ -2963,6 +3135,20 @@ local function onUiModeChanged(data)
             emit('COMPANION_PAUSE_MENU_OPEN:')
         elseif data.oldMode == MM and data.newMode ~= MM then
             emit('COMPANION_PAUSE_MENU_CLOSED:')
+        end
+    end)
+
+    -- Level up. Reuses this same UiModeChanged mechanism rather than adding a native open/closed
+    -- signal: GM_Levelup maps to the 'LevelUp' Lua UI mode, and both edges reach here (pushGuiMode
+    -- and popGuiMode both call uiModeChanged). The CLOSE edge covers every exit -- the native
+    -- commit's removeGuiMode as well as anything else that pops the mode -- so the bottom screen
+    -- can never be left showing a level-up that is already over.
+    pcall(function()
+        local LU = interfaces.UI.MODE.LevelUp
+        if data.newMode == LU then
+            exportLevelUp()
+        elseif data.oldMode == LU and data.newMode ~= LU then
+            emit('COMPANION_LEVELUP_CLOSED:')
         end
     end)
 

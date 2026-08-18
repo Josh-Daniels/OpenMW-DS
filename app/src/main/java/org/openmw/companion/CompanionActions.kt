@@ -133,6 +133,17 @@ object CompanionActions {
     // the timed fade/advance all live in the C++ TrainingWindow). [index] is the skill's ordinal in
     // the exported best-3 list. Training is one-shot: the engine emits COMPANION_TRAINING_CLOSED after
     // the 2-hour advance completes (or immediately if it rejects the train).
+    // Level up. Both drive the NATIVE LevelupDialog's own handlers, so selection semantics
+    // (toggle, replace-last-at-quota), the coin-count gate and the ordered commit are the game's,
+    // not ours. Picking by attribute ID rather than an ordinal keeps the DS grid order independent
+    // of the native window's. A pick on an attribute already at 100 is refused natively.
+    fun levelUpPick(attrId: String) = runCommand("CMP:levelup_pick:$attrId")
+
+    // Confirm. Deliberately routed to the same entry point as the native OK button: under quota it
+    // refuses and shows vanilla's own message, so the DS Done gate can never commit something the
+    // real gate would have rejected.
+    fun levelUpConfirm() = runCommand("CMP:levelup_ok")
+
     fun trainSkill(index: Int) = runCommand("CMP:training_train:$index")
 
     // Cancel training (closes the native window + emits COMPANION_TRAINING_CLOSED). Idempotent —

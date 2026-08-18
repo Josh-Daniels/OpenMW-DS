@@ -104,6 +104,13 @@ object LogParser {
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_AMMO = "COMPANION_AMMO:"
     private const val P_EQUIPPED_CHARGE = "COMPANION_EQUIPPED_CHARGE:"
+    // Level up. START/ATTR/END carry the display data (Lua); SELECTION is the native window's
+    // authoritative coin count + picks; CLOSED comes from the Lua UiModeChanged close edge.
+    const val P_LEVELUP_START = "COMPANION_LEVELUP_START:"
+    const val P_LEVELUP_ATTR = "COMPANION_LEVELUP_ATTR:"
+    const val P_LEVELUP_END = "COMPANION_LEVELUP_END"
+    const val P_LEVELUP_SELECTION = "COMPANION_LEVELUP_SELECTION:"
+    const val P_LEVELUP_CLOSED = "COMPANION_LEVELUP_CLOSED"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
     // Player standing (reputation/bounty/factions). Single small line, merged onto
@@ -616,6 +623,50 @@ object LogParser {
         val count = o.optInt("count", 0)
         if (count <= 0) return null
         return EquippedAmmo(id = o.optString("id", ""), count = count)
+    }
+
+    /** Header of a COMPANION_LEVELUP_START payload. Null if malformed. */
+    fun parseLevelUpStart(json: String): LevelUpSession? = try {
+        val o = JSONObject(json)
+        LevelUpSession(
+            level = o.optInt("level", 0),
+            flavour = o.optString("flavour", ""),
+            image = o.optString("image", "")
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** One COMPANION_LEVELUP_ATTR row. Null if malformed. */
+    fun parseLevelUpAttr(json: String): LevelUpAttribute? = try {
+        val o = JSONObject(json)
+        val arr = o.optJSONArray("skills")
+        val skills = if (arr == null) emptyList() else
+            (0 until arr.length()).mapNotNull { arr.optString(it, "").ifBlank { null } }
+        LevelUpAttribute(
+            id = o.optString("id", ""),
+            name = o.optString("name", ""),
+            description = o.optString("desc", ""),
+            icon = o.optString("icon", ""),
+            base = o.optInt("base", 0),
+            count = o.optInt("count", 0),
+            mult = o.optInt("mult", 1),
+            disabled = o.optBoolean("disabled", false),
+            skills = skills
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** COMPANION_LEVELUP_SELECTION payload: "<coinCount>|<id>,<id>,...". The id list may be empty.
+     *  Returns null if the line is malformed, so a bad line leaves the previous state alone rather
+     *  than silently resetting the coin count to a wrong value. */
+    fun parseLevelUpSelection(payload: String): Pair<Int, List<String>>? {
+        val bar = payload.indexOf('|')
+        if (bar < 0) return null
+        val count = payload.substring(0, bar).trim().toIntOrNull() ?: return null
+        val ids = payload.substring(bar + 1).split(',').mapNotNull { it.trim().ifBlank { null } }
+        return count to ids
     }
 
     /** Enchantment charge of the equipped-item slot. `{}` (or a zero capacity) parses to null,

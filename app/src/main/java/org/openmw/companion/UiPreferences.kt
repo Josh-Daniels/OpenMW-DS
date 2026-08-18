@@ -115,7 +115,11 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // companion-hide-travel-on-dsmode patches), so it is non-pending (default DS): the native
     // GM_Travel window is suppressed and the bottom screen is the sole surface.
     GameUiElement("game_ui_travel", "Travel"),
-    GameUiElement("game_ui_levelup", "Level up", pending = true),
+    // Level up is non-pending as of Aug 19 2026: LevelUpOverlay exists on the bottom screen and
+    // DS suppresses the native GM_Levelup window via the already-wired companionDsLevelUp() gate.
+    // The native LevelupDialog still owns selection state and the commit (CMP:levelup_* bridges) —
+    // the DS side is presentation only.
+    GameUiElement("game_ui_levelup", "Level up"),
     // Dialogue-service windows (GM_SpellBuying / GM_Training) — now non-pending (default DS): the
     // bottom-screen SpellBuyingOverlay / TrainingOverlayHost exist, and DS suppresses the native
     // window via companion-hide-gamewindows-on-dsmode.patch (setCompanionDsSpellBuying/Training →
@@ -290,6 +294,15 @@ val INTERIOR_BRIGHTNESS_RANGE = 0f..0.35f
  *  Keep in step with the engine if it ever changes upstream. */
 const val MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT = 0.08f
 
+/** Most HUD favourite quick-slots a category can show. Also the number PERSISTED per category —
+ *  lowering the visible count hides slots rather than deleting them, so this is the storage width
+ *  regardless of what is on screen. See [FavouritesRepository]. */
+const val FAV_SLOTS_MAX = 4
+
+/** Shipped favourite slot count per category. 2 reproduces the fixed 2 + 2 the HUD had before the
+ *  count became configurable, so a fresh install looks exactly as it always did. */
+const val FAV_SLOTS_DEFAULT = 2
+
 object UiPreferences {
     private const val PREFS = "companion_ui_settings"
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
@@ -320,6 +333,8 @@ object UiPreferences {
     private const val UI_SOUND_VOLUME = "ui_sound_volume"
     private const val NIGHT_BRIGHTNESS = "exterior_night_brightness"
     private const val INTERIOR_BRIGHTNESS = "minimum_interior_brightness"
+    private const val FAV_GEAR_SLOTS = "fav_gear_slots"
+    private const val FAV_MAGIC_SLOTS = "fav_magic_slots"
     private const val VANILLA_FONT = "vanilla_font"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
@@ -447,6 +462,8 @@ object UiPreferences {
     private val uiSoundVolumeFlow = MutableStateFlow(UI_SOUND_VOLUME_DEFAULT)
     private val nightBrightnessFlow = MutableStateFlow(NIGHT_BRIGHTNESS_DEFAULT)
     private val interiorBrightnessFlow = MutableStateFlow(MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT)
+    private val favGearSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
+    private val favMagicSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
 
     // Whether the companion + DS overlays render in the game's own typeface instead of the Android
     // system serif/monospace. The face is MysticCards.ttf — OpenMW's SIL-OFL replacement for
@@ -579,12 +596,16 @@ object UiPreferences {
         effectTimersFlow.value = p.getBoolean(EFFECT_TIMERS, true)
         uiSoundsFlow.value = p.getBoolean(UI_SOUNDS, true)
         uiSoundVolumeFlow.value = p.getFloat(UI_SOUND_VOLUME, UI_SOUND_VOLUME_DEFAULT)
+            .coerceIn(UI_SOUND_VOLUME_RANGE)
         nightBrightnessFlow.value =
             p.getFloat(NIGHT_BRIGHTNESS, NIGHT_BRIGHTNESS_DEFAULT).coerceIn(NIGHT_BRIGHTNESS_RANGE)
         interiorBrightnessFlow.value =
             p.getFloat(INTERIOR_BRIGHTNESS, MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT)
                 .coerceIn(INTERIOR_BRIGHTNESS_RANGE)
-            .coerceIn(UI_SOUND_VOLUME_RANGE)
+        favGearSlotsFlow.value =
+            p.getInt(FAV_GEAR_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
+        favMagicSlotsFlow.value =
+            p.getInt(FAV_MAGIC_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         p.getString(LOOTING_LOCATION, null)
@@ -864,6 +885,32 @@ object UiPreferences {
         val v = value.coerceIn(INTERIOR_BRIGHTNESS_RANGE)
         interiorBrightnessFlow.value = v
         editor(context).putFloat(INTERIOR_BRIGHTNESS, v).apply()
+    }
+
+    /**
+     * How many HUD favourite GEAR slots to show (0..[FAV_SLOTS_MAX]).
+     *
+     * This is a VISIBILITY count, not a storage width: [FAV_SLOTS_MAX] slots are always persisted,
+     * so lowering it hides favourites rather than destroying them and raising it brings them back.
+     * 0 hides the whole FAV. GEAR group.
+     */
+    fun favGearSlotsFlow(): StateFlow<Int> = favGearSlotsFlow.asStateFlow()
+
+    /** Set the visible HUD favourite gear slot count and persist. Clamped to 0..[FAV_SLOTS_MAX]. */
+    fun setFavGearSlots(context: Context, value: Int) {
+        val v = value.coerceIn(0, FAV_SLOTS_MAX)
+        favGearSlotsFlow.value = v
+        editor(context).putInt(FAV_GEAR_SLOTS, v).apply()
+    }
+
+    /** How many HUD favourite SPELL slots to show (0..[FAV_SLOTS_MAX]). See [favGearSlotsFlow]. */
+    fun favMagicSlotsFlow(): StateFlow<Int> = favMagicSlotsFlow.asStateFlow()
+
+    /** Set the visible HUD favourite spell slot count and persist. Clamped to 0..[FAV_SLOTS_MAX]. */
+    fun setFavMagicSlots(context: Context, value: Int) {
+        val v = value.coerceIn(0, FAV_SLOTS_MAX)
+        favMagicSlotsFlow.value = v
+        editor(context).putInt(FAV_MAGIC_SLOTS, v).apply()
     }
 
     /** Whether the journal's chronological view uses the spine-hinged page-turn animation. */
