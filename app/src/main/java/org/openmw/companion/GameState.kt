@@ -132,7 +132,13 @@ data class InfoEffect(val text: String, val harmful: Boolean)
 data class ItemInfo(
     val name: String,
     val rows: List<Pair<String, String>>,
-    val effects: List<InfoEffect>
+    val effects: List<InfoEffect>,
+    /** Enchantment charge for the popup's charge bar, mirroring vanilla's "Charges" bar.
+     *  `maxCharge == 0` means no bar — which is the case for an unenchanted item AND for the two
+     *  enchantment types that never drain (Cast Once, Constant Effect), exactly as vanilla. A
+     *  snapshot taken when the popup was opened; it does not track live. */
+    val charge: Int = 0,
+    val maxCharge: Int = 0
 )
 
 /** Current combat/crosshair target, shown as a name + health bar on the HUD. */

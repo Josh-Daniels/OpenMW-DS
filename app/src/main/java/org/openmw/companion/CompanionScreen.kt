@@ -3153,6 +3153,43 @@ private fun ItemInfoPopupCard(info: ItemInfo?, enchant: ItemEnchant?, edge: Popu
                     }
                     InfoEffectRow(e.name + parts, e.harmful, e.icon)
                 }
+                // Charge bar — vanilla's "Charges" row, a labelled bar with the current/max pair.
+                // Drawn only when the async COMPANION_INFO reply carried a charge, which the
+                // exporter emits ONLY for Cast When Strikes / Cast When Used; vanilla likewise
+                // draws no bar for Cast Once or Constant Effect. So there is no enchantment-type
+                // test here — maxCharge > 0 IS the signal, the same convention the HUD meter uses.
+                val maxCharge = info?.maxCharge ?: 0
+                if (maxCharge > 0) {
+                    val cur = info?.charge ?: 0
+                    val ratio = (cur.toFloat() / maxCharge).coerceIn(0f, 1f)
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Charge", color = BoneDim, fontSize = 11.sp, fontFamily = MwBody)
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .padding(horizontal = 8.dp)
+                                .height(9.dp)
+                                .clip(RoundedCornerShape(1.dp))
+                                .background(Color(0xFF0E0B07))
+                                .border(1.dp, BronzeDark, RoundedCornerShape(1.dp))
+                        ) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth(ratio)
+                                    .fillMaxHeight()
+                                    .background(if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C))
+                            )
+                        }
+                        Text(
+                            "$cur/$maxCharge",
+                            color = Bone, fontSize = 11.sp, fontFamily = MwData
+                        )
+                    }
+                }
             }
         }
 

@@ -2072,6 +2072,32 @@ end
 -- derived by comparing the piece's weight to a per-slot base GMST scaled by the
 -- fLightMaxMod / fMedMaxMod multipliers. Mirrors OpenMW's Armor::getEquipmentSkill.
 local ARMOR_WEIGHT_GMST = nil
+-- The armour rating VANILLA DISPLAYS, which is skill-adjusted rather than the record's base value.
+-- Mirrors Armor::getSkillAdjustedArmorRating's engine path:
+--     weight == 0  ->  base rating, unscaled (unenchantable "clothing-like" armour)
+--     otherwise    ->  baseArmor * <player's governing armour skill> / iBaseArmorSkill
+-- The governing skill comes from the same Light/Medium/Heavy classification armorWeightClass
+-- already derives for the Weight row's suffix, so the two can never disagree about a piece's class.
+-- (The engine first tries a Lua `Combat.getSkillAdjustedArmorRating` interface override and only
+-- falls back to this; the stock interface implements this same formula, so replicating the fallback
+-- matches an unmodded game. A mod that overrides that interface would diverge here.)
+local ARMOR_CLASS_SKILL = { Light = "lightarmor", Medium = "mediumarmor", Heavy = "heavyarmor" }
+local function armorRatingFor(rec)
+    local base = rec.baseArmor or 0
+    if (rec.weight or 0) == 0 then return base end
+    local out = base
+    pcall(function()
+        local cls = armorWeightClass(rec)
+        local skillId = cls and ARMOR_CLASS_SKILL[cls]
+        if not skillId then return end
+        local skill = types.NPC.stats.skills[skillId](self).modified
+        local iBase = core.getGMST("iBaseArmorSkill")
+        if not skill or not iBase or iBase == 0 then return end
+        out = base * skill / iBase
+    end)
+    return out
+end
+
 local function armorWeightClass(rec)
     if ARMOR_WEIGHT_GMST == nil then
         local AT = types.Armor.TYPE
@@ -2114,6 +2140,14 @@ local function exportInfo(arg)
     end
 
     local name, rows, effects = "", {}, {}
+    -- Enchantment charge for the popup's charge bar, mirroring vanilla's "Charges" bar. Emitted
+    -- ONLY for the two enchantment types that actually drain (Cast When Strikes / Cast When Used);
+    -- vanilla draws no bar for Cast Once or Constant Effect either. Carried on this ON-DEMAND reply
+    -- rather than on the streamed item lines on purpose: enchantment charge regenerates every frame,
+    -- so putting it on itemJson would break exportInventory's change detection (see
+    -- COMPANION_EQUIPPED_CHARGE for the same trade-off). A popup is opened by hand, so a snapshot
+    -- taken at open time is exactly right and costs nothing.
+    local infoCharge, infoMaxCharge = 0, 0
 
     if kind == "spell" then
         local rec = core.magic.spells.records[id]
@@ -2159,6 +2193,21 @@ local function exportInfo(arg)
         local function isType(ty) return foundType == ty or (item ~= nil and ty.objectIsInstance(item)) end
         name = (rec.name and rec.name ~= "" and rec.name) or id
 
+        -- Remaining USES for lockpicks/probes/repair hammers: a bare count, which is what vanilla
+        -- shows (getItemHealth), NOT the current/max pair Condition uses. A pristine item has no
+        -- stored condition, so it reads as full; a vendor item has no instance at all, likewise.
+        local function usesLeft(maxCondition)
+            if not maxCondition or maxCondition <= 0 then return nil end
+            local cur = maxCondition
+            if item then
+                pcall(function()
+                    local data = types.Item.itemData(item)
+                    if data and data.condition ~= nil then cur = data.condition end
+                end)
+            end
+            return string.format("%d", math.floor(cur + 0.5))
+        end
+
         -- Instance condition (current / max), not the record's max health. nil when there is
         -- no instance (vendor items), which omits the Condition row.
         local function condStr(maxHealth)
@@ -2169,11 +2218,6 @@ local function exportInfo(arg)
                 if data and data.condition ~= nil then cur = data.condition end
             end)
             return string.format("%d / %d", math.floor(cur + 0.5), math.floor(maxHealth + 0.5))
-        end
-        local function enchantPts()
-            if rec.enchantCapacity and rec.enchantCapacity > 0 then
-                addRow(rows, "Enchant Pts", fmtNum(rec.enchantCapacity))
-            end
         end
 
         -- Weight, with an armor class suffix for armor pieces, e.g. "16 (Heavy)".
@@ -2186,53 +2230,79 @@ local function exportInfo(arg)
         -- is NOT emitted here — it rides the streamed item exports (itemJson "ench") and the popup
         -- renders it from local state, so `effects` here carries only intrinsic potion/ingredient
         -- alchemy effects (avoids showing enchant effects twice).
+        -- ROWS ARE VANILLA-PARITY, per class, in vanilla's order (mwclass/*.cpp getToolTipInfo).
+        -- Verified against the engine Aug 19 2026. Three "verbose" settings gate rows and ALL THREE
+        -- ship false (engine default AND app/settings.fallback.cfg), so their rows are simply absent
+        -- here rather than conditional -- Lua cannot read engine settings, so if any is ever turned
+        -- on, vanilla will show a row we do not:
+        --   show melee info        -> weapon Reach + Attack Speed   (we used to show these ALWAYS)
+        --   show projectile damage -> ammo Type + damage
+        --   show effect duration   -> light Duration
         if isType(types.Weapon) then
-            addRow(rows, "Type", weaponTypeStr(rec))
-            -- Damage rows, keyed on the weapon CLASS exactly as the vanilla tooltip does
-            -- (mwclass/weapon.cpp getToolTipInfo, which branches on mWeaponClass):
-            --   melee  -> all THREE attacks, because all three are real and the player picks
-            --             between them with the movement direction. This is the full stat block,
-            --             not the list column's one-line summary -- do NOT collapse it to the
-            --             primary attack again (that is the Aug 19 2026 regression).
-            --   thrown -> ONE row, chop x2 (the weapon is its own ammo)
-            --   ranged/ammo -> ONE row from CHOP; their slash/thrust are 0, so emitting all three
-            --             printed "Slash 0-0 / Thrust 0-0" on every bow, crossbow, arrow and bolt.
-            local function dmgRow(label, mn, mx)
-                addRow(rows, label, string.format("%d-%d",
-                    math.floor((mn or 0) + 0.5), math.floor((mx or 0) + 0.5)))
-            end
+            -- AMMO (arrows/bolts) gets NO type and NO damage row: vanilla wraps both in
+            -- `weaponClass != Ammo || show projectile damage`, so by default an arrow tooltip is
+            -- just condition/weight/value.
             local cls = weaponClass(rec.type)
-            if cls == "melee" then
-                dmgRow("Chop", rec.chopMinDamage, rec.chopMaxDamage)
-                dmgRow("Slash", rec.slashMinDamage, rec.slashMaxDamage)
-                dmgRow("Thrust", rec.thrustMinDamage, rec.thrustMaxDamage)
-            elseif cls == "thrown" then
-                dmgRow("Damage", (rec.chopMinDamage or 0) * 2, (rec.chopMaxDamage or 0) * 2)
-            else
-                dmgRow("Damage", rec.chopMinDamage, rec.chopMaxDamage)
+            if cls ~= "ammo" then
+                addRow(rows, "Type", weaponTypeStr(rec))
+                local function dmgRow(label, mn, mx)
+                    addRow(rows, label, string.format("%d-%d",
+                        math.floor((mn or 0) + 0.5), math.floor((mx or 0) + 0.5)))
+                end
+                if cls == "melee" then
+                    dmgRow("Chop", rec.chopMinDamage, rec.chopMaxDamage)
+                    dmgRow("Slash", rec.slashMinDamage, rec.slashMaxDamage)
+                    dmgRow("Thrust", rec.thrustMinDamage, rec.thrustMaxDamage)
+                elseif cls == "thrown" then
+                    dmgRow("Damage", (rec.chopMinDamage or 0) * 2, (rec.chopMaxDamage or 0) * 2)
+                else
+                    dmgRow("Damage", rec.chopMinDamage, rec.chopMaxDamage)
+                end
             end
-            addRow(rows, "Reach", fmtNum(rec.reach))
-            addRow(rows, "Speed", fmtNum(rec.speed))
-            enchantPts()
             addRow(rows, "Condition", condStr(rec.health))
         elseif isType(types.Armor) then
-            addRow(rows, "Armor Rating", fmtNum(rec.baseArmor))
-            enchantPts()
+            -- SKILL-ADJUSTED rating, as vanilla shows (Armor::getSkillAdjustedArmorRating):
+            -- baseArmor * <governing armor skill> / iBaseArmorSkill, with a weightless piece
+            -- reporting its base rating unscaled. The raw baseArmor shown here before is a
+            -- different number from the one the game puts on screen.
+            addRow(rows, "Armor Rating", fmtNum(armorRatingFor(rec)))
             addRow(rows, "Condition", condStr(rec.health))
-        elseif isType(types.Clothing) then
-            enchantPts()
         elseif isType(types.Potion) then
             appendEffectList(rec.effects, effects, false)
         elseif isType(types.Ingredient) then
             appendIngredientEffects(rec, effects)
-        elseif isType(types.Lockpick) or isType(types.Probe) then
+        elseif isType(types.Lockpick) or isType(types.Probe) or isType(types.Repair) then
+            -- Vanilla order is Uses then Quality, and Uses is the REMAINING count on its own
+            -- (getItemHealth), not a current/max pair like Condition.
+            addRow(rows, "Uses", usesLeft(rec.maxCondition))
             addRow(rows, "Quality", fmtNum(rec.quality))
-            addRow(rows, "Uses Left", condStr(rec.maxCondition))
-        elseif isType(types.Book) then
-            if not rec.isScroll and rec.skill and rec.skill ~= "" then
-                addRow(rows, "Skill", capitalize(tostring(rec.skill)))
-            end
+        elseif isType(types.Apparatus) then
+            addRow(rows, "Quality", fmtNum(rec.quality))
         end
+        -- Clothing, Book, Light and Miscellaneous intentionally have NO rows of their own --
+        -- vanilla shows weight and value and nothing else for all four. In particular:
+        --   * no "Enchant Pts" anywhere (NO vanilla tooltip shows enchant capacity; it used to be
+        --     emitted here for weapons, armour and clothing);
+        --   * no "Skill" row on skill books (vanilla never shows which skill a book teaches).
+        -- Charge snapshot for the bar (see infoCharge above). Instance charge when we have the
+        -- item; for a vendor's item there is no instance, and vanilla treats that same -1 case as
+        -- "full", so max is the right fallback rather than 0.
+        pcall(function()
+            local enchId = rec.enchant
+            if not enchId or enchId == "" then return end
+            local ench = core.magic.enchantments.records[enchId]
+            if not ench then return end
+            local ET = core.magic.ENCHANTMENT_TYPE
+            if ench.type ~= ET.CastOnStrike and ench.type ~= ET.CastOnUse then return end
+            local maxC = ench.charge or 0
+            if maxC <= 0 then return end
+            local cur = maxC
+            if item then
+                local d = types.Item.itemData(item)
+                if d and d.enchantmentCharge ~= nil then cur = d.enchantmentCharge end
+            end
+            infoCharge, infoMaxCharge = math.floor(cur + 0.5), math.floor(maxC + 0.5)
+        end)
         -- Weight (with armor-class suffix for armor) and Value LAST, matching the vanilla tooltip.
         addRow(rows, "Weight", weightStr)
         addRow(rows, "Value", fmtNum(rec.value))
@@ -2241,8 +2311,8 @@ local function exportInfo(arg)
         return
     end
 
-    emit(string.format('COMPANION_INFO:{"name":"%s","rows":[%s],"effects":[%s]}',
-        jsonEscape(name), table.concat(rows, ','), table.concat(effects, ',')))
+    emit(string.format('COMPANION_INFO:{"name":"%s","rows":[%s],"effects":[%s],"charge":%d,"maxCharge":%d}',
+        jsonEscape(name), table.concat(rows, ','), table.concat(effects, ','), infoCharge, infoMaxCharge))
 end
 
 -- =============================== Developer Tools ===============================

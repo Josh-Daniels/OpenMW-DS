@@ -366,7 +366,10 @@ object LogParser {
                 InfoEffect(e.optString("t", ""), e.optBoolean("h", false))
             }
         } ?: emptyList()
-        ItemInfo(o.optString("name", ""), rows, effects)
+        ItemInfo(
+            o.optString("name", ""), rows, effects,
+            charge = o.optInt("charge", 0), maxCharge = o.optInt("maxCharge", 0)
+        )
     } catch (e: Exception) {
         null
     }
