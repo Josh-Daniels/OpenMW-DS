@@ -11091,6 +11091,10 @@ private fun SpellSectionHeader(title: String) {
 @Composable
 private fun MagicPanel(state: GameState) {
     val sel = state.selectedSpell
+    // Success chance per learned spell, joined by id at render time. Its own flow rather than a
+    // field on SpellEntry because it is dynamic (fatigue term, and 0 when magicka is short) while
+    // the rest of a spell row is static — see GameStateRepository.spellChances.
+    val spellChances by GameStateRepository.spellChances.collectAsState()
     // The spell list is always the compact layout now (the Standard/Compact toggle was removed).
 
     Column(
@@ -11248,6 +11252,11 @@ private fun MagicPanel(state: GameState) {
                                 effect = spell.effect,
                                 school = spell.school,
                                 cost = spell.cost,
+                                // Only this section passes a chance. The map is keyed by spell id
+                                // and contains learned spells only, so the powers/scrolls/enchanted
+                                // sections would look up null anyway — but not passing it there
+                                // keeps that intent explicit rather than incidental.
+                                chance = spellChances[spell.id],
                                 onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
@@ -11311,6 +11320,11 @@ private fun SpellRow(
     effect: String = "",
     school: String = "",
     cost: Int = 0,
+    // Success chance as a whole percent, or null for "no chance column". Null is the norm for
+    // powers, scrolls and enchanted items — vanilla shows a chance for LEARNED SPELLS only (a
+    // power's column is left empty and an enchanted item's second number is charge, not chance),
+    // and the exporter already filters to that set, so there is no spell-type test here.
+    chance: Int? = null,
     onInfo: (() -> Unit)? = null,
     iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
@@ -11394,6 +11408,17 @@ private fun SpellRow(
                     Spacer(Modifier.width(6.dp))
                 } else if (cost > 0) {
                     ItemStatColumn(cost.toString(), "COST", width = 40.dp, cardStyle = true)
+                    Spacer(Modifier.width(6.dp))
+                }
+                // CHANCE as its own labelled column rather than folded into COST as vanilla's
+                // "24/87" single cell. Vanilla has no column headers so it can afford the compact
+                // form; ours does, and the combined heading does not fit — measured against the
+                // real game font, "COST/CHANCE" is 77.6dp and the value "100/100" is 42.1dp, so the
+                // one-cell version would need an ~82dp column against COST's current 40dp. Two
+                // labelled columns are both narrower overall and unambiguous. 48dp fits the widest
+                // title ("CHANCE", 44.8dp) and value ("100%", ~25dp).
+                if (chance != null) {
+                    ItemStatColumn("$chance%", "CHANCE", width = 48.dp, cardStyle = true)
                     Spacer(Modifier.width(6.dp))
                 }
                 if (school.isNotEmpty()) {

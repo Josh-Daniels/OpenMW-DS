@@ -1,0 +1,30 @@
+--- a/apps/openmw/mwlua/magicbindings.cpp
++++ b/apps/openmw/mwlua/magicbindings.cpp
+@@ -541,6 +541,27 @@
+             else
+                 return spellStore->find(spellId);
+         };
++        // Companion: the spell's success CHANCE as a whole percent, i.e. the second half of the
++        // vanilla magic menu's "Cost/Chance" column. Read-only, so it takes a plain Object rather
++        // than SelfObject and can be called for any actor.
++        //
++        // Bound rather than reimplemented in Lua on purpose. MWMechanics::getSpellSuccessChance
++        // folds in the per-effect base-cost loop, the lowest-school-skill search, willpower/luck,
++        // the Sound and Silence magic effects, the fatigue term, god mode, the magicka check and
++        // the always-succeed flag -- and its spell-cost term has an autocalc branch that pulls in
++        // calcEffectCost as well. Every input is Lua-readable, but a hand-written copy would be a
++        // long formula with many chances to drift silently out of step with the engine, for a
++        // number the player compares directly against the vanilla screen.
++        //
++        // Defaults are left alone (cap = true, checkMagicka = true) because that is exactly how
++        // MWGui::SpellModel builds mCostColumn, so this matches the vanilla display 1:1 -- including
++        // reading 0 when the player cannot currently afford the spell.
++        actor["getSpellSuccessChance"] = [](const Object& o, const sol::object& spellOrId) -> int {
++            const MWWorld::Ptr& ptr = o.ptr();
++            if (!ptr.getClass().isActor())
++                throw std::runtime_error("Actor expected");
++            return static_cast<int>(MWMechanics::getSpellSuccessChance(toSpellId(spellOrId), ptr));
++        };
+         actor["setSelectedSpell"] = [context, spellStore](const SelfObject& o, const sol::object& spellOrId) {
+             const MWWorld::Ptr& ptr = o.ptr();
+             const MWWorld::Class& cls = ptr.getClass();

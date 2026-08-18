@@ -365,6 +365,54 @@ local function exportSpells()
     emit('COMPANION_SPELLS_END')
 end
 
+
+local lastSpellChancesStr = nil
+
+-- Per-spell success CHANCE (whole percent) — the second half of the vanilla magic menu's
+-- "Cost/Chance" column. Streamed id|chance, one small line each.
+--
+-- WHY ITS OWN EXPORT rather than another field on COMPANION_SPELLS_ITEM: chance is DYNAMIC in a way
+-- the rest of a spell row is not. It scales with the fatigue term, so it changes continuously while
+-- the player runs or fights, and it drops to 0 the moment magicka falls below the spell's cost.
+-- Folding it into exportSpells would make that batch's change-detection signature differ on almost
+-- every tick, re-streaming the whole spell list — names, icons, effect descriptions and all — at up
+-- to 5 Hz. Here the same event re-streams only id|chance pairs. Same reasoning as
+-- COMPANION_EQUIPPED_CHARGE, and the streaming (rather than one line) follows the standing rule
+-- against any COMPANION_ line that can grow unbounded: the count is the player's learned-spell
+-- total, which mods can push arbitrarily high.
+--
+-- LEARNED SPELLS ONLY (SPELL_TYPE.Spell), matching vanilla exactly:
+--   * POWERS get no chance. getSpellSuccessChance does answer for them (canUsePower and 100 or 0),
+--     but MWGui::SpellModel leaves a power's cost column EMPTY, and inventing a number vanilla
+--     chooses not to show would read as a once-per-day power being "0% likely to work".
+--   * Enchanted items and scrolls have no chance either — vanilla's column is Cost/CHARGE for them,
+--     which the companion already renders as the charge bar.
+-- The value comes from the engine (types.Actor.getSpellSuccessChance, companion-spell-success-chance
+-- .patch), not a Lua re-derivation, so it cannot drift from what the vanilla screen shows.
+local function exportSpellChances()
+    local parts = {}
+    pcall(function()
+        for _, spell in ipairs(types.Actor.spells(self)) do
+            local rec = core.magic.spells.records[spell.id]
+            if rec and rec.type == core.magic.SPELL_TYPE.Spell then
+                local ok, chance = pcall(function()
+                    return types.Actor.getSpellSuccessChance(self, spell.id)
+                end)
+                if ok and chance then
+                    parts[#parts + 1] = string.format('%s|%d', jsonEscape(spell.id), chance)
+                end
+            end
+        end
+    end)
+
+    local sig = table.concat(parts, ',')
+    if sig == lastSpellChancesStr then return end
+    lastSpellChancesStr = sig
+    emit('COMPANION_SPELL_CHANCES_START')
+    for _, p in ipairs(parts) do emit('COMPANION_SPELL_CHANCE:' .. p) end
+    emit('COMPANION_SPELL_CHANCES_END')
+end
+
 local lastSelectedSpellStr = nil
 
 local function exportSelectedSpell()
@@ -2893,6 +2941,7 @@ local function onUpdate(dt)
     if slowTimer >= SLOW_INTERVAL then
         slowTimer = 0
         exportSpells()
+        exportSpellChances()
         exportSelectedSpell()
         exportInventory()
         exportEquipment()

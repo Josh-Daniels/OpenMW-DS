@@ -319,6 +319,20 @@ object GameStateRepository {
     // for the same 4096-byte reason as inventory (a mage's list plus the added per-spell stats can
     // exceed one flush).
     private var spellsBuffer: MutableList<SpellEntry>? = null
+    private var spellChanceBuffer: MutableMap<String, Int>? = null
+
+    /**
+     * Spell id -> success chance (whole percent), the second half of the vanilla magic menu's
+     * "Cost/Chance" column. Learned spells only — powers, scrolls and enchanted items are absent by
+     * design (see the Lua exporter), so a missing id means "no chance to show", not "0%".
+     *
+     * Kept OUT of [SpellEntry] deliberately. Chance is dynamic (it tracks the fatigue term and drops
+     * to 0 when magicka is short) while the rest of a spell row is static, so it arrives on its own
+     * stream and is joined by id at render time. Folding it into the spell list would re-stream every
+     * spell's name, icon and effect text every time the player's fatigue ticked.
+     */
+    private val _spellChances = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val spellChances: StateFlow<Map<String, Int>> = _spellChances.asStateFlow()
 
     // --- Looting/pickpocketing container session (COMPANION_CONTAINER_*) ---
     // null = no container open. OPEN sets the header (name/isCorpse) and starts a
@@ -742,6 +756,27 @@ object GameStateRepository {
                     _state.update { it.copy(spells = buf.toList()) }
                 }
                 spellsBuffer = null
+            }
+            // Spell success chances (ITEM first — most frequent). Same buffered START/ITEM/END
+            // shape as the spell list itself; committed only on END so a batch lost part-way
+            // leaves the previous map intact rather than a half-filled one.
+            trimmed.contains(LogParser.P_SPELL_CHANCE) -> {
+                spellChanceBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_SPELL_CHANCE) + LogParser.P_SPELL_CHANCE.length
+                    val payload = trimmed.substring(idx).trim()
+                    val sep = payload.lastIndexOf('|')
+                    if (sep > 0) {
+                        val id = payload.substring(0, sep)
+                        payload.substring(sep + 1).toIntOrNull()?.let { buf[id] = it }
+                    }
+                }
+            }
+            trimmed.contains(LogParser.P_SPELL_CHANCES_START) -> {
+                spellChanceBuffer = mutableMapOf()
+            }
+            trimmed.contains(LogParser.P_SPELL_CHANCES_END) -> {
+                spellChanceBuffer?.let { _spellChances.value = it.toMap() }
+                spellChanceBuffer = null
             }
             trimmed.contains(LogParser.P_INFO) -> {
                 val idx = trimmed.indexOf(LogParser.P_INFO) + LogParser.P_INFO.length

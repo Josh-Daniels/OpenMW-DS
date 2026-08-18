@@ -19,6 +19,12 @@ object LogParser {
     const val P_SPELLS_START = "COMPANION_SPELLS_START"
     const val P_SPELLS_ITEM = "COMPANION_SPELLS_ITEM:"
     const val P_SPELLS_END = "COMPANION_SPELLS_END"
+    // Per-spell success chance stream. NOTE none of these is a substring of the SPELLS_* prefixes
+    // above (the character after "SPELL" differs: '_' vs 'S'), so the contains()-based dispatch
+    // cannot cross-match them and their relative order in the `when` does not matter.
+    const val P_SPELL_CHANCES_START = "COMPANION_SPELL_CHANCES_START"
+    const val P_SPELL_CHANCE = "COMPANION_SPELL_CHANCE:"
+    const val P_SPELL_CHANCES_END = "COMPANION_SPELL_CHANCES_END"
     private const val P_SELECTED_SPELL = "COMPANION_SELECTED_SPELL:"
     private const val P_INVENTORY = "COMPANION_INVENTORY:"
     const val P_INVENTORY_START = "COMPANION_INVENTORY_START"
