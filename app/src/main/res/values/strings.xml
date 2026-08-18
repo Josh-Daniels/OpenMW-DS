@@ -154,6 +154,20 @@
         <item quantity="one">Add Mods (%1$d folder added)</item>
         <item quantity="other">Add Mods (%1$d folders added)</item>
     </plurals>
+    <string name="simplified_data_files_label">"Data Files: "</string>
+    <string name="simplified_manage_folders">Manage folders</string>
+    <string name="simplified_manage_folders_title">Manage folders</string>
+    <string name="simplified_manage_folders_intro">Folders registered in your configuration. Removing one takes it out of the game\'s setup — nothing is deleted from your device.</string>
+    <string name="simplified_manage_folders_empty">No folders are registered.</string>
+    <string name="simplified_manage_folders_game_tag">Game files folder</string>
+    <string name="simplified_remove_game_files_warning">This is your game files folder. Removing it leaves no game to run — Play will be disabled and you will need to select game files again.</string>
+    <string name="simplified_remove_folder_title">Remove mod folder?</string>
+    <string name="simplified_remove_folder_plugins">These plugins will also be removed from the load order, because they load from this folder:</string>
+    <string name="simplified_remove_folder_no_plugins">No plugins in your load order come from this folder, so the load order is unchanged.</string>
+    <string name="simplified_remove_folder_missing">This folder is no longer on your device, so the plugins listed are the ones your load order can no longer load from anywhere. Leaving them would stop the game from starting.</string>
+    <string name="simplified_remove_folder_keeps_files">The folder and its files are NOT deleted from your device — this only removes it from the mod configuration. You can add it again at any time.</string>
+    <string name="simplified_remove_folder_done">Removed from the mod configuration</string>
+    <string name="simplified_plugins_discovered">Added %1$d new plugin(s) to the load order</string>
     <string name="simplified_transfer_from_alpha3">Transfer from Alpha3</string>
     <string name="simplified_load_order">Load Order</string>
     <string name="simplified_copy_mod_order">Copy mod order from Alpha3</string>

@@ -53,6 +53,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -114,6 +116,7 @@ import kotlinx.coroutines.withContext
 import org.openmw.BuildConfig
 import org.openmw.Constants
 import org.openmw.R
+import org.openmw.fragments.USER_CFG_DEFAULT_LINE
 import org.openmw.ui.controls.UIStateManager.customCFG
 import org.openmw.ui.page.main.MainPageViewModel
 import org.openmw.ui.page.mod.ModAssistantViewModel
@@ -187,9 +190,36 @@ private suspend fun collectSettledModValues(onValues: (List<ModValue>) -> Unit) 
     }
 }
 
+/** A cfg path as written may be quoted (`modPathSelection` emits `data="<folder>"`) and may carry a
+ *  trailing slash. Everything that compares or opens one of these paths goes through this. */
+private fun normPath(path: String) = path.trim().trim('"').trimEnd('/')
+
 /**
- * How many MOD data folders have been added, i.e. the `data=` lines in the user openmw.cfg that are
- * not the base game's own `Data Files` and not a folder the app manages for itself.
+ * Whether the stored game-files path is a real selection.
+ *
+ * `null` means the DataStore has not emitted yet — a state EVERY cold open passes through, since
+ * `getGameFilesUriState` is an async flow collected with `initial = null`. `""` is written by
+ * `MainPageViewModel` when a selection fails validation, and `"Game Files: "` is a legacy sentinel
+ * the older screens still test for. None of the three identifies a game folder, and telling them
+ * apart from a real path is the whole job here — see [addedModFolders] for why conflating "not loaded
+ * yet" with "no game folder" was actively dangerous.
+ *
+ * One predicate shared by the screen's `gameFilesMissing` and [addedModFolders], so the button's
+ * label and the removable-folder list can never disagree about whether the game folder is known.
+ */
+private fun gameFilesConfigured(savedPath: String?) =
+    !savedPath.isNullOrBlank() && savedPath != "Game Files: "
+
+// NOTE: a `baseDataFilesPath(savedPath)` helper used to live here, deriving the displayed Data Files
+// path by appending "/Data Files" to the stored game-files path. It was removed once the Add Mods
+// label started reading the path out of the cfg instead — the cfg is what the load order and the
+// engine actually use, so a derived path could (and did) advertise a folder with no `data=` line.
+// Classification still handles the "player selected the Data Files folder itself" case by matching
+// BOTH the root and `<root>/Data Files`; see `manageableFolders` and [addedModFolders].
+
+/**
+ * The MOD data folders that have been added, i.e. the `data=` entries in the user openmw.cfg that
+ * are not the base game's own `Data Files` and not a folder the app manages for itself.
  *
  * There is no "the selected mods folder" to report the way game files have one saved path:
  * [ModAssistantViewModel.modPathSelection] APPENDS a `data="<folder>"` line (plus a `content=` line
@@ -202,25 +232,340 @@ private suspend fun collectSettledModValues(onValues: (List<ModValue>) -> Unit) 
  *  - the app's own resources/delta/companion paths, which are written by the launcher and the Delta
  *    merge tool rather than chosen by the player.
  * Duplicates collapse, because adding the same folder twice appends nothing the second time.
+ *
+ * This is ALSO the list of folders offered as removable in [ManageModFoldersDialog], and the
+ * exclusions above are what keeps `Data Files` and the app-managed paths off it — remove one of
+ * those and the game has no data at all. One function, so the count on the button and the removable
+ * list can never disagree about what counts as a player-added folder.
+ *
+ * COLD-OPEN CORRECTNESS — why the [gameFilesConfigured] guard is not defensive padding:
+ * the base game's folder is identified by string-matching `<savedPath>/Data Files`, and `savedPath`
+ * arrives from an async DataStore flow that is `null` for the first frames of EVERY cold open. With
+ * no guard, `gameDataFiles` was null in that window, so the base game's own `data=` line failed the
+ * exclusion and was reported as a player-added mod folder: on a real device cfg the button showed
+ * "Add Mods (1 folder added)" with a Manage line before settling to the correct 0, and while it was
+ * up the Manage dialog offered `Morrowind/Data Files` itself for removal. Returning an empty list
+ * until the path is known makes the unknown state read as "nothing added" — the same, harmless thing
+ * the screen shows when there genuinely is nothing — instead of as a removable base game.
+ *
+ * The game ROOT is excluded alongside `<root>/Data Files` because a player who browses to the
+ * `Data Files` folder and selects THAT as their game files (a natural mistake — the Add Mods button
+ * literally says "select Data Files") stores a path for which `<savedPath>/Data Files` never matches
+ * anything. That case is permanent, not transient, and produced the same wrongly-removable base game.
  */
-private fun countAddedModFolders(values: List<ModValue>, savedPath: String?): Int {
-    fun norm(path: String) = path.trim().trim('"').trimEnd('/')
+private fun addedModFolders(values: List<ModValue>, savedPath: String?): List<ModValue> {
+    // Not "no game folder" but "we do not know it yet" — and without knowing it, nothing here can
+    // tell the base game apart from a mod. Report nothing rather than something destructive.
+    if (!gameFilesConfigured(savedPath)) return emptyList()
 
-    val gameDataFiles = savedPath?.takeIf { it.isNotBlank() }?.let { norm("$it/Data Files") }
-    val appManaged = listOfNotNull(
-        gameDataFiles,
-        norm(Constants.USER_RESOURCES),
-        norm("${Constants.USER_RESOURCES}/vfs-mw"),
-        norm(Constants.USER_DELTA),
-        norm("${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion"),
+    val gameRoot = normPath(savedPath!!)
+    val appManaged = listOf(
+        normPath("$gameRoot/Data Files"),
+        gameRoot,
+        normPath(Constants.USER_RESOURCES),
+        normPath("${Constants.USER_RESOURCES}/vfs-mw"),
+        normPath(Constants.USER_DELTA),
+        normPath("${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion"),
     )
 
     return values.asSequence()
-        .filter { it.category == "data" }
-        .map { norm(it.value) }
+        .filter { it.category == "data" && normPath(it.value).isNotEmpty() }
+        .distinctBy { normPath(it.value) }
+        .filter { entry ->
+            appManaged.none { it.equals(normPath(entry.value), ignoreCase = true) }
+        }
+        .toList()
+}
+
+/** One row of the Manage-folders list: a registered `data=` entry, and whether it is the base game's
+ *  own folder (which needs a stronger warning and also has to clear the stored game-files path). */
+private class ManagedFolder(val entry: ModValue, val isGameFiles: Boolean)
+
+/**
+ * Every `data=` folder the PLAYER is responsible for — the base game's own Data Files plus any mod
+ * folders added on top. This is what the Manage-folders dialog lists.
+ *
+ * DELIBERATELY WIDER THAN [addedModFolders], which stays "extra folders on top of the base game" for
+ * the button's count. Manage needs the base game folder too: without it, a setup whose mods are
+ * merged straight into Data Files had nothing to manage at all, and there was no way to unregister a
+ * folder and get back to an empty configuration. Removing the game files row is a real, deliberate
+ * action here rather than an accident waiting to happen — it is labelled as the game files, it warns
+ * accordingly, and it goes through the same cascade as any other removal.
+ *
+ * Still excluded: the app's own resources / vfs-mw / delta / companion paths. The player never chose
+ * those, they are rewritten by the launcher anyway, and removing one breaks the app rather than the
+ * setup. (They normally live in the INTERNAL global cfg rather than the user cfg, so this is a
+ * belt-and-braces filter for configs that have picked them up.)
+ *
+ * When the game folder is not known — the cold-open window before the DataStore emits, or a genuinely
+ * unconfigured install — nothing can be classified as the base game, so every entry is listed as an
+ * ordinary folder. That is safe HERE precisely because the base game is removable by design in this
+ * list; it is NOT safe for [addedModFolders], which is why that one keeps its guard.
+ */
+private fun manageableFolders(values: List<ModValue>, savedPath: String?): List<ManagedFolder> {
+    val appManaged = listOf(
+        normPath(Constants.USER_RESOURCES),
+        normPath("${Constants.USER_RESOURCES}/vfs-mw"),
+        normPath(Constants.USER_DELTA),
+        normPath("${Constants.USER_FILE_STORAGE}/OpenMW/Mods/companion"),
+    )
+    val gameRoot = savedPath?.takeIf { gameFilesConfigured(it) }?.let { normPath(it) }
+    val gamePaths = listOfNotNull(gameRoot, gameRoot?.let { normPath("$it/Data Files") })
+
+    return values.asSequence()
+        .filter { it.category == "data" && normPath(it.value).isNotEmpty() }
+        .distinctBy { normPath(it.value) }
+        .filter { entry -> appManaged.none { it.equals(normPath(entry.value), ignoreCase = true) } }
+        .map { entry ->
+            ManagedFolder(
+                entry = entry,
+                isGameFiles = gamePaths.any { it.equals(normPath(entry.value), ignoreCase = true) },
+            )
+        }
+        // Game files first: it is the root of the setup, and it is the row that carries the warning.
+        .sortedByDescending { it.isGameFiles }
+        .toList()
+}
+
+/** The extensions `ModAssistantViewModel.modPathSelection` turns into `content=` lines when a mod
+ *  folder is added (via `findFilesWithExtensions`). Mirrored here so a removal identifies exactly
+ *  what the add wrote — including `.bsa`, which that function also files as content. */
+private val MOD_PLUGIN_EXTENSIONS =
+    setOf("bsa", "esm", "esp", "esl", "omwaddon", "omwgame", "omwscripts")
+
+/**
+ * Plugin file names (lowercased) directly inside [dir].
+ *
+ * NON-recursive on purpose: `findFilesWithExtensions` is a single `listFiles()`, so only top-level
+ * plugins ever became `content=` lines. Recursing here would claim entries the add never created.
+ * An absent or unreadable folder yields an empty set — callers distinguish that case themselves.
+ */
+private fun pluginFileNamesIn(dir: String): Set<String> =
+    File(dir).takeIf { it.isDirectory }
+        ?.listFiles()
+        ?.asSequence()
+        ?.filter { it.isFile }
+        ?.map { it.name }
+        ?.filter { it.substringAfterLast('.', "").lowercase() in MOD_PLUGIN_EXTENSIONS }
+        ?.map { it.lowercase() }
+        ?.toSet()
+        ?: emptySet()
+
+/**
+ * The extensions the ENGINE can actually load from a `content=` line.
+ *
+ * Taken from `World::loadContentFiles`' loader table (worldimp.cpp): `.esm`, `.esp`, `.omwgame`,
+ * `.omwaddon`, `.project` and `.omwscripts`. Anything else reaches `GameContentLoader::load`, finds
+ * no loader, and **throws `"Cannot load file: <path>"`** — a hard startup failure. So this set is a
+ * correctness boundary, not a filter for tidiness.
+ *
+ * Deliberately NARROWER than [MOD_PLUGIN_EXTENSIONS], which mirrors what `modPathSelection` WRITES:
+ *  - `.bsa` is excluded. That function files archives as `content=` lines, which the engine cannot
+ *    load; archives belong on `fallback-archive=` (the global cfg already lists the three base ones).
+ *    Auto-adding one would break launching, so this never does — even though a removal still cleans
+ *    up such a line if `modPathSelection` created one.
+ *  - `.esl` is excluded for the same reason: this engine registers no loader for it.
+ *  - `.project` is excluded on judgement rather than necessity — it loads, but it is an OpenMW-CS
+ *    working file and enabling one automatically is not what dropping it in a folder means.
+ */
+private val ENGINE_CONTENT_EXTENSIONS =
+    setOf("esm", "esp", "omwgame", "omwaddon", "omwscripts")
+
+/**
+ * Plugins sitting in a registered data folder with no `content=` line yet, as new entries ready to
+ * append to the load order.
+ *
+ * This is what makes a mod copied into a data folder BY HAND — file manager, adb, an unzip — appear
+ * in the load order on the next launcher open, instead of only after re-selecting that folder through
+ * Add Mods. Registering the folder again was the only route before, and it is a confusing thing to
+ * have to discover.
+ *
+ * Rules that keep it from fighting the player:
+ *  - a plugin already named by ANY content entry is left alone, INCLUDING a disabled `;content=` one.
+ *    Disabling a mod must not cause it to be silently re-added and re-enabled on the next open.
+ *  - only ENABLED `data=` folders are scanned. A `;data=` folder is not on the engine's search path,
+ *    so a content line pointing into it would not resolve — the same crash this avoids elsewhere.
+ *  - new entries are appended AFTER every existing content entry (ids continue from the current max,
+ *    and the writer sorts by id), so an established load order is never reordered. New plugins going
+ *    last is also the conventional default for a freshly added one.
+ *  - names are scanned in sorted order so repeated runs are deterministic.
+ *  - a name that is blank, not equal to its own `trim()`, or contains a newline is SKIPPED. Not
+ *    hypothetical fussiness: `readModValues` trims each value, so a file called `"Foo .esp"` would
+ *    round-trip as `"Foo.esp"`, never match on the next scan, and be appended again on every pass —
+ *    an endless write loop.
+ */
+private fun unregisteredContent(all: List<ModValue>): List<ModValue> {
+    val known = all.asSequence()
+        .filter { it.category == "content" }
+        .mapTo(mutableSetOf()) { it.value.trim().lowercase() }
+
+    val folders = all.asSequence()
+        .filter { it.category == "data" && it.isChecked }
+        .map { normPath(it.value) }
         .filter { it.isNotEmpty() }
         .distinct()
-        .count { candidate -> appManaged.none { it.equals(candidate, ignoreCase = true) } }
+        .toList()
+
+    var nextId = all.maxOfOrNull { it.id } ?: 0
+    val discovered = mutableListOf<ModValue>()
+
+    folders.forEach { dir ->
+        val names = File(dir).takeIf { it.isDirectory }
+            ?.listFiles()
+            ?.asSequence()
+            ?.filter { it.isFile }
+            ?.map { it.name }
+            ?.filter { it.substringAfterLast('.', "").lowercase() in ENGINE_CONTENT_EXTENSIONS }
+            ?.filter { it.isNotBlank() && it == it.trim() && '\n' !in it }
+            ?.sorted()
+            ?: return@forEach
+
+        names.forEach { name ->
+            if (known.add(name.lowercase())) {
+                discovered += ModValue(++nextId, "content", name, isChecked = true)
+            }
+        }
+    }
+    return discovered
+}
+
+/**
+ * What removing one mod data folder entails, resolved BEFORE anything is written so the
+ * confirmation can enumerate it.
+ *
+ * @param plugins the `content=` entries that must go with the folder. NOT cosmetic: a `content=`
+ *   line whose file cannot be found in any remaining data folder is a HARD launch failure —
+ *   `World::loadContentFiles` throws "the content file does not exist" (worldimp.cpp) rather than
+ *   skipping it. Removing the `data=` line alone would brick the next launch.
+ * @param remaining every value that survives, i.e. what gets written back.
+ */
+private class ModFolderRemovalPlan(
+    val folder: ModValue,
+    val displayPath: String,
+    val plugins: List<ModValue>,
+    val folderMissing: Boolean,
+    val remaining: List<ModValue>,
+    /** Removing the base game's folder also has to clear the stored game-files path, or the launcher
+     *  keeps claiming a game folder it no longer has a `data=` line for. */
+    val isGameFiles: Boolean,
+)
+
+/**
+ * Work out the full cascade for removing [folder].
+ *
+ * A content entry is doomed when it loads from the folder being removed AND from nowhere else. The
+ * "nowhere else" half matters: the same plugin file can sit in two data folders (a patch folder over
+ * a base folder) while the cfg carries only ONE `content=` line for it, and that line still resolves
+ * after this folder goes. Only ENABLED data entries can resolve anything — the engine never sees a
+ * `;data=` line — so disabled ones do not count as a survivor.
+ *
+ * Disabled `;content=` entries ARE swept along. They are inert today, but leaving one behind means a
+ * later re-tick points at a folder that is gone, which is the same crash deferred.
+ *
+ * When the folder is no longer on disk (the player deleted it themselves and is now tidying up the
+ * config) there is nothing to enumerate, so the rule falls back to "every content entry that
+ * resolves in no remaining folder". Those entries already cannot load — the config was broken before
+ * this removal — and the confirmation says so explicitly rather than sweeping them silently.
+ *
+ * Touches the filesystem (`listFiles`), so call it off the main thread.
+ */
+private fun planModFolderRemoval(
+    all: List<ModValue>,
+    folder: ManagedFolder,
+): ModFolderRemovalPlan {
+    val target = normPath(folder.entry.value)
+    val folderMissing = !File(target).isDirectory
+    val inTarget = pluginFileNamesIn(target)
+
+    val elsewhere = all.asSequence()
+        .filter { it.category == "data" && it.isChecked }
+        .map { normPath(it.value) }
+        .filterNot { it.equals(target, ignoreCase = true) }
+        .flatMap { pluginFileNamesIn(it).asSequence() }
+        .toSet()
+
+    val doomed = all.filter { entry ->
+        if (entry.category != "content") return@filter false
+        val name = entry.value.trim().lowercase()
+        if (name in elsewhere) return@filter false
+        if (folderMissing) true else name in inTarget
+    }
+    val doomedIds = doomed.mapTo(mutableSetOf()) { it.stableId }
+
+    // Matched by PATH, not stableId, so a cfg that somehow lists the same folder twice loses both
+    // entries — otherwise the survivor would keep resolving the plugins we just removed.
+    val remaining = all.filter { entry ->
+        when {
+            entry.category == "data" && normPath(entry.value).equals(target, ignoreCase = true) ->
+                false
+            entry.stableId in doomedIds -> false
+            else -> true
+        }
+    }
+
+    return ModFolderRemovalPlan(
+        folder = folder.entry,
+        displayPath = normPath(folder.entry.value).removePrefix("/storage/emulated/0/"),
+        plugins = doomed,
+        folderMissing = folderMissing,
+        remaining = remaining,
+        isGameFiles = folder.isGameFiles,
+    )
+}
+
+/**
+ * Write a planned removal to openmw.cfg. Returns whether the config now reflects it.
+ *
+ * CONTENT IS WRITTEN FIRST, AND THAT ORDER IS LOAD-BEARING. Each call rewrites one section, so a
+ * failure between the two leaves a partial state — and only one of the two orders degrades safely:
+ *  - content then data: worst case the `content=` lines are gone but the `data=` line remains. A
+ *    data folder with nothing loading from it is inert, and the game still starts.
+ *  - data then content: worst case the `data=` line is gone and the `content=` lines are orphaned,
+ *    which is exactly the "content file does not exist" crash this whole feature exists to prevent.
+ * The data write is therefore skipped entirely if the content write failed.
+ *
+ * Both calls pass the same full [ModFolderRemovalPlan.remaining] list; `writeModValuesToFile`
+ * filters it to the target category itself. Passing the whole list is what preserves `Data Files`
+ * and the app-managed `data=` entries — that writer REPLACES the section it is given, so anything
+ * omitted would be dropped.
+ */
+private suspend fun applyModFolderRemoval(
+    viewModel: ModAssistantViewModel,
+    plan: ModFolderRemovalPlan,
+): Boolean {
+    var ok = false
+    viewModel.writeModValuesToFile(
+        modValues = plan.remaining,
+        filePath = Constants.USER_OPENMW_CFG,
+        targetCategory = OpenMWConfigUtils.ConfigKeyType.Content.key,
+    ) { ok = it }
+    if (!ok) return false
+
+    viewModel.writeModValuesToFile(
+        modValues = plan.remaining,
+        filePath = Constants.USER_OPENMW_CFG,
+        targetCategory = OpenMWConfigUtils.ConfigKeyType.Data.key,
+    ) { ok = it }
+    if (!ok) return false
+
+    // Removing the last folder leaves `saveOpenMWConfig` writing a ZERO-BYTE file, which is not a
+    // state the rest of the app recognises: `updateUserConfig` decides whether a game-files selection
+    // may reseed this cfg by testing for the default header, so an empty file read as "custom, do not
+    // touch" and re-selecting game files silently wrote nothing — a registered game folder with an
+    // empty load order. That guard now also accepts an empty file, and writing the header back here
+    // means the file says what it is either way rather than sitting at zero bytes.
+    // Gated on the FILE being zero bytes, not on `remaining` being empty. Those are different: a cfg
+    // can carry lines this screen never models (`fallback-archive=`, `data-local=`, comments), which
+    // `saveOpenMWConfig` preserves in its "Others" bucket — so an empty `remaining` does not mean an
+    // empty file, and writing the header on that basis would DESTROY those lines. Length 0 is the one
+    // case where there is provably nothing to lose.
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val cfg = File(Constants.USER_OPENMW_CFG)
+            if (cfg.length() == 0L) cfg.writeText("$USER_CFG_DEFAULT_LINE\n")
+        }
+    }
+    return true
 }
 
 /** Bounded retry for giving the Play button initial focus, so the controller's confirm button
@@ -357,6 +702,173 @@ private suspend fun importAlpha3ModOrder(viewModel: ModAssistantViewModel) {
                 )
             }
         }
+    )
+}
+
+/**
+ * The "Manage folders" list: every registered `data=` folder the player owns — the game files folder
+ * and any mod folders added on top — each with a Remove action.
+ *
+ * Read-plus-remove only. Adding stays on the buttons that open this, and nothing here edits the load
+ * order — that is the load-order panel's job.
+ *
+ * The game files row is TAGGED rather than hidden or disabled. Removing it is a legitimate way to
+ * unregister everything and get back to an empty configuration, so the design makes it visible and
+ * clearly labelled instead of unreachable; the strength of the warning lives in the confirmation.
+ *
+ * Shown only while no removal is being confirmed, so this and the confirmation never stack as two
+ * dialog windows (the same reason `AlphaMigrationFirstLaunch` gates its browser behind `selecting`).
+ */
+@Composable
+private fun ManageModFoldersDialog(
+    folders: List<ManagedFolder>,
+    onRemoveRequested: (ManagedFolder) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.simplified_manage_folders_title)) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 300.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    text = stringResource(R.string.simplified_manage_folders_intro),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(10.dp))
+
+                if (folders.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.simplified_manage_folders_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MwBoneDim,
+                    )
+                    return@Column
+                }
+
+                folders.forEachIndexed { index, folder ->
+                    if (index > 0) HorizontalDivider(color = MwBronzeDark)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(vertical = 8.dp, horizontal = 2.dp)
+                        ) {
+                            Text(
+                                // Storage prefix trimmed for legibility, as the Alpha3 list does.
+                                text = normPath(folder.entry.value)
+                                    .removePrefix("/storage/emulated/0/"),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            if (folder.isGameFiles) {
+                                // So the consequential row is identifiable BEFORE tapping Remove,
+                                // not only in the confirmation that follows.
+                                Text(
+                                    text = stringResource(R.string.simplified_manage_folders_game_tag),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MwBronzeLight,
+                                )
+                            }
+                        }
+                        TextButton(onClick = { onRemoveRequested(folder) }) {
+                            Text(stringResource(R.string.remove))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        },
+    )
+}
+
+/**
+ * Confirmation for one folder removal, which ENUMERATES the cascade rather than asking a generic
+ * "are you sure".
+ *
+ * Naming the plugins is the point of this dialog: removing a data folder silently takes plugins out
+ * of the load order too, and that is not something the player can infer from "remove this folder".
+ * It also states that nothing leaves the device — otherwise Remove reads as deleting a download.
+ */
+@Composable
+private fun ConfirmRemoveModFolderDialog(
+    plan: ModFolderRemovalPlan,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.simplified_remove_folder_title)) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(text = plan.displayPath, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(10.dp))
+
+                if (plan.isGameFiles) {
+                    // First thing after the path, before the plugin list, because it changes what
+                    // the whole action means: this is not "drop a mod", it is "unregister the game".
+                    Text(
+                        text = stringResource(R.string.simplified_remove_game_files_warning),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MwBronzeLight,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+
+                if (plan.plugins.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.simplified_remove_folder_no_plugins),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Text(
+                        text = stringResource(R.string.simplified_remove_folder_plugins),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    plan.plugins.forEach { plugin ->
+                        Text(
+                            text = plugin.value,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MwBronzeLight,
+                            modifier = Modifier.padding(start = 8.dp, top = 1.dp),
+                        )
+                    }
+                    if (plan.folderMissing) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = stringResource(R.string.simplified_remove_folder_missing),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MwBoneDim,
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = stringResource(R.string.simplified_remove_folder_keeps_files),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MwBoneDim,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text(stringResource(R.string.btn_confirm)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.btn_cancel)) }
+        },
     )
 }
 
@@ -523,17 +1035,82 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
     val bypassFlow = remember(context) { GameFilesPreferences.loadBypassGameCheck(context) }
 
     val savedPath by gameFilesFlow.collectAsState(initial = null)
-    val gameFilesMissing = savedPath.isNullOrEmpty() || savedPath == "Game Files: "
+    // Same predicate the removable-folder list uses, so "is the game folder known" is decided in one
+    // place. (Widened from the old `isNullOrEmpty` to `isNullOrBlank`: a whitespace-only stored path
+    // is not a game folder either, and treating it as one left Play enabled on an unusable setup.)
+    val gameFilesMissing = !gameFilesConfigured(savedPath)
 
-    // How many mod folders have been added, for the Add-Mods button's own label. Read from
-    // openmw.cfg on the SAME triggers as the load-order panel below and through the same settling
-    // helper, because `modPathSelection` writes the cfg on its own IO coroutine — `refreshKey` is
-    // bumped from its completion callback, but the game-files path can still land late.
-    var addedModFolders by remember { mutableStateOf(0) }
+    // The whole cfg mod list, for the Add-Mods button's count AND the Manage-folders dialog's
+    // removable list. Read on the SAME triggers as the load-order panel below and through the same
+    // settling helper, because `modPathSelection` writes the cfg on its own IO coroutine —
+    // `refreshKey` is bumped from its completion callback, but the game-files path can still land
+    // late.
+    //
+    // Kept as the FULL list rather than just the count, because a removal has to rewrite the
+    // `content` and `data` sections in full and therefore needs every entry it is preserving — the
+    // load-order panel's content-only view is not enough.
+    var allModValues by remember { mutableStateOf(emptyList<ModValue>()) }
     LaunchedEffect(refreshKey, savedPath) {
-        collectSettledModValues { values ->
-            addedModFolders = countAddedModFolders(values, savedPath)
+        collectSettledModValues { values -> allModValues = values }
+    }
+    // Two DIFFERENT lists, deliberately. The count on the Add Mods button is "extra folders on top
+    // of the base game", so it excludes the game files folder. The Manage list INCLUDES it, so a
+    // setup with no extra folders still has something to manage and can be taken back to empty.
+    val addedModFolderCount = remember(allModValues, savedPath) {
+        addedModFolders(allModValues, savedPath).size
+    }
+    val manageable = remember(allModValues, savedPath) {
+        manageableFolders(allModValues, savedPath)
+    }
+    // The base game's row, if it is actually registered in the cfg. Null means the game folder has no
+    // `data=` line — which is a real, reachable state (a full removal, or a selection that failed to
+    // seed the cfg) and one the Add Mods label must not paper over.
+    val gameFilesRow = manageable.firstOrNull { it.isGameFiles }
+
+    // Pick up plugins copied into a registered folder from OUTSIDE the app, so a mod dropped into
+    // Data Files by hand appears in the load order without re-selecting the folder through Add Mods.
+    //
+    // Keyed on `allModValues` rather than on refreshKey, so it runs after every read — including the
+    // one the write below triggers. That terminates rather than looping: the second pass finds the
+    // entries it just wrote already registered and writes nothing. If the write FAILS the cfg does
+    // not change, so no re-read is triggered and it does not spin either.
+    LaunchedEffect(allModValues) {
+        if (allModValues.isEmpty()) return@LaunchedEffect
+        val discovered = withContext(Dispatchers.IO) { unregisteredContent(allModValues) }
+        if (discovered.isEmpty()) return@LaunchedEffect
+
+        var ok = false
+        modVm.writeModValuesToFile(
+            modValues = allModValues + discovered,
+            filePath = Constants.USER_OPENMW_CFG,
+            targetCategory = OpenMWConfigUtils.ConfigKeyType.Content.key,
+        ) { ok = it }
+        if (ok) {
+            // Deterministic refresh: the write bumps the cfg mtime, but `collectSettledModValues`
+            // only watches for a bounded window, so a late write would otherwise not be picked up
+            // until something else changed.
+            refreshKey++
+            MToast(
+                String.format(
+                    stringRes(R.string.simplified_plugins_discovered), discovered.size
+                )
+            )
+        } else {
+            MToast(stringRes(R.string.failed_to_save_openmw_config))
         }
+    }
+
+    // Manage-folders state. `pendingPlan` is resolved off the main thread (it lists the folder), so
+    // the request and the resolved plan are separate states.
+    var showManageFolders by remember { mutableStateOf(false) }
+    var folderPendingPlan by remember { mutableStateOf<ManagedFolder?>(null) }
+    var pendingRemoval by remember { mutableStateOf<ModFolderRemovalPlan?>(null) }
+    LaunchedEffect(folderPendingPlan) {
+        val folder = folderPendingPlan ?: return@LaunchedEffect
+        pendingRemoval = withContext(Dispatchers.IO) {
+            planModFolderRemoval(allModValues, folder)
+        }
+        folderPendingPlan = null
     }
 
     // Play state, read exactly as the Alpha3 Play FAB reads it and handed to the shared
@@ -597,7 +1174,14 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                 onClick = {
                     customCFG = true
                     mainVm.selectMorrowWindFolder(context)
-                }
+                },
+                // Same entry point as the Add Mods button's, on the same shared dialog. Both buttons
+                // carry it because the dialog spans both concerns — the game files folder and the mod
+                // folders are all just registered `data=` entries — and this is the only route to
+                // unregistering the game files folder and getting back to an empty configuration.
+                secondaryText = stringResource(R.string.simplified_manage_folders)
+                    .takeIf { manageable.isNotEmpty() },
+                onSecondaryClick = { showManageFolders = true },
             )
             LauncherActionButton(
                 modifier = Modifier.weight(1f),
@@ -605,17 +1189,49 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                 // APPENDS another data folder to openmw.cfg — so the feedback is a running count of
                 // what has been added. A path would have to pick one of several arbitrarily, and
                 // would silently stop changing on every add after the first.
-                text = if (addedModFolders > 0) {
-                    pluralStringResource(
-                        R.plurals.simplified_mods_added, addedModFolders, addedModFolders
+                //
+                // THREE states, not two. Zero added folders means two completely different things,
+                // and collapsing them was misleading for anyone who merges their mods straight into
+                // the base Data Files folder: that is a perfectly valid setup with mods installed and
+                // showing in the load-order panel, yet the button kept saying "select Data Files" as
+                // though no setup had happened. So the prompt is shown ONLY while the game folder is
+                // genuinely unset; once it is set, the button ECHOES THE DATA FILES PATH IN USE, in
+                // the same "<label>: <path>" shape as the game-files button beside it, so a merged
+                // setup reads as configured rather than as unfinished.
+                //
+                // The count still wins when there ARE separate folders, because that is exactly the
+                // state where one path cannot represent the setup — there are several, and picking
+                // one to display would be arbitrary and would stop changing after the first add.
+                //
+                // The path comes from the CFG (the Manage list), NOT from the stored game-files path.
+                // Deriving it from the stored path let the button advertise a Data Files folder that
+                // had no `data=` line at all: after a full removal, re-selecting game files restored
+                // the preference while the cfg stayed empty, so the button read correctly while the
+                // load order below it was empty. Reading the same source the load order reads means
+                // the two cannot disagree.
+                text = when {
+                    addedModFolderCount > 0 -> pluralStringResource(
+                        R.plurals.simplified_mods_added, addedModFolderCount, addedModFolderCount
                     )
-                } else {
-                    stringResource(R.string.select_data_files)
+                    gameFilesRow != null -> stringResource(R.string.simplified_data_files_label) +
+                        normPath(gameFilesRow.entry.value)
+                    else -> stringResource(R.string.select_data_files)
                 },
                 onClick = {
                     showModsBrowser = true
                     MToast(stringRes(R.string.add_mod))
-                }
+                },
+                // The way in to removing a folder. Gated on the MANAGE list, not on the button's own
+                // count: with only the game files folder registered the count is 0, but there is
+                // still a folder to unregister — and gating on the count is what previously made a
+                // merged setup unable to reach the Manage dialog at all.
+                //
+                // Its own tap target inside the button rather than a second action bound to the whole
+                // button: the primary tap must stay ADD, and a mis-tap that removed a folder instead
+                // of opening a browser would be a genuinely bad outcome.
+                secondaryText = stringResource(R.string.simplified_manage_folders)
+                    .takeIf { manageable.isNotEmpty() },
+                onSecondaryClick = { showManageFolders = true },
             )
             // Settings, with an update dot overlaid. The dot tracks update availability DIRECTLY
             // and is deliberately not dismissible — it's the quiet always-on signal, so the
@@ -864,6 +1480,45 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
         )
     }
 
+    // --- Manage folders. Hidden while a removal is being confirmed so the two never stack. ---
+    if (showManageFolders && pendingRemoval == null) {
+        ManageModFoldersDialog(
+            folders = manageable,
+            onRemoveRequested = { folderPendingPlan = it },
+            onDismiss = { showManageFolders = false },
+        )
+    }
+    pendingRemoval?.let { plan ->
+        ConfirmRemoveModFolderDialog(
+            plan = plan,
+            onConfirm = {
+                pendingRemoval = null
+                coroutineScope.launch {
+                    if (applyModFolderRemoval(modVm, plan)) {
+                        // Removing the game files folder must also clear the STORED PATH, or the
+                        // launcher keeps reporting a game folder whose `data=` line no longer
+                        // exists — Play would stay enabled on a setup with no game to run. Written
+                        // AFTER the cfg succeeds, so a failed write cannot leave the pref cleared
+                        // and the cfg intact. "" is the same value MainPageViewModel writes when a
+                        // selection fails validation, so `gameFilesConfigured` reads it as unset.
+                        if (plan.isGameFiles) {
+                            GameFilesPreferences.storeGameFilesPath(context, "")
+                        }
+                        // Re-reads the cfg, which refreshes BOTH the load-order panel (the removed
+                        // plugins leave it) and this dialog's own list behind us.
+                        refreshKey++
+                        MToast(stringRes(R.string.simplified_remove_folder_done))
+                    } else {
+                        MToast(stringRes(R.string.failed_to_save_openmw_config))
+                    }
+                }
+            },
+            // Cancel drops the plan only, so the manage list comes back — nothing has been written
+            // at this point.
+            onDismiss = { pendingRemoval = null },
+        )
+    }
+
     BackHandler(showModsBrowser) { showModsBrowser = false }
     if (showModsBrowser) {
         FileBrowserPopup(
@@ -939,6 +1594,8 @@ private fun LauncherActionButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     flashing: Boolean = false,
+    secondaryText: String? = null,
+    onSecondaryClick: (() -> Unit)? = null,
 ) {
     val transition = rememberInfiniteTransition(label = "launcherBtn")
     val pulse by transition.animateFloat(
@@ -950,27 +1607,59 @@ private fun LauncherActionButton(
     Button(
         onClick = onClick,
         modifier = modifier
-            .heightIn(min = 44.dp)
+            // 52dp rather than 44dp so a button carrying a secondary line is the same height as one
+            // that does not — two visibly different heights side by side in the action row read as a
+            // layout mistake.
+            .heightIn(min = 52.dp)
             .then(if (flashing) Modifier.graphicsLayer(scaleX = pulse, scaleY = pulse) else Modifier),
         shape = RoundedCornerShape(12.dp),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
         colors = ButtonDefaults.buttonColors(containerColor = MwSlotBg),
         border = BorderStroke(1.dp, if (flashing) MwBronzeLight else MwBronzeDark),
     ) {
-        Text(
-            text = text,
-            color = if (flashing) MwBronzeLight else MwBone,
-            fontSize = 13.sp,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = text,
+                color = if (flashing) MwBronzeLight else MwBone,
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (secondaryText != null) {
+                // A clickable INSIDE a Button: the inner clickable consumes the tap, so the
+                // enclosing Button's onClick does not also fire. Underlined so it reads as its own
+                // target rather than as a subtitle — an inert-looking label that is actually the
+                // only way to reach removal would never be found.
+                Text(
+                    text = secondaryText,
+                    color = MwBronzeLight,
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clickable(enabled = onSecondaryClick != null) {
+                            onSecondaryClick?.invoke()
+                        },
+                )
+            }
+        }
     }
 }
 
 /**
  * The mod load-order panel: the Content (ESM/ESP) entries from openmw.cfg, drag-reorderable by the
- * handle on each row.
+ * handle on each row and individually enable/disable-able by the checkbox on each row.
+ *
+ * A DISABLED entry is a `;content=…`-commented line, which [readModValues] surfaces as
+ * `isChecked = false` and [ModAssistantViewModel.writeModValuesToFile] re-emits with the `;` — so
+ * the persistence half of the toggle was already proven by drag-reorder (a disabled row has always
+ * survived a reorder correctly). What was missing was any UI: this panel used to ignore
+ * `isChecked` entirely, so a disabled plugin rendered IDENTICALLY to an enabled one. The checkbox
+ * and the dimmed row below are the two halves of that fix, and the dimming matters on its own —
+ * without it the list actively misreports the config.
  *
  * Reuses the Alpha3 load-order LOGIC wholesale — [readModValues] to load, and
  * [ModAssistantViewModel.writeModValuesToFile] with `targetCategory = "content"` to persist, which
@@ -1021,6 +1710,32 @@ private fun ModLoadOrderPanel(
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
         items = items.toMutableList().apply { add(to.index, removeAt(from.index)) }
+    }
+
+    // The ONE writer for this panel, shared by the drag handler and the enable/disable checkbox —
+    // the same call the Alpha3 Content tab makes on drop. It rewrites the whole `content` section
+    // from `values`, mapping each entry to `content=` or `;content=` by its `isChecked`, so a
+    // reorder and a toggle are the same operation as far as the file is concerned.
+    //
+    // The list is passed in rather than read from `items` inside, so a caller that has just
+    // assigned `items` cannot depend on snapshot-visibility timing for what it persists.
+    //
+    // Deliberately NOT Alpha3's approach of rewriting the single matching line in openmw.cfg
+    // directly: that hand-rolls the `;` prefixing a second time and matches lines by string
+    // equality, which drifts from the writer the drag path already uses.
+    fun persist(values: List<ModValue>) {
+        coroutineScope.launch {
+            viewModel.writeModValuesToFile(
+                modValues = values,
+                filePath = Constants.USER_OPENMW_CFG,
+                targetCategory = contentKey,
+                onFinish = { isSuccess ->
+                    if (!isSuccess) {
+                        MToast(stringRes(R.string.failed_to_save_openmw_config))
+                    }
+                }
+            )
+        }
     }
 
     Column(
@@ -1075,15 +1790,46 @@ private fun ModLoadOrderPanel(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // Enable/disable. A CHECKBOX rather than a tap on the row: the row is
+                            // also the drag surface, and a mis-tap while reaching for the handle
+                            // must not silently disable a plugin. Its own 48dp touch target keeps
+                            // it well clear of the handle at the far end of the row.
+                            Checkbox(
+                                checked = modValue.isChecked,
+                                onCheckedChange = { checked ->
+                                    val updated = items.map {
+                                        // Matched on stableId, not id: ids are only sequential
+                                        // after a drag renumbers them, and readModValues numbers
+                                        // across ALL categories, so they are not unique-per-row
+                                        // in any way worth relying on here.
+                                        if (it.stableId == modValue.stableId) {
+                                            it.copy(isChecked = checked)
+                                        } else {
+                                            it
+                                        }
+                                    }
+                                    items = updated
+                                    persist(updated)
+                                },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = MwBronzeLight,
+                                    checkmarkColor = MwStoneDark,
+                                    uncheckedColor = MwBronzeDark,
+                                )
+                            )
                             Text(
+                                // The ordinal is the row's POSITION (index + 1), and disabled rows
+                                // keep theirs — load order still matters for when the plugin comes
+                                // back, and numbering only the enabled rows would make every
+                                // number below a toggle jump.
                                 text = "${index + 1}",
-                                color = MwBronzeLight,
+                                color = if (modValue.isChecked) MwBronzeLight else MwBronzeDark,
                                 style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(start = 10.dp, end = 6.dp)
+                                modifier = Modifier.padding(end = 6.dp)
                             )
                             Text(
                                 text = modValue.value,
-                                color = MwBone,
+                                color = if (modValue.isChecked) MwBone else MwBoneDim,
                                 style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1102,21 +1848,14 @@ private fun ModLoadOrderPanel(
                                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                                             view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                                         }
-                                        // Renumber, then hand off to the SAME writer the Alpha3
-                                        // Content tab uses on drop.
-                                        items = items.mapIndexed { i, item -> item.copy(id = i + 1) }
-                                        coroutineScope.launch {
-                                            viewModel.writeModValuesToFile(
-                                                modValues = items,
-                                                filePath = Constants.USER_OPENMW_CFG,
-                                                targetCategory = contentKey,
-                                                onFinish = { isSuccess ->
-                                                    if (!isSuccess) {
-                                                        MToast(stringRes(R.string.failed_to_save_openmw_config))
-                                                    }
-                                                }
-                                            )
-                                        }
+                                        // Renumber so the writer's sortedBy(id) matches the order
+                                        // just dragged, then persist. `isChecked` rides along on
+                                        // the copy, so a disabled row keeps its `;` through a
+                                        // reorder.
+                                        val reordered =
+                                            items.mapIndexed { i, item -> item.copy(id = i + 1) }
+                                        items = reordered
+                                        persist(reordered)
                                     }
                                 ),
                                 onClick = {}

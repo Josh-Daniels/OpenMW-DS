@@ -110,6 +110,17 @@ data class ActiveEffect(
  */
 data class EquippedAmmo(val id: String, val count: Int)
 
+/**
+ * Enchantment charge of the item in the equipped-item (weapon) slot, backing the HUD corner
+ * icon's charge meter. Null whenever no meter should be drawn — the exporter decides that
+ * (only Cast on Strike / Cast on Use enchantments actually consume charge), so do not re-derive
+ * it here; see COMPANION_EQUIPPED_CHARGE.
+ */
+data class EquippedCharge(val charge: Int, val maxCharge: Int) {
+    /** 0f..1f fill ratio, guarded against divide-by-zero. */
+    val ratio: Float get() = if (maxCharge > 0) (charge.toFloat() / maxCharge).coerceIn(0f, 1f) else 0f
+}
+
 /** One effect row in an item/spell info popup. */
 data class InfoEffect(val text: String, val harmful: Boolean)
 
@@ -589,6 +600,12 @@ data class GameState(
      * does not match the weapon). Backs the HUD's ammo counter — see [EquippedAmmo].
      */
     val ammo: EquippedAmmo? = null,
+    /**
+     * Enchantment charge of the equipped (weapon-slot) item, when that item's enchantment is one
+     * that drains; null in every other case. Backs the HUD's equipped-item charge meter — see
+     * [EquippedCharge].
+     */
+    val equippedCharge: EquippedCharge? = null,
     val selectedSpell: String? = null,
     val activeEffects: List<ActiveEffect> = emptyList(),
     val journalEntries: List<JournalEntry> = emptyList(),

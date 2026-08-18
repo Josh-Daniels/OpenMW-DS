@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.compose.ui.graphics.Color
 import org.openmw.BuildConfig
 import org.openmw.Constants
+import org.openmw.fragments.USER_CFG_DEFAULT_LINE
 import org.openmw.ui.controls.UIStateManager.gameList
 import org.openmw.ui.controls.UIStateManager.userUI
 import org.openmw.ui.view.addCustomLog
@@ -109,7 +110,9 @@ class UserManageAssets(val context: Context) {
             File("${Constants.USER_FILE_STORAGE}/.nomedia").writeText("nomedia")
         }
         if (!File(Constants.USER_OPENMW_CFG).exists()) {
-            File(Constants.USER_OPENMW_CFG).writeText("# This is the user openmw.cfg. Feel free to modify it as you wish.\n")
+            // Shared literal: `updateUserConfig` tests for exactly this line to decide the file is
+            // pristine and may be reseeded, so the two must not drift.
+            File(Constants.USER_OPENMW_CFG).writeText("$USER_CFG_DEFAULT_LINE\n")
         }
         gameList.forEach { game ->
             val uiDir = "${Constants.USER_FILE_STORAGE}/$game/ui"

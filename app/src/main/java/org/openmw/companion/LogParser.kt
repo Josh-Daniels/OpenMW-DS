@@ -97,6 +97,7 @@ object LogParser {
     const val P_TEXT_INPUT_CLOSED = "COMPANION_TEXT_INPUT_CLOSED"
     private const val P_EQUIPMENT = "COMPANION_EQUIPMENT:"
     private const val P_AMMO = "COMPANION_AMMO:"
+    private const val P_EQUIPPED_CHARGE = "COMPANION_EQUIPPED_CHARGE:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
     // Player standing (reputation/bounty/factions). Single small line, merged onto
@@ -262,6 +263,8 @@ object LogParser {
                     current.copy(equipment = parseEquipment(after(line, P_EQUIPMENT)))
                 line.contains(P_AMMO) ->
                     current.copy(ammo = parseAmmo(after(line, P_AMMO)))
+                line.contains(P_EQUIPPED_CHARGE) ->
+                    current.copy(equippedCharge = parseEquippedCharge(after(line, P_EQUIPPED_CHARGE)))
                 line.contains(P_ACTIVE_EFFECTS) ->
                     current.copy(activeEffects = parseActiveEffects(after(line, P_ACTIVE_EFFECTS)))
                 line.contains(P_CHARACTER) ->
@@ -604,6 +607,15 @@ object LogParser {
         val count = o.optInt("count", 0)
         if (count <= 0) return null
         return EquippedAmmo(id = o.optString("id", ""), count = count)
+    }
+
+    /** Enchantment charge of the equipped-item slot. `{}` (or a zero capacity) parses to null,
+     *  i.e. the same "no meter" outcome — see [EquippedCharge]. */
+    private fun parseEquippedCharge(json: String): EquippedCharge? {
+        val o = JSONObject(json)
+        val max = o.optInt("maxCharge", 0)
+        if (max <= 0) return null
+        return EquippedCharge(charge = o.optInt("charge", 0), maxCharge = max)
     }
 
     private fun parseActiveEffects(json: String): List<ActiveEffect> {

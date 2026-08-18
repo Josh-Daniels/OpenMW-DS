@@ -857,6 +857,25 @@ local function magicEffectName(eff)
     return nil
 end
 
+-- The weapon's CLASS, which is what every damage-display decision actually keys on.
+-- Mirrors the engine's own per-type table (mwmechanics/weapontype.cpp mWeaponClass), whose
+-- tooltip code (mwclass/weapon.cpp getToolTipInfo) branches on exactly this:
+--   melee  -> all THREE attacks (chop/slash/thrust) are real and are all shown
+--   thrown -> a single attack, chop x2 (the weapon is its own ammo)
+--   ranged -> a single attack, stored in chop (bows/crossbows have thrust = 0)
+--   ammo   -> likewise a single attack in chop (arrows/bolts)
+-- Shared by itemStats and exportInfo so the two can never disagree about which weapons have
+-- one attack and which have three -- they drifted apart once already (Jul 28 2026 fixed the
+-- arrow rows by making the popup copy itemStats' single-stat logic wholesale, which silently
+-- collapsed every SWORD in the popup from three rows to one; fixed Aug 19 2026).
+local function weaponClass(weaponType)
+    local WT = types.Weapon.TYPE
+    if weaponType == WT.Arrow or weaponType == WT.Bolt then return "ammo" end
+    if weaponType == WT.MarksmanThrown then return "thrown" end
+    if weaponType == WT.MarksmanBow or weaponType == WT.MarksmanCrossbow then return "ranged" end
+    return "melee"
+end
+
 -- Returns (statVal, statKey, cond) for an inventory item.
 --   statVal / statKey  short pre-formatted display strings ("" = no stat)
 --   cond               0..1 condition ratio, or nil when no durability
@@ -885,15 +904,17 @@ local function itemStats(item, cat)
     if cat == "weapon" or cat == "ammo" then
         local WT = types.Weapon.TYPE
         local t = rec.type
+        local cls = weaponClass(t)
         local key, mn, mx
-        -- Damage display mirrors the vanilla tooltip (mwclass/weapon.cpp), which keys on the weapon
-        -- CLASS, not the individual attack type: MELEE weapons show their primary attack (chop/slash/
-        -- thrust), but MARKSMAN weapons (bows/crossbows) + AMMO (arrows/bolts) store their damage in
-        -- CHOP with thrust=0 and show a single generic "Attack", and THROWN weapons show chop×2 (they're
-        -- both weapon and ammo). Using THRUST for marksman/thrown/ammo showed "THRUST 0-0".
-        if t == WT.MarksmanBow or t == WT.MarksmanCrossbow or t == WT.Arrow or t == WT.Bolt then
+        -- ONE stat only -- this is the narrow list column, not the info popup. For a weapon with a
+        -- single attack that is simply it; for a MELEE weapon (which really has three) we show its
+        -- PRIMARY attack, the one the vanilla stat block leads with per weapon type. The popup shows
+        -- all three for melee, matching the vanilla tooltip -- see exportInfo. Marksman/ammo store
+        -- their damage in CHOP with thrust = 0, and thrown is chop x2 (it is its own ammo); keying
+        -- those off THRUST is what once displayed "THRUST 0-0" on every bow and arrow.
+        if cls == "ranged" or cls == "ammo" then
             key, mn, mx = "DMG", rec.chopMinDamage, rec.chopMaxDamage
-        elseif t == WT.MarksmanThrown then
+        elseif cls == "thrown" then
             key = "DMG"
             mn, mx = (rec.chopMinDamage or 0) * 2, (rec.chopMaxDamage or 0) * 2
         elseif t == WT.SpearTwoWide then
@@ -1369,6 +1390,56 @@ local function exportAmmo()
     if str == lastAmmoStr then return end
     lastAmmoStr = str
     emit('COMPANION_AMMO:' .. str)
+end
+
+local lastEquippedChargeStr = nil
+
+-- Enchantment charge of the item in the WEAPON slot (16 = CarriedRight — the item the HUD's
+-- equipped-item icon shows), as `{"charge":N,"maxCharge":M}`, or `{}` when no charge meter
+-- should be drawn.
+--
+-- Its own small line rather than a field on the streamed inventory items, for the same reason
+-- COMPANION_AMMO is one: enchantment charge REGENERATES continuously (the engine tops every
+-- enchanted item in the pack up a little each frame), so carrying it on itemJson would make the
+-- inventory batch differ on nearly every tick and defeat exportInventory's change detection —
+-- the dominant cost this export path was optimised for. Here a change costs one ~40-byte line.
+--
+-- Emits `{}` unless the equipped item's enchantment actually CONSUMES charge, i.e. Cast on
+-- Strike or Cast on Use. Cast Once (scrolls) is spent whole and Constant Effect never drains, so
+-- a meter for either would sit permanently full and say nothing. As with COMPANION_AMMO, the
+-- PRESENCE of a payload is the "draw a meter" signal — the app does not re-derive which
+-- enchantments are charge-bearing.
+--
+-- Read from the equipped object itself, so it is per-STACK correct — unlike the spells export's
+-- charge, which is keyed by recordId.
+local function exportEquippedCharge()
+    local str = '{}'
+    pcall(function()
+        local item = types.Actor.getEquipment(self)[16]
+        if item == nil then return end
+        local enchId = itemEnchantId(item)
+        if not enchId then return end
+        local ench = core.magic.enchantments.records[enchId]
+        if not ench then return end
+        local ENCH = core.magic.ENCHANTMENT_TYPE
+        if ench.type ~= ENCH.CastOnStrike and ench.type ~= ENCH.CastOnUse then return end
+        local maxCharge = ench.charge or 0
+        if maxCharge <= 0 then return end
+        local charge = maxCharge
+        pcall(function()
+            local d = types.Item.itemData(item)
+            if d and d.enchantmentCharge ~= nil then charge = d.enchantmentCharge end
+        end)
+        -- Whole points, matching the spells export so the two can never disagree on screen.
+        -- Quantizing also protects the change detection above: the raw value is a float that
+        -- creeps up every frame while recharging, which nothing reads that finely.
+        str = string.format('{"charge":%d,"maxCharge":%d}',
+            math.floor(charge + 0.5), math.floor(maxCharge + 0.5))
+    end)
+
+    if str == lastEquippedChargeStr then return end
+    lastEquippedChargeStr = str
+    emit('COMPANION_EQUIPPED_CHARGE:' .. str)
 end
 
 -- Lazy per-questId lookup from core.dialogue.journal.records.
@@ -2069,29 +2140,29 @@ local function exportInfo(arg)
         -- alchemy effects (avoids showing enchant effects twice).
         if isType(types.Weapon) then
             addRow(rows, "Type", weaponTypeStr(rec))
-            -- Only the damage row that actually APPLIES to this weapon class, mirroring itemStats'
-            -- logic (and the vanilla tooltip in mwclass/weapon.cpp). Emitting all three unconditionally
-            -- meant an arrow read "Chop 5-10 / Slash 0-0 / Thrust 0-0" — two meaningless rows on every
-            -- bow, crossbow, arrow, bolt and thrown weapon. Marksman/ammo store damage in CHOP with
-            -- thrust=0; thrown is chop x2; spears thrust; blunt/axe chop; blades slash.
-            local WT = types.Weapon.TYPE
-            local t = rec.type
-            local dmgLabel, dmgMin, dmgMax
-            if t == WT.MarksmanBow or t == WT.MarksmanCrossbow or t == WT.Arrow or t == WT.Bolt then
-                dmgLabel, dmgMin, dmgMax = "Damage", rec.chopMinDamage, rec.chopMaxDamage
-            elseif t == WT.MarksmanThrown then
-                dmgLabel = "Damage"
-                dmgMin, dmgMax = (rec.chopMinDamage or 0) * 2, (rec.chopMaxDamage or 0) * 2
-            elseif t == WT.SpearTwoWide then
-                dmgLabel, dmgMin, dmgMax = "Thrust", rec.thrustMinDamage, rec.thrustMaxDamage
-            elseif t == WT.BluntOneHand or t == WT.BluntTwoClose or t == WT.BluntTwoWide
-                or t == WT.AxeOneHand or t == WT.AxeTwoHand then
-                dmgLabel, dmgMin, dmgMax = "Chop", rec.chopMinDamage, rec.chopMaxDamage
-            else
-                dmgLabel, dmgMin, dmgMax = "Slash", rec.slashMinDamage, rec.slashMaxDamage
+            -- Damage rows, keyed on the weapon CLASS exactly as the vanilla tooltip does
+            -- (mwclass/weapon.cpp getToolTipInfo, which branches on mWeaponClass):
+            --   melee  -> all THREE attacks, because all three are real and the player picks
+            --             between them with the movement direction. This is the full stat block,
+            --             not the list column's one-line summary -- do NOT collapse it to the
+            --             primary attack again (that is the Aug 19 2026 regression).
+            --   thrown -> ONE row, chop x2 (the weapon is its own ammo)
+            --   ranged/ammo -> ONE row from CHOP; their slash/thrust are 0, so emitting all three
+            --             printed "Slash 0-0 / Thrust 0-0" on every bow, crossbow, arrow and bolt.
+            local function dmgRow(label, mn, mx)
+                addRow(rows, label, string.format("%d-%d",
+                    math.floor((mn or 0) + 0.5), math.floor((mx or 0) + 0.5)))
             end
-            addRow(rows, dmgLabel, string.format("%d-%d",
-                math.floor((dmgMin or 0) + 0.5), math.floor((dmgMax or 0) + 0.5)))
+            local cls = weaponClass(rec.type)
+            if cls == "melee" then
+                dmgRow("Chop", rec.chopMinDamage, rec.chopMaxDamage)
+                dmgRow("Slash", rec.slashMinDamage, rec.slashMaxDamage)
+                dmgRow("Thrust", rec.thrustMinDamage, rec.thrustMaxDamage)
+            elseif cls == "thrown" then
+                dmgRow("Damage", (rec.chopMinDamage or 0) * 2, (rec.chopMaxDamage or 0) * 2)
+            else
+                dmgRow("Damage", rec.chopMinDamage, rec.chopMaxDamage)
+            end
             addRow(rows, "Reach", fmtNum(rec.reach))
             addRow(rows, "Speed", fmtNum(rec.speed))
             enchantPts()
@@ -2707,6 +2778,7 @@ local function onUpdate(dt)
         exportInventory()
         exportEquipment()
         exportAmmo()
+        exportEquippedCharge()
         exportActiveEffects()
         exportCharacter()
         exportCharacterDetail()

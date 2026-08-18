@@ -8550,6 +8550,25 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
     val selectedSpellName = selectedSpellEntry?.displayName() ?: "None"
     val spellIcon = selectedSpellEntry?.icon ?: ""
 
+    // Meter on the SPELL icon: a cast-on-use enchanted item's remaining charge. Learned spells
+    // and scrolls have no charge (maxCharge = 0) and get no meter.
+    val spellMeter = selectedSpellEntry
+        ?.takeIf { it.maxCharge > 0 }
+        ?.let { (it.charge.toFloat() / it.maxCharge).coerceIn(0f, 1f) }
+
+    // Meter on the WEAPON (equipped item) icon. Two things share the one meter, because they are
+    // the same question — how much of this item is left to use:
+    //   * enchantment charge, for an item whose enchantment drains (state.equippedCharge is
+    //     already null unless it does — see EquippedCharge);
+    //   * a lockpick's or probe's remaining USES, which vanilla shows as a number on the item.
+    // Charge wins when an item has both, matching the inventory list's condition column. Ordinary
+    // weapons deliberately show nothing: their condition degrades slowly and is repairable,
+    // whereas both of the above are consumables you need to watch mid-fight or mid-lock.
+    val weaponMeter = state.equippedCharge?.ratio
+        ?: weaponItem
+            ?.takeIf { it.category == "lockpick" || it.category == "probe" }
+            ?.cond
+
     // The game's own player-direction arrow texture (same asset the native HUD minimap and world
     // map use, via RotatingSkin). Extracted through the shared icon pipeline (raw VFS path, DXT
     // decompressed) and drawn rotated by arrowDeg below; falls back to the drawn arrow while it
@@ -8829,8 +8848,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             iconPath = spellIcon,
             showName = showSpellName,
             onToggle = { showSpellName = !showSpellName },
-            charge = selectedSpellEntry?.charge ?: 0,
-            maxCharge = selectedSpellEntry?.maxCharge ?: 0
+            meter = spellMeter
         )
 
         // Weapon — top-RIGHT icon box, above the FAV. GEAR group. Tapping toggles a persistent
@@ -8844,7 +8862,8 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
             // Ammo count for a bow/crossbow. Null for everything else — the exporter decides that
             // (see EquippedAmmo), so there is no weapon-type test here to drift out of step with
             // the engine's own rule.
-            ammoCount = state.ammo?.count
+            ammoCount = state.ammo?.count,
+            meter = weaponMeter
         )
 
         // Sneak indicator — vanilla stealth icon (sneaking && undetected), shown just below the
@@ -9238,10 +9257,11 @@ private fun EquippedCornerIcon(
     iconPath: String,
     showName: Boolean,
     onToggle: () -> Unit,
-    // Enchantment charge for a cast-on-use item equipped to the SPELL slot; maxCharge = 0 → no bar.
-    // Drawn as a thin meter across the bottom of the icon, same colours as the spells-tab charge bar.
-    charge: Int = 0,
-    maxCharge: Int = 0,
+    // A thin meter across the bottom of the icon, same colours as the spells-tab charge bar:
+    // enchantment charge, or a lockpick/probe's remaining uses. 0f..1f; null = no meter.
+    // Computed by the caller so this box stays a dumb renderer and each slot keeps its own rule
+    // for what the meter means (see the two call sites).
+    meter: Float? = null,
     // Remaining rounds in the equipped ammo stack, for a bow/crossbow in the WEAPON slot.
     // null = no counter, which is the normal case for every other weapon (and for a bow with
     // nothing loaded) — see EquippedAmmo.
@@ -9276,9 +9296,9 @@ private fun EquippedCornerIcon(
                     modifier = Modifier.size(40.dp)
                 )
             }
-            // Enchantment charge meter, overlaid across the bottom edge of the icon (spells-tab style).
-            if (maxCharge > 0) {
-                val ratio = (charge.toFloat() / maxCharge).coerceIn(0f, 1f)
+            // Charge / uses meter, overlaid across the bottom edge of the icon (spells-tab style).
+            if (meter != null) {
+                val ratio = meter.coerceIn(0f, 1f)
                 val fillColor = if (ratio >= 0.5f) BronzeLight else Color(0xFFC75C5C)
                 Box(
                     modifier = Modifier

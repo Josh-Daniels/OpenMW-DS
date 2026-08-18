@@ -21,6 +21,18 @@ import java.io.File
 private val job = Job()
 private val scope = CoroutineScope(Dispatchers.IO + job)
 
+/**
+ * The header `UserManageAssets.onFirstLaunch` seeds an untouched user openmw.cfg with, and the marker
+ * [updateUserConfig] tests for to decide the file holds nothing worth protecting.
+ *
+ * Hoisted out of that function so the two places that care — the pristine test here and the
+ * simplified launcher, which restores this line when a folder removal empties the file — compare
+ * against ONE literal. It was previously a local `val` here duplicated by a literal in
+ * `ManageAssets`, where a one-character drift between copies would silently disable the reseed path.
+ */
+internal const val USER_CFG_DEFAULT_LINE =
+    "# This is the user openmw.cfg. Feel free to modify it as you wish."
+
 private data class GameFiles(
     val esmContentLines: List<String>,
     val bsaFallbackLines: List<String>
@@ -248,10 +260,17 @@ private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedD
 
 private fun updateUserConfig(savedPath: String, gameFiles: GameFiles) {
     val esmFile = File(Constants.USER_OPENMW_CFG)
-    val defaultLine = "# This is the user openmw.cfg. Feel free to modify it as you wish."
     val replacementStringData = """data="${savedPath}/Data Files""""
 
-    val shouldOverwrite = !customCFG || (esmFile.exists() && esmFile.readText().trim() == defaultLine)
+    // "Pristine" = there is nothing in the user cfg worth protecting, so a game-files selection may
+    // (re)seed it. An EMPTY file counts, and that inclusion is a fix, not a nicety: the simplified
+    // launcher's Manage-folders removal can legitimately empty this file, and until now re-selecting
+    // game files afterwards wrote NOTHING — the guard only recognised a file holding exactly the
+    // default header — so the player got a registered game folder with an empty load order and had
+    // to re-add the Data Files folder by hand to recover.
+    val pristine = !esmFile.exists() ||
+        esmFile.readText().trim().let { it.isEmpty() || it == USER_CFG_DEFAULT_LINE }
+    val shouldOverwrite = !customCFG || pristine
 
     if (shouldOverwrite) {
         esmFile.bufferedWriter().use { writer ->
