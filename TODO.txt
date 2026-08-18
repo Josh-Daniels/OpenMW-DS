@@ -1,9 +1,8 @@
 TODO bugs & updates:
 
 Choosing custom class could use controller support.
-More favourites
 
 Updates:
-- Set up DS screen for Level up, alchemy, enchanting, spellmaking
+- Set up DS screen for alchemy, enchanting, spellmaking
 - Split screen for alchemy, enchanting, spell making
 - Top screen only for bartering, looting, spells, training, persuasion, repair, rest/wait, level up, alchemy, enchanting, spell making.
