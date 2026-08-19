@@ -111,6 +111,24 @@ object LogParser {
     const val P_LEVELUP_END = "COMPANION_LEVELUP_END"
     const val P_LEVELUP_SELECTION = "COMPANION_LEVELUP_SELECTION:"
     const val P_LEVELUP_CLOSED = "COMPANION_LEVELUP_CLOSED"
+    // DS Alchemy. ALL native (alchemywindow.cpp) — the whole batch is read off the live
+    // MWMechanics::Alchemy after every mutation. OPEN/CLOSED bracket the session; STATE_START ..
+    // STATE_END bracket one full re-publish. Streamed one small line per record because the browse
+    // list is bounded only by how many ingredients the player carries. No prefix here is a substring
+    // of another (STATE_START vs STATE_END differ), which matters — the repo dispatches on contains().
+    const val P_ALCHEMY_OPEN = "COMPANION_ALCHEMY_OPEN"
+    const val P_ALCHEMY_STATE_START = "COMPANION_ALCHEMY_STATE_START:"
+    const val P_ALCHEMY_APPARATUS = "COMPANION_ALCHEMY_APPARATUS:"
+    const val P_ALCHEMY_SLOT = "COMPANION_ALCHEMY_SLOT:"
+    const val P_ALCHEMY_EFFECT = "COMPANION_ALCHEMY_EFFECT:"
+    const val P_ALCHEMY_TOOL = "COMPANION_ALCHEMY_TOOL:"
+    const val P_ALCHEMY_ITEM = "COMPANION_ALCHEMY_ITEM:"
+    const val P_ALCHEMY_STATE_END = "COMPANION_ALCHEMY_STATE_END"
+    const val P_ALCHEMY_CLOSED = "COMPANION_ALCHEMY_CLOSED"
+    // Result / validation text, already RESOLVED from its GMST natively. Emitted instead of the
+    // native message box only while Alchemy is DS, because that box renders bottom-centre of the TOP
+    // screen, behind the DS panels. Same GMSTs and same order as vanilla — only the delivery differs.
+    const val P_ALCHEMY_MSG = "COMPANION_ALCHEMY_MSG:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
     // Player standing (reputation/bounty/factions). Single small line, merged onto
@@ -667,6 +685,113 @@ object LogParser {
         val count = payload.substring(0, bar).trim().toIntOrNull() ?: return null
         val ids = payload.substring(bar + 1).split(',').mapNotNull { it.trim().ifBlank { null } }
         return count to ids
+    }
+
+    /** Header of a COMPANION_ALCHEMY_STATE_START payload. Null if malformed, which leaves the
+     *  previous session alone rather than replacing it with defaults. */
+    fun parseAlchemyStart(json: String): AlchemySession? = try {
+        val o = JSONObject(json)
+        AlchemySession(
+            factor = o.optDouble("factor", 0.0).toFloat(),
+            chance = o.optInt("chance", 0),
+            skill = o.optDouble("skill", 0.0).toFloat(),
+            wort = o.optDouble("wort", 15.0).toFloat(),
+            maxBrew = o.optInt("maxBrew", 0),
+            brewCount = o.optInt("brewCount", 1),
+            ready = o.optInt("ready", AlchemyReady.NO_MORTAR),
+            name = o.optString("name", ""),
+            suggested = o.optString("suggested", "")
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** One COMPANION_ALCHEMY_APPARATUS row. An absent slot parses to `present = false`. */
+    fun parseAlchemyApparatus(json: String): AlchemyApparatus? = try {
+        val o = JSONObject(json)
+        AlchemyApparatus(
+            slot = o.optInt("slot", 0),
+            present = o.optBoolean("present", false),
+            id = o.optString("id", ""),
+            // Defaults to the slot: the engine hardcodes slot == AppaType, so a payload without an
+            // explicit type still lands on the right picker.
+            type = o.optInt("type", o.optInt("slot", 0)),
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            quality = o.optDouble("quality", 0.0).toFloat()
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** One COMPANION_ALCHEMY_SLOT row (an ingredient slot; may be empty). */
+    fun parseAlchemySlot(json: String): AlchemySlot? = try {
+        val o = JSONObject(json)
+        AlchemySlot(
+            slot = o.optInt("slot", 0),
+            present = o.optBoolean("present", false),
+            id = o.optString("id", ""),
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            count = o.optInt("count", 0)
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** One COMPANION_ALCHEMY_EFFECT row (a created-potion effect). An unknown effect carries no
+     *  name and no icon at all — the UI draws "?" for it, as vanilla's own widget does. */
+    fun parseAlchemyEffect(json: String): AlchemyEffect? = try {
+        val o = JSONObject(json)
+        AlchemyEffect(
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            known = o.optBoolean("known", false)
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** One COMPANION_ALCHEMY_TOOL row (an owned apparatus, for the per-type picker). */
+    fun parseAlchemyTool(json: String): AlchemyTool? = try {
+        val o = JSONObject(json)
+        val id = o.optString("id", "")
+        if (id.isBlank()) null else AlchemyTool(
+            id = id,
+            type = o.optInt("type", 0),
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            quality = o.optDouble("quality", 0.0).toFloat()
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    /** One COMPANION_ALCHEMY_ITEM row (a carried ingredient). Its `effects` array keeps one entry
+     *  per NON-EMPTY effect slot, in slot order, with `k` = known — so an ingredient with a known
+     *  first effect and three unknown ones yields four entries and renders as one name plus three
+     *  "?", exactly like the vanilla tooltip. */
+    fun parseAlchemyIngredient(json: String): AlchemyIngredient? = try {
+        val o = JSONObject(json)
+        val id = o.optString("id", "")
+        val arr = o.optJSONArray("effects")
+        val effects = if (arr == null) emptyList() else (0 until arr.length()).mapNotNull {
+            val e = arr.optJSONObject(it) ?: return@mapNotNull null
+            AlchemyEffect(
+                name = e.optString("n", ""),
+                icon = e.optString("ic", ""),
+                known = e.optBoolean("k", false)
+            )
+        }
+        if (id.isBlank()) null else AlchemyIngredient(
+            id = id,
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            count = o.optInt("count", 0),
+            effects = effects
+        )
+    } catch (e: Exception) {
+        null
     }
 
     /** Enchantment charge of the equipped-item slot. `{}` (or a zero capacity) parses to null,

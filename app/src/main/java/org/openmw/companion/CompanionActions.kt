@@ -144,6 +144,42 @@ object CompanionActions {
     // real gate would have rejected.
     fun levelUpConfirm() = runCommand("CMP:levelup_ok")
 
+    // --- DS Alchemy ---------------------------------------------------------------------------
+    // All handled natively in androidmain.cpp → alchemywindow.cpp, which drives the REAL
+    // MWMechanics::Alchemy. Nothing about alchemy is reimplemented on this side: the combination
+    // rule and its slot order, the duplicate-ingredient rejection, the validation order,
+    // countPotionsToBrew() and the per-potion success roll all stay in the engine.
+    //
+    // Apparatus and ingredients are addressed by RefId, NEVER by a list ordinal — the browse list
+    // reorders as stacks are consumed, so an ordinal would target the wrong item after any mutation.
+
+    /** Put an owned apparatus in its slot. The engine derives the slot from the record and uses
+     *  [slot] only as a sanity filter, so the two can never disagree. */
+    fun alchemySetApparatus(slot: Int, itemId: String) =
+        runCommand("CMP:alchemy_apparatus_set:$slot|$itemId")
+
+    fun alchemyClearApparatus(slot: Int) = runCommand("CMP:alchemy_apparatus_clear:$slot")
+
+    /** Place an ingredient in the first free slot. Silently does nothing when all four are full or
+     *  an ingredient of this record is already placed — exactly what vanilla's addIngredient() does
+     *  (it returns -1 and the window shows no feedback). */
+    fun alchemyAddIngredient(itemId: String) = runCommand("CMP:alchemy_ingredient_add:$itemId")
+
+    /** Empty one ingredient slot IN PLACE. The remaining ingredients keep their positions — slot
+     *  order decides the created-effect order, so nothing is ever compacted. */
+    fun alchemyClearIngredient(slot: Int) = runCommand("CMP:alchemy_ingredient_clear:$slot")
+
+    /** Set the potion name. Raw tail after the prefix, so spaces and ':' survive. */
+    fun alchemySetName(text: String) = runCommand("CMP:alchemy_name:$text")
+
+    /** Brew. Routed to the native Create button, which clamps to min(countPotionsToBrew(), count)
+     *  and produces vanilla's own messages and sounds. The DS spinner is capped to the craftable
+     *  maximum so it should never send more than that, but the native clamp remains the authority —
+     *  it is what makes an over-large count harmless rather than something to guard against here. */
+    fun alchemyCreate(count: Int) = runCommand("CMP:alchemy_create:$count")
+
+    fun alchemyCancel() = runCommand("CMP:alchemy_cancel")
+
     fun trainSkill(index: Int) = runCommand("CMP:training_train:$index")
 
     // Cancel training (closes the native window + emits COMPANION_TRAINING_CLOSED). Idempotent —

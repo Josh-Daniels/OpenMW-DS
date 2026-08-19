@@ -426,6 +426,32 @@ object GameStateRepository {
     private val _levelUpSession = MutableStateFlow<LevelUpSession?>(null)
     val levelUpSession: StateFlow<LevelUpSession?> = _levelUpSession.asStateFlow()
     private var pendingLevelUpSelection: Pair<Int, List<String>>? = null
+    // --- DS Alchemy session (COMPANION_ALCHEMY_*) ---
+    // null = GM_Alchemy is not open. OPEN starts the session (as an EMPTY placeholder, so the
+    // overlay can mount before the first batch lands); STATE_START..STATE_END brackets one full
+    // re-publish, which the native window emits after EVERY mutation; CLOSED clears.
+    //
+    // Buffered and committed only on STATE_END, exactly like the journal/inventory streams: a batch
+    // cut short (a truncated line, a mode pop mid-emit) then leaves the previous complete state on
+    // screen rather than a half-applied one.
+    private val _alchemySession = MutableStateFlow<AlchemySession?>(null)
+    val alchemySession: StateFlow<AlchemySession?> = _alchemySession.asStateFlow()
+    private var alchemyHeader: AlchemySession? = null
+    private var alchemyApparatusBuffer: MutableList<AlchemyApparatus>? = null
+    private var alchemySlotBuffer: MutableList<AlchemySlot>? = null
+    private var alchemyEffectBuffer: MutableList<AlchemyEffect>? = null
+    private var alchemyToolBuffer: MutableList<AlchemyTool>? = null
+    private var alchemyItemBuffer: MutableList<AlchemyIngredient>? = null
+
+    // Result / validation text for the DS alchemy banner. text + monotonic seq so an IDENTICAL
+    // repeat still re-fires (a plain StateFlow would dedupe it) — brewing the same failure twice in
+    // a row must show the message twice. Same shape as crimeMessage.
+    private var alchemyMsgSeq = 0L
+    private val _alchemyMessage = MutableStateFlow<Pair<String, Long>?>(null)
+    val alchemyMessage: StateFlow<Pair<String, Long>?> = _alchemyMessage.asStateFlow()
+
+    fun clearAlchemyMessage() { _alchemyMessage.value = null }
+
     private var trainingSkillBuffer: MutableList<TrainingSkill>? = null
     private var trainingNpcName: String = ""
     private var trainingPlayerGold: Int = 0
@@ -828,6 +854,92 @@ object GameStateRepository {
                     pendingLevelUpSelection = count to ids
                     _levelUpSession.value = _levelUpSession.value?.copy(coinCount = count, selected = ids)
                 }
+            }
+            // DS Alchemy. Per-record lines first (most frequent inside a batch), then the
+            // brackets. No prefix here is a substring of another, so the order is for cost only.
+            trimmed.contains(LogParser.P_ALCHEMY_ITEM) -> {
+                alchemyItemBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ALCHEMY_ITEM) + LogParser.P_ALCHEMY_ITEM.length
+                    LogParser.parseAlchemyIngredient(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_APPARATUS) -> {
+                alchemyApparatusBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ALCHEMY_APPARATUS) + LogParser.P_ALCHEMY_APPARATUS.length
+                    LogParser.parseAlchemyApparatus(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_SLOT) -> {
+                alchemySlotBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ALCHEMY_SLOT) + LogParser.P_ALCHEMY_SLOT.length
+                    LogParser.parseAlchemySlot(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_EFFECT) -> {
+                alchemyEffectBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ALCHEMY_EFFECT) + LogParser.P_ALCHEMY_EFFECT.length
+                    LogParser.parseAlchemyEffect(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_TOOL) -> {
+                alchemyToolBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ALCHEMY_TOOL) + LogParser.P_ALCHEMY_TOOL.length
+                    LogParser.parseAlchemyTool(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_STATE_START) -> {
+                val idx = trimmed.indexOf(LogParser.P_ALCHEMY_STATE_START) + LogParser.P_ALCHEMY_STATE_START.length
+                alchemyHeader = LogParser.parseAlchemyStart(trimmed.substring(idx).trim())
+                alchemyApparatusBuffer = mutableListOf()
+                alchemySlotBuffer = mutableListOf()
+                alchemyEffectBuffer = mutableListOf()
+                alchemyToolBuffer = mutableListOf()
+                alchemyItemBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_STATE_END) -> {
+                val header = alchemyHeader
+                if (header != null) {
+                    _alchemySession.value = header.copy(
+                        // sortedBy slot rather than trusting emission order: the slot index is what
+                        // the clear commands address, so a mismatch would clear the wrong one.
+                        apparatus = (alchemyApparatusBuffer ?: mutableListOf()).sortedBy { it.slot },
+                        slots = (alchemySlotBuffer ?: mutableListOf()).sortedBy { it.slot },
+                        // Created effects keep EMISSION order — that is listEffects() order, which
+                        // is gameplay-significant and must never be sorted.
+                        created = (alchemyEffectBuffer ?: mutableListOf()).toList(),
+                        tools = (alchemyToolBuffer ?: mutableListOf()).toList(),
+                        ingredients = (alchemyItemBuffer ?: mutableListOf()).toList()
+                    )
+                }
+                alchemyHeader = null
+                alchemyApparatusBuffer = null
+                alchemySlotBuffer = null
+                alchemyEffectBuffer = null
+                alchemyToolBuffer = null
+                alchemyItemBuffer = null
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_MSG) -> {
+                val idx = trimmed.indexOf(LogParser.P_ALCHEMY_MSG) + LogParser.P_ALCHEMY_MSG.length
+                val text = trimmed.substring(idx).trim()
+                if (text.isNotEmpty()) _alchemyMessage.value = text to alchemyMsgSeq++
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_CLOSED) -> {
+                _alchemySession.value = null
+                _alchemyMessage.value = null
+                alchemyHeader = null
+                alchemyApparatusBuffer = null
+                alchemySlotBuffer = null
+                alchemyEffectBuffer = null
+                alchemyToolBuffer = null
+                alchemyItemBuffer = null
+            }
+            trimmed.contains(LogParser.P_ALCHEMY_OPEN) -> {
+                // Mount the overlay immediately on an EMPTY session. The first batch follows in the
+                // same frame (onOpen emits OPEN then calls update()), but starting from null here
+                // would leave a stale session from a previous visit on screen if that batch were
+                // ever lost. Checked AFTER the other ALCHEMY prefixes only for dispatch cost.
+                _alchemySession.value = AlchemySession()
+                _alchemyMessage.value = null
             }
             trimmed.contains(LogParser.P_LEVELUP_CLOSED) -> {
                 _levelUpSession.value = null

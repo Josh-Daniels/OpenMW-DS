@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -1339,6 +1340,19 @@ private fun CompanionScreenContent() {
         if (levelUpDs == GameUiMode.DS) {
             levelUpSession?.let { session ->
                 LevelUpOverlay(session = session)
+            }
+        }
+
+        // Alchemy overlay. Driven by COMPANION_ALCHEMY_* (native AlchemyWindow) — the whole batch
+        // is read off the live MWMechanics::Alchemy after every mutation, so nothing about the
+        // mechanic lives here. Shown while Alchemy is DS. zIndex 18f: like level-up it fully
+        // REPLACES a native window rather than layering over a conversation, and the TOP half of
+        // the screen (name + apparatus + created effects) is its own overlay in EngineActivity.
+        val alchemyDs by UiPreferences.gameUiModeFlow("game_ui_alchemy").collectAsState()
+        val alchemySession by GameStateRepository.alchemySession.collectAsState()
+        if (alchemyDs == GameUiMode.DS) {
+            alchemySession?.let { session ->
+                AlchemyOverlay(session = session)
             }
         }
 
@@ -6145,6 +6159,761 @@ private fun RepairButton(
 
 /* ---- Training overlay (bottom screen) ---- */
 
+
+
+/* ---- DS Alchemy (bottom + top screens) ---- */
+
+/**
+ * The four apparatus types, `ESM::Apparatus::AppaType`. The engine hardcodes exactly these and
+ * throws on any other value, so four slots is safe to assume rather than derive.
+ *
+ * Only index 0 is required to brew at all; the other three are optional quality modifiers (a retort
+ * for beneficial effects, an alembic for harmful ones, a calcinator either way).
+ */
+private val ALCHEMY_APPARATUS_NAMES = listOf("Mortar & Pestle", "Alembic", "Calcinator", "Retort")
+
+/** Gap between the top-screen alchemy panel and the bottom edge of that screen. The top screen is
+ *  1920x1080 at density 369, i.e. ~832 x ~468 dp, so this is a small inset on a ~468dp-tall screen —
+ *  enough that the panel is not flush against the edge, not so much that it creeps back to centre. */
+private val ALCHEMY_TOP_PANEL_INSET = 24.dp
+
+/**
+ * Cross-screen alchemy UI state. Both companion surfaces are separate compositions in separate
+ * windows, so anything one has to tell the other lives here — Compose snapshot state is process-wide
+ * and observed from both. Same technique as [ManualJournalComposerState].
+ *
+ * All of it is pure presentation. Nothing here influences a mechanic: the picker and the composer
+ * only decide which command gets sent, and the filter only decides which rows are drawn.
+ */
+private object AlchemyUiState {
+    /** Non-null while the TOP screen's apparatus picker is open, holding the apparatus TYPE it is
+     *  filtered to — the same per-type filter vanilla's ItemSelectionDialog applies. */
+    var pickerType by mutableStateOf<Int?>(null)
+    /** True while the BOTTOM screen's name keyboard is up (raised by A on the top screen's name
+     *  field). The keyboard has to live on the bottom panel — it is touch-only by design, because
+     *  the Android IME would move input focus off the game entirely (see [TextInputOverlay]). */
+    var nameComposer by mutableStateOf(false)
+    /** Browse-list filter — matched against the display name AND the ingredient's KNOWN effect
+     *  names at once. Vanilla keeps those two as mutually-exclusive modes behind a toggle button
+     *  (setting both throws in its model); one combined field is strictly more permissive, finds
+     *  everything either mode would, and saves a tap. Purely presentational — filtering decides
+     *  which rows are drawn and nothing else. */
+    var filter by mutableStateOf("")
+    /** The quantity spinner, clamped to 1..maxBrew.
+     *
+     *  Vanilla's own spinner is UNCAPPED (`AlchemyWindow` never calls setMaxValue) and silently
+     *  brews only `min(countPotionsToBrew(), value)` — a deliberate divergence, because a number you
+     *  can raise with no effect reads as broken on a touch screen. The engine still applies that
+     *  same clamp underneath, so this cap is a UI affordance and never the thing enforcing it. */
+    var qty by mutableStateOf(1)
+
+    fun reset() {
+        pickerType = null
+        nameComposer = false
+        filter = ""
+        qty = 1
+    }
+}
+
+/**
+ * Does this ingredient pass the current browse filter?
+ *
+ * Case-insensitive substring against the display name OR any effect the player can actually SEE.
+ * Both halves come from `SortFilterItemModel::filterAccepts` under `Filter_OnlyIngredients`, which
+ * offers them as two mutually-exclusive modes; they are combined here because one field that finds
+ * either is easier to use on a touch screen and can never find less.
+ *
+ * UNKNOWN EFFECTS CAN NEVER MATCH, and that is not merely cosmetic — the engine filters against
+ * `Alchemy::effectsDescription`, which stops at the first slot the player's Alchemy cannot reach, so
+ * matching a hidden effect would leak exactly the information the skill gate exists to withhold.
+ * (The exporter does not even send a name for an unknown effect, so this is belt and braces.)
+ */
+private fun alchemyIngredientMatches(item: AlchemyIngredient, filter: String): Boolean {
+    val needle = filter.trim().lowercase()
+    if (needle.isEmpty()) return true
+    if (item.name.lowercase().contains(needle)) return true
+    return item.effects.any { it.known && it.name.lowercase().contains(needle) }
+}
+
+/**
+ * BOTTOM-screen alchemy: ingredient slots, the searchable ingredient list, the quantity spinner,
+ * the success chance and Create/Cancel.
+ *
+ * TOUCH ONLY, by design — the companion panel is `FLAG_NOT_FOCUSABLE`, so no D-pad input reaches it.
+ * The controller half of the screen is the TOP overlay (name + apparatus), which consumes NavEvents.
+ *
+ * PRESENTATION ONLY. Every tap sends a `CMP:alchemy_*` command to the native AlchemyWindow and the
+ * screen is redrawn from the batch that comes back, so the combination rule and its slot order, the
+ * duplicate-ingredient rejection, the validation order, `countPotionsToBrew()` and the per-potion
+ * success roll are all still the engine's.
+ */
+@Composable
+private fun AlchemyOverlay(session: AlchemySession) {
+    // Reset the local view state once per session, not per recomposition.
+    DisposableEffect(Unit) {
+        AlchemyUiState.reset()
+        onDispose { AlchemyUiState.reset() }
+    }
+
+    var searching by remember { mutableStateOf(false) }
+    val message by GameStateRepository.alchemyMessage.collectAsState()
+
+    // Highest quantity currently brewable. countPotionsToBrew() is 0 whenever the recipe is not
+    // ready at all (no mortar, <2 ingredients, no name, no shared effects), so floor the cap at 1 —
+    // the spinner should sit at 1 in those states, not collapse to 0, and pressing Create is how
+    // vanilla's validation message is produced.
+    val qtyCap = session.maxBrew.coerceAtLeast(1)
+    // Follow the craftable maximum DOWN as it changes — most visibly right after a brew, which
+    // consumes one of each ingredient per potion and can empty a slot entirely. Keyed on maxBrew so
+    // it re-clamps on every fresh batch; it also runs on first composition, pinning the initial 1.
+    LaunchedEffect(qtyCap) { AlchemyUiState.qty = AlchemyUiState.qty.coerceIn(1, qtyCap) }
+
+    val visible = remember(session.ingredients, AlchemyUiState.filter) {
+        session.ingredients.filter { alchemyIngredientMatches(it, AlchemyUiState.filter) }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .zIndex(18f)
+            // Swallow stray taps: this is a full-screen replacement for the native window, and there
+            // is no tap-outside-to-dismiss (Cancel is an explicit button, as it is in vanilla).
+            .pointerInput(Unit) { detectTapGestures { } }
+            .background(StoneDark)
+    ) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 6.dp)) {
+
+            // --- Header -----------------------------------------------------------------------------
+            // A "Success N%" badge sat here briefly and was REMOVED; see AlchemySession.chance for
+            // why. Do not put it back without reading that note first.
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "ALCHEMY",
+                    color = BronzeLight, fontSize = 15.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Bronze))
+            Spacer(Modifier.height(6.dp))
+
+            // --- Ingredient slots ------------------------------------------------------------------
+            // Rendered in SLOT ORDER including the gaps: order decides which effects the potion ends
+            // up with and the order they apply, so a hole in the middle is real state. Nothing is
+            // ever compacted or sorted here.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                session.slots.forEach { slot ->
+                    AlchemySlotBox(
+                        slot = slot,
+                        modifier = Modifier.weight(1f),
+                        onTap = {
+                            if (slot.present) {
+                                UiSounds.play(UiSounds.Cue.TOGGLE)
+                                CompanionActions.alchemyClearIngredient(slot.slot)
+                            }
+                        }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            // --- Filter row -------------------------------------------------------------------------
+            // One field matching the name OR any KNOWN effect (see alchemyIngredientMatches).
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+                        .clickable { searching = true }
+                        .padding(horizontal = 9.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        AlchemyUiState.filter.ifBlank { "Search name or known effect…" },
+                        color = if (AlchemyUiState.filter.isBlank()) BoneDim else BoneBright,
+                        fontSize = 12.sp, fontFamily = MwBody, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (AlchemyUiState.filter.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    AlchemyChip(label = "Clear", active = false, onTap = { AlchemyUiState.filter = "" })
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            // --- Browse list ------------------------------------------------------------------------
+            // Ingredients already placed are absent from the export (vanilla drops them from its own
+            // list too), and a full set of four slots leaves every row inert — addIngredient() would
+            // return -1 with no feedback, so the row is greyed rather than pretending to work.
+            val canAdd = session.freeSlots > 0
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                if (visible.isEmpty()) {
+                    Text(
+                        if (session.ingredients.isEmpty()) "No ingredients carried"
+                        else "No ingredients match",
+                        color = BoneDim, fontSize = 12.sp, fontFamily = MwBody,
+                        modifier = Modifier.padding(vertical = 10.dp)
+                    )
+                } else visible.forEach { item ->
+                    AlchemyIngredientRow(
+                        item = item,
+                        enabled = canAdd,
+                        onTap = {
+                            if (canAdd) {
+                                UiSounds.play(UiSounds.Cue.TOGGLE)
+                                CompanionActions.alchemyAddIngredient(item.id)
+                            }
+                        }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            Spacer(Modifier.height(6.dp))
+
+            // --- Quantity + Create/Cancel -------------------------------------------------------------
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                // Both steppers are bounded and grey out at their limit, so the cap is visible
+                // rather than just felt. See AlchemyUiState.qty for why this diverges from vanilla's
+                // unbounded spinner.
+                AlchemyStepButton("−", enabled = AlchemyUiState.qty > 1) {
+                    AlchemyUiState.qty--
+                    UiSounds.play(UiSounds.Cue.TICK)
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier
+                        .width(58.dp)
+                        // Same height as the two step buttons flanking it, so the trio reads as one
+                        // control rather than a short box wedged between two tall ones.
+                        .height(ALCHEMY_CONTROL_HEIGHT)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(3.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "${AlchemyUiState.qty}",
+                        color = BoneBright, fontSize = 15.sp, fontFamily = MwData,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                AlchemyStepButton("+", enabled = AlchemyUiState.qty < qtyCap) {
+                    AlchemyUiState.qty++
+                    UiSounds.play(UiSounds.Cue.TICK)
+                }
+                Spacer(Modifier.width(10.dp))
+                // countPotionsToBrew() — the smallest selected stack, or 0 whenever the recipe is not
+                // ready at all (which INCLUDES an empty name). Shown as information, not as a cap.
+                Text(
+                    "of ${session.maxBrew}",
+                    color = if (session.maxBrew > 0) BoneDim else BoneMuted,
+                    fontSize = 13.sp, fontFamily = MwData
+                )
+                Spacer(Modifier.weight(1f))
+                // Create is ALWAYS enabled, exactly as in vanilla: pressing it with an invalid recipe
+                // is how the validation message is produced, and pressing it with two ingredients
+                // that share no effect really does destroy one of each. No pre-warning is added.
+                AlchemyActionButton(label = "Create", color = BronzeLight) {
+                    UiSounds.play(UiSounds.Cue.ACTION)
+                    CompanionActions.alchemyCreate(AlchemyUiState.qty)
+                }
+                Spacer(Modifier.width(8.dp))
+                AlchemyActionButton(label = "Cancel", color = Bone) {
+                    UiSounds.play(UiSounds.Cue.TOGGLE)
+                    CompanionActions.alchemyCancel()
+                }
+            }
+        }
+
+        // --- Result / validation banner -------------------------------------------------------------
+        // The resolved GMST text, routed here because the native transient message renders on the TOP
+        // screen behind these panels. Keyed on the sequence number so an identical repeat re-shows.
+        message?.let { (text, seq) ->
+            LaunchedEffect(seq) {
+                delay(ALCHEMY_MSG_MS)
+                GameStateRepository.clearAlchemyMessage()
+            }
+            Box(
+                Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 34.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text,
+                    color = BoneBright, fontSize = 13.sp, fontFamily = MwDisplay,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xF2201A12))
+                        .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
+                )
+            }
+        }
+
+        // --- Search entry ------------------------------------------------------------------------
+        if (searching) {
+            TextInputOverlay(
+                initialText = AlchemyUiState.filter,
+                title = "SEARCH NAME OR EFFECT",
+                onConfirm = { AlchemyUiState.filter = it; searching = false },
+                onCancel = { searching = false }
+            )
+        }
+
+        // --- Potion name entry --------------------------------------------------------------------
+        // Raised from the TOP screen's name field (A / tap), because the keyboard has to be touch and
+        // touch only reaches the bottom panel. Confirming sends CMP:alchemy_name, after which the
+        // native window re-publishes and the top field shows the new value.
+        // `!searching` keeps the two keyboards mutually exclusive: the name composer is raised from
+        // the TOP screen, so it can arrive while the search field is already open down here, and two
+        // stacked keyboards would take each other's taps.
+        if (AlchemyUiState.nameComposer && !searching) {
+            TextInputOverlay(
+                initialText = session.name,
+                title = "POTION NAME",
+                onConfirm = {
+                    CompanionActions.alchemySetName(it)
+                    AlchemyUiState.nameComposer = false
+                },
+                onCancel = { AlchemyUiState.nameComposer = false }
+            )
+        }
+    }
+}
+
+/** How long the alchemy result banner stays up. Matched to the crime toast so the two read the same. */
+private const val ALCHEMY_MSG_MS = 4200L
+
+@Composable
+private fun AlchemyChip(label: String, active: Boolean, onTap: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (active) PillActiveBg else SlotBg)
+            .border(1.dp, if (active) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
+            .clickable { onTap() }
+            .padding(horizontal = 9.dp, vertical = 6.dp)
+    ) {
+        Text(
+            label,
+            color = if (active) BoneBright else BoneDim,
+            fontSize = 11.sp, fontFamily = MwDisplay, maxLines = 1
+        )
+    }
+}
+
+/** Height shared by the whole bottom control row — the two step buttons, the quantity readout
+ *  between them, and Create/Cancel — so nothing in that row is a different size from its neighbour. */
+private val ALCHEMY_CONTROL_HEIGHT = 46.dp
+
+@Composable
+private fun AlchemyStepButton(label: String, enabled: Boolean = true, onTap: () -> Unit) {
+    Box(
+        Modifier
+            .size(ALCHEMY_CONTROL_HEIGHT)
+            .clip(RoundedCornerShape(3.dp))
+            .background(SlotBg)
+            .border(1.dp, if (enabled) BronzeDark else Color(0xFF2A2118), RoundedCornerShape(3.dp))
+            .then(if (enabled) Modifier.clickable { onTap() } else Modifier),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (enabled) BoneBright else BoneMuted.copy(alpha = 0.45f),
+            fontSize = 18.sp, fontFamily = MwData, fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+/** Create / Cancel. A local button rather than the shared [RepairButton] purely so this row can be
+ *  sized for a fingertip without changing how the repair overlay looks. */
+@Composable
+private fun AlchemyActionButton(label: String, color: Color, onTap: () -> Unit) {
+    Box(
+        Modifier
+            .height(ALCHEMY_CONTROL_HEIGHT)
+            .clip(RoundedCornerShape(3.dp))
+            .background(color.copy(alpha = 0.20f))
+            .border(1.dp, color, RoundedCornerShape(3.dp))
+            .clickable { onTap() }
+            .padding(horizontal = 18.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label, color = color,
+            fontSize = 14.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold, maxLines = 1
+        )
+    }
+}
+
+/** One ingredient slot. Tapping a filled slot empties it IN PLACE — the other slots keep their
+ *  positions, because the order they were placed in is what decides the created effects. */
+@Composable
+private fun AlchemySlotBox(slot: AlchemySlot, modifier: Modifier = Modifier, onTap: () -> Unit) {
+    val icon = rememberItemIcon(slot.icon)
+    Column(
+        modifier
+            .height(62.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (slot.present) SlotWorn else SlotBg)
+            .border(1.dp, if (slot.present) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
+            .clickable { onTap() }
+            .padding(3.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        if (slot.present) {
+            if (icon != null) {
+                Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(28.dp))
+            }
+            Text(
+                slot.name,
+                color = BoneBright, fontSize = 9.sp, fontFamily = MwBody,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center
+            )
+        } else {
+            Text("empty", color = BoneMuted, fontSize = 10.sp, fontFamily = MwBody)
+        }
+    }
+}
+
+/**
+ * One browse-list row: the ingredient plus one entry per NON-EMPTY effect slot. Unknown slots show
+ * "?" and carry no name at all (the exporter sends none), which is exactly what the vanilla
+ * ingredient tooltip does — it lists every filled slot and renders the ones the player's Alchemy
+ * cannot yet reach as a bare question mark.
+ *
+ * The effects are joined with ", " rather than laid out as separate columns: bare space separation
+ * read as one run-on phrase ("Drain Agility ? ? ?"), with no visible boundary between a two-word
+ * effect name and the question marks after it.
+ *
+ * Sized generously for a fingertip — this is the one list on the screen that is tapped repeatedly.
+ */
+@Composable
+private fun AlchemyIngredientRow(item: AlchemyIngredient, enabled: Boolean, onTap: () -> Unit) {
+    val icon = rememberItemIcon(item.icon)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(SlotBg)
+            .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+            .then(if (enabled) Modifier.clickable { onTap() } else Modifier)
+            .padding(horizontal = 8.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (icon != null) {
+            Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(40.dp))
+            Spacer(Modifier.width(9.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    item.name,
+                    color = if (enabled) BoneBright else BoneMuted,
+                    fontSize = 14.sp, fontFamily = MwBody,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (item.count > 1) {
+                    Spacer(Modifier.width(6.dp))
+                    Text("x${item.count}", color = BoneDim, fontSize = 12.sp, fontFamily = MwData)
+                }
+            }
+            if (item.effects.isNotEmpty()) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    item.effects.joinToString(",   ") { if (it.known) it.name else "?" },
+                    color = BoneDim, fontSize = 11.sp, fontFamily = MwData,
+                    lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/**
+ * TOP-screen alchemy: the name field and the four apparatus slots on the left, the created-effects
+ * preview on the right.
+ *
+ * This is the D-PAD half of the screen. It is hosted non-touchable, so the whole left column is
+ * driven by the controller: Up/Down walks the five focusables (name, then the four apparatus slots)
+ * and A activates the focused one. The created-effects column is view-only and deliberately OUTSIDE
+ * that loop — there is nothing to do to it.
+ *
+ * Apparatus behaviour matches the native window exactly: A on a FILLED slot empties it, A on an
+ * EMPTY one opens a picker restricted to that apparatus type — the same per-type filter vanilla's
+ * ItemSelectionDialog applies.
+ */
+@Composable
+fun AlchemyTopOverlay() {
+    val session by GameStateRepository.alchemySession.collectAsState()
+    val s = session ?: return
+
+    val picker = AlchemyUiState.pickerType
+    val pickerTools = if (picker == null) emptyList() else s.toolsOfType(picker)
+
+    // The main loop yields entirely while the picker or the name keyboard owns input.
+    // One action for both input paths: A on the focused row and a tap on any row run this, so the
+    // two can never diverge. Apparatus behaviour matches the native window — a FILLED slot is
+    // emptied, an EMPTY one opens the per-type picker.
+    val activate: (Int) -> Unit = { i ->
+        if (i == 0) {
+            AlchemyUiState.nameComposer = true
+        } else {
+            s.apparatus.getOrNull(i - 1)?.let { slot ->
+                if (slot.present) CompanionActions.alchemyClearApparatus(slot.slot)
+                else AlchemyUiState.pickerType = slot.type
+            }
+        }
+    }
+    val focus = rememberListNavFocus(
+        itemCount = 1 + s.apparatus.size,
+        enabled = picker == null && !AlchemyUiState.nameComposer,
+        onConfirm = activate
+    )
+
+    // Bottom-aligned rather than centred: the top screen is the game, and a centred panel sits
+    // right over the middle of the view. Dropping it low keeps the upper two thirds clear. The
+    // apparatus picker below uses the same alignment and inset so it lands where the panel was
+    // rather than floating in the space the panel just vacated.
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+        // ONE panel around all three sections (name, apparatus, created effects). They are parts of
+        // a single screen, not three independent overlays, so they share one frame; the columns are
+        // separated by a hairline rule rather than by borders of their own, which would have read as
+        // three unrelated windows that happened to be adjacent.
+        Row(
+            Modifier
+                // Outside the panel frame, so it is a gap from the screen edge and not interior
+                // padding — hence before mwPanel() in the chain, not after.
+                .padding(bottom = ALCHEMY_TOP_PANEL_INSET)
+                .fillMaxWidth(0.82f)
+                // IntrinsicSize.Min so the divider's fillMaxHeight() below resolves to the TALLEST
+                // COLUMN rather than to the incoming (full-screen) constraint, which would stretch
+                // this whole panel down the screen.
+                .height(IntrinsicSize.Min)
+                .mwPanel()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // ---- Left: name + apparatus (the focus loop) ----
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "POTION NAME",
+                    color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+                AlchemyTopFocusBox(focused = focus == 0, onTap = { activate(0) }) {
+                    Text(
+                        // The native window auto-fills this with suggestPotionName() whenever the
+                        // suggestion CHANGES, which is what lets a hand-typed name survive. The
+                        // value shown is always the field's real caption, echoed back in the batch.
+                        s.name.ifBlank { "(unnamed)" },
+                        color = if (s.name.isBlank()) BoneMuted else BoneBright,
+                        fontSize = 13.sp, fontFamily = MwBody,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "APPARATUS",
+                    color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+                s.apparatus.forEachIndexed { i, appa ->
+                    val icon = rememberItemIcon(appa.icon)
+                    AlchemyTopFocusBox(
+                        focused = focus == i + 1,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                        onTap = { activate(i + 1) }
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (appa.present && icon != null) {
+                                Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(22.dp))
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    ALCHEMY_APPARATUS_NAMES.getOrElse(appa.type) { "Apparatus" },
+                                    // Only the Mortar & Pestle is required; the rest are optional
+                                    // quality modifiers, so an empty one is not an error state.
+                                    color = if (appa.type == 0 && !appa.present) Color(0xFFC75C5C) else BoneDim,
+                                    fontSize = 9.sp, fontFamily = MwData
+                                )
+                                Text(
+                                    if (appa.present) appa.name else "— none —",
+                                    color = if (appa.present) BoneBright else BoneMuted,
+                                    fontSize = 12.sp, fontFamily = MwBody,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (appa.present) {
+                                Text(
+                                    formatQuality(appa.quality),
+                                    color = BronzeLight, fontSize = 10.sp, fontFamily = MwData
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Divider between the two columns. fillMaxHeight inside a Row measures against the
+            // tallest sibling, so it tracks the left column's height without a fixed value.
+            Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
+
+            // ---- Right: created effects (view-only, never focused) ----
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "CREATED EFFECTS",
+                    color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(6.dp))
+                if (s.created.isEmpty()) {
+                    Text(
+                        "None",
+                        color = BoneMuted, fontSize = 12.sp, fontFamily = MwBody
+                    )
+                } else s.created.forEach { eff ->
+                    val icon = rememberItemIcon(if (eff.known) eff.icon else "")
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (icon != null) {
+                            Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        // NAME ONLY — no magnitude, no duration, no range. Vanilla builds this list
+                        // with mIsConstant/mNoTarget/mNoMagnitude all set, so it shows nothing else
+                        // either; and an entry the player's Alchemy cannot yet reach is a bare "?".
+                        Text(
+                            if (eff.known) eff.name else "?",
+                            color = if (eff.known) Bone else BoneMuted,
+                            fontSize = 12.sp, fontFamily = MwBody,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
+        // ---- Apparatus picker ----
+        // Lives on the TOP screen so the whole apparatus flow stays reachable with the D-pad. Marked
+        // as a cancel-able modal so native routes B to COMPANION_NAV_CANCEL (closing just this) rather
+        // than popping GM_Alchemy, and so the loop above yields while it is up.
+        if (picker != null) {
+            DisposableEffect(picker) {
+                ModalNav.count++
+                CompanionActions.setModalCancelOpen(true)
+                onDispose {
+                    ModalNav.count--
+                    if (ModalNav.count == 0) CompanionActions.setModalCancelOpen(false)
+                }
+            }
+            val pickerFocus = rememberListNavFocus(
+                itemCount = pickerTools.size,
+                onConfirm = { i ->
+                    pickerTools.getOrNull(i)?.let { CompanionActions.alchemySetApparatus(picker, it.id) }
+                    AlchemyUiState.pickerType = null
+                },
+                onCancel = { AlchemyUiState.pickerType = null }
+            )
+            Box(
+                Modifier
+                    // The scrim stays full-bleed; only the card is inset, so there is no unscrimmed
+                    // strip along the bottom edge.
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .pointerInput(picker) { detectTapGestures { AlchemyUiState.pickerType = null } },
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Column(
+                    Modifier
+                        .padding(bottom = ALCHEMY_TOP_PANEL_INSET)
+                        .fillMaxWidth(0.5f)
+                        .mwPanel()
+                        // Swallow taps on the card so a miss between rows cannot dismiss it.
+                        .pointerInput(Unit) { detectTapGestures { } }
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        ALCHEMY_APPARATUS_NAMES.getOrElse(picker) { "Apparatus" }.uppercase(),
+                        color = BronzeLight, fontSize = 13.sp, fontFamily = MwDisplay,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    if (pickerTools.isEmpty()) {
+                        Text("You carry none.", color = BoneMuted, fontSize = 12.sp, fontFamily = MwBody)
+                    } else pickerTools.forEachIndexed { i, tool ->
+                        val icon = rememberItemIcon(tool.icon)
+                        AlchemyTopFocusBox(
+                            focused = pickerFocus == i,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                            onTap = {
+                                CompanionActions.alchemySetApparatus(picker, tool.id)
+                                AlchemyUiState.pickerType = null
+                            }
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (icon != null) {
+                                    Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(22.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Text(
+                                    tool.name,
+                                    color = BoneBright, fontSize = 12.sp, fontFamily = MwBody,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    formatQuality(tool.quality),
+                                    color = BronzeLight, fontSize = 10.sp, fontFamily = MwData
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Apparatus quality, as the native tooltip prints it — one decimal place. */
+private fun formatQuality(q: Float): String = String.format("%.1f", q)
+
+/** A focusable row on the top screen. Focus is a brighter, thicker border, matching the launcher's
+ *  Play button: a pre-selected control that looks identical to an idle one reads as broken. */
+@Composable
+private fun AlchemyTopFocusBox(
+    focused: Boolean,
+    modifier: Modifier = Modifier,
+    onTap: (() -> Unit)? = null,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (focused) PillActiveBg else SlotBg)
+            .border(if (focused) 2.dp else 1.dp, if (focused) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
+            .then(if (onTap != null) Modifier.clickable { onTap() } else Modifier)
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    ) { content() }
+}
 
 /**
  * Bottom-screen LEVEL UP window — the attribute picker.

@@ -435,6 +435,171 @@ data class LevelUpSession(
     fun isSelected(attrId: String): Boolean = selected.any { it.equals(attrId, ignoreCase = true) }
 }
 
+/* ---------------- DS Alchemy (COMPANION_ALCHEMY_*) ---------------- */
+
+/**
+ * One magic effect on the alchemy screen — either a created-potion effect or one of an
+ * ingredient's four.
+ *
+ * [known] is skill-gated and the ONLY thing that decides whether the player may see it. When it is
+ * false the exporter sends no [name] and no [icon] at all and the UI draws "?", which is exactly
+ * what vanilla's MWSpellEffect widget does with `mKnown = false`.
+ *
+ * The two gates are DIFFERENT formulas and must not be conflated:
+ *  - an INGREDIENT's slot k is known iff `Alchemy >= fWortChanceValue * (k + 1)` (so 15/30/45/60
+ *    with the stock GMST) — per record and per slot, never per instance, and nothing is ever
+ *    "identified" by use;
+ *  - a CREATED effect at list position i uses `Alchemy::knownEffect(i, player)`: i<=1 needs
+ *    fWortChanceValue, i<=3 needs x2, i<=5 needs x3, i<=7 needs x4, and 8+ is never known.
+ * Both are evaluated natively; this class only carries the answer.
+ */
+data class AlchemyEffect(
+    val name: String = "",
+    val icon: String = "",
+    val known: Boolean = false
+)
+
+/**
+ * One of the four apparatus slots, read from the live `MWMechanics::Alchemy::mTools`.
+ *
+ * [type] is `ESM::Apparatus::AppaType`: 0 Mortar & Pestle, 1 Alembic, 2 Calcinator, 3 Retort. The
+ * engine hardcodes four and throws on anything outside that range, so [slot] == [type] always and
+ * four slots is safe to assume.
+ *
+ * Only the Mortar & Pestle is REQUIRED (see [AlchemyReady.NO_MORTAR]); the other three are optional
+ * quality modifiers.
+ */
+data class AlchemyApparatus(
+    val slot: Int,
+    val present: Boolean = false,
+    val id: String = "",
+    val type: Int = 0,
+    val name: String = "",
+    val icon: String = "",
+    val quality: Float = 0f
+)
+
+/** One apparatus the player is carrying — the source for the per-type picker, matching vanilla's
+ *  ItemSelectionDialog (Filter_OnlyAlchemyTools + setApparatusTypeFilter). */
+data class AlchemyTool(
+    val id: String,
+    val type: Int = 0,
+    val name: String = "",
+    val icon: String = "",
+    val quality: Float = 0f
+)
+
+/**
+ * One of the four ingredient slots.
+ *
+ * Emitted per slot INCLUDING the empty ones, and never compacted: slot order is gameplay-significant
+ * (it decides the order of the created effects, and therefore the order they apply when the potion
+ * is drunk), so a gap in the middle is real state and is drawn where it is.
+ */
+data class AlchemySlot(
+    val slot: Int,
+    val present: Boolean = false,
+    val id: String = "",
+    val name: String = "",
+    val icon: String = "",
+    val count: Int = 0
+)
+
+/** One row of the browse list. Ingredients already placed in a slot are omitted by the exporter,
+ *  matching vanilla (which drops them from its own list via addDragItem of the full stack). */
+data class AlchemyIngredient(
+    val id: String,
+    val name: String = "",
+    val icon: String = "",
+    val count: Int = 0,
+    val effects: List<AlchemyEffect> = emptyList()
+)
+
+/** `MWMechanics::Alchemy::Result`, in the engine's own order — which is also the order
+ *  `getReadyStatus()` checks them in, so the first failing condition is the one reported. */
+object AlchemyReady {
+    const val SUCCESS = 0
+    const val NO_MORTAR = 1
+    const val TOO_FEW_INGREDIENTS = 2
+    const val NO_NAME = 3
+    const val NO_EFFECTS = 4
+    const val RANDOM_FAILURE = 5
+}
+
+/**
+ * A live DS alchemy screen; null when GM_Alchemy is not open.
+ *
+ * Everything here is read from the live `MWMechanics::Alchemy` after every mutation — nothing is
+ * tracked or recomputed on this side. In particular:
+ *
+ * [apparatus] must come from the native mTools rather than being derived from [tools], because the
+ * prefill is SESSION-STICKY: `Alchemy::clear()` deliberately leaves mTools alone and the window
+ * keeps one Alchemy for the whole game session, so `setAlchemist()` re-selects whatever the player
+ * last hand-picked (as long as they still own it) and only falls back to highest quality otherwise.
+ *
+ * [chance] is EXPORTED BUT DELIBERATELY NOT DISPLAYED. It was shown next to Create for a while and
+ * was removed, for two reasons worth keeping written down:
+ *
+ *  1. It is a property of the CHARACTER, not of the recipe — `factor` is
+ *     `Alchemy(modified) + 0.1*Intelligence + 0.1*Luck` and nothing else, so it does not move as
+ *     ingredients or apparatus change. Sitting beside Create it read as being about the potion.
+ *     (Apparatus affects potion STRENGTH through `updateEffects`, never the odds.)
+ *  2. More seriously, it was not the whole truth. `createSingle()` has TWO failure paths and this
+ *     covers only the roll: it returns Result_RandomFailure without rolling at all when the
+ *     QUANTIFIED effect list is empty, i.e. when every effect's magnitude or duration rounded to
+ *     <= 0 (low skill and/or a poor mortar against an expensive effect). The real chance there is
+ *     0% while this still reported `floor(factor) + 1`, and the ingredients are destroyed anyway.
+ *     The Created Effects preview cannot be used to detect that either — it is built from the
+ *     UNQUANTIFIED `listEffects()`, so it lists effects that then get nullified.
+ *
+ * If it is ever brought back, fix (2) first: it needs a `companionHasQuantifiedEffects()` accessor
+ * alongside the two already added to MWMechanics::Alchemy, and must show 0% when that is false.
+ *
+ * [maxBrew] is `countPotionsToBrew()` = the smallest selected-ingredient stack, or 0 whenever the
+ * recipe is not ready — INCLUDING when the name is empty. The DS quantity spinner is capped to it
+ * and follows it down after a brew; vanilla's own spinner is uncapped and silently brews only
+ * `min(maxBrew, spinner)`. That clamp still runs natively either way, so the cap is a UI affordance
+ * rather than the thing enforcing the limit. See AlchemyUiState.qty.
+ */
+data class AlchemySession(
+    val factor: Float = 0f,
+    val chance: Int = 0,
+    /** Alchemy skill, MODIFIED (fortify effects included) — the value every gate here uses. */
+    val skill: Float = 0f,
+    /** `fWortChanceValue`, read live: it is content data and mods change it. */
+    val wort: Float = 15f,
+    val maxBrew: Int = 0,
+    /** The native spinner's current value, echoed back so the two can never disagree. */
+    val brewCount: Int = 1,
+    val ready: Int = AlchemyReady.NO_MORTAR,
+    val name: String = "",
+    /** `suggestPotionName()` — the first created effect's display string, or "" when there is none.
+     *  The native window auto-fills the name field with it whenever it CHANGES, which is what lets a
+     *  hand-typed name survive; that behaviour lives natively and is not re-implemented here. */
+    val suggested: String = "",
+    val apparatus: List<AlchemyApparatus> = emptyList(),
+    val slots: List<AlchemySlot> = emptyList(),
+    val created: List<AlchemyEffect> = emptyList(),
+    val tools: List<AlchemyTool> = emptyList(),
+    val ingredients: List<AlchemyIngredient> = emptyList()
+) {
+    /** Free ingredient slots. 0 means a further tap can do nothing — vanilla's addIngredient()
+     *  silently returns -1 in that case, and so the row is simply not offered. */
+    val freeSlots: Int get() = slots.count { !it.present }
+
+    /** Is an ingredient of this record already placed? `addIngredient()` rejects a duplicate RefId,
+     *  so the browse list must not offer one (the exporter already omits them; this is the guard for
+     *  anything built from a stale batch). */
+    fun isSlotted(id: String): Boolean =
+        slots.any { it.present && it.id.equals(id, ignoreCase = true) }
+
+    /** The owned apparatus of one type, for that slot's picker. Sorted by name to match vanilla's
+     *  SortFilterItemModel, whose comparator falls through to the lowercased display name once the
+     *  items share a type. */
+    fun toolsOfType(type: Int): List<AlchemyTool> =
+        tools.filter { it.type == type }.sortedBy { it.name.lowercase() }
+}
+
 data class TrainingSession(
     val npcName: String,
     val playerGold: Int,

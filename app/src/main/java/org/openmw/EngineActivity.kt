@@ -19,6 +19,7 @@ import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.UiSounds
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
+import org.openmw.companion.AlchemyTopOverlay
 import org.openmw.companion.LevelUpTopOverlay
 import org.openmw.companion.LootingTopOverlay
 import org.openmw.companion.ManualJournalDraftTopOverlay
@@ -174,6 +175,7 @@ class EngineActivity : SDLActivity() {
     private var playerCombatTopView: View? = null
     private var manualJournalTopView: View? = null
     private var levelUpTopView: View? = null
+    private var alchemyTopView: View? = null
 
     // INTERACTIVE looting grids on the TOP screen (this activity's own window / Display 0), shown
     // while a container session is active AND Looting is routed to SPLIT (game_ui_looting == DS).
@@ -321,6 +323,7 @@ class EngineActivity : SDLActivity() {
         hidePlayerCombatTopOverlay()
         hideManualJournalTopOverlay()
         hideLevelUpTopOverlay()
+        hideAlchemyTopOverlay()
         hideLootingTopOverlay()
         hideBarterTopOverlay()
 
@@ -1190,6 +1193,22 @@ class EngineActivity : SDLActivity() {
                 .collect { show -> if (show) showLevelUpTopOverlay() else hideLevelUpTopOverlay() }
         }
 
+        // Top-screen ALCHEMY half: the potion name, the four apparatus slots and the created-effects
+        // preview, shown while an alchemy session is live AND Alchemy is DS. Unlike the other
+        // top-screen overlays this one is the D-PAD half of the screen — it consumes NavEvents for
+        // its own focus loop — but the window itself is still non-touchable and non-focusable, so it
+        // never takes input away from the game. The session flow is nulled by COMPANION_ALCHEMY_CLOSED,
+        // which the native window emits from every close path (exit / Cancel / onClose), so it cannot
+        // be left stranded.
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.alchemySession,
+                UiPreferences.gameUiModeFlow("game_ui_alchemy"),
+            ) { session, mode -> session != null && mode == GameUiMode.DS }
+                .distinctUntilChanged()
+                .collect { show -> if (show) showAlchemyTopOverlay() else hideAlchemyTopOverlay() }
+        }
+
         // Top-screen INTERACTIVE looting grids: shown while a container session is active AND
         // Looting is routed to SPLIT AND the Looting element is DS (companion draws it). The
         // bottom screen shows only the terminal controls (LootingControlsOnly).
@@ -1268,9 +1287,14 @@ class EngineActivity : SDLActivity() {
             val restWaitNav = sessionNav(GameStateRepository.sleepSession, "game_ui_restwait")
             val trainingNav = sessionNav(GameStateRepository.trainingSession, "game_ui_training")
             val spellBuyingNav = sessionNav(GameStateRepository.spellBuyingSession, "game_ui_spellbuying")
+            // Alchemy needs the gate too: its TOP-screen half owns a D-pad focus loop, so the
+            // controller must be re-emitted as COMPANION_NAV_* rather than driving the hidden
+            // native AlchemyWindow.
+            val alchemyNav = sessionNav(GameStateRepository.alchemySession, "game_ui_alchemy")
 
             combine(
-                dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav, trainingNav, spellBuyingNav
+                dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav, trainingNav,
+                spellBuyingNav, alchemyNav
             ) { arr ->
                 arr.any { it }
             }.combine(GameStateRepository.pauseMenuVisible) { anyOverlay, paused ->
@@ -1447,6 +1471,22 @@ class EngineActivity : SDLActivity() {
         val overlay = levelUpTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         levelUpTopView = null
+    }
+
+    // INTERACTIVE (touchable), unlike the other top-screen overlays: the alchemy left column is a
+    // real control surface, so the name field and apparatus slots answer to a TAP as well as to A on
+    // the D-pad. Still FLAG_NOT_FOCUSABLE, so the controller keeps arriving as COMPANION_NAV_*
+    // through the usual gate rather than being taken by this window. It is MATCH_PARENT and so
+    // swallows top-screen touch while it is up, which is harmless here — GM_Alchemy pauses the game.
+    private fun showAlchemyTopOverlay() = showInteractiveTopScreenOverlay(
+        alreadyShown = { alchemyTopView != null },
+        onAdded = { alchemyTopView = it },
+    ) { ProvideTopPanelOpacity { AlchemyTopOverlay() } }
+
+    private fun hideAlchemyTopOverlay() {
+        val overlay = alchemyTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        alchemyTopView = null
     }
 
     private fun showManualJournalTopOverlay() = showTopScreenOverlay(

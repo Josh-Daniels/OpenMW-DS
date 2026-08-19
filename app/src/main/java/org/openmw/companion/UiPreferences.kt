@@ -106,7 +106,7 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // Repair + Rest/Wait have companion (DS) overlays (RepairOverlay / RestWaitOverlay +
     // companion-repair-export / companion-restwait-export patches), so they are non-pending
     // (default DS): the native GM_MerchantRepair / GM_Rest windows are suppressed and the bottom
-    // screen is the sole surface. Level up..Alchemy: native suppression is wired (companionDs*)
+    // screen is the sole surface. Spellmaking/Enchanting: native suppression is wired (companionDs*)
     // but no companion overlay exists yet, so they stay pending -> locked to VANILLA and the
     // suppression stays dormant (companionDs*() always false) until an overlay lands. See
     // companion-hide-gamewindows-on-dsmode.patch.
@@ -130,7 +130,12 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     GameUiElement("game_ui_training", "Training"),
     GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
     GameUiElement("game_ui_enchanting", "Enchanting", pending = true),
-    GameUiElement("game_ui_alchemy", "Alchemy", pending = true),
+    // Alchemy is non-pending as of Aug 19 2026: AlchemyOverlay (bottom) + AlchemyTopOverlay (top)
+    // exist, and DS suppresses the native GM_Alchemy window via the already-wired companionDsAlchemy()
+    // gate. The native AlchemyWindow still owns the whole mechanic — the combination rule and its
+    // slot order, the session-sticky apparatus prefill, countPotionsToBrew(), the validation order
+    // and the per-potion success roll (CMP:alchemy_* bridges). The DS side is presentation only.
+    GameUiElement("game_ui_alchemy", "Alchemy"),
     GameUiElement("game_ui_restwait", "Rest / Wait"),
     // Crime "reported" alert: DS = a top-of-stack toast on the companion screen; Vanilla = the native
     // transient message (which renders bottom-center of the top screen, hidden behind DS panels).

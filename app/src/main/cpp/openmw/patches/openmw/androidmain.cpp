@@ -204,6 +204,19 @@ extern "C" void companionBarterCancel();
 // OWN handlers, so selection semantics, the coin-count gate and the entire commit stay native.
 extern "C" void companionLevelupPick(const char* attrId);
 extern "C" void companionLevelupOk();
+// Bottom-screen ALCHEMY (alchemywindow.cpp). Apparatus and ingredients are addressed by SERIALIZED
+// RefId, never by a list ordinal: the browse list is a SortFilterItemModel that reorders as stacks
+// are consumed, so an ordinal would silently target the wrong item after any mutation (unlike
+// travel/training, whose lists are stable because the sim is paused). Every bridge forwards to the
+// window's OWN handlers, so the combination rule, the ready-status order, countPotionsToBrew(), the
+// per-potion success roll and the ingredient consumption all stay native.
+extern "C" void companionAlchemySetApparatus(int slot, const char* refId);
+extern "C" void companionAlchemyClearApparatus(int slot);
+extern "C" void companionAlchemyAddIngredient(const char* refId);
+extern "C" void companionAlchemyClearIngredient(int slot);
+extern "C" void companionAlchemySetName(const char* text);
+extern "C" void companionAlchemyCreate(int count);
+extern "C" void companionAlchemyCancel();
 // Bottom-screen merchant repair (merchantrepair.cpp). Items addressed by ordinal index.
 extern "C" void companionRepairItem(int index);
 extern "C" void companionRepairAll();
@@ -493,6 +506,51 @@ void drainCompanionCommands()
         else if (cmd.rfind("CMP:levelup_pick:", 0) == 0)
         {
             companionLevelupPick(cmd.c_str() + (sizeof("CMP:levelup_pick:") - 1));
+        }
+        // Alchemy (CMP:alchemy_*) is driven natively — MWMechanics::Alchemy owns the shared-effect
+        // combination rule and its slot ORDER, the session-sticky apparatus prefill (Alchemy::clear
+        // deliberately does not clear mTools), countPotionsToBrew(), the validation order and the
+        // per-potion success roll that consumes the ingredients whatever the outcome. None of that
+        // is reachable from Lua and none of it is reimplemented. See companion-alchemy-export.patch.
+        // _cancel is checked before the colon-arg _create form so the shared "CMP:alchemy_c" prefix
+        // cannot mis-route.
+        else if (cmd.rfind("CMP:alchemy_cancel", 0) == 0)
+        {
+            companionAlchemyCancel();
+        }
+        else if (cmd.rfind("CMP:alchemy_apparatus_set:", 0) == 0)
+        {
+            // arg = "<slot>|<refId>". The refId is the tail (item ids contain spaces), so split
+            // only on the first '|'.
+            std::string arg = cmd.substr(sizeof("CMP:alchemy_apparatus_set:") - 1);
+            const std::size_t bar = arg.find('|');
+            if (bar != std::string::npos)
+            {
+                const int slot = std::atoi(arg.substr(0, bar).c_str());
+                companionAlchemySetApparatus(slot, arg.substr(bar + 1).c_str());
+            }
+        }
+        else if (cmd.rfind("CMP:alchemy_apparatus_clear:", 0) == 0)
+        {
+            companionAlchemyClearApparatus(std::atoi(cmd.c_str() + (sizeof("CMP:alchemy_apparatus_clear:") - 1)));
+        }
+        else if (cmd.rfind("CMP:alchemy_ingredient_add:", 0) == 0)
+        {
+            companionAlchemyAddIngredient(cmd.c_str() + (sizeof("CMP:alchemy_ingredient_add:") - 1));
+        }
+        else if (cmd.rfind("CMP:alchemy_ingredient_clear:", 0) == 0)
+        {
+            companionAlchemyClearIngredient(std::atoi(cmd.c_str() + (sizeof("CMP:alchemy_ingredient_clear:") - 1)));
+        }
+        else if (cmd.rfind("CMP:alchemy_name:", 0) == 0)
+        {
+            // Raw tail — a potion name may contain spaces and ':'.
+            std::string text = cmd.substr(sizeof("CMP:alchemy_name:") - 1);
+            companionAlchemySetName(text.c_str());
+        }
+        else if (cmd.rfind("CMP:alchemy_create:", 0) == 0)
+        {
+            companionAlchemyCreate(std::atoi(cmd.c_str() + (sizeof("CMP:alchemy_create:") - 1)));
         }
         else if (cmd.rfind("CMP:training_cancel", 0) == 0)
         {

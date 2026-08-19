@@ -1,0 +1,803 @@
+Bottom/top-screen DS ALCHEMY: export the live alchemy state and expose command bridges so the
+companion can replace the native AlchemyWindow, which windowmanagerimp already suppresses when the
+"game_ui_alchemy" element is DS (companion-hide-gamewindows-on-dsmode.patch — the gate was wired
+dormant long before this patch existed).
+
+PRESENTATION + INPUT FORWARDING ONLY. MWMechanics::Alchemy keeps every rule: the shared-effect-by-
+>=2-ingredients combination rule AND its slot order (which decides both the created-effect order and
+the order effects apply when drunk), the four hardcoded apparatus types, the mortar-and-pestle
+requirement, the duplicate-RefId ingredient rejection, the validation order, countPotionsToBrew(),
+and the per-potion success roll that consumes the ingredients whatever the outcome.
+
+Three things are load-bearing:
+
+  * The apparatus slots are read from the live mTools, NOT derived. Alchemy::clear() deliberately
+    does not clear mTools and the window holds one Alchemy for the whole session, so setAlchemist()
+    re-selects whatever the player last hand-picked (while still owned) and only falls back to
+    highest quality otherwise. That preference exists nowhere else and cannot be reconstructed.
+
+  * The state batch is emitted from the tail of update(), which the window already calls after EVERY
+    mutation (open / apparatus set+clear / ingredient add+clear / create), so the companion never
+    tracks anything itself. It is STREAMED one small line per record — the browse list is bounded
+    only by how many ingredients the player carries, so a single line would hit the 4096-byte
+    stdout-flush truncation.
+
+  * The close signal is emitted explicitly from exit() and onCancelButtonClicked, because in DS mode
+    the window is hidden and WindowBase::setVisible() only fires onClose() on a visible->hidden edge
+    — so the ordinary onClose() never runs on the real mode-pop. onClose() is still overridden (with
+    the usual !containsMode guard, which also suppresses the spurious emit on the DS suppression's
+    own transient hide) to cover Vanilla mode. All three funnel through a once-guarded helper.
+
+Unlike LevelupDialog there is deliberately NO exit() refusal: alchemy is genuinely cancellable in
+vanilla, so B falls through to Cancel exactly as before and no windowmanagerimp escape-hatch change
+is needed.
+
+Result/validation text is routed to the bottom screen in DS mode only (COMPANION_ALCHEMY_MSG, same
+shape as COMPANION_CRIME_MSG) because the native transient message renders bottom-centre of the TOP
+screen, behind the DS panels. Same GMSTs, same order, same sounds — only the delivery changes.
+
+Two tiny read-only accessors are added to MWMechanics::Alchemy (companionAlchemyFactor /
+companionReadyStatus) so the success chance and the ready status shown on screen are the SAME values
+createSingle()/getReadyStatus() act on rather than a second implementation.
+
+For a MULTI-POTION batch the DS result line states the counts explicitly ("<brewed> of
+<attempted>"). Vanilla cannot express a partial batch -- its success line prints only the brewed
+count, and prints the bare singular when exactly one survived, which is indistinguishable from
+having asked for one; its failure line carries no count at all, so a wholly-failed batch of four
+reads the same as a single failure despite having destroyed four sets of ingredients. Single-attempt
+brews keep vanilla's exact wording. Result_NoEffects deliberately carries NO count: create() returns
+it before the loop, having consumed exactly one set.
+
+Kotlin side: LogParser prefixes -> AlchemySession in GameStateRepository -> AlchemyOverlay (bottom)
+and AlchemyTopOverlay (top). Added Aug 19 2026.
+
+diff --git a/apps/openmw/mwgui/alchemywindow.cpp b/apps/openmw/mwgui/alchemywindow.cpp
+index b1a23f811e..4108798591 100644
+diff --git a/apps/openmw/mwgui/alchemywindow.cpp b/apps/openmw/mwgui/alchemywindow.cpp
+index b1a23f811e..e992851ae7 100644
+--- a/apps/openmw/mwgui/alchemywindow.cpp
++++ b/apps/openmw/mwgui/alchemywindow.cpp
+@@ -13,6 +13,22 @@
+ #include <components/esm3/loadingr.hpp>
+ #include <components/esm3/loadmgef.hpp>
+ 
++#ifdef __ANDROID__
++#include <algorithm>
++#include <cmath>
++#include <sstream>
++
++#include <components/debug/debuglog.hpp>
++#include <components/esm/attr.hpp>
++#include <components/esm3/loadgmst.hpp>
++#include <components/esm3/loadskil.hpp>
++#include <components/misc/resourcehelpers.hpp>
++#include <components/resource/resourcesystem.hpp>
++#include <components/vfs/manager.hpp>
++
++#include "../mwworld/containerstore.hpp"
++#endif
++
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/windowmanager.hpp"
+ #include "../mwbase/world.hpp"
+@@ -32,6 +48,77 @@
+ #include "sortfilteritemmodel.hpp"
+ #include "widgets.hpp"
+ 
++#ifdef __ANDROID__
++// COMPANION: true when Alchemy is routed to the DS (bottom) screen, in which case the native
++// AlchemyWindow is suppressed by windowmanagerimp (companion-hide-gamewindows-on-dsmode.patch) and
++// the companion is the sole surface. Defined in androidmain.cpp. A block-scope extern "C" is
++// ill-formed, so it is declared here at namespace scope and only CALLED inside functions.
++extern "C" bool companionDsAlchemy();
++
++namespace
++{
++    // COMPANION: the live AlchemyWindow, so the CMP:alchemy_* bridges can drive the REAL window
++    // while it is hidden in DS mode. Set in onOpen (not the ctor): the window is built once at
++    // startup and reused, so the ctor fires long before any alchemy session. Cleared on close.
++    // Mirrors gCompanionLevelupDialog in levelupdialog.cpp.
++    MWGui::AlchemyWindow* gCompanionAlchemyWindow = nullptr;
++    // True between COMPANION_ALCHEMY_OPEN and _CLOSED, so the close signal fires exactly once no
++    // matter which of the three close paths gets there first (exit / Cancel / onClose).
++    bool gCompanionAlchemyOpen = false;
++
++    // JSON-escape a string for a COMPANION_ALCHEMY_* payload. Inventory icon paths contain
++    // backslashes and item names can contain quotes, so both must be escaped. (A private copy of
++    // tradewindow.cpp's helper -- that one is file-static in its own translation unit.)
++    std::string companionAlchemyJsonEscape(std::string_view s)
++    {
++        std::string out;
++        out.reserve(s.size() + 8);
++        for (const char c : s)
++        {
++            switch (c)
++            {
++                case '"': out += "\\\""; break;
++                case '\\': out += "\\\\"; break;
++                case '\n': out += "\\n"; break;
++                case '\r': out += "\\r"; break;
++                case '\t': out += "\\t"; break;
++                default: out += c; break;
++            }
++        }
++        return out;
++    }
++
++    // Raw ESM icon field -> the uniform VFS path the companion's icon pipeline expects, exactly as
++    // the barter export does it.
++    std::string companionAlchemyIcon(std::string_view raw)
++    {
++        if (raw.empty())
++            return {};
++        const VFS::Manager* const vfs = MWBase::Environment::get().getResourceSystem()->getVFS();
++        if (!vfs)
++            return {};
++        return Misc::ResourceHelpers::correctIconPath(VFS::Path::toNormalized(raw), *vfs);
++    }
++
++    // COMPANION: player-facing result/validation text. In DS mode the native window is hidden and
++    // the transient native message box renders bottom-centre of the TOP screen, behind the DS
++    // panels -- so the RESOLVED text is routed to the bottom screen instead (same shape as
++    // COMPANION_CRIME_MSG). Vanilla mode takes the untouched native path, tag and all. The GMST and
++    // the optional suffix are exactly the ones vanilla passes to messageBox().
++    void companionAlchemyMessage(MWBase::WindowManager* winMgr, const char* gmst, const std::string& suffix = {})
++    {
++        if (companionDsAlchemy())
++        {
++            std::string text{ winMgr->getGameSettingString(gmst, {}) };
++            text += suffix;
++            Log(Debug::Info) << "COMPANION_ALCHEMY_MSG:" << text;
++            return;
++        }
++        winMgr->messageBox("#{" + std::string(gmst) + "}" + suffix);
++    }
++}
++#endif
++
+ namespace MWGui
+ {
+     AlchemyWindow::AlchemyWindow()
+@@ -114,6 +201,12 @@ namespace MWGui
+ 
+     void AlchemyWindow::onCancelButtonClicked(MyGUI::Widget* /*sender*/)
+     {
++#ifdef __ANDROID__
++        // COMPANION: in DS mode the window is hidden, so the pop below produces no visible->hidden
++        // edge and onClose() never runs -- emit the close signal here. Once-guarded, so the Vanilla
++        // path (where onClose() does fire) is unaffected.
++        companionEmitClosed();
++#endif
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Alchemy);
+     }
+ 
+@@ -127,9 +220,71 @@ namespace MWGui
+ 
+     void AlchemyWindow::createPotions(int count)
+     {
++#ifdef __ANDROID__
++        // COMPANION: Alchemy::create takes `count` by REFERENCE and overwrites it with the number
++        // actually brewed, so the number of ATTEMPTS is only available here, before the call. It is
++        // already the clamped min(countPotionsToBrew(), spinner) from onCreateButtonClicked -- i.e.
++        // how many times the roll really ran, not what the player typed -- which is exactly what the
++        // DS message needs to report against.
++        const int attempted = count;
++#endif
+         MWMechanics::Alchemy::Result result = mAlchemy->create(mNameEdit->getCaption(), count);
+         MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
+ 
++#ifdef __ANDROID__
++        // COMPANION: same GMSTs, same branch structure and the same sounds; the delivery changes in
++        // DS mode (see companionAlchemyMessage), and for a MULTI-POTION batch the counts are made
++        // explicit as "<brewed> of <attempted>".
++        //
++        // Vanilla cannot express a partial batch. Its success line prints only the brewed count --
++        // "(3)" for three-of-four, and the bare singular when exactly one survived, which is
++        // indistinguishable from having asked for one. Its failure line is a flat "you failed" with
++        // no count at all, so a wholly-failed batch of four looks identical to a single failure
++        // while having consumed four sets of ingredients. Both are genuinely ambiguous about what
++        // was destroyed, so the DS screen states it.
++        //
++        // The format is kept UNIFORM across success and failure -- "(4 of 4)", "(3 of 4)",
++        // "(0 of 4)" -- rather than reverting to vanilla's "(4)" when nothing failed: a message
++        // that changes SHAPE on the interesting case is easy to skim past.
++        //
++        // Single-attempt brews keep vanilla's exact wording; there is nothing to disambiguate.
++        const std::string batchSuffix = attempted > 1
++            ? " (" + std::to_string(count) + " of " + std::to_string(attempted) + ")"
++            : std::string{};
++        switch (result)
++        {
++            case MWMechanics::Alchemy::Result_NoName:
++                companionAlchemyMessage(winMgr, "sNotifyMessage37");
++                break;
++            case MWMechanics::Alchemy::Result_NoMortarAndPestle:
++                companionAlchemyMessage(winMgr, "sNotifyMessage45");
++                break;
++            case MWMechanics::Alchemy::Result_LessThanTwoIngredients:
++                companionAlchemyMessage(winMgr, "sNotifyMessage6a");
++                break;
++            case MWMechanics::Alchemy::Result_Success:
++                winMgr->playSound(ESM::RefId::stringRefId("potion success"));
++                if (attempted > 1)
++                    companionAlchemyMessage(winMgr, "sPotionSuccess",
++                        " " + mNameEdit->getCaption().asUTF8() + batchSuffix);
++                else
++                    companionAlchemyMessage(winMgr, "sPotionSuccess");
++                break;
++            case MWMechanics::Alchemy::Result_NoEffects:
++                // NO count here even for a large batch, and that is the point: create() returns this
++                // from getReadyStatus() BEFORE the loop, having consumed exactly ONE set of
++                // ingredients. "(0 of 4)" would claim four sets were destroyed when only one was.
++                companionAlchemyMessage(winMgr, "sNotifyMessage8");
++                winMgr->playSound(ESM::RefId::stringRefId("potion fail"));
++                break;
++            case MWMechanics::Alchemy::Result_RandomFailure:
++                // Here the loop DID run to completion with every roll failing, so `attempted` sets
++                // of ingredients really are gone -- worth saying, since nothing was produced.
++                companionAlchemyMessage(winMgr, "sNotifyMessage8", batchSuffix);
++                winMgr->playSound(ESM::RefId::stringRefId("potion fail"));
++                break;
++        }
++#else
+         switch (result)
+         {
+             case MWMechanics::Alchemy::Result_NoName:
+@@ -155,6 +310,7 @@ namespace MWGui
+                 winMgr->playSound(ESM::RefId::stringRefId("potion fail"));
+                 break;
+         }
++#endif
+ 
+         // remove ingredient slots that have been fully used up
+         for (size_t i = 0; i < mIngredients.size(); ++i)
+@@ -302,6 +458,16 @@ namespace MWGui
+             }
+         }
+ 
++#ifdef __ANDROID__
++        // COMPANION: publish the window for the CMP:alchemy_* bridges and announce the session
++        // BEFORE the first update(), because update() emits the state batch and the bottom screen
++        // must have seen OPEN first. Set here rather than in the ctor: the window is constructed
++        // once at startup, long before any alchemy session.
++        gCompanionAlchemyWindow = this;
++        gCompanionAlchemyOpen = true;
++        Log(Debug::Info) << "COMPANION_ALCHEMY_OPEN";
++#endif
++
+         update();
+         initFilter();
+ 
+@@ -488,6 +654,13 @@ namespace MWGui
+         std::vector<MyGUI::Widget*> effectItems;
+         effectsWidget->createEffectWidgets(effectItems, mEffectsBox, coord, false, 0);
+         effectsWidget->setCoord(coord);
++
++#ifdef __ANDROID__
++        // COMPANION: re-publish the whole state. update() is the window's own post-mutation hook
++        // (open / apparatus set+clear / ingredient add+clear / create all call it), so the bottom
++        // screen never has to track anything itself.
++        companionEmitState();
++#endif
+     }
+ 
+     void AlchemyWindow::addRepeatController(MyGUI::Widget* widget)
+@@ -628,4 +801,432 @@ namespace MWGui
+ 
+         return true;
+     }
++
++#ifdef __ANDROID__
++
++    // ================= Companion (bottom-screen alchemy) =================
++    //
++    // PRESENTATION + INPUT FORWARDING ONLY. Every rule the DS screen appears to enforce is still
++    // enforced by MWMechanics::Alchemy underneath: the shared-effect-by->=2-ingredients combination
++    // rule and its slot ORDER, the four apparatus types, the mortar-and-pestle requirement, the
++    // duplicate-RefId ingredient rejection, the ready-status order, countPotionsToBrew(), and the
++    // per-potion success roll that destroys the ingredients whatever the outcome.
++
++    // The full state batch, streamed one small line per record (the browse list is bounded only by
++    // how many ingredients the player is carrying, so it must not ride a single line -- the
++    // 4096-byte stdout-flush truncation would silently cut it).
++    void AlchemyWindow::companionEmitState()
++    {
++        const MWWorld::Ptr player = MWMechanics::getPlayer();
++        if (player.isEmpty())
++            return;
++
++        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
++        MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
++
++        // Push the typed name into the Alchemy object BEFORE reading ready/maxBrew. This is the
++        // exact sequence onCreateButtonClicked uses (setPotionName then countPotionsToBrew), so the
++        // numbers shown are the ones Create would act on -- getReadyStatus() checks mPotionName, and
++        // countPotionsToBrew() returns 0 unless the status is Result_Success.
++        mAlchemy->setPotionName(mNameEdit->getCaption().asUTF8());
++
++        const float alchemySkill = player.getClass().getSkill(player, ESM::Skill::Alchemy);
++        const float fWortChanceValue
++            = store.get<ESM::GameSetting>().find("fWortChanceValue")->mValue.getFloat();
++
++        // getAlchemyFactor() = skill(Alchemy).modified + 0.1*Intelligence + 0.1*Luck. Vanilla's roll
++        // is `factor < Misc::Rng::roll0to99()`, i.e. a uniform integer in [0,99]; failure iff that
++        // integer exceeds the factor. So the success chance is the count of integers <= factor out
++        // of 100 -- floor(factor)+1, clamped. This only REPORTS the roll; nothing here changes it.
++        const float factor = mAlchemy->companionAlchemyFactor();
++        const int chance = std::clamp(static_cast<int>(std::floor(factor)) + 1, 0, 100);
++
++        const int ready = static_cast<int>(mAlchemy->companionReadyStatus());
++        const int maxBrew = mAlchemy->countPotionsToBrew();
++        const std::string suggested = mAlchemy->suggestPotionName();
++
++        {
++            std::ostringstream o;
++            o << "COMPANION_ALCHEMY_STATE_START:{"
++              << "\"factor\":" << factor
++              << ",\"chance\":" << chance
++              << ",\"skill\":" << alchemySkill
++              << ",\"wort\":" << fWortChanceValue
++              << ",\"maxBrew\":" << maxBrew
++              << ",\"brewCount\":" << mBrewCountEdit->getValue()
++              << ",\"ready\":" << ready
++              << ",\"name\":\"" << companionAlchemyJsonEscape(mNameEdit->getCaption().asUTF8()) << "\""
++              << ",\"suggested\":\"" << companionAlchemyJsonEscape(suggested) << "\"}";
++            Log(Debug::Info) << o.str();
++        }
++
++        // --- Apparatus slots, straight off the live mTools ---------------------------------------
++        // Read from the Alchemy object rather than derived, because the prefill is SESSION-STICKY:
++        // Alchemy::clear() deliberately does not clear mTools, so setAlchemist() re-selects whatever
++        // the player last hand-picked (while still owned) and only falls back to highest quality
++        // otherwise. That preference lives nowhere else and cannot be reconstructed.
++        {
++            int slot = 0;
++            for (auto it = mAlchemy->beginTools(); it != mAlchemy->endTools() && slot < 4; ++it, ++slot)
++            {
++                std::ostringstream o;
++                o << "COMPANION_ALCHEMY_APPARATUS:{\"slot\":" << slot;
++                if (it->isEmpty())
++                    o << ",\"present\":false}";
++                else
++                {
++                    const ESM::Apparatus* rec = it->get<ESM::Apparatus>()->mBase;
++                    o << ",\"present\":true"
++                      << ",\"id\":\"" << companionAlchemyJsonEscape(it->getCellRef().getRefId().serializeText()) << "\""
++                      << ",\"type\":" << rec->mData.mType
++                      << ",\"name\":\"" << companionAlchemyJsonEscape(rec->mName) << "\""
++                      << ",\"icon\":\"" << companionAlchemyJsonEscape(companionAlchemyIcon(rec->mIcon)) << "\""
++                      << ",\"quality\":" << rec->mData.mQuality << "}";
++                }
++                Log(Debug::Info) << o.str();
++            }
++        }
++
++        // --- Ingredient slots, IN PLACEMENT ORDER ------------------------------------------------
++        // Emitted per slot including the empty ones, so the bottom screen can render the gaps
++        // exactly where they are. Slot order is gameplay-significant (it decides the order of the
++        // created effects and therefore the order they apply when drunk), so it is never compacted.
++        {
++            int slot = 0;
++            for (auto it = mAlchemy->beginIngredients(); it != mAlchemy->endIngredients() && slot < 4; ++it, ++slot)
++            {
++                std::ostringstream o;
++                o << "COMPANION_ALCHEMY_SLOT:{\"slot\":" << slot;
++                if (it->isEmpty())
++                    o << ",\"present\":false}";
++                else
++                {
++                    MWWorld::Ptr item = *it;
++                    o << ",\"present\":true"
++                      << ",\"id\":\"" << companionAlchemyJsonEscape(item.getCellRef().getRefId().serializeText()) << "\""
++                      << ",\"name\":\"" << companionAlchemyJsonEscape(item.getClass().getName(item)) << "\""
++                      << ",\"icon\":\"" << companionAlchemyJsonEscape(
++                             companionAlchemyIcon(item.getClass().getInventoryIcon(item))) << "\""
++                      << ",\"count\":" << item.getCellRef().getCount() << "}";
++                }
++                Log(Debug::Info) << o.str();
++            }
++        }
++
++        // --- Created effects ---------------------------------------------------------------------
++        // listEffects() order, unsorted, exactly as the native preview builds it. NAME + ICON ONLY:
++        // vanilla sets mIsConstant/mNoTarget/mNoMagnitude on every one of these, so no magnitude,
++        // duration or range is shown -- and the "known" test here is knownEffect(index), which is a
++        // DIFFERENT formula from the per-ingredient slot gate below. Unknown entries carry no name
++        // or icon; the bottom screen draws "?" for them, as MWSpellEffect does.
++        {
++            std::size_t idx = 0;
++            for (const MWMechanics::EffectKey& key : mAlchemy->listEffects())
++            {
++                const bool known = MWMechanics::Alchemy::knownEffect(idx, player);
++                const ESM::MagicEffect* mgef = store.get<ESM::MagicEffect>().search(key.mId);
++                std::string name;
++                std::string icon;
++                if (known && mgef)
++                {
++                    const ESM::Attribute* attr = store.get<ESM::Attribute>().search(key.mArg);
++                    const ESM::Skill* skl = store.get<ESM::Skill>().search(key.mArg);
++                    name = MWMechanics::getMagicEffectString(*mgef, attr, skl);
++                    icon = companionAlchemyIcon(mgef->mIcon);
++                }
++                std::ostringstream o;
++                o << "COMPANION_ALCHEMY_EFFECT:{\"name\":\"" << companionAlchemyJsonEscape(name) << "\""
++                  << ",\"icon\":\"" << companionAlchemyJsonEscape(icon) << "\""
++                  << ",\"known\":" << (known ? "true" : "false") << "}";
++                Log(Debug::Info) << o.str();
++                ++idx;
++            }
++        }
++
++        // --- Owned apparatus, for the per-type picker ---------------------------------------------
++        // The whole owned set; the bottom screen filters by "type", which is precisely what vanilla's
++        // ItemSelectionDialog does (Filter_OnlyAlchemyTools + setApparatusTypeFilter(i)).
++        {
++            MWWorld::Ptr playerPtr = player;
++            MWWorld::ContainerStore& cstore = playerPtr.getClass().getContainerStore(playerPtr);
++            for (auto it = cstore.begin(MWWorld::ContainerStore::Type_Apparatus); it != cstore.end(); ++it)
++            {
++                const ESM::Apparatus* rec = it->get<ESM::Apparatus>()->mBase;
++                std::ostringstream o;
++                o << "COMPANION_ALCHEMY_TOOL:{"
++                  << "\"id\":\"" << companionAlchemyJsonEscape(it->getCellRef().getRefId().serializeText()) << "\""
++                  << ",\"type\":" << rec->mData.mType
++                  << ",\"name\":\"" << companionAlchemyJsonEscape(rec->mName) << "\""
++                  << ",\"icon\":\"" << companionAlchemyJsonEscape(companionAlchemyIcon(rec->mIcon)) << "\""
++                  << ",\"quality\":" << rec->mData.mQuality << "}";
++                Log(Debug::Info) << o.str();
++            }
++        }
++
++        // --- Browse list: every ingredient the player is carrying ----------------------------------
++        // Read from mModel (the raw InventoryItemModel), not mSortModel: the DS screen does its own
++        // filtering, and mSortModel additionally carries the native window's own filter state.
++        // mModel was refreshed by the mItemView->update() above, so it is current.
++        //
++        // Ingredients already in a slot are omitted, matching what the player sees in vanilla --
++        // there, update() calls addDragItem(item, FULL stack count), which drives the row's count to
++        // zero and drops it from the list entirely. (Vanilla compares Ptrs while this compares
++        // RefIds; ingredients carry no per-instance state so a ContainerStore holds at most one
++        // stack per RefId, and addIngredient() would reject a second stack of the same RefId anyway.)
++        if (mModel)
++        {
++            const std::size_t itemCount = mModel->getItemCount();
++            for (std::size_t i = 0; i < itemCount; ++i)
++            {
++                const ItemStack stack = mModel->getItem(static_cast<ItemModel::ModelIndex>(i));
++                MWWorld::Ptr base = stack.mBase;
++                if (base.getType() != ESM::Ingredient::sRecordId)
++                    continue;
++
++                const ESM::RefId& refId = base.getCellRef().getRefId();
++                bool slotted = false;
++                for (auto it = mAlchemy->beginIngredients(); it != mAlchemy->endIngredients(); ++it)
++                    if (!it->isEmpty() && it->getCellRef().getRefId() == refId)
++                    {
++                        slotted = true;
++                        break;
++                    }
++                if (slotted)
++                    continue;
++
++                const ESM::Ingredient* rec = base.get<ESM::Ingredient>()->mBase;
++
++                std::ostringstream o;
++                o << "COMPANION_ALCHEMY_ITEM:{"
++                  << "\"id\":\"" << companionAlchemyJsonEscape(refId.serializeText()) << "\""
++                  << ",\"name\":\"" << companionAlchemyJsonEscape(base.getClass().getName(base)) << "\""
++                  << ",\"icon\":\"" << companionAlchemyJsonEscape(
++                         companionAlchemyIcon(base.getClass().getInventoryIcon(base))) << "\""
++                  << ",\"count\":" << static_cast<int>(stack.mCount)
++                  << ",\"effects\":[";
++                bool first = true;
++                for (int k = 0; k < 4; ++k)
++                {
++                    if (rec->mData.mEffectID[k].empty())
++                        continue;
++                    // The per-ingredient visibility rule, verbatim from MWClass::Ingredient's
++                    // tooltip: slot k is known iff Alchemy >= fWortChanceValue * (k + 1). Purely
++                    // skill-gated -- not per instance, and nothing is ever "identified".
++                    const bool known = alchemySkill >= fWortChanceValue * static_cast<float>(k + 1);
++                    std::string effName;
++                    std::string effIcon;
++                    const ESM::MagicEffect* mgef = store.get<ESM::MagicEffect>().search(rec->mData.mEffectID[k]);
++                    if (known && mgef)
++                    {
++                        const ESM::Attribute* attr = store.get<ESM::Attribute>().search(rec->mData.mAttributes[k]);
++                        const ESM::Skill* skl = store.get<ESM::Skill>().search(rec->mData.mSkills[k]);
++                        effName = MWMechanics::getMagicEffectString(*mgef, attr, skl);
++                        effIcon = companionAlchemyIcon(mgef->mIcon);
++                    }
++                    if (!first)
++                        o << ",";
++                    first = false;
++                    o << "{\"n\":\"" << companionAlchemyJsonEscape(effName) << "\""
++                      << ",\"ic\":\"" << companionAlchemyJsonEscape(effIcon) << "\""
++                      << ",\"k\":" << (known ? "true" : "false") << "}";
++                }
++                o << "]}";
++                Log(Debug::Info) << o.str();
++            }
++        }
++
++        Log(Debug::Info) << "COMPANION_ALCHEMY_STATE_END";
++    }
++
++    void AlchemyWindow::companionEmitClosed()
++    {
++        if (!gCompanionAlchemyOpen)
++            return;
++        gCompanionAlchemyOpen = false;
++        gCompanionAlchemyWindow = nullptr;
++        Log(Debug::Info) << "COMPANION_ALCHEMY_CLOSED";
++    }
++
++    void AlchemyWindow::onClose()
++    {
++        WindowBase::onClose();
++        // Only on the REAL mode-pop, never on the transient hide the DS suppression performs one
++        // frame after the window is pushed (containsMode is still true there). In DS mode this
++        // rarely fires at all -- the window is already hidden by then, so setVisible(false) produces
++        // no visible->hidden edge; exit() / onCancelButtonClicked cover that case.
++        if (!MWBase::Environment::get().getWindowManager()->containsMode(GM_Alchemy))
++            companionEmitClosed();
++    }
++
++    bool AlchemyWindow::exit()
++    {
++        // B / Escape. Unlike LevelupDialog there is deliberately NO refusal here: alchemy is
++        // genuinely cancellable in vanilla, and the DS screen keeps that. Emit the close signal and
++        // return true exactly as the base class did, so the mode pops as before.
++        companionEmitClosed();
++        return true;
++    }
++
++    void AlchemyWindow::companionSetApparatus(int slot, std::string_view refId)
++    {
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        if (player.isEmpty())
++            return;
++        MWWorld::ContainerStore& cstore = player.getClass().getContainerStore(player);
++        for (auto it = cstore.begin(MWWorld::ContainerStore::Type_Apparatus); it != cstore.end(); ++it)
++        {
++            if (it->getCellRef().getRefId().serializeText() != refId)
++                continue;
++
++            MWWorld::Ptr item = *it;
++            // The slot is derived from the RECORD, exactly as onItemSelected does -- an apparatus
++            // can only ever go in its own type's slot. The caller's slot is used only as a sanity
++            // filter so a stale command cannot land an alembic in the retort slot.
++            const int32_t index = item.get<ESM::Apparatus>()->mBase->mData.mType;
++            if (index < 0 || index >= static_cast<int32_t>(mApparatus.size()))
++                return;
++            if (slot >= 0 && slot != index)
++                return;
++
++            const auto& widget = mApparatus[index];
++            widget->setItem(item);
++            mAlchemy->addApparatus(item);
++            widget->setUserString("ToolTipType", "ItemPtr");
++            widget->setUserData(MWWorld::Ptr(item));
++            MWBase::Environment::get().getWindowManager()->playSound(item.getClass().getDownSoundId(item));
++            update();
++            return;
++        }
++    }
++
++    void AlchemyWindow::companionClearApparatus(int slot)
++    {
++        if (slot < 0 || slot >= static_cast<int>(mApparatus.size()))
++            return;
++        // The same body as onApparatusSelected's filled-slot branch.
++        const auto& widget = mApparatus[slot];
++        mAlchemy->removeApparatus(static_cast<std::size_t>(slot));
++
++        if (widget->getChildCount())
++            MyGUI::Gui::getInstance().destroyWidget(widget->getChildAt(0));
++
++        widget->clearUserStrings();
++        widget->setItem(MWWorld::Ptr());
++        widget->setUserData(MWWorld::Ptr());
++        update();
++    }
++
++    void AlchemyWindow::companionAddIngredient(std::string_view refId)
++    {
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        if (player.isEmpty())
++            return;
++        MWWorld::ContainerStore& cstore = player.getClass().getContainerStore(player);
++        for (auto it = cstore.begin(MWWorld::ContainerStore::Type_Ingredient); it != cstore.end(); ++it)
++        {
++            if (it->getCellRef().getRefId().serializeText() != refId)
++                continue;
++
++            MWWorld::Ptr item = *it;
++            // Alchemy::addIngredient owns both rejections -- no free slot, or an ingredient of this
++            // RefId already placed -- and returns -1 for either. Vanilla gives no feedback in that
++            // case and neither does this; the bottom screen simply never offers the row.
++            if (mAlchemy->addIngredient(item) != -1)
++            {
++                update();
++                MWBase::Environment::get().getWindowManager()->playSound(item.getClass().getUpSoundId(item));
++            }
++            return;
++        }
++    }
++
++    void AlchemyWindow::companionClearIngredient(int slot)
++    {
++        if (slot < 0 || slot >= static_cast<int>(mIngredients.size()))
++            return;
++        // The same body as onIngredientSelected. removeIngredient() blanks the slot in place, so
++        // the remaining ingredients keep their positions -- nothing is compacted, which matters
++        // because slot order decides the created-effect order.
++        mAlchemy->removeIngredient(static_cast<std::size_t>(slot));
++        update();
++    }
++
++    void AlchemyWindow::companionSetName(std::string_view text)
++    {
++        mNameEdit->setCaption(MyGUI::UString(std::string(text)));
++        // Re-publish: the name gates getReadyStatus() and therefore countPotionsToBrew(). update()
++        // is safe to call here -- it only overwrites the caption when the SUGGESTION changed, which
++        // typing cannot do, so a hand-typed name survives exactly as it does in vanilla.
++        update();
++    }
++
++    void AlchemyWindow::companionCreate(int count)
++    {
++        // Set the spinner and press the real button, so the min(countPotionsToBrew(), value) clamp,
++        // the validation order, the messages, the sounds and the per-potion roll are all the native
++        // ones. No upper bound is applied here on purpose: that native clamp is the authority, which
++        // is what makes an over-large count harmless. (The DS spinner caps itself at the craftable
++        // maximum as a UI affordance -- a divergence from vanilla's unbounded spinner -- so in
++        // practice it never sends more than the clamp would grant anyway.)
++        mBrewCountEdit->setValue(std::max(1, count));
++        onCreateButtonClicked(mCreateButton);
++    }
++
++    void AlchemyWindow::companionCancel()
++    {
++        onCancelButtonClicked(mCancelButton);
++    }
++
++// COMPANION: bottom-screen alchemy bridges, driven from drainCompanionCommands (androidmain.cpp) on
++// the engine main thread. Every one is a no-op unless an alchemy session is actually open, so a
++// stale command after the window closed cannot do anything.
++extern "C" void companionAlchemySetApparatus(int slot, const char* refId)
++{
++    if (!gCompanionAlchemyWindow || !refId)
++        return;
++    gCompanionAlchemyWindow->companionSetApparatus(slot, refId);
++}
++
++extern "C" void companionAlchemyClearApparatus(int slot)
++{
++    if (!gCompanionAlchemyWindow)
++        return;
++    gCompanionAlchemyWindow->companionClearApparatus(slot);
++}
++
++extern "C" void companionAlchemyAddIngredient(const char* refId)
++{
++    if (!gCompanionAlchemyWindow || !refId)
++        return;
++    gCompanionAlchemyWindow->companionAddIngredient(refId);
++}
++
++extern "C" void companionAlchemyClearIngredient(int slot)
++{
++    if (!gCompanionAlchemyWindow)
++        return;
++    gCompanionAlchemyWindow->companionClearIngredient(slot);
++}
++
++extern "C" void companionAlchemySetName(const char* text)
++{
++    if (!gCompanionAlchemyWindow || !text)
++        return;
++    gCompanionAlchemyWindow->companionSetName(text);
++}
++
++extern "C" void companionAlchemyCreate(int count)
++{
++    if (!gCompanionAlchemyWindow)
++        return;
++    gCompanionAlchemyWindow->companionCreate(count);
++}
++
++extern "C" void companionAlchemyCancel()
++{
++    if (!gCompanionAlchemyWindow)
++        return;
++    gCompanionAlchemyWindow->companionCancel();
++}
++#endif
+ }
+diff --git a/apps/openmw/mwgui/alchemywindow.hpp b/apps/openmw/mwgui/alchemywindow.hpp
+index cdf0192cce..403804f34f 100644
+--- a/apps/openmw/mwgui/alchemywindow.hpp
++++ b/apps/openmw/mwgui/alchemywindow.hpp
+@@ -33,6 +33,37 @@ namespace MWGui
+ 
+         std::string_view getWindowIdForLua() const override { return "Alchemy"; }
+ 
++#ifdef __ANDROID__
++        // COMPANION: the close signal. The DS screen replaces this window, which means the window is
++        // HIDDEN -- and WindowBase::setVisible() only fires onClose() on a visible->hidden edge, so
++        // the ordinary onClose() never runs on the real mode-pop in DS mode. exit() (B / Escape) and
++        // onCancelButtonClicked therefore emit it explicitly; onClose() still covers Vanilla mode.
++        // All three funnel through companionEmitClosed(), which is once-guarded. Same shape as
++        // travel / training / spell-buying.
++        void onClose() override;
++        bool exit() override;
++
++        // COMPANION: bottom/top-screen bridges, called from drainCompanionCommands (androidmain.cpp)
++        // on the engine main thread. Public so the extern "C" wrappers in the .cpp can reach them.
++        //
++        // Every one of them drives the REAL MWMechanics::Alchemy owned by this window, so the
++        // combination rule, the ready-status order, countPotionsToBrew(), the per-potion success
++        // roll and the ingredient consumption all stay exactly where they were. Nothing about
++        // alchemy is reimplemented on the companion side.
++        //
++        // Items are addressed by SERIALIZED RefId, never by a list ordinal: the browse list is a
++        // SortFilterItemModel that reorders as stacks are consumed, so an ordinal would silently
++        // target the wrong item after any mutation (unlike travel/training, where the sim is paused
++        // and the list is stable).
++        void companionSetApparatus(int slot, std::string_view refId);
++        void companionClearApparatus(int slot);
++        void companionAddIngredient(std::string_view refId);
++        void companionClearIngredient(int slot);
++        void companionSetName(std::string_view text);
++        void companionCreate(int count);
++        void companionCancel();
++#endif
++
+     private:
+         static const float sCountChangeInitialPause; // in seconds
+         static const float sCountChangeInterval; // in seconds
+@@ -95,6 +126,16 @@ namespace MWGui
+ 
+         void update();
+ 
++#ifdef __ANDROID__
++        // COMPANION: the full state batch. Emitted from the tail of update(), which the window
++        // already calls after EVERY mutation (open, apparatus set/clear, ingredient add/clear,
++        // create) -- so the DS screen is re-rendered from the live Alchemy object rather than from
++        // anything it tracked itself.
++        void companionEmitState();
++        // Once-guarded COMPANION_ALCHEMY_CLOSED emit; also clears the file-static window pointer.
++        void companionEmitClosed();
++#endif
++
+         std::unique_ptr<MWMechanics::Alchemy> mAlchemy;
+ 
+         std::vector<ItemWidget*> mApparatus;
+diff --git a/apps/openmw/mwmechanics/alchemy.hpp b/apps/openmw/mwmechanics/alchemy.hpp
+index eca7014c84..91c3f6ff93 100644
+--- a/apps/openmw/mwmechanics/alchemy.hpp
++++ b/apps/openmw/mwmechanics/alchemy.hpp
+@@ -83,6 +83,22 @@ namespace MWMechanics
+         TEffectsIterator endEffects() const;
+ 
+     public:
++#ifdef __ANDROID__
++        // COMPANION (bottom-screen alchemy): read-only windows onto the two private helpers the DS
++        // screen has to show. Both simply forward, so the numbers the companion draws are the SAME
++        // ones createSingle()/getReadyStatus() act on -- there is no second implementation to drift.
++        //
++        // companionAlchemyFactor() is skill(Alchemy).modified + 0.1*Intelligence + 0.1*Luck. It is
++        // BOTH the success-roll threshold (createSingle: fail iff factor < roll0to99()) and the `x`
++        // that drives magnitude/duration/value in updateEffects(), which is why the DS screen can
++        // show one number for "chance" without inventing anything.
++        //
++        // NOTE both dereference mAlchemist, so they are only valid between setAlchemist() and
++        // clear() -- i.e. while the window is open, which is the only time the DS screen asks.
++        float companionAlchemyFactor() const { return getAlchemyFactor(); }
++        Result companionReadyStatus() const { return getReadyStatus(); }
++#endif
++
+         int countPotionsToBrew() const;
+         ///< calculates maximum amount of potions, which you can make from selected ingredients
+ 
