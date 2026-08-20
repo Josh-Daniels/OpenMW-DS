@@ -9,7 +9,7 @@
  #include <MyGUI_FactoryManager.h>
  #include <MyGUI_InputManager.h>
  #include <MyGUI_LanguageManager.h>
-@@ -1872,6 +1874,44 @@
+@@ -1872,6 +1874,81 @@
          onKeyFocusChanged(widget);
      }
  
@@ -36,8 +36,44 @@
 +    {
 +        if (!gCompanionTextInput || !utf8)
 +            return;
-+        gCompanionTextInput->setCaption(MyGUI::UString(utf8));
++        MyGUI::EditBox* field = gCompanionTextInput;
++        field->setCaption(MyGUI::UString(utf8));
++
++        // A MULTI-LINE field (the class-description box) takes Return as a literal newline, so
++        // injecting it there types into the box instead of accepting - and because nothing
++        // releases the key, MyGUI's own repeat (InputManager::frameEntered re-raising mHoldKey
++        // every INPUT_INTERVAL_KEY) keeps inserting newlines until the dialog is closed by hand.
++        // Confirm the owning dialog instead, by handing it the same A press its controller
++        // handler already treats as OK. Guarded on that dialog actually OWNING this field, so a
++        // multi-line box under some unrelated window can never press a button nobody aimed at.
++        if (field->getEditMultiLine())
++        {
++            MWGui::WindowBase* owner
++                = MWBase::Environment::get().getWindowManager()->getActiveControllerWindow();
++            if (owner && owner->mMainWidget)
++            {
++                for (MyGUI::Widget* w = field; w != nullptr; w = w->getParent())
++                {
++                    if (w == owner->mMainWidget)
++                    {
++                        SDL_ControllerButtonEvent confirm{};
++                        confirm.button = SDL_CONTROLLER_BUTTON_A;
++                        // Destroys the dialog (and this EditBox) on the way out - touch neither
++                        // owner nor field afterwards. gCompanionTextInput is reset by the
++                        // resulting onKeyFocusChanged.
++                        owner->onControllerButtonEvent(confirm);
++                        break;
++                    }
++                }
++            }
++            return;
++        }
++
 +        MWBase::Environment::get().getWindowManager()->injectKeyPress(MyGUI::KeyCode::Return, 0, false);
++        // RELEASE IT. injectKeyPress leaves MyGUI holding the key (InputManager::mHoldKey) and
++        // re-raising it every frame; on a single-line field that repeat is invisible, but the key
++        // stays held and would keep firing at whatever gains key focus next.
++        MWBase::Environment::get().getWindowManager()->injectKeyRelease(MyGUI::KeyCode::Return);
 +    }
 +    // COMPANION: called when the bottom-screen input panel CANCELS (Cancel button / tap-away):
 +    // discard the edit by injecting Escape, which routes through exitCurrentGuiMode and closes/
@@ -48,13 +84,14 @@
 +        if (!gCompanionTextInput)
 +            return;
 +        MWBase::Environment::get().getWindowManager()->injectKeyPress(MyGUI::KeyCode::Escape, 0, false);
++        MWBase::Environment::get().getWindowManager()->injectKeyRelease(MyGUI::KeyCode::Escape);
 +    }
 +#endif
 +
      void WindowManager::onKeyFocusChanged(MyGUI::Widget* widget)
      {
          bool capturesInput = false;
-@@ -1884,6 +1924,38 @@
+@@ -1884,6 +1961,38 @@
                  capturesInput = widget->castType<MyGUI::EditBox>(false);
          }
  
@@ -93,3 +130,4 @@
          // The SDL_IsTextInputActive() check helps to avoid duplicate calls in SDL2.
          // This may no longer be required when switching to SDL3 where the function
          // has also been renamed to SDL_TextInputActive() and returns bool instead
+

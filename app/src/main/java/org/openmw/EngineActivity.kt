@@ -1059,13 +1059,24 @@ class EngineActivity : SDLActivity() {
             "hud_crosshair" to { on: Boolean -> setCompanionHudCrosshair(on) },
             "hud_sneak" to { on: Boolean -> setCompanionHudSneak(on) },
             "hud_enemy" to { on: Boolean -> setCompanionHudEnemy(on) },
-            "hud_controller_tooltips" to { on: Boolean -> setCompanionHudControllerTooltips(on) },
         )
         hudPushes.forEach { (key, push) ->
             lifecycleScope.launch {
                 UiPreferences.hudOnFlow(key).collect { on ->
                     runCatching { push(on) }.onFailure { Log.e(TAG, "setCompanionHud[$key] failed", it) }
                 }
+            }
+        }
+
+        // Controller tooltips is the one HUD element NOT pushed from its raw preference: it is
+        // forced On while the active save has no real journal entries, so a new player navigating
+        // the native character-creation menus always has the button hints — including under "All
+        // DS", which otherwise turns them off. The stored preference is untouched and takes effect
+        // the moment the first journal entry lands. See UiPreferences.controllerTooltipsEffectiveFlow.
+        lifecycleScope.launch {
+            UiPreferences.controllerTooltipsEffectiveFlow().collect { on ->
+                runCatching { setCompanionHudControllerTooltips(on) }
+                    .onFailure { Log.e(TAG, "setCompanionHud[hud_controller_tooltips] failed", it) }
             }
         }
 

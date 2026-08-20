@@ -2,9 +2,13 @@ package org.openmw.companion
 
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 /**
  * Where the conversation UI is drawn.
@@ -201,19 +205,32 @@ val HUD_ELEMENTS: List<UiElement> = listOf(
 /**
  * Bounds and defaults for the two adaptive-dimming brightness sliders. Public because both the
  * options rows (slider `valueRange`) and the overlay's mapping read them, and they MUST agree — the
- * lower bound of the MIN range is the legibility guarantee described on
- * [UiPreferences.adaptiveDimMinBrightnessFlow].
+ * lower bound of the MIN range and `DIM_ABSOLUTE_MAX_ALPHA` are one mechanism, and the slider's
+ * dark end is only reachable while they stay in step (see [ADAPTIVE_DIM_MIN_RANGE]).
  *
  * The two ranges deliberately do not overlap (min tops out at 0.50, max starts at 0.60), so no
  * combination of slider positions can invert the ramp and there is no crossing case to handle.
  */
-/** Darkest the companion may get in the darkest scene. The floor is the readability cap. */
-val ADAPTIVE_DIM_MIN_RANGE = 0.15f..0.50f
+/** Darkest the companion may get in the darkest scene.
+ *
+ *  **The floor was 0.15 as a hard readability guarantee; it is 0f as of Aug 20 2026.** That was a
+ *  deliberate, play-tested decision: 15% was still too bright in the darkest scenes on this panel.
+ *  0f means the bottom of the slider can take the companion to fully black in the darkest scene —
+ *  that is the point, not an oversight. `DIM_ABSOLUTE_MAX_ALPHA` was raised to 1f to match, because
+ *  the two are one mechanism: the cap clamps the mapped opacity, so leaving it at 0.85 would have
+ *  made everything below 15% here completely inert. Keep the invariant
+ *  `ADAPTIVE_DIM_MIN_RANGE.start == 1 - DIM_ABSOLUTE_MAX_ALPHA` if either is ever changed again. */
+val ADAPTIVE_DIM_MIN_RANGE = 0f..0.50f
 /** Brightest the companion stays in the brightest scene. 1f = untouched. */
 val ADAPTIVE_DIM_MAX_RANGE = 0.60f..1.00f
-/** Pre-slider behaviour: the ramp ended at a hardcoded 0.75 overlay opacity. */
-const val ADAPTIVE_DIM_MIN_DEFAULT = 0.25f
-/** Pre-slider behaviour: bright scenes were left completely clear. */
+/** 0.30 as of Aug 20 2026, one step darker than the 0.25 that reproduced the pre-slider ramp end
+ *  (a hardcoded 0.75 overlay opacity; 0.30 gives 0.70). */
+const val ADAPTIVE_DIM_MIN_DEFAULT = 0.30f
+/** Bright scenes are left completely clear — the pre-slider behaviour, and the top of
+ *  [ADAPTIVE_DIM_MAX_RANGE]. Briefly 0.60 earlier on Aug 20 2026, which applied a 40% baseline dim
+ *  even at midday; that turned out to be what made bright days look dark on the bottom screen, so
+ *  it was put back. At 1.00 the `alpha > 0.001f` draw-skip fires again outdoors, so the common
+ *  daylight case costs nothing. */
 const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
 
 /**
@@ -263,8 +280,14 @@ const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
 const val TOP_DIM_ABSOLUTE_MAX_ALPHA = 0.42f
 /** Identity with [ADAPTIVE_DIM_MIN_RANGE] — see above; the screens matched only at parity. The
  *  slider still does real work up top: at darker positions the [TOP_DIM_ABSOLUTE_MAX_ALPHA] cap is
- *  reached in progressively less dark scenes. */
-val TOP_ADAPTIVE_DIM_MIN_RANGE = 0.15f..0.50f
+ *  reached in progressively less dark scenes.
+ *
+ *  **Tracked the bottom range's floor down to 0f on Aug 20 2026 to KEEP that identity.** Leaving it
+ *  at 0.15 would have turned `projectBrightness` into a real (untuned) transform and quietly
+ *  changed the top screen's mid-slider response — the opposite of what a bottom-screen-only change
+ *  should do. The top screen's actual behaviour is unaffected at the extremes either way, because
+ *  [TOP_DIM_ABSOLUTE_MAX_ALPHA] is what binds there, and that is unchanged. */
+val TOP_ADAPTIVE_DIM_MIN_RANGE = 0f..0.50f
 /** Identity with [ADAPTIVE_DIM_MAX_RANGE]. The bright end was never observable during tuning (at
  *  the default "Brightest" position the projection returns this range's upper bound whatever its
  *  start is), so it is set to parity with the bottom screen — the one relationship the tuning DID
@@ -304,20 +327,34 @@ const val UI_SOUND_VOLUME_DEFAULT = 0.5f
  */
 val NIGHT_BRIGHTNESS_RANGE = 0f..0.20f
 
-/** Conservative default: about +29% luminance on a clear night (0.174 -> 0.224). Visible, but well
- *  short of flattening the moonlit look. The slider goes further for anyone who wants it. */
-const val NIGHT_BRIGHTNESS_DEFAULT = 0.05f
+/** About +86% luminance on a clear night (0.174 -> 0.324). Raised from a deliberately conservative
+ *  0.05 (+29%) on Aug 20 2026 after play-testing: the cautious value was too dark to be much use on
+ *  the handheld's panel. Still a LIFT rather than a floor, so the spread between weathers survives
+ *  intact (see applyNightAmbientFloor); 0 remains exact vanilla. */
+const val NIGHT_BRIGHTNESS_DEFAULT = 0.15f
 
 /**
  * Range for OpenMW's own `Shaders/minimum interior brightness`. This is a pass-through to the
- * engine setting, NOT a companion invention, so the value stored here is the literal engine value
- * and [MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT] is the engine's own shipped default.
+ * engine setting, NOT a companion invention, so the value stored here is the literal engine value.
  */
 val INTERIOR_BRIGHTNESS_RANGE = 0f..0.35f
 
 /** OpenMW's shipped default for `Shaders/minimum interior brightness` (files/settings-default.cfg).
- *  Keep in step with the engine if it ever changes upstream. */
+ *  Keep in step with the engine if it ever changes upstream.
+ *
+ *  **This is the ENGINE's value, no longer OURS** — we ship [INTERIOR_BRIGHTNESS_DEFAULT] instead
+ *  (Aug 20 2026). Kept because it is still the reference point for `DIM_LUMINANCE_DARK` in
+ *  `CompanionScreen.kt`, which is pinned to the darkest interior the engine can ever report — that
+ *  is the bottom of this slider (0f), reached when a player turns the floor off, NOT our default. */
 const val MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT = 0.08f
+
+/** What OpenMW-DS ships for the interior floor, chosen Aug 20 2026 over the engine's own 0.08 —
+ *  vanilla interiors are near-black on this handheld's panel. Briefly 0.35 (the top of
+ *  [INTERIOR_BRIGHTNESS_RANGE]) the same day before settling here, roughly halfway between vanilla
+ *  and that. Raising it makes the companion dim itself LESS indoors for free, since both feed the
+ *  same `RenderingManager::setAmbientColour` signal (see "Game brightness floors"). A player who
+ *  wants vanilla darkness slides it to 0. */
+const val INTERIOR_BRIGHTNESS_DEFAULT = 0.15f
 
 /** Most HUD favourite quick-slots a category can show. Also the number PERSISTED per category —
  *  lowering the visible count hides slots rather than deleting them, so this is the storage width
@@ -401,6 +438,26 @@ object UiPreferences {
 
     private var prefs: SharedPreferences? = null
 
+    // Restorers for the flows that [init] only assigns WHEN A STORED VALUE EXISTS — the
+    // `getString(...)?.let { }` ones, whose MutableStateFlow initialiser IS their only default site.
+    // Clearing the prefs does not reset those (the `?.let` simply never fires), so [resetToDefaults]
+    // replays these instead. Each entry is captured by [rememberDefault] at construction, i.e. before
+    // any load, so it restores exactly the declared default and there is no second copy of any
+    // default value to drift out of step.
+    //
+    // MUST be declared before the flows that register into it — Kotlin initialises object properties
+    // top to bottom, and a flow calling rememberDefault() above this line would hit a null list.
+    // Boolean/Float/Int flows need NO entry: their `getX(key, DEFAULT)` reads already return the
+    // default once the prefs file is empty.
+    private val partialLoadRestorers = mutableListOf<() -> Unit>()
+
+    /** Register this flow's constructed value as its reset target. See [partialLoadRestorers]. */
+    private fun <T> MutableStateFlow<T>.rememberDefault(): MutableStateFlow<T> {
+        val declared = value
+        partialLoadRestorers += { this.value = declared }
+        return this
+    }
+
     // Per-element Game UI mode (DS = companion draws it; VANILLA = native handles it). Pending
     // elements are locked to their VANILLA default and never persisted/changed.
     private val gameUiModeFlows: Map<String, MutableStateFlow<GameUiMode>> =
@@ -417,18 +474,18 @@ object UiPreferences {
     // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default TOP. This MutableStateFlow
     // init IS the fresh-install fallback: the load below passes null to getString and only overrides
     // when a value is actually stored, so there is no second default site.
-    private val conversationLocationFlow = MutableStateFlow(ConversationLocation.TOP)
+    private val conversationLocationFlow = MutableStateFlow(ConversationLocation.TOP).rememberDefault()
 
     // Item-list layout for the two-panel screens (looting/pickpocket, barter): Classic grid vs
     // Shelf. One switch, all those contexts. Default CLASSIC (the proven layout).
-    private val inventoryLayoutFlow = MutableStateFlow(InventoryLayout.CLASSIC)
+    private val inventoryLayoutFlow = MutableStateFlow(InventoryLayout.CLASSIC).rememberDefault()
 
     // Spells tab density flow — removed (compact-only). Kept commented for reference.
     // private val spellsListStyleFlow = MutableStateFlow(SpellsListStyle.STANDARD)
 
     // Layout of the single-panel Inventory tab (List / Cards). Default CARDS. Unrelated to
     // inventoryLayoutFlow (Classic/Shelf) above.
-    private val inventoryTabStyleFlow = MutableStateFlow(InventoryTabStyle.CARDS)
+    private val inventoryTabStyleFlow = MutableStateFlow(InventoryTabStyle.CARDS).rememberDefault()
 
     // Whether the pinned "Equipped (N)" drop-down bar at the bottom of the Inventory tab is hidden
     // (freeing space for an extra row of items). Default true (hidden) — worn items show inline
@@ -486,7 +543,7 @@ object UiPreferences {
     private val uiSoundsFlow = MutableStateFlow(true)
     private val uiSoundVolumeFlow = MutableStateFlow(UI_SOUND_VOLUME_DEFAULT)
     private val nightBrightnessFlow = MutableStateFlow(NIGHT_BRIGHTNESS_DEFAULT)
-    private val interiorBrightnessFlow = MutableStateFlow(MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT)
+    private val interiorBrightnessFlow = MutableStateFlow(INTERIOR_BRIGHTNESS_DEFAULT)
     private val favGearSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
     private val favMagicSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
 
@@ -515,19 +572,19 @@ object UiPreferences {
 
     // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default SPLIT
     // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
-    private val lootingLocationFlow = MutableStateFlow(ScreenLocation.SPLIT)
-    private val barterLocationFlow = MutableStateFlow(ScreenLocation.SPLIT)
-    private val trainingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
-    private val spellBuyingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
-    private val repairLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
-    private val travelLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
-    private val restwaitLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
-    private val crimeLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM)
+    private val lootingLocationFlow = MutableStateFlow(ScreenLocation.SPLIT).rememberDefault()
+    private val barterLocationFlow = MutableStateFlow(ScreenLocation.SPLIT).rememberDefault()
+    private val trainingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM).rememberDefault()
+    private val spellBuyingLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM).rememberDefault()
+    private val repairLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM).rememberDefault()
+    private val travelLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM).rememberDefault()
+    private val restwaitLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM).rememberDefault()
+    private val crimeLocationFlow = MutableStateFlow(ScreenLocation.BOTTOM).rememberDefault()
     private val topPanelOpacityFlow = MutableStateFlow(1f)
 
     // Where the combat target's health bar is drawn (BOTTOM / TOP). Default TOP.
-    private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.TOP)
-    private val persuasionLocationFlow = MutableStateFlow(PersuasionLocation.BOTTOM)
+    private val targetHealthLocationFlow = MutableStateFlow(TargetHealthLocation.TOP).rememberDefault()
+    private val persuasionLocationFlow = MutableStateFlow(PersuasionLocation.BOTTOM).rememberDefault()
 
     // Whether the player's vitals (health/magicka/fatigue) ALSO show on the top screen during
     // combat. Default true (also shown on the top screen).
@@ -541,9 +598,9 @@ object UiPreferences {
         HUD_ELEMENTS.associate { it.key to MutableStateFlow(hudDefaultOn(it.key)) }
 
     // Input section: whether a visible top-screen game cursor exists and can be steered with the
-    // thumbstick. Default false (off). The actual cursor suppression lives in a native patch; this
+    // thumbstick. Default true (on). The actual cursor suppression lives in a native patch; this
     // only stores the preference. INDEPENDENT of touchInputFlow below — see setGameCursor.
-    private val gameCursorFlow = MutableStateFlow(false)
+    private val gameCursorFlow = MutableStateFlow(true)
 
     // Input section: direct touch-to-click on the top screen while a menu (GUI mode) is open —
     // tap a spot = a mouse click there. Default true (on). This only stores the preference; the
@@ -567,14 +624,48 @@ object UiPreferences {
         if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs = p
+        loadInto(p, context)
+    }
+
+    /**
+     * Restore every companion setting to its shipped default — the "Default settings" button in
+     * Developer Tools. Wipes the whole prefs file, so anything not modelled here (a key from an
+     * older build, say) goes too.
+     *
+     * Deliberately re-runs [loadInto] against the now-EMPTY prefs rather than assigning defaults by
+     * hand: every `getX(key, DEFAULT)` read in there already yields the default from an empty file,
+     * so the reset cannot fall out of step with startup for any of them. The `?.let`-loaded flows
+     * are the exception — they are simply not assigned when the key is missing — which is what
+     * [partialLoadRestorers] covers, replayed first so [loadInto] can still override any of them.
+     *
+     * Not covered on purpose: FavouritesRepository, QuestPrefsRepository and CustomJournalRepository
+     * live in their own stores and hold player-CREATED content (favourites, quest pins, hand-written
+     * journal entries), which is not a "setting" and must not be destroyed by a settings reset.
+     */
+    fun resetToDefaults(context: Context) {
+        val p = prefs ?: context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs = p
+        // commit(), not apply(): this is a rare, explicit, user-initiated action and the file should
+        // be genuinely empty on disk before anything reloads from it.
+        p.edit().clear().commit()
+        partialLoadRestorers.forEach { it() }
+        loadInto(p, context)
+    }
+
+    private fun loadInto(p: SharedPreferences, context: Context) {
         GAME_UI_ELEMENTS.forEach { el ->
             if (el.pending) {
                 // Pending elements ignore any stored value — the mode is locked to VANILLA.
                 gameUiModeFlows.getValue(el.key).value = GameUiMode.VANILLA
             } else {
-                p.getString(GAME_UI_PREFIX + el.key, null)
-                    ?.let { runCatching { GameUiMode.valueOf(it) }.getOrNull() }
-                    ?.let { gameUiModeFlows.getValue(el.key).value = it }
+                // Assigned unconditionally, falling back to el.defaultMode — which is the SAME
+                // single default site gameUiModeFlows is constructed from, so no drift. It has to
+                // be total rather than `?.let`: resetToDefaults() re-runs this against empty prefs
+                // and would otherwise leave a DS element sitting on its old value.
+                gameUiModeFlows.getValue(el.key).value =
+                    p.getString(GAME_UI_PREFIX + el.key, null)
+                        ?.let { runCatching { GameUiMode.valueOf(it) }.getOrNull() }
+                        ?: el.defaultMode
             }
         }
         customSnapshotFlow.value = !p.getString(GAME_UI_CUSTOM, null).isNullOrEmpty()
@@ -586,7 +677,7 @@ object UiPreferences {
         // prevent; reconcile it here too, since a config persisted while both-off was briefly
         // reachable must not come back as a lockout. Touch input is the one turned back on (it is
         // the shipped default, and unlike the cursor it doesn't change what A does in native menus).
-        gameCursorFlow.value = p.getBoolean(GAME_CURSOR, false)
+        gameCursorFlow.value = p.getBoolean(GAME_CURSOR, true)
         touchInputFlow.value = p.getBoolean(TOUCH_INPUT, true)
         if (!gameCursorFlow.value && !touchInputFlow.value) {
             touchInputFlow.value = true
@@ -625,7 +716,7 @@ object UiPreferences {
         nightBrightnessFlow.value =
             p.getFloat(NIGHT_BRIGHTNESS, NIGHT_BRIGHTNESS_DEFAULT).coerceIn(NIGHT_BRIGHTNESS_RANGE)
         interiorBrightnessFlow.value =
-            p.getFloat(INTERIOR_BRIGHTNESS, MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT)
+            p.getFloat(INTERIOR_BRIGHTNESS, INTERIOR_BRIGHTNESS_DEFAULT)
                 .coerceIn(INTERIOR_BRIGHTNESS_RANGE)
         favGearSlotsFlow.value =
             p.getInt(FAV_GEAR_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
@@ -700,7 +791,10 @@ object UiPreferences {
     /** Bulk-set every non-pending Game UI element to [mode] (the "All DS" / "All Native" quick-set
      *  buttons). Pending elements stay locked to VANILLA. Also flips the controller button-hint bar
      *  ([CONTROLLER_TOOLTIPS_KEY]): DS -> Off, Vanilla -> On (only useful when navigating native
-     *  menus). DS additionally forces the Conversation Screen Layout to TOP (the other per-window
+     *  menus). **That write still happens during the early-game window, but does not take effect
+     *  until the first journal entry** — the bar is forced on until then regardless of preset; see
+     *  [controllerTooltipsEffectiveFlow]. DS additionally forces the Conversation Screen Layout to
+     *  TOP (the other per-window
      *  layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at their own settings).
      *  The Input section (Touch input / Game cursor) is deliberately NOT touched by either preset —
      *  it's the player's own choice and survives a quick-set. The Item List Style (Classic/Shelf) is
@@ -759,6 +853,47 @@ object UiPreferences {
     }
 
     fun hudOnFlow(key: String): StateFlow<Boolean> = hudFlows.getValue(key).asStateFlow()
+
+    /** The controller button-hint bar is FORCED ON while the active save has no real journal
+     *  entries — i.e. through character creation and the opening moments, where a new player is
+     *  navigating native menus (race/class/birthsign) with a controller and the hint bar is the
+     *  only thing naming the buttons. "All DS" turns the bar off as one of its side effects, which
+     *  is right for a settled game and wrong for the first five minutes.
+     *
+     *  This is a DISPLAY OVERRIDE ONLY — nothing here writes a preference. [setAllGameUi] and the
+     *  Controller tooltips row still set the stored value normally during the window; it simply
+     *  does not take effect until the first journal entry lands, at which point these flows re-emit
+     *  and the player's real choice applies.
+     *
+     *  Reuses the SAME "no real journal entries yet" test the map tap already uses as its
+     *  character-created gate (`state.journalEntries.isNotEmpty()`) rather than adding a second
+     *  notion of "early game". Note `state.journalEntries` holds only the GAME's entries — the
+     *  player's own custom journal notes are merged in at the UI layer and deliberately not
+     *  injected into it (see `rememberMergedJournal`), so writing a manual note cannot end the
+     *  window early.
+     *
+     *  SAVE SWITCHING is safe by construction, not by caching: a load destroys the Lua player
+     *  script, the fresh one's `onActive` calls `exportJournal()` with its count primed to -1 so
+     *  even a zero-entry save emits `COMPANION_JOURNAL_START:0`/`_END:0`, and the repository
+     *  REPLACES `journalEntries` wholesale on every `_END`. So switching an established character
+     *  for a fresh one clears the list rather than carrying it over, and vice versa. The only gap
+     *  is the sub-second window between the load and that first export, during which the previous
+     *  save's entries still stand. */
+    fun controllerTooltipsForcedFlow(): Flow<Boolean> =
+        GameStateRepository.state
+            .map { it.journalEntries.isEmpty() }
+            .distinctUntilChanged()
+
+    /** Controller tooltips as the ENGINE should see them: the stored preference, OR'd with the
+     *  early-game force above. This is what gets pushed to native — never the raw preference.
+     *
+     *  [distinctUntilChanged] is load-bearing, not tidiness: `GameStateRepository.state` re-emits
+     *  on every COMPANION_STATS tick (10 Hz), so without it this would fire a JNI push ten times a
+     *  second forever. */
+    fun controllerTooltipsEffectiveFlow(): Flow<Boolean> =
+        combine(hudOnFlow(CONTROLLER_TOOLTIPS_KEY), controllerTooltipsForcedFlow()) { on, forced ->
+            on || forced
+        }.distinctUntilChanged()
 
     /** Set a HUD element's on/off state and persist. */
     fun setHudOn(context: Context, key: String, on: Boolean) {
@@ -858,8 +993,9 @@ object UiPreferences {
     /** Screen brightness (1f = undimmed) the companion reaches in the DARKEST scene. */
     fun adaptiveDimMinBrightnessFlow(): StateFlow<Float> = adaptiveDimMinBrightnessFlow.asStateFlow()
 
-    /** Set the darkest-scene brightness and persist. Clamped to [ADAPTIVE_DIM_MIN_RANGE], whose
-     *  lower bound is the readability cap — this clamp is deliberate and must not be removed. */
+    /** Set the darkest-scene brightness and persist. Clamped to [ADAPTIVE_DIM_MIN_RANGE] — that
+     *  range's lower bound was a readability cap until Aug 20 2026 and is now 0f; the clamp itself
+     *  stays, so a stored value can never sit outside what the slider can express. */
     fun setAdaptiveDimMinBrightness(context: Context, value: Float) {
         val v = value.coerceIn(ADAPTIVE_DIM_MIN_RANGE)
         adaptiveDimMinBrightnessFlow.value = v

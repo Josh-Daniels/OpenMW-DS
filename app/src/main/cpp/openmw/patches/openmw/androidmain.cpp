@@ -71,10 +71,12 @@ static std::atomic<bool> g_companionHudEnabled{ true };
 // Mirrors the companion "Game cursor" option (UiPreferences "gameCursor"), pushed
 // from Kotlin via setCompanionCursorEnabled(). Read by the engine through the
 // companionCursorEnabled() bridge to suppress the top-screen SDL cursor (touch +
-// both thumbsticks) while the option is off. Default false = cursor suppressed.
+// both thumbsticks) while the option is off. Default true = cursor allowed, matching
+// UiPreferences' shipped default; this initial value only covers the window before the
+// Kotlin collector pushes the persisted one, and is also what a failed push falls back to.
 // std::atomic: written on a JNI thread, read on the input/engine threads. See
 // companion-gamecursor-suppress.patch.
-static std::atomic<bool> g_companionCursorEnabled{ false };
+static std::atomic<bool> g_companionCursorEnabled{ true };
 
 // Mirrors the companion "Touch input" option (UiPreferences "touch_input"), pushed from Kotlin via
 // setCompanionTouchClick(). Read by the SDL event pump (companion-touch-click.patch) through the

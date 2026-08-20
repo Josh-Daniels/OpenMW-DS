@@ -1,7 +1,9 @@
 TODO bugs & updates:
 
-Choosing custom class could use controller support. - Default mouse mode on as a patch for now.
-Setting the vanilla conversation window to be slightly larger by default so text selection isn't cut off.
-
-Updates:
+Updates to reach 1.0.0:
 - Set up DS screen for spellmaking
+- Edit layout of the settings
+- Edit the home page of DS UI
+- Edit the readme.md heavily
+- Make trailer.
+- Make how to video.

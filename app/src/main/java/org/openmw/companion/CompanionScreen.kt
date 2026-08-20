@@ -17319,6 +17319,11 @@ private fun prettify(id: String): String =
 private val OptionsBg = Color(0xFF1A1410)
 /** Fill of the "active" pill in the two-option selectors. */
 private val PillActiveBg = Color(0xFF3A2A10)
+/** Armed state of the "Default settings" button. Same red as the crime toast + harmful effect
+ *  dots, so "this is destructive" reads the same way everywhere. */
+private val ResetWarnRed = Color(0xFFC75C5C)
+/** How long "Default settings" stays armed before disarming itself. */
+private const val RESET_CONFIRM_MS = 4000L
 
 /** Remembers the options-menu scroll position across pause open/close cycles. The menu's host
  *  window is added/removed each time the pause menu opens, destroying any compose-scoped state, so
@@ -17881,6 +17886,9 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
         item { CollapsibleSection(SECTION_DEVELOPER_TOOLS) }
         if (OptionsSectionState.isExpanded(SECTION_DEVELOPER_TOOLS)) {
             item { DeveloperToolsBlurb() }
+            // Above the gate on purpose: restoring defaults is not a developer action and must not
+            // require turning Developer mode on to reach.
+            item(key = "dev_reset_settings") { ResetSettingsRow() }
             item { DeveloperModeRow() }
             if (developerMode) {
                 // Tuning, not a cheat — kept ahead of the action rows so it does not interrupt
@@ -18517,18 +18525,27 @@ private const val DIM_LUMINANCE_BRIGHT = 0.40f
 private const val DIM_LUMINANCE_DARK = 0.08f
 
 /**
- * ABSOLUTE ceiling on the overlay's opacity, i.e. the readability guarantee, independent of where
- * the player has put the brightness sliders.
+ * ABSOLUTE ceiling on the overlay's opacity, independent of where the player has put the
+ * brightness sliders.
  *
- * This layer sits ABOVE every other companion layer including popups and the crime toast, so
- * nothing can punch back through it — the ceiling is the only thing keeping the UI readable rather
- * than merely dim. It was a plain hardcoded 0.75 before the min/max brightness sliders existed
- * (raised there from 0.55 after testing). The sliders now choose where inside that budget the ramp
- * ends, but they CANNOT exceed it: [UiPreferences.ADAPTIVE_DIM_MIN_RANGE]'s lower bound is
- * `1 - DIM_ABSOLUTE_MAX_ALPHA`, and the mapping below re-clamps to this value as a backstop.
- * Deliberately belt-and-braces — do not raise this to let people go darker.
+ * **This WAS a readability guarantee (0.85, and 0.75 before the sliders existed). It is 1f as of
+ * Aug 20 2026, i.e. no longer a guarantee at all** — the developer play-tested at the old floor and
+ * found the darkest scenes still too bright on this panel, so the Darkest slider's range was opened
+ * down to 0% and this had to follow.
+ *
+ * The two are ONE mechanism, not two: the sliders choose where inside this budget the ramp ends,
+ * and the mapping re-clamps to this value as a backstop — so leaving the cap at 0.85 while opening
+ * the range to 0f would have made every slider position below 15% completely inert (the mapped
+ * alpha would clamp back to 0.85 exactly as before). The invariant to preserve if either is
+ * touched again is `UiPreferences.ADAPTIVE_DIM_MIN_RANGE.start == 1 - DIM_ABSOLUTE_MAX_ALPHA`,
+ * which is what keeps the slider's dark end exactly reachable and no further.
+ *
+ * Consequence worth knowing: this layer sits ABOVE every other companion layer including popups and
+ * the crime toast, so nothing can punch back through it. At the very bottom of the slider the
+ * bottom screen can now go fully black in the darkest scenes. That is the intended behaviour;
+ * turning the feature off is still the supported way to want something else.
  */
-private const val DIM_ABSOLUTE_MAX_ALPHA = 0.85f
+private const val DIM_ABSOLUTE_MAX_ALPHA = 1f
 
 /** Fade duration between dim levels. Long enough that cell transitions and weather/lightning
  *  changes read as a smooth adjustment instead of a strobe. */
@@ -18626,7 +18643,9 @@ private fun rememberBottomScreenDimAlpha(): Float {
  * WHY ABOVE EVERYTHING (zIndex 40f, over the 30f crime toast / persuasion popup): the effect is
  * simulating ambient darkness of the whole panel, so it has to be uniform. Sitting below the
  * overlays would let a dialogue or item popup punch through at full brightness in a pitch-dark
- * cave — exactly the problem this fixes. [DIM_ABSOLUTE_MAX_ALPHA] is what keeps that readable.
+ * cave — exactly the problem this fixes. [DIM_ABSOLUTE_MAX_ALPHA] used to bound how far that
+ * could go; since Aug 20 2026 it is 1f, so at the bottom of the Darkest slider this layer can
+ * reach full black. Deliberate — see that constant.
  *
  * NO POINTER MODIFIERS: a Box carrying only `background()` does not consume pointer input (the
  * dropdown scrim nearby has to add `pointerInput` explicitly to intercept taps). Adding
@@ -18973,8 +18992,10 @@ private fun GameBrightnessRow() {
  * and the old name started describing only two of them.)
  *
  * The end labels are drawn FROM [range] so they can never drift from the enforced bounds — in
- * particular the adaptive-dimming MIN slider's left label IS the readability cap, and showing a
- * different number there would be a lie about how dark the screen can get.
+ * particular the adaptive-dimming MIN slider's left label IS the darkest the screen can go, and
+ * showing a different number there would be a lie about that. (It read 15% while that bound was a
+ * readability cap; it reads 0% since Aug 20 2026, when the cap was lifted — see
+ * [DIM_ABSOLUTE_MAX_ALPHA].)
  *
  * Adaptive dimming passes percent-of-BRIGHTNESS rather than overlay opacity because that is the
  * thing the player is actually setting; the inversion happens once, in [AdaptiveDimOverlay].
@@ -19349,6 +19370,83 @@ private fun DeveloperToolsBlurb() {
         lineHeight = 15.sp,
         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
     )
+}
+
+/**
+ * "Default settings" — restores every companion setting to its shipped default.
+ *
+ * Sits in Developer Tools but ABOVE the "Developer mode" gate, so it is reachable without turning
+ * developer mode on. That placement is also why it CONFIRMS: unlike the gated rows below it, any
+ * player who opens this section can reach it, and a stray tap would otherwise discard a layout that
+ * took a long time to arrange. The first tap arms, the second commits, and the arming lapses on its
+ * own after [RESET_CONFIRM_MS] so the button cannot sit primed indefinitely.
+ *
+ * Scope is [UiPreferences] only — favourites, quest pins and hand-written journal entries live in
+ * their own stores and are player-CREATED content, not settings, so a settings reset leaves them
+ * alone. Note the reset also turns Developer mode itself back off (its default), which collapses
+ * the rows below; that is correct, not a glitch.
+ */
+@Composable
+private fun ResetSettingsRow() {
+    val context = LocalContext.current
+    var armed by remember { mutableStateOf(false) }
+
+    // Disarm on its own, so the destructive state is never left standing.
+    LaunchedEffect(armed) {
+        if (armed) {
+            delay(RESET_CONFIRM_MS)
+            armed = false
+        }
+    }
+
+    val accent = if (armed) ResetWarnRed else BronzeLight
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Default settings", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            if (armed) {
+                "This clears every companion setting \u2014 Game Menus, layouts, HUD, brightness, " +
+                    "sounds \u2014 back to how the app ships. Favourites, quest pins and your own " +
+                    "journal entries are not touched."
+            } else {
+                "Restore every companion setting to its shipped default."
+            },
+            color = if (armed) BoneBright else BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(PillActiveBg.copy(alpha = 0.94f))
+                .border(1.dp, accent, RoundedCornerShape(4.dp))
+                .clickable {
+                    if (armed) {
+                        UiSounds.play(UiSounds.Cue.ACTION)
+                        UiPreferences.resetToDefaults(context)
+                        armed = false
+                    } else {
+                        UiSounds.play(UiSounds.Cue.TOGGLE)
+                        armed = true
+                    }
+                }
+                .padding(vertical = 9.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                if (armed) "TAP AGAIN TO RESET" else "DEFAULT SETTINGS",
+                color = accent,
+                fontSize = 14.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+    }
 }
 
 /**
@@ -19846,6 +19944,15 @@ private fun Alpha3OverlayRow() {
 @Composable
 private fun HudToggleRow(el: UiElement) {
     val context = LocalContext.current
+    // Controller tooltips is force-shown until the first real journal entry (see
+    // UiPreferences.controllerTooltipsForcedFlow). The pills below deliberately STAY LIVE and keep
+    // showing the stored preference: this window is exactly when a new player is most likely to be
+    // in here choosing All DS, so locking the control would block the setting at the one moment it
+    // is most wanted, and a pill that ignores taps reads as broken. The tag plus the line under the
+    // pills explain why the screen disagrees with the setting for now.
+    val forcedOn = if (el.key == "hud_controller_tooltips") {
+        UiPreferences.controllerTooltipsForcedFlow().collectAsState(initial = false).value
+    } else false
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -19860,6 +19967,15 @@ private fun HudToggleRow(el: UiElement) {
                 Text(
                     "PENDING",
                     color = BoneDim.copy(alpha = 0.7f),
+                    fontSize = 9.sp,
+                    fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+            } else if (forcedOn) {
+                Text(
+                    "ON FOR NOW",
+                    color = BronzeLight,
                     fontSize = 9.sp,
                     fontFamily = MwDisplay,
                     fontWeight = FontWeight.Bold,
@@ -19888,6 +20004,17 @@ private fun HudToggleRow(el: UiElement) {
                     enabled = true
                 ) { UiPreferences.setHudOn(context, el.key, false) }
             }
+        }
+        if (forcedOn) {
+            Text(
+                "Shown until your first journal entry, so the button hints are there while you " +
+                    "make your character. Your choice above applies after that.",
+                color = BoneDim.copy(alpha = 0.7f),
+                fontSize = 10.sp,
+                fontFamily = MwBody,
+                lineHeight = 13.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
     }
 }

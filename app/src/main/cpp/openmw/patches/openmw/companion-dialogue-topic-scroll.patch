@@ -1,0 +1,111 @@
+--- a/components/widgets/list.hpp
++++ b/components/widgets/list.hpp
+@@ -50,6 +50,16 @@
+         void scrollToTop();
+         void setViewOffset(int offset);
+ 
++        /**
++         * Scroll by the smallest amount that brings the item at \a index (including its vertical
++         * padding) fully inside the visible area. Does nothing if it is already fully visible.
++         * \note relies on the widgets laid out by redraw(), so it is a no-op before the first draw.
++         */
++        void scrollToItem(size_t index);
++
++        /// Scroll so the last item is at the bottom of the visible area.
++        void scrollToBottom();
++
+         void setPropertyOverride(std::string_view key, std::string_view value) override;
+ 
+     protected:
+@@ -61,6 +71,9 @@
+         void onItemSelected(MyGUI::Widget* sender);
+ 
+     private:
++        /// Clamp \a position to the scrollable range and apply it.
++        void setScrollPosition(int position);
++
+         MyGUI::ScrollView* mScrollView;
+         MyGUI::Widget* mClient;
+         std::string mListItemSkin;
+--- a/components/widgets/list.cpp
++++ b/components/widgets/list.cpp
+@@ -1,5 +1,7 @@
+ #include "list.hpp"
+ 
++#include <algorithm>
++
+ #include <MyGUI_Button.h>
+ #include <MyGUI_Gui.h>
+ #include <MyGUI_ImageBox.h>
+@@ -181,4 +183,44 @@
+     {
+         mScrollView->setViewOffset(MyGUI::IntPoint(0, offset));
+     }
++
++    void MWList::scrollToItem(size_t index)
++    {
++        // redraw() creates exactly one widget per item, in item order, so the child index and the
++        // item index line up. Bail out if that is not (yet) true rather than guessing a position.
++        if (index >= mItems.size() || index >= mScrollView->getChildCount())
++            return;
++
++        const int viewHeight = mScrollView->getViewCoord().height;
++        if (viewHeight <= 0)
++            return;
++
++        // The widget is positioned inside the item's vertical padding, so add it back on both
++        // sides: an item counts as visible only when its padding is visible too.
++        const MyGUI::Widget* item = mScrollView->getChildAt(index);
++        const int padding = mItems[index].mVPadding;
++        const int top = item->getTop() - padding;
++        const int bottom = item->getTop() + item->getHeight() + padding;
++
++        // NB the view offset is negative; work in positive scroll positions and scroll by the
++        // smallest amount that makes the item fully visible.
++        int position = -mScrollView->getViewOffset().top;
++        if (top < position)
++            position = top;
++        else if (bottom > position + viewHeight)
++            position = bottom - viewHeight;
++
++        setScrollPosition(position);
++    }
++
++    void MWList::scrollToBottom()
++    {
++        setScrollPosition(mScrollView->getCanvasSize().height);
++    }
++
++    void MWList::setScrollPosition(int position)
++    {
++        const int maxPosition = std::max(0, mScrollView->getCanvasSize().height - mScrollView->getViewCoord().height);
++        mScrollView->setViewOffset(MyGUI::IntPoint(0, -std::clamp(position, 0, maxPosition)));
++    }
+ }
+--- a/apps/openmw/mwgui/dialogue.cpp
++++ b/apps/openmw/mwgui/dialogue.cpp
+@@ -1200,17 +1200,13 @@
+ 
+         if (focused)
+         {
+-            // Scroll the side bar to keep the active item in view
+-            int offset = 0;
+-            for (int i = 6; i < static_cast<int>(index); i++)
+-            {
+-                const std::string& keyword = mTopicsList->getItemNameAt(i);
+-                if (keyword.empty())
+-                    offset += 18 + sVerticalPadding * 2;
+-                else
+-                    offset += mTopicsList->getItemWidget(keyword)->getHeight() + sVerticalPadding * 2;
+-            }
+-            mTopicsList->setViewOffset(-offset);
++            // Scroll the side bar to keep the active item in view. Ask the list to do it from its
++            // real geometry: assuming a fixed number of visible rows leaves the selection just off
++            // the bottom edge whenever the window is too short to fit that many.
++            if (index == mTopicsList->getItemCount())
++                mTopicsList->scrollToBottom(); // "Goodbye" sits below the list; show the list's end
++            else
++                mTopicsList->scrollToItem(index);
+         }
+     }
+ 
