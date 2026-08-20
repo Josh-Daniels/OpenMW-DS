@@ -144,7 +144,7 @@ GameStateRepository -> MapDsTopOverlay (top screen) and MapDsControls (bottom). 
      protected:
          bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
          void setActiveControllerWindow(bool active) override;
-@@ -331,6 +359,17 @@
+@@ -331,6 +359,18 @@
          EditNoteDialog mEditNoteDialog;
          ESM::CustomMarker mEditingMarker;
  
@@ -153,6 +153,7 @@ GameStateRepository -> MapDsTopOverlay (top screen) and MapDsControls (bottom). 
 +        // address them by index. Rebuilt on every export; the DS UI only ever acts on an index it
 +        // was just given, and every mutation re-exports.
 +        std::vector<ESM::CustomMarker> mCompanionNotes;
++        void companionEnsureLocalMaps();
 +        void companionExportGlobal();
 +        void companionExportFog();
 +        void companionExportNotes();
@@ -241,7 +242,7 @@ GameStateRepository -> MapDsTopOverlay (top screen) and MapDsControls (bottom). 
  
          const bool global = Settings::map().mGlobal;
  
-@@ -1644,6 +1700,258 @@
+@@ -1644,6 +1700,304 @@
          if (!mLocalMapRender)
              return true;
          return mLocalMapRender->isPositionExplored(nX, nY, cellX, cellY);
@@ -288,6 +289,51 @@ GameStateRepository -> MapDsTopOverlay (top screen) and MapDsControls (bottom). 
 +        if (const osg::Image* ov = mGlobalMapRender->companionOverlayImage())
 +            if (ov->data() && ov->s() == w && ov->t() == h)
 +                companionDeliverGlobalMapOverlay(w, h, ov->data());
++    }
++
++    void MapWindow::companionEnsureLocalMaps()
++    {
++        // WITHOUT THIS, CELLS THE PLAYER HAS EXPLORED RENDER AS SOLID BLACK ON THE DS MAP.
++        //
++        // A segment's fog image is created in LocalMap::requestExteriorMap, and the only thing
++        // that calls it for a cell OTHER than the one the player stands in is
++        // LocalMapBase::updateRequiredMaps -- which walks mMaps and skips any entry that is
++        // invisible or `widgetCropped`. In DS mode this window is hidden, so every entry is
++        // skipped and no neighbour ever gets a fog image. companion-localmap-export.patch already
++        // force-renders the eight neighbours' IMAGERY past that same filter; this is the other
++        // half, and it has to exist separately because that patch runs per cell-change while this
++        // needs the whole viewing-distance grid, not just the 3x3.
++        //
++        // The consumer draws imagery-without-fog as solid black on purpose (no fog mask cannot be
++        // read as "fully explored" -- that would be a free reveal), so the missing half shows up
++        // as explored cells going black, typically the row and column the player has not walked
++        // into. Opening the vanilla map fixed it precisely because doing so un-crops those widgets
++        // and lets updateRequiredMaps run.
++        //
++        // This is the SAME call updateRequiredMaps makes, so the outcome is the engine's own and
++        // an already-explored cell gets its SAVED fog back (requestExteriorMap prefers
++        // cell->getFog() and only falls back to a fully-opaque initFogOfWar). Fog is created
++        // synchronously inside that call, so companionExportFog can read it in the same pass; the
++        // imagery is an RTT and lands a frame or two later through the existing capture callback.
++        //
++        // Exteriors only, mirroring updateRequiredMaps' own guard: an interior's segments and
++        // their fog are all set up by requestInteriorMap/updatePlayer in one go, so there is
++        // nothing per-cell to request.
++        //
++        // Cheap despite the getExterior() calls: this runs once per DS-map mount, and only for
++        // cells that are missing fog -- the steady state after the first open is a no-op.
++        if (!mLocalMapRender || !mActiveCell || !mActiveCell->isExterior())
++            return;
++        for (int x = mGrid.left; x <= mGrid.right; ++x)
++        {
++            for (int y = mGrid.top; y <= mGrid.bottom; ++y)
++            {
++                if (mLocalMapRender->getFogOfWarTexture(x, y))
++                    continue;
++                requestMapRender(&MWBase::Environment::get().getWorldModel()->getExterior(
++                    ESM::ExteriorCellLocation(x, y, ESM::Cell::sDefaultWorldspaceId)));
++            }
++        }
 +    }
 +
 +    void MapWindow::companionExportFog()
@@ -411,6 +457,7 @@ GameStateRepository -> MapDsTopOverlay (top screen) and MapDsControls (bottom). 
 +        o << "}";
 +        Log(Debug::Info) << o.str();
 +
++        companionEnsureLocalMaps();
 +        companionExportGlobal();
 +        companionExportFog();
 +        companionExportNotes();

@@ -91,8 +91,9 @@ object GameStateRepository {
     // reproduces TimeOfDayInterpolator::getValue's own night factor rather than picking an hour.
     //
     // It exists because [ambientLuminance] ALONE can no longer tell night from day: the Game
-    // Brightness night lift raises the night ambient, and at the shipped default the two bands
-    // overlap (lifted Overcast night 0.384 vs Overcast day 0.377). This selects which bright-end
+    // Brightness night lift raises the night ambient, and at a lift of 0.15 the two bands overlap
+    // outright (lifted Overcast night 0.384 vs Overcast day 0.377) — that value shipped briefly on
+    // Aug 20 2026; the lift now defaults to 0. This selects which bright-end
     // ceiling the dimming ramp uses — see UiPreferences.ADAPTIVE_DIM_NIGHT_MAX_RANGE.
     //
     // Quantized to 0.05 and change-detected Lua-side, so it arrives a handful of times per in-game

@@ -239,9 +239,12 @@ const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
  *
  * WHY NIGHT NEEDS ITS OWN CEILING AT ALL. The ramp reads one number, the scene's ambient
  * luminance, and the Game Brightness night lift deliberately RAISES that number at night. At the
- * shipped 0.15 lift the day and night bands genuinely cross over for part of the weather table:
+ * lift of 0.15 the day and night bands genuinely cross over for part of the weather table:
  * lifted Overcast night reports 0.384 against Overcast day's 0.377, so night measures as brighter
- * than day of the same weather and the ramp leaves it essentially undimmed (alpha 0.03). Lowering
+ * than day of the same weather and the ramp leaves it essentially undimmed (alpha 0.03). That 0.15
+ * SHIPPED for part of Aug 20 2026, which is how this was found; [NIGHT_BRIGHTNESS_DEFAULT] is now
+ * 0, so at stock settings there is no overlap and this ceiling is what keeps night correct for
+ * anyone who raises that slider. Lowering
  * `DIM_LUMINANCE_BRIGHT` cannot fix that — Thunderstorm day sits at 0.353, BELOW both — so the
  * only separation available is an independent "is it night" signal, which is what
  * `GameStateRepository.nightWeight` supplies.
@@ -361,11 +364,24 @@ const val UI_SOUND_VOLUME_DEFAULT = 0.5f
  */
 val NIGHT_BRIGHTNESS_RANGE = 0f..0.20f
 
-/** About +86% luminance on a clear night (0.174 -> 0.324). Raised from a deliberately conservative
- *  0.05 (+29%) on Aug 20 2026 after play-testing: the cautious value was too dark to be much use on
- *  the handheld's panel. Still a LIFT rather than a floor, so the spread between weathers survives
- *  intact (see applyNightAmbientFloor); 0 remains exact vanilla. */
-const val NIGHT_BRIGHTNESS_DEFAULT = 0.15f
+/** **0 = EXACT VANILLA, and that is the point of the value rather than a fallback.** `applyNight
+ *  AmbientFloor` recomputes from each weather's own `Weather_*_Ambient_Night_Color` fallback every
+ *  time, so a lift of 0 writes the vanilla colours back bit-identically — the feature ships fully
+ *  off and nights look exactly as Morrowind intends until the player opts in.
+ *
+ *  It shipped at 0.05 and then 0.15 (+86% on a clear night) earlier on Aug 20 2026 before being
+ *  set here. Both of those were play-tested and liked; the decision to ship 0 anyway is a
+ *  vanilla-fidelity one, matching the same stance the Game UI elements take (everything defaults
+ *  to Vanilla and the player opts in). Do not read this as "0.15 was wrong".
+ *
+ *  Knock-on worth knowing: at 0 the `COMPANION_NIGHT_AMBIENT_OK` read-back probe never fires,
+ *  because it only runs when a write actually CHANGES a colour. That diagnostic therefore appears
+ *  the first time a player raises the slider, not at startup. Nothing consumes it either way.
+ *
+ *  It does NOT disable the night dimming ceiling — [ADAPTIVE_DIM_NIGHT_MAX_RANGE] keys off
+ *  `COMPANION_NIGHT_WEIGHT` (time of day), not off luminance, so night still dims correctly. With
+ *  no lift the ramp ALSO measures night correctly again, so the two agree rather than compete. */
+const val NIGHT_BRIGHTNESS_DEFAULT = 0f
 
 /**
  * Range for OpenMW's own `Shaders/minimum interior brightness`. This is a pass-through to the
@@ -376,19 +392,27 @@ val INTERIOR_BRIGHTNESS_RANGE = 0f..0.35f
 /** OpenMW's shipped default for `Shaders/minimum interior brightness` (files/settings-default.cfg).
  *  Keep in step with the engine if it ever changes upstream.
  *
- *  **This is the ENGINE's value, no longer OURS** — we ship [INTERIOR_BRIGHTNESS_DEFAULT] instead
- *  (Aug 20 2026). Kept because it is still the reference point for `DIM_LUMINANCE_DARK` in
- *  `CompanionScreen.kt`, which is pinned to the darkest interior the engine can ever report — that
- *  is the bottom of this slider (0f), reached when a player turns the floor off, NOT our default. */
+ *  TWO consumers, and they mean different things — do not collapse either into a literal:
+ *   - [INTERIOR_BRIGHTNESS_DEFAULT] below IS this value, deliberately, so we ship exact vanilla.
+ *   - `DIM_LUMINANCE_DARK` (`CompanionScreen.kt`) is pinned to it as the darkest interior the
+ *     engine can ever report. **That pin is to the ENGINE's floor, not to our default**, and stays
+ *     correct even if we ever ship a higher one: a player can always slide this to 0, at which
+ *     point the engine's own clamp is what an interior actually reports. */
 const val MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT = 0.08f
 
-/** What OpenMW-DS ships for the interior floor, chosen Aug 20 2026 over the engine's own 0.08 —
- *  vanilla interiors are near-black on this handheld's panel. Briefly 0.35 (the top of
- *  [INTERIOR_BRIGHTNESS_RANGE]) the same day before settling here, roughly halfway between vanilla
- *  and that. Raising it makes the companion dim itself LESS indoors for free, since both feed the
- *  same `RenderingManager::setAmbientColour` signal (see "Game brightness floors"). A player who
- *  wants vanilla darkness slides it to 0. */
-const val INTERIOR_BRIGHTNESS_DEFAULT = 0.15f
+/** What OpenMW-DS ships for the interior floor: **exact vanilla, expressed as the engine's own
+ *  constant rather than a repeated literal** so the two cannot drift if upstream ever moves it.
+ *
+ *  It was 0.35, then 0.15, earlier on Aug 20 2026 — both play-tested and liked, because vanilla
+ *  interiors ARE near-black on this handheld's panel. Shipping vanilla anyway is a fidelity call,
+ *  the same stance the Game UI elements take (ship Vanilla, let the player opt in), and it is why
+ *  this reads as an alias rather than as a coincidence that two constants share a number.
+ *
+ *  Raising it makes the companion dim itself LESS indoors for free, since both feed the same
+ *  `RenderingManager::setAmbientColour` signal (see "Game brightness floors"). Note this is still a
+ *  live pass-through, not a no-op: the engine persists its own copy to `settings.cfg`, so we keep
+ *  pushing it at startup to re-assert vanilla over whatever is stored there. */
+const val INTERIOR_BRIGHTNESS_DEFAULT = MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT
 
 /** Most HUD favourite quick-slots a category can show. Also the number PERSISTED per category —
  *  lowering the visible count hides slots rather than deleting them, so this is the storage width

@@ -3066,11 +3066,13 @@ end
 --
 -- WHY THIS EXISTS. The companion's screen dimming ramps purely on the exported ambient luminance,
 -- and `applyNightAmbientFloor` above deliberately raises the night ambient — so the same number now
--- describes two very different scenes. At the shipped 0.15 lift the two genuinely CROSS OVER for
--- part of the weather table: lifted Overcast night reports 0.384 against Overcast day's 0.377, i.e.
--- night is measured as BRIGHTER than day of the same weather. No luminance threshold can separate
--- those (Thunderstorm day is 0.353, below both), so the dimming ramp needs an independent
--- "is it night" signal to pick its bright-end ceiling. That is this.
+-- describes two very different scenes. At a 0.15 lift the two genuinely CROSS OVER for part of the
+-- weather table: lifted Overcast night reports 0.384 against Overcast day's 0.377, i.e. night is
+-- measured as BRIGHTER than day of the same weather. No luminance threshold can separate those
+-- (Thunderstorm day is 0.353, below both), so the dimming ramp needs an independent "is it night"
+-- signal to pick its bright-end ceiling. That is this. (0.15 shipped for part of Aug 20 2026, which
+-- is how this was found; the lift now defaults to 0, so at stock settings there is no overlap and
+-- this export is what keeps the night ceiling right for anyone who raises the slider.)
 --
 -- It is a WEIGHT, not a boolean, on purpose: it is the exact interpolation factor the engine gives
 -- mNightValue, so the companion's ceiling crossfades on the game's own dawn/dusk curve instead of

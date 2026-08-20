@@ -907,9 +907,11 @@ fun ProvideTopPanelOpacity(content: @Composable () -> Unit) {
  *
  * WHY A SECOND CEILING RATHER THAN A SMARTER RAMP. [adaptiveDimAlpha] reads ONE number, the
  * scene's ambient luminance, and the Game Brightness night lift raises that number at night. At
- * the shipped 0.15 lift the day and night bands overlap outright: lifted Overcast night reports
+ * a 0.15 lift the day and night bands overlap outright: lifted Overcast night reports
  * 0.384 against Overcast day's 0.377, so the ramp reads night as the brighter of the two and
- * leaves it at alpha 0.03. No value of [DIM_LUMINANCE_BRIGHT] can separate them either —
+ * leaves it at alpha 0.03. (0.15 shipped for part of Aug 20 2026; the lift now defaults to 0, so
+ * at stock settings there is no overlap — this ceiling still applies, it just no longer has a
+ * measurement error to correct.) No value of [DIM_LUMINANCE_BRIGHT] can separate them either —
  * Thunderstorm DAY sits at 0.353, below both. Night has to be identified independently, which is
  * what `GameStateRepository.nightWeight` is for.
  *
@@ -7188,6 +7190,47 @@ private fun mapLocalPos(
     return Offset(cx + (m.x - p.x) * px, cy - (m.y - p.y) * px)
 }
 
+/**
+ * Is this world position EXPLORED — i.e. is the fog at that point lifted?
+ *
+ * A transcription of `LocalMap::isPositionExplored`, against the same per-segment fog the DS map
+ * already draws. Vanilla puts door markers on `Local_MarkerLayer`, which is BEHIND
+ * `Local_FogLayer`, so an undiscovered door is simply covered by the black fog square; this Canvas
+ * paints in draw order instead, so the markers have to be gated explicitly or they float on top of
+ * the fog and hand the player a map of places they have not found yet.
+ *
+ * **Notes deliberately do NOT go through this.** Vanilla puts custom markers — and magic/`Mark`
+ * markers — on `Local_MarkerAboveFogLayer`, i.e. in FRONT of the fog: a note the player placed
+ * themselves is theirs to see. Only the game's own door markers are a discovery.
+ *
+ * Three details are the engine's, not ours:
+ *  - **The fog image is Y-DOWN** (row 0 = the cell's HIGH-world-Y edge) — `getMarkerPosition` does
+ *    `nY = 1 - fract(worldY / cellSize)`, and `mapwindow.cpp` notes the fog texture is the one
+ *    layer whose UV is *not* inverted. So the row index is `1 - fractional Y`, not the fraction.
+ *  - **The threshold is `alpha < 200`, not `< 255`** — a partially-lifted texel counts as explored.
+ *  - **No fog image at all means NOT explored** (`isPositionExplored` returns false on a null
+ *    image). That is the safe direction: a cell whose imagery was force-rendered but which the
+ *    player has never entered must not reveal its doors.
+ *
+ * Interiors work through the same path because [mapLocalRaw] already applies the NorthMarker
+ * rotation and the bounds shift, which is exactly what `worldToInteriorMapPosition` does before
+ * taking the same fractional parts.
+ */
+private fun mapPositionExplored(
+    worldX: Float, worldY: Float, s: MapDsState, f: MapLocalFrame,
+    fog: Map<Triple<Int, Int, Boolean>, Bitmap>
+): Boolean {
+    val raw = mapLocalRaw(worldX, worldY, s, f)
+    val gx = floor(raw.x).toInt()
+    val gy = floor(raw.y).toInt()
+    val bmp = fog[Triple(gx, gy, s.interior)] ?: return false
+    val nX = (raw.x - gx).coerceIn(0f, 1f)
+    val nY = (1f - (raw.y - gy)).coerceIn(0f, 1f)
+    val u = ((bmp.width - 1) * nX).toInt().coerceIn(0, bmp.width - 1)
+    val v = ((bmp.height - 1) * nY).toInt().coerceIn(0, bmp.height - 1)
+    return (bmp.getPixel(u, v) ushr 24) < 200
+}
+
 /** A real WORLD POSITION -> screen, on the world map. This is the projection the player marker and
  *  the notes use. [mapPlaceCentre] is the sibling for discovered locations, which differ only in
  *  carrying integer cell indices and therefore needing the half-cell centring offset. */
@@ -7435,6 +7478,13 @@ private fun MapSurface(
     // on the local map. The `ext` flag is computed natively from the marker's own cell id, so it
     // cannot disagree with how the note was filed.
     val myNotes = remember(notes, isWorld) { notes.filter { it.exterior == isWorld } }
+    // Door markers the player has actually discovered. Computed once per data change rather than
+    // inside the Canvas: it samples a bitmap per marker, and both the draw and the hit test need
+    // the same answer — deriving it twice would let a tap find a marker that is not drawn.
+    val visibleDoors = remember(doorMarkers, fog, s, frame) {
+        if (isWorld) emptyList()
+        else doorMarkers.filter { mapPositionExplored(it.worldX, it.worldY, s, frame, fog) }
+    }
 
     Box(modifier.mapSurfaceFrame()) {
 
@@ -7549,7 +7599,10 @@ private fun MapSurface(
                                         add(Triple(it, mapLocalPos(it.worldX, it.worldY, s, frame, px, cx, cy),
                                             it.note))
                                     }
-                                    doorMarkers.forEach {
+                                    // Same fog gate as the draw — a marker that is not on screen
+                                    // must not be tappable either, or an undiscovered door leaks
+                                    // its name through a tap on empty fog.
+                                    visibleDoors.forEach {
                                         add(Triple(it, mapLocalPos(it.worldX, it.worldY, s, frame, px, cx, cy),
                                             it.name))
                                     }
@@ -7631,7 +7684,9 @@ private fun MapSurface(
                             drawRect(Color.Black, topLeft = Offset(left, top), size = Size(px, px))
                         }
                     }
-                    doorMarkers.forEach { dm ->
+                    // Fog-gated: vanilla hides an undiscovered door behind the fog layer, and a
+                    // Canvas has no layers to do that for us. See mapPositionExplored.
+                    visibleDoors.forEach { dm ->
                         val c = mapLocalPos(dm.worldX, dm.worldY, s, frame, px, cx, cy)
                         val half = px * MAP_DOOR_CELLS / 2f
                         drawRect(
