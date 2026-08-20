@@ -474,6 +474,114 @@ object GameStateRepository {
 
     fun clearEnchantMessage() { _enchantMessage.value = null }
 
+    // --- DS Map (COMPANION_MAP_* + three binary JNI deliveries) ---
+    // Pushed WHOLE once per DS-map mount: GM_Inventory pauses the sim, so none of this can change
+    // while the map is on screen. The two global layers and the fog segments are large, so they
+    // arrive as byte arrays through their own JNI methods rather than as COMPANION_ text.
+    /** True while the in-game map VIEW is open (the Interface mode showing only the Map window).
+     *  Reported by Lua, which owns that toggle — the minimap tap is the same command for open and
+     *  close, so the companion cannot infer the state from having sent it. */
+    private val _mapModeOpen = MutableStateFlow(false)
+    val mapModeOpen: StateFlow<Boolean> = _mapModeOpen.asStateFlow()
+
+    private val _mapDsState = MutableStateFlow<MapDsState?>(null)
+    val mapDsState: StateFlow<MapDsState?> = _mapDsState.asStateFlow()
+    private var mapStateBuffer: MapDsState? = null
+
+    private val _mapNotes = MutableStateFlow<List<MapNote>>(emptyList())
+    val mapNotes: StateFlow<List<MapNote>> = _mapNotes.asStateFlow()
+    private var mapNoteBuffer: MutableList<MapNote>? = null
+
+    private val _mapPlaces = MutableStateFlow<List<MapPlace>>(emptyList())
+    val mapPlaces: StateFlow<List<MapPlace>> = _mapPlaces.asStateFlow()
+    private var mapPlaceBuffer: MutableList<MapPlace>? = null
+
+    /** The static world-map terrain layer, and where it sits in cell space. */
+    private val _globalMapBase = MutableStateFlow<Bitmap?>(null)
+    val globalMapBase: StateFlow<Bitmap?> = _globalMapBase.asStateFlow()
+    private val _globalMapInfo = MutableStateFlow<GlobalMapInfo?>(null)
+    val globalMapInfo: StateFlow<GlobalMapInfo?> = _globalMapInfo.asStateFlow()
+
+    /** The explored-areas layer, drawn over the base. Transparent where unexplored. */
+    private val _globalMapOverlay = MutableStateFlow<Bitmap?>(null)
+    val globalMapOverlay: StateFlow<Bitmap?> = _globalMapOverlay.asStateFlow()
+
+    /** Per-segment fog, keyed the same way the local map segments already are. ALPHA_8: the engine
+     *  writes `val = alpha << 24` and never touches RGB, so only the alpha plane is sent. */
+    private val _mapFog = MutableStateFlow<Map<Triple<Int, Int, Boolean>, Bitmap>>(emptyMap())
+    val mapFog: StateFlow<Map<Triple<Int, Int, Boolean>, Bitmap>> = _mapFog.asStateFlow()
+
+    /** OpenGL row 0 is the BOTTOM row; an Android Bitmap's row 0 is the TOP. Every image coming out
+     *  of the engine needs this — onMapTexture has always done it for the local segments, and the
+     *  two world-map layers were missing it, which rendered the world map upside down. Flipping the
+     *  IMAGE (rather than inverting the coordinate maths) keeps the marker formulas, which already
+     *  assume a top-down image, correct. */
+    private fun flipVertically(src: Bitmap): Bitmap {
+        val m = Matrix().apply { preScale(1f, -1f) }
+        val out = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, false)
+        if (out != src) src.recycle()
+        return out
+    }
+
+    /** Called from native on the engine thread with the static world-map terrain (RGB or RGBA). */
+    fun onGlobalMapBase(
+        width: Int, height: Int, minX: Int, minY: Int, cellPixels: Int, channels: Int, data: ByteArray
+    ) {
+        if (width <= 0 || height <= 0) return
+        val pixels = IntArray(width * height)
+        for (i in pixels.indices) {
+            val o = i * channels
+            val r = data[o].toInt() and 0xFF
+            val g = data[o + 1].toInt() and 0xFF
+            val b = data[o + 2].toInt() and 0xFF
+            // The base is opaque terrain; when it arrives as RGB there is no alpha byte to read.
+            val a = if (channels == 4) data[o + 3].toInt() and 0xFF else 0xFF
+            pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        _globalMapBase.value?.recycle()
+        _globalMapBase.value = flipVertically(
+            Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888))
+        _globalMapInfo.value = GlobalMapInfo(width, height, minX, minY, cellPixels)
+    }
+
+    /** Called from native with the explored-areas layer (RGBA, transparent where unexplored). */
+    fun onGlobalMapOverlay(width: Int, height: Int, rgba: ByteArray) {
+        if (width <= 0 || height <= 0) return
+        val pixels = IntArray(width * height)
+        for (i in pixels.indices) {
+            val o = i * 4
+            val r = rgba[o].toInt() and 0xFF
+            val g = rgba[o + 1].toInt() and 0xFF
+            val b = rgba[o + 2].toInt() and 0xFF
+            val a = rgba[o + 3].toInt() and 0xFF
+            pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        _globalMapOverlay.value?.recycle()
+        _globalMapOverlay.value = flipVertically(
+            Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888))
+    }
+
+    /** Called from native with one segment's fog mask. ALPHA_8 — one byte per texel. */
+    fun onMapFog(segX: Int, segY: Int, isInterior: Int, width: Int, height: Int, alpha: ByteArray) {
+        if (width <= 0 || height <= 0) return
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
+        bmp.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(alpha))
+        _mapFog.value = _mapFog.value + (Triple(segX, segY, isInterior != 0) to bmp)
+    }
+
+    /** Dropped when the DS map unmounts — these are the largest bitmaps the companion ever holds
+     *  (~3 MB each for the two global layers), and they are re-pushed on the next mount anyway. */
+    fun clearMapDs() {
+        _mapDsState.value = null
+        _mapNotes.value = emptyList()
+        _mapPlaces.value = emptyList()
+        _mapFog.value = emptyMap()
+        _globalMapBase.value?.recycle(); _globalMapBase.value = null
+        _globalMapOverlay.value?.recycle(); _globalMapOverlay.value = null
+        _globalMapInfo.value = null
+        mapStateBuffer = null; mapNoteBuffer = null; mapPlaceBuffer = null
+    }
+
     // One-shot popup requests from the engine, both seq'd for the same reason as the message above:
     // adding the same Fortify Skill twice must raise the selector twice.
     private var enchantArgPickSeq = 0L
@@ -978,6 +1086,43 @@ object GameStateRepository {
                 alchemyEffectBuffer = null
                 alchemyToolBuffer = null
                 alchemyItemBuffer = null
+            }
+            trimmed.contains(LogParser.P_MAPMODE) -> {
+                val idx = trimmed.indexOf(LogParser.P_MAPMODE) + LogParser.P_MAPMODE.length
+                _mapModeOpen.value = trimmed.substring(idx).trim().startsWith("1")
+            }
+            // DS Map. Per-record lines first, then the brackets.
+            trimmed.contains(LogParser.P_MAP_NOTE) -> {
+                mapNoteBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_MAP_NOTE) + LogParser.P_MAP_NOTE.length
+                    LogParser.parseMapNote(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_MAP_PLACE) -> {
+                mapPlaceBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_MAP_PLACE) + LogParser.P_MAP_PLACE.length
+                    LogParser.parseMapPlace(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_MAP_NOTES_START) -> { mapNoteBuffer = mutableListOf() }
+            trimmed.contains(LogParser.P_MAP_NOTES_END) -> {
+                mapNoteBuffer?.let { _mapNotes.value = it.toList() }
+                mapNoteBuffer = null
+            }
+            trimmed.contains(LogParser.P_MAP_PLACES_START) -> { mapPlaceBuffer = mutableListOf() }
+            trimmed.contains(LogParser.P_MAP_PLACES_END) -> {
+                mapPlaceBuffer?.let { _mapPlaces.value = it.toList() }
+                mapPlaceBuffer = null
+            }
+            trimmed.contains(LogParser.P_MAP_STATE) -> {
+                val idx = trimmed.indexOf(LogParser.P_MAP_STATE) + LogParser.P_MAP_STATE.length
+                mapStateBuffer = LogParser.parseMapState(trimmed.substring(idx).trim())
+            }
+            trimmed.contains(LogParser.P_MAP_END) -> {
+                // Committed only at the end of the push, so a half-arrived batch never replaces a
+                // good one on screen.
+                mapStateBuffer?.let { _mapDsState.value = it }
+                mapStateBuffer = null
             }
             // DS Enchanting. Per-record lines first (most frequent inside a batch), then the
             // brackets, then the one-shot requests, and OPEN last — it is the SHORTEST prefix here

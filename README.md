@@ -14,17 +14,16 @@ If you don't have a thor or don't care about dual-screen Morrowind, you probably
 ---
 ## Features
 
-- **Minimap**: a live, player-centered, rotating map of the current cell, rendered by the engine itself and streamed to
+- **Minimap**: A live, player-centered, map of the current cell, rendered by the engine itself and streamed to
   the second screen (uses the same system as the vanilla in game minimap would).
-- **Live character stats**: health, magicka, fatigue, & active effects, updated continuously.
+- **Live character stats**: Health, magicka, fatigue, & active effects, updated continuously.
 - **Favourite items & spells**: Added little buttons on the minimap that can be used to store favourites for faster
   swapping of weapons or spells.
 - **Inventory**: full list of inventory with tap to equip/unequip, long press for info, drop, add to favourites.
 - **Magic**: spells, powers, and scrolls with tap to equip/unequip, long press for info or add to favourites.
 - **Journal**: Lower screen version of the in game journal (with all functionality: quests, topics, etc).
 - **Optional UI Overhaul**: an overhaul of the in game UI to make it look more like the companion UI on the bottom
-  screen. Completely optional and can be turned off in the options menu (on pause). This is just to help with the stark
-  contrast between vanilla resolution and OpenMW-DS lower screen resolution.
+  screen. Completely optional and can be turned off in the options menu (on pause). This UI also integrates with the bottom screen to use both screens for a more DS style feel. 
 - **Optional Touch Contols**: Alpha3 uses the left thumbstick as a mouse for menus. This version allows the use of touch
   input instead (Activated at the bottom of the OpenMW-DS Options page).
 

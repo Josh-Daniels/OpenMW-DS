@@ -21,6 +21,7 @@ import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
 import org.openmw.companion.AlchemyTopOverlay
 import org.openmw.companion.EnchantingTopOverlay
+import org.openmw.companion.MapDsTopOverlay
 import org.openmw.companion.LevelUpTopOverlay
 import org.openmw.companion.LootingTopOverlay
 import org.openmw.companion.ManualJournalDraftTopOverlay
@@ -178,6 +179,7 @@ class EngineActivity : SDLActivity() {
     private var levelUpTopView: View? = null
     private var alchemyTopView: View? = null
     private var enchantingTopView: View? = null
+    private var mapDsTopView: View? = null
 
     // INTERACTIVE looting grids on the TOP screen (this activity's own window / Display 0), shown
     // while a container session is active AND Looting is routed to SPLIT (game_ui_looting == DS).
@@ -327,6 +329,7 @@ class EngineActivity : SDLActivity() {
         hideLevelUpTopOverlay()
         hideAlchemyTopOverlay()
         hideEnchantingTopOverlay()
+        hideMapDsTopOverlay()
         hideLootingTopOverlay()
         hideBarterTopOverlay()
 
@@ -738,6 +741,32 @@ class EngineActivity : SDLActivity() {
         }
 
         /**
+         * DS map: the static world-map terrain layer. Called once per DS-map mount (the sim is
+         * paused while the map is up, so it cannot change underneath). Measured ~2.36 MB on the
+         * stock load order, which is why it ships in one piece rather than tiled.
+         */
+        @JvmStatic
+        fun onCompanionGlobalMapBase(
+            width: Int, height: Int, minX: Int, minY: Int, cellPixels: Int, channels: Int, data: ByteArray
+        ) {
+            GameStateRepository.onGlobalMapBase(width, height, minX, minY, cellPixels, channels, data)
+        }
+
+        /** DS map: the explored-areas layer, drawn over the base. */
+        @JvmStatic
+        fun onCompanionGlobalMapOverlay(width: Int, height: Int, rgba: ByteArray) {
+            GameStateRepository.onGlobalMapOverlay(width, height, rgba)
+        }
+
+        /** DS map: one segment's fog mask. ALPHA_8 — 1024 bytes for a 32x32 segment. */
+        @JvmStatic
+        fun onCompanionMapFog(
+            segX: Int, segY: Int, isInterior: Int, width: Int, height: Int, alpha: ByteArray
+        ) {
+            GameStateRepository.onMapFog(segX, segY, isInterior, width, height, alpha)
+        }
+
+        /**
          * Called from native (engine thread) whenever OpenMW's in-game Hide UI
          * toggle flips mHudEnabled. Mirrors the state onto the Alpha3 second-screen
          * overlay so the touch controls / gear icon / arrow hide and show in sync.
@@ -835,6 +864,7 @@ class EngineActivity : SDLActivity() {
         @JvmStatic external fun setCompanionDsSpellmaking(on: Boolean)
         @JvmStatic external fun setCompanionDsEnchanting(on: Boolean)
         @JvmStatic external fun setCompanionDsAlchemy(on: Boolean)
+        @JvmStatic external fun setCompanionDsMap(on: Boolean)
         @JvmStatic external fun setCompanionDsRestWait(on: Boolean)
         @JvmStatic external fun setCompanionDsCrimeAlerts(on: Boolean)
         // Dialogue-service windows (GM_SpellBuying / GM_Training) that push over GM_Dialogue.
@@ -1079,6 +1109,10 @@ class EngineActivity : SDLActivity() {
             "game_ui_spellmaking" to { on: Boolean -> setCompanionDsSpellmaking(on) },
             "game_ui_enchanting" to { on: Boolean -> setCompanionDsEnchanting(on) },
             "game_ui_alchemy" to { on: Boolean -> setCompanionDsAlchemy(on) },
+            // NOTE this only tells native the ELEMENT's mode. The window is suppressed by
+            // (element == DS) AND (overlay mounted) — the mount half is sent separately by the
+            // overlay itself, so the combined inventory view and the pinned map stay native.
+            "game_ui_map" to { on: Boolean -> setCompanionDsMap(on) },
             "game_ui_restwait" to { on: Boolean -> setCompanionDsRestWait(on) },
             "game_ui_crime" to { on: Boolean -> setCompanionDsCrimeAlerts(on) },
             "game_ui_spellbuying" to { on: Boolean -> setCompanionDsSpellBuying(on) },
@@ -1241,6 +1275,21 @@ class EngineActivity : SDLActivity() {
                 .collect { show -> if (show) showEnchantingTopOverlay() else hideEnchantingTopOverlay() }
         }
 
+        // TOP-screen DS map. Shown while the in-game map view is open AND the Map element is DS.
+        // The map is the display half; the bottom screen carries the toggle, zoom and note UI.
+        // INTERACTIVE, and it has to be — this is the surface pinch-to-zoom and drag-to-pan act on,
+        // which is the whole reason the DS map exists rather than a restyled native window: OpenMW
+        // discards every touch and gesture event before MyGUI sees them, so the native map could
+        // never have had real multi-touch.
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.mapModeOpen,
+                UiPreferences.gameUiModeFlow("game_ui_map"),
+            ) { open, mode -> open && mode == GameUiMode.DS }
+                .distinctUntilChanged()
+                .collect { show -> if (show) showMapDsTopOverlay() else hideMapDsTopOverlay() }
+        }
+
         // Top-screen INTERACTIVE looting grids: shown while a container session is active AND
         // Looting is routed to SPLIT AND the Looting element is DS (companion draws it). The
         // bottom screen shows only the terminal controls (LootingControlsOnly).
@@ -1327,10 +1376,19 @@ class EngineActivity : SDLActivity() {
             // hidden in DS mode, so leaving the controller on it would drive a window nobody can
             // see (and B would pop the mode out from under the DS screen).
             val enchantNav = sessionNav(GameStateRepository.enchantSession, "game_ui_enchanting")
+            // The DS map replaces a window that is normally controller-navigable, so the same gate
+            // applies: while it is up the controller must be re-emitted as COMPANION_NAV_* rather
+            // than driving the hidden native map.
+            val mapNav = GameStateRepository.mapModeOpen
+                .combine(UiPreferences.gameUiModeFlow("game_ui_map")) { open, mode ->
+                    open && mode == GameUiMode.DS
+                }
 
             combine(
-                dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav, trainingNav,
-                spellBuyingNav, alchemyNav, enchantNav
+                listOf(
+                    dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav,
+                    trainingNav, spellBuyingNav, alchemyNav, enchantNav, mapNav
+                )
             ) { arr ->
                 arr.any { it }
             }.combine(GameStateRepository.pauseMenuVisible) { anyOverlay, paused ->
@@ -1537,6 +1595,17 @@ class EngineActivity : SDLActivity() {
         val overlay = enchantingTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         enchantingTopView = null
+    }
+
+    private fun showMapDsTopOverlay() = showInteractiveTopScreenOverlay(
+        alreadyShown = { mapDsTopView != null },
+        onAdded = { mapDsTopView = it },
+    ) { ProvideTopPanelOpacity { MapDsTopOverlay() } }
+
+    private fun hideMapDsTopOverlay() {
+        val overlay = mapDsTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        mapDsTopView = null
     }
 
     private fun showManualJournalTopOverlay() = showTopScreenOverlay(

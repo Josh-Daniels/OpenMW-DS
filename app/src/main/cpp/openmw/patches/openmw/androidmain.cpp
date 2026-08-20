@@ -53,6 +53,11 @@ static JavaVM*   g_companionVm     = nullptr;
 static jclass    g_companionClass  = nullptr;
 static jmethodID g_companionMethod = nullptr;
 static jmethodID g_mapTextureMethod = nullptr;
+// DS map delivery, resolved alongside the others in installCompanionSink. All three stay nullptr
+// when no second screen exists, and every delivery function checks its own before allocating.
+static jmethodID g_globalMapBaseMethod = nullptr;
+static jmethodID g_globalMapOverlayMethod = nullptr;
+static jmethodID g_mapFogMethod = nullptr;
 static jmethodID g_hudVisibilityMethod = nullptr;
 
 // Mirrors OpenMW's in-game Hide UI state (mHudEnabled), updated on every toggle
@@ -109,6 +114,20 @@ static std::atomic<bool> g_companionDsLevelUp{ false };     // GM_Levelup
 static std::atomic<bool> g_companionDsSpellmaking{ false }; // GM_SpellCreation
 static std::atomic<bool> g_companionDsEnchanting{ false };  // GM_Enchanting
 static std::atomic<bool> g_companionDsAlchemy{ false };     // GM_Alchemy
+// DS MAP. Two flags, ANDed by companionDsMapActive(), and both are required:
+//   g_companionDsMap    -- the "game_ui_map" element is DS (the player's preference).
+//   g_companionMapMounted -- the DS map overlay is actually on screen right now.
+// The mount flag is what keeps this off the combined GM_Inventory view and the pinned HUD map:
+// the DS map only mounts from the app's own CMP:openmap path, so both of those see false. It is
+// deliberately NOT a one-shot armed at command time -- that open can fail to happen at all
+// (char-gen suppression, a close toggle), and a stale one-shot would then suppress a later map
+// open that came from a vanilla path.
+static std::atomic<bool> g_companionDsMap{ false };
+static std::atomic<bool> g_companionMapMounted{ false };
+// Has GM_Inventory actually been observed open since the mount flag was raised? Gates the
+// self-clear above, which would otherwise fire in the window between raising the flag and Lua's
+// deferred AddUiMode creating the mode.
+static std::atomic<bool> g_companionMapModeSeen{ false };
 static std::atomic<bool> g_companionDsRestWait{ false };    // GM_Rest
 static std::atomic<bool> g_companionDsCrimeAlerts{ false }; // crime "reported" message: DS toast vs native
 static std::atomic<bool> g_companionDsSpellBuying{ false }; // GM_SpellBuying
@@ -217,6 +236,19 @@ extern "C" void companionAlchemyClearIngredient(int slot);
 extern "C" void companionAlchemySetName(const char* text);
 extern "C" void companionAlchemyCreate(int count);
 extern "C" void companionAlchemyCancel();
+// DS MAP (mapwindow.cpp). companionMapExportAll pushes the WHOLE map state in one go -- global
+// base + overlay, per-segment fog, notes and the clustered discovered locations. A full push rather
+// than live deltas is correct because GM_Inventory is a GUI mode: the sim is paused for as long as
+// the DS map is up, so none of it can change underneath. That is also why nothing hooks
+// GlobalMap::copyResult -- with no live overlay delta there is no camera-cleanup ordering to get
+// wrong. Notes are addressed by their index in the last export; every mutation re-exports.
+extern "C" void companionMapExportAll();
+extern "C" void companionMapUpdateVisible();
+// True while GM_Inventory is the active mode (the mode the companion map view runs in).
+extern "C" bool companionMapModeOpen();
+extern "C" void companionMapAddNote(float worldX, float worldY, bool exterior, const char* note);
+extern "C" void companionMapEditNote(int index, const char* note);
+extern "C" void companionMapDeleteNote(int index);
 // DS ENCHANTING (enchantingdialog.cpp). The item and the soul gem are addressed by SERIALIZED
 // RefId — their pickers browse a container store whose order is not stable — while EFFECTS are
 // addressed by INDEX, which is safe because mEffects is an ordered vector the player mutates
@@ -378,6 +410,22 @@ void drainCompanionCommands()
     // char-gen-suppressed open) harmlessly no-ops on the next all-tabs native inventory open.
     if (g_companionPendingMapActive.load(std::memory_order_relaxed) && companionTryActivateMap())
         g_companionPendingMapActive.store(false, std::memory_order_relaxed);
+
+    // Self-clear for the suppression flag, so an open that never happened cannot leave the native
+    // map suppressed forever. Two steps on purpose: the flag is raised BEFORE the mode exists (see
+    // CMP:openmap), so it may only be cleared once the mode has actually been SEEN open -- clearing
+    // on "not in GM_Inventory" alone would fire in the gap between the two and undo itself.
+    if (g_companionMapMounted.load())
+    {
+        if (companionMapModeOpen())
+            g_companionMapModeSeen.store(true);
+        else if (g_companionMapModeSeen.load())
+        {
+            g_companionMapModeSeen.store(false);
+            g_companionMapMounted.store(false);
+            companionMapUpdateVisible();
+        }
+    }
 
     // Same rationale: runs before the queue-empty early-return below, so it is a true per-frame
     // poll rather than something that only fires on frames carrying a command.
@@ -671,6 +719,52 @@ void drainCompanionCommands()
         {
             companionEnchantCancel();
         }
+        // DS map. map_mount is the MOUNT-SCOPED suppression flag (see g_companionMapMounted):
+        // Kotlin sets it when the overlay mounts and clears it when it unmounts, and
+        // updateVisible() reads the live value. Mounting also triggers the one full state push.
+        else if (cmd.rfind("CMP:map_mount:", 0) == 0)
+        {
+            const bool on = cmd[sizeof("CMP:map_mount:") - 1] == '1';
+            g_companionMapMounted.store(on);
+            if (!on)
+                g_companionMapModeSeen.store(false);
+            // Re-assert window visibility immediately so the native map hides/shows on the same
+            // frame the overlay appears/disappears, rather than waiting for the next GUI change.
+            companionMapUpdateVisible();
+            if (on)
+                companionMapExportAll();
+        }
+        else if (cmd.rfind("CMP:map_refresh", 0) == 0)
+        {
+            companionMapExportAll();
+        }
+        else if (cmd.rfind("CMP:map_note_add:", 0) == 0)
+        {
+            // "<worldX>|<worldY>|<note>" -- the note is the raw tail (it may contain spaces and ':').
+            // "<worldX>|<worldY>|<exterior 0/1>|<note>". The exterior flag is what lets a note
+            // dropped on the WORLD map be filed against the exterior cell under the tap even while
+            // the player is standing in an interior — see companionAddNote.
+            std::string arg = cmd.substr(sizeof("CMP:map_note_add:") - 1);
+            const std::size_t b1 = arg.find('|');
+            const std::size_t b2 = (b1 == std::string::npos) ? std::string::npos : arg.find('|', b1 + 1);
+            const std::size_t b3 = (b2 == std::string::npos) ? std::string::npos : arg.find('|', b2 + 1);
+            if (b3 != std::string::npos)
+                companionMapAddNote(static_cast<float>(std::atof(arg.substr(0, b1).c_str())),
+                    static_cast<float>(std::atof(arg.substr(b1 + 1, b2 - b1 - 1).c_str())),
+                    arg.substr(b2 + 1, b3 - b2 - 1) == "1",
+                    arg.substr(b3 + 1).c_str());
+        }
+        else if (cmd.rfind("CMP:map_note_edit:", 0) == 0)
+        {
+            std::string arg = cmd.substr(sizeof("CMP:map_note_edit:") - 1);
+            const std::size_t bar = arg.find('|');
+            if (bar != std::string::npos)
+                companionMapEditNote(std::atoi(arg.substr(0, bar).c_str()), arg.substr(bar + 1).c_str());
+        }
+        else if (cmd.rfind("CMP:map_note_delete:", 0) == 0)
+        {
+            companionMapDeleteNote(std::atoi(cmd.c_str() + (sizeof("CMP:map_note_delete:") - 1)));
+        }
         else if (cmd.rfind("CMP:training_cancel", 0) == 0)
         {
             companionTrainingCancel();
@@ -716,6 +810,20 @@ void drainCompanionCommands()
         // forwards to Lua (fall through into the generic handler below) for the mode toggle itself.
         else if (cmd.rfind("CMP:openmap", 0) == 0)
         {
+            // ANTI-FLICKER: raise the DS-map suppression flag HERE, not when the Kotlin overlay
+            // mounts. Kotlin only learns the map opened via COMPANION_MAPMODE, and its
+            // CMP:map_mount:1 then has to come back the other way -- a full round trip during
+            // which the native map window is already visible, which is the frame of vanilla map
+            // that flickers. Setting it on this side of the trip means the pushGuiMode that Lua's
+            // (deferred) AddUiMode triggers already sees the flag at its tail call to
+            // updateVisible, so the window is never painted at all.
+            //
+            // This does NOT re-introduce the one-shot lifetime bug the mount-scoped flag exists to
+            // avoid: the flag is still cleared by Kotlin on unmount, AND self-clears below once the
+            // mode has been seen open and then closed -- which covers the case where the open never
+            // happens at all (char-gen suppression), where no overlay ever mounts to clear it.
+            if (g_companionDsMap.load())
+                g_companionMapMounted.store(true);
             companionForceMapMaximized();
             // Request that the map become the active (on-screen) controller window once GM_Inventory
             // actually opens (deferred via the Lua AddUiMode this command triggers). The per-frame
@@ -784,6 +892,12 @@ Java_org_openmw_EngineActivity_installCompanionSink(JNIEnv* env, jobject /*thiz*
                                                "(Ljava/lang/String;)V");
     g_mapTextureMethod = env->GetStaticMethodID(g_companionClass, "onCompanionMapTexture",
                                                 "(IIIIIFFFFF[B)V");
+    g_globalMapBaseMethod = env->GetStaticMethodID(g_companionClass, "onCompanionGlobalMapBase",
+                                                   "(IIIIII[B)V");
+    g_globalMapOverlayMethod = env->GetStaticMethodID(g_companionClass, "onCompanionGlobalMapOverlay",
+                                                      "(II[B)V");
+    g_mapFogMethod = env->GetStaticMethodID(g_companionClass, "onCompanionMapFog",
+                                            "(IIIII[B)V");
     g_hudVisibilityMethod = env->GetStaticMethodID(g_companionClass, "onHudVisibilityChanged",
                                                    "(Z)V");
     env->DeleteLocalRef(cls);
@@ -856,6 +970,62 @@ extern "C" void companionDeliverMapTexture(
         e->ExceptionDescribe();
         e->ExceptionClear();
     }
+    e->DeleteLocalRef(arr);
+}
+
+// DS MAP binary payloads. These bypass the COMPANION_ text push because they are megabytes; each
+// bails before any JNI allocation when the sink is not installed.
+extern "C" void companionDeliverGlobalMapBase(
+    int width, int height, int minX, int minY, int cellSize, int channels, const unsigned char* data)
+{
+    Log(Debug::Info) << "COMPANION_DEBUG: global map base " << width << "x" << height
+                     << " minX=" << minX << " minY=" << minY << " cellSize=" << cellSize
+                     << " ch=" << channels;
+    if (!g_companionVm || !g_companionClass || !g_globalMapBaseMethod || !data) return;
+
+    JNIEnv* e = nullptr;
+    g_companionVm->AttachCurrentThread(&e, nullptr);
+    const jsize size = static_cast<jsize>(width) * height * channels;
+    jbyteArray arr = e->NewByteArray(size);
+    if (!arr) return;
+    e->SetByteArrayRegion(arr, 0, size, reinterpret_cast<const jbyte*>(data));
+    e->CallStaticVoidMethod(g_companionClass, g_globalMapBaseMethod, (jint)width, (jint)height,
+        (jint)minX, (jint)minY, (jint)cellSize, (jint)channels, arr);
+    if (e->ExceptionCheck()) { e->ExceptionDescribe(); e->ExceptionClear(); }
+    e->DeleteLocalRef(arr);
+}
+
+extern "C" void companionDeliverGlobalMapOverlay(int width, int height, const unsigned char* rgba)
+{
+    if (!g_companionVm || !g_companionClass || !g_globalMapOverlayMethod || !rgba) return;
+
+    JNIEnv* e = nullptr;
+    g_companionVm->AttachCurrentThread(&e, nullptr);
+    const jsize size = static_cast<jsize>(width) * height * 4;
+    jbyteArray arr = e->NewByteArray(size);
+    if (!arr) return;
+    e->SetByteArrayRegion(arr, 0, size, reinterpret_cast<const jbyte*>(rgba));
+    e->CallStaticVoidMethod(g_companionClass, g_globalMapOverlayMethod, (jint)width, (jint)height, arr);
+    if (e->ExceptionCheck()) { e->ExceptionDescribe(); e->ExceptionClear(); }
+    e->DeleteLocalRef(arr);
+}
+
+// ALPHA ONLY -- 1024 bytes for a 32x32 segment rather than 4096. LocalMap::updatePlayer writes
+// `val = alpha << 24` and never touches RGB, so the other three channels are provably zero.
+extern "C" void companionDeliverMapFog(
+    int segX, int segY, int isInterior, int width, int height, const unsigned char* alpha)
+{
+    if (!g_companionVm || !g_companionClass || !g_mapFogMethod || !alpha) return;
+
+    JNIEnv* e = nullptr;
+    g_companionVm->AttachCurrentThread(&e, nullptr);
+    const jsize size = static_cast<jsize>(width) * height;
+    jbyteArray arr = e->NewByteArray(size);
+    if (!arr) return;
+    e->SetByteArrayRegion(arr, 0, size, reinterpret_cast<const jbyte*>(alpha));
+    e->CallStaticVoidMethod(g_companionClass, g_mapFogMethod, (jint)segX, (jint)segY,
+        (jint)isInterior, (jint)width, (jint)height, arr);
+    if (e->ExceptionCheck()) { e->ExceptionDescribe(); e->ExceptionClear(); }
     e->DeleteLocalRef(arr);
 }
 
@@ -1041,6 +1211,10 @@ extern "C" bool companionDsLevelUp() { return g_companionDsLevelUp.load(); }
 extern "C" bool companionDsSpellmaking() { return g_companionDsSpellmaking.load(); }
 extern "C" bool companionDsEnchanting() { return g_companionDsEnchanting.load(); }
 extern "C" bool companionDsAlchemy() { return g_companionDsAlchemy.load(); }
+extern "C" bool companionDsMapActive()
+{
+    return g_companionDsMap.load() && g_companionMapMounted.load();
+}
 extern "C" bool companionDsRestWait() { return g_companionDsRestWait.load(); }
 extern "C" bool companionDsCrimeAlerts() { return g_companionDsCrimeAlerts.load(); }
 extern "C" bool companionDsSpellBuying() { return g_companionDsSpellBuying.load(); }
@@ -1086,6 +1260,12 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionDsAlchemy(JNIEnv*, jclass, jboolean on)
 {
     g_companionDsAlchemy.store(on == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_openmw_EngineActivity_setCompanionDsMap(JNIEnv*, jclass, jboolean on)
+{
+    g_companionDsMap.store(on == JNI_TRUE);
 }
 extern "C" JNIEXPORT void JNICALL
 Java_org_openmw_EngineActivity_setCompanionDsRestWait(JNIEnv*, jclass, jboolean on)

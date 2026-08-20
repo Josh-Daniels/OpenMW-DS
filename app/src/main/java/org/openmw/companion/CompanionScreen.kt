@@ -65,6 +65,7 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -98,6 +99,9 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -175,6 +179,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.sin
+import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.abs
 import kotlin.math.floor
@@ -1383,6 +1388,16 @@ private fun CompanionScreenContent() {
             alchemySession?.let { session ->
                 AlchemyOverlay(session = session)
             }
+        }
+
+        // DS map controls (bottom screen). The map itself is the TOP-screen overlay; this is the
+        // toggle, zoom and note UI. Mounting this composable is ALSO what sets the native
+        // suppression flag (see MapDsControls' DisposableEffect), so the native map window is
+        // hidden exactly as long as this is on screen and not one frame longer.
+        val mapDs by UiPreferences.gameUiModeFlow("game_ui_map").collectAsState()
+        val mapOpen by GameStateRepository.mapModeOpen.collectAsState()
+        if (mapDs == GameUiMode.DS && mapOpen) {
+            MapDsControls()
         }
 
         // Enchanting overlay. Driven by COMPANION_ENCHANTING_* (native EnchantingDialog) — the whole
@@ -7017,6 +7032,842 @@ private fun AlchemyTopFocusBox(
             .then(if (onTap != null) Modifier.clickable { onTap() } else Modifier)
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) { content() }
+}
+
+
+
+/* ================= DS Map ================= */
+
+/**
+ * Per-map zoom limits, in SCREEN PIXELS PER CELL (local) or per world-map cell (global).
+ *
+ * **There is no World/Local continuum any more.** Both maps are on screen at once, one per physical
+ * display, so there is nothing to flip BETWEEN — the old "zoom the local map out far enough and it
+ * becomes the world map" mechanic was removed with the single-surface design that needed it. What
+ * replaces it is two plain clamps whose job is to stop either map impersonating the other:
+ *  - the world map has a zoom-IN ceiling, so it cannot become a de-facto local map;
+ *  - the local map has a zoom-OUT floor, so it cannot become a de-facto world map.
+ *
+ * The floors are not constants: each is "the map exactly fills the viewport width", measured per
+ * surface (see [mapZoomBounds]), so neither can be shrunk into empty background — and because a map
+ * can be moved between screens, its floor is re-measured against whichever surface it is on.
+ */
+private const val MAP_LOCAL_MAX = 8000f
+private const val MAP_GLOBAL_FIT = 22f
+private const val MAP_GLOBAL_MAX = 260f
+
+/**
+ * The local map's DEFAULT zoom, matched to the HUD minimap so the two read as the same map at the
+ * same scale rather than two different views of it.
+ *
+ * The minimap works in exactly these units — `cellPx = size.minDimension / MINIMAP_CROP_FRACTION`
+ * — so this is that same expression against whichever surface the local map currently occupies.
+ * Derived per surface rather than stored as a constant, because the two displays differ in size and
+ * the map can be swapped between them.
+ */
+private fun mapLocalDefaultScale(viewport: Size): Float =
+    if (viewport.minDimension > 0f) viewport.minDimension / MINIMAP_CROP_FRACTION else 620f
+
+/** Marker size as a FRACTION OF A CELL, so markers are locked to the map and grow as you zoom in.
+ *
+ *  THE TWO MAPS NEED VERY DIFFERENT FRACTIONS, and that is why there are two constants. A cell is a
+ *  completely different size on screen in each — hundreds of px on the local map against tens on the
+ *  world map — so reusing one figure drew local markers hundreds of px across. The local figure is
+ *  vanilla's own: `doorMarkerCreated` uses `getMarkerCoordinates(x, y, data, 8)` against a
+ *  `local map widget size` of 512, i.e. 8/512. (Vanilla's custom/note markers use 16 in the same
+ *  units, which is what MAP_NOTE_CELLS mirrors.) */
+private const val MAP_PLACE_CELLS = 0.45f          // world map — a whole town inside one small cell
+private const val MAP_DOOR_CELLS = 8f / 512f       // local map — vanilla's door-marker ratio
+private const val MAP_NOTE_CELLS = 16f / 512f      // vanilla's custom-marker ratio
+
+/**
+ * How much LARGER the player arrow is drawn than the marker boxes on the same map.
+ *
+ * It is still sized in cell units, so it shrinks and grows with the map exactly as the icons do —
+ * these are just multipliers on that. Two reasons it needs them rather than matching the boxes 1:1:
+ * `compass.dds` carries transparent padding, so the visible arrow is only a fraction of the box it
+ * is drawn into; and the arrow conveys a DIRECTION, which needs more pixels to read than a static
+ * square does. The world figure is larger because its boxes stand for whole towns while the arrow
+ * still marks a single point.
+ */
+private const val MAP_ARROW_SCALE_LOCAL = 1.5f
+private const val MAP_ARROW_SCALE_WORLD = 4f
+
+/** Floor on the TOUCH target only (never the drawn box). Markers scale, so they get genuinely small
+ *  when zoomed out; the tap area stops shrinking here while the square carries on. */
+private val MAP_PLACE_MIN_HIT = 22.dp
+
+/** How long a tapped marker's name/note label stays up before auto-dismissing. Matches the HUD
+ *  minimap's own door-marker bubble so the two read the same. */
+private const val MAP_PLACE_LABEL_MS = 3000L
+
+/**
+ * The interior rotation parameters, or the identity for an exterior.
+ *
+ * **INTERIOR LOCAL MAPS ARE ROTATED BY THE CELL'S NORTHMARKER** (`mAngle = atan2(north.x, north.y)`
+ * about the expanded bounds centre) — the engine applies it to the map, the player dot and the
+ * arrow alike, and it is NOT exposed to Lua, so the companion receives `angle`/`center` on the
+ * segment export and replicates it. Exteriors are world-aligned, so angle 0 and the bounds terms
+ * fall out. Getting this wrong looks exactly like it sounds: everything sits at a CONSTANT rotation
+ * (commonly near 90 degrees) and never self-corrects as you move.
+ */
+private data class MapLocalFrame(
+    val angle: Float, val centerX: Float, val centerY: Float,
+    val boundsMinX: Float, val boundsMinY: Float
+)
+
+private fun mapLocalFrame(interior: Boolean, seg: InteriorSegment?): MapLocalFrame =
+    if (interior && seg != null)
+        MapLocalFrame(seg.angle, seg.centerX, seg.centerY, seg.boundsMinX, seg.boundsMinY)
+    else MapLocalFrame(0f, 0f, 0f, 0f, 0f)
+
+/**
+ * World position -> SEGMENT SPACE (units of one segment, +Y up), the single conversion the whole
+ * local map is built on. Rotates first, exactly as `LocalMap::updatePlayer` does, then shifts by the
+ * interior bounds. For an exterior this reduces to `world / cellSize`, i.e. plain cell coordinates.
+ *
+ * Everything downstream is a DIFFERENCE against the player's own value, so the `boundsMin` term
+ * cancels for markers and only matters for locating the segment grid itself.
+ */
+private fun mapLocalRaw(worldX: Float, worldY: Float, s: MapDsState, f: MapLocalFrame): Offset {
+    val ca = cos(f.angle); val sa = sin(f.angle)
+    val rx = ca * (worldX - f.centerX) - sa * (worldY - f.centerY) + f.centerX
+    val ry = sa * (worldX - f.centerX) + ca * (worldY - f.centerY) + f.centerY
+    return Offset((rx - f.boundsMinX) / s.cellSize, (ry - f.boundsMinY) / s.cellSize)
+}
+
+/** World position -> screen, on the LOCAL map. Player-centred, so the player's own position lands
+ *  exactly on (cx, cy) and the `boundsMin`/centre terms cancel. Shared by the door markers, the
+ *  notes and the hit tests so they cannot drift apart. */
+private fun mapLocalPos(
+    worldX: Float, worldY: Float, s: MapDsState, f: MapLocalFrame, px: Float, cx: Float, cy: Float
+): Offset {
+    val m = mapLocalRaw(worldX, worldY, s, f)
+    val p = mapLocalRaw(s.playerX, s.playerY, s, f)
+    return Offset(cx + (m.x - p.x) * px, cy - (m.y - p.y) * px)
+}
+
+/** A real WORLD POSITION -> screen, on the world map. This is the projection the player marker and
+ *  the notes use. [mapPlaceCentre] is the sibling for discovered locations, which differ only in
+ *  carrying integer cell indices and therefore needing the half-cell centring offset. */
+private fun mapWorldPos(
+    worldX: Float, worldY: Float, s: MapDsState, gi: GlobalMapInfo, k: Float, left: Float, top: Float
+): Offset = Offset(
+    left + (worldX / s.cellSize - gi.minX) * gi.cellPixels * k,
+    top + (gi.height - (worldY / s.cellSize - gi.minY) * gi.cellPixels) * k
+)
+
+/** The exact inverse of [mapWorldPos] — screen -> world position on the world map. Backs long-press
+ *  note placement, which must land the note where the finger was and NOT at the player. */
+private fun mapWorldFromScreen(
+    screen: Offset, s: MapDsState, gi: GlobalMapInfo, k: Float, left: Float, top: Float
+): Offset = Offset(
+    ((screen.x - left) / (gi.cellPixels * k) + gi.minX) * s.cellSize,
+    (gi.minY + (gi.height - (screen.y - top) / k) / gi.cellPixels) * s.cellSize
+)
+
+/** Screen centre of a world-map DISCOVERED-LOCATION marker.
+ *
+ *  THE +0.5 IS LOAD-BEARING. A place's coordinates are integer CELL INDICES (addVisitedLocation is
+ *  handed getGridX()/getGridY(), and a cluster's barycentre stays in that same index space), so the
+ *  bare index addresses the cell's south-west CORNER. The engine adds half a cell to reach the
+ *  centre before converting — `createMarkerCoords` calls
+ *      worldPosToGlobalMapImageSpace((x + 0.5f) * CellSizeInUnits, (y + 0.5f) * CellSizeInUnits, ...)
+ *  — and omitting it put every marker half a cell left of and below where it belonged. Notes and the
+ *  player position carry REAL world positions and must NOT get this offset; they use [mapWorldPos]. */
+private fun mapPlaceCentre(
+    p: MapPlace, gi: GlobalMapInfo, k: Float, left: Float, top: Float
+): Offset = Offset(
+    left + (p.x + 0.5f - gi.minX) * gi.cellPixels * k,
+    top + (gi.height - (p.y + 0.5f - gi.minY) * gi.cellPixels) * k
+)
+
+/** The world map's top-left corner on screen, given the surface size and the map's own pan/zoom. */
+private fun mapWorldOrigin(gi: GlobalMapInfo, k: Float, viewport: Size, offset: Offset): Offset =
+    Offset(
+        viewport.width / 2f + offset.x - gi.width * k / 2f,
+        viewport.height / 2f + offset.y - gi.height * k / 2f
+    )
+
+/** The pan offset that puts the PLAYER under the world map's centre. Derived by inverting
+ *  [mapWorldOrigin]: the image's left edge sits at `viewportCentre + offset - imageWidth/2`, so
+ *  solving "the player lands on the centre" for offset gives this. Meaningless indoors, where the
+ *  player's coordinates are in the interior's own space — callers gate on that. */
+private fun mapCentreOnPlayer(s: MapDsState, gi: GlobalMapInfo, scale: Float): Offset {
+    val k = scale / gi.cellPixels
+    val pcx = s.playerX / s.cellSize
+    val pcy = s.playerY / s.cellSize
+    return Offset(
+        (gi.width / 2f - (pcx - gi.minX) * gi.cellPixels) * k,
+        (gi.height / 2f - (gi.height - (pcy - gi.minY) * gi.cellPixels)) * k
+    )
+}
+
+private data class MapZoomBounds(val min: Float, val max: Float)
+
+/**
+ * Zoom limits for ONE map on ONE surface. The floor is "the map exactly fills the viewport width",
+ * so neither map can be shrunk into empty background; the ceiling is the fixed cap that stops each
+ * map impersonating the other.
+ *
+ * The LOCAL floor is measured from the segments that ACTUALLY have imagery, not from the declared
+ * grid: for an interior `mGrid` is `getInteriorGrid()` — the whole interior, however large — while
+ * only rendered segments are exported, so trusting the grid let big interiors zoom out into black.
+ */
+private fun mapZoomBounds(
+    view: MapView, viewportWidth: Float, info: GlobalMapInfo?, segmentKeys: Set<Pair<Int, Int>>
+): MapZoomBounds = when (view) {
+    MapView.GLOBAL -> {
+        val floor = if (info != null && info.width > 0 && viewportWidth > 0f)
+            viewportWidth / (info.width.toFloat() / info.cellPixels.coerceAtLeast(1))
+        else MAP_GLOBAL_FIT
+        MapZoomBounds(floor, maxOf(MAP_GLOBAL_MAX, floor))
+    }
+    MapView.LOCAL -> {
+        val cellsAcross = if (segmentKeys.isNotEmpty()) {
+            val xs = segmentKeys.map { it.first }
+            (xs.max() - xs.min() + 1).coerceAtLeast(1)
+        } else 3
+        val floor = if (viewportWidth > 0f) viewportWidth / cellsAcross else 620f
+        MapZoomBounds(floor, maxOf(MAP_LOCAL_MAX, floor))
+    }
+}
+
+/**
+ * Clamp the pan so a map always covers its surface — you can never scroll off into background.
+ *
+ * Asks where the map's rectangle would sit with a ZERO offset, then solves per axis for the offsets
+ * that keep it over the viewport. When the map is SMALLER than the viewport on an axis (possible
+ * vertically, since the floor only guarantees a width fit) the valid range is empty and the map is
+ * centred on that axis rather than jammed against an edge.
+ */
+private fun mapClampOffset(
+    offset: Offset, viewport: Size, scale: Float, view: MapView,
+    s: MapDsState?, info: GlobalMapInfo?, segmentKeys: Set<Pair<Int, Int>>, frame: MapLocalFrame
+): Offset {
+    if (viewport.width <= 0f || viewport.height <= 0f) return offset
+    val l: Float; val t: Float; val r: Float; val b: Float
+    if (view == MapView.GLOBAL) {
+        val gi = info ?: return offset
+        val k = scale / gi.cellPixels
+        val w = gi.width * k; val h = gi.height * k
+        l = viewport.width / 2f - w / 2f; r = l + w
+        t = viewport.height / 2f - h / 2f; b = t + h
+    } else {
+        val st = s ?: return offset
+        if (segmentKeys.isEmpty()) return offset
+        val xs = segmentKeys.map { it.first }
+        val ys = segmentKeys.map { it.second }
+        // SEGMENT space, via the same rotation-aware conversion the draw uses — otherwise the clamp
+        // disagrees with what is on screen indoors.
+        val pr = mapLocalRaw(st.playerX, st.playerY, st, frame)
+        l = viewport.width / 2f + (xs.min() - pr.x) * scale
+        r = viewport.width / 2f + (xs.max() + 1 - pr.x) * scale
+        // Y is inverted (segment +Y up, screen +Y down), so the MAX row is the TOP edge.
+        t = viewport.height / 2f - ((ys.max() + 1) - pr.y) * scale
+        b = viewport.height / 2f - (ys.min() - pr.y) * scale
+    }
+    fun clamp1(off: Float, lo: Float, hi: Float, extent: Float): Float {
+        val min = extent - hi
+        val max = -lo
+        return if (min > max) (min + max) / 2f else off.coerceIn(min, max)
+    }
+    return Offset(clamp1(offset.x, l, r, viewport.width), clamp1(offset.y, t, b, viewport.height))
+}
+
+/**
+ * Cross-screen DS map state. Both surfaces are separate compositions in separate windows, so
+ * everything they share lives here — the same technique [AlchemyUiState] and [EnchantUiState] use.
+ *
+ * **Pan/zoom is stored PER MAP, not per screen**, which is what makes swapping non-destructive: a
+ * map carries its own view with it when it changes displays, so a swap re-homes it rather than
+ * resetting it. (Its zoom FLOOR is re-measured against the new surface's width, so a map moving to a
+ * narrower screen can be nudged out to fit — that is the clamp doing its job, not a reset.)
+ */
+private object MapDsUiState {
+    /** false = world on top, local on bottom (the default). Swap exchanges the two. */
+    var swapped by mutableStateOf(false)
+    val topView: MapView get() = if (swapped) MapView.LOCAL else MapView.GLOBAL
+    val bottomView: MapView get() = if (swapped) MapView.GLOBAL else MapView.LOCAL
+
+    /** Each map applies its default zoom and auto-centres ONCE, on the first frame where its
+     *  surface has been measured and the data has arrived. Deliberately NOT remembered across
+     *  opens: going in and out of buildings invalidates a stored local view anyway, and you almost
+     *  always open the map to see where you are NOW rather than where you last looked. */
+    var worldInit by mutableStateOf(false)
+    var localInit by mutableStateOf(false)
+
+    var worldScale by mutableStateOf(MAP_GLOBAL_FIT)
+    var worldOffset by mutableStateOf(Offset.Zero)
+    var localScale by mutableStateOf(620f)   // replaced on first measure — see mapLocalDefaultScale
+    var localOffset by mutableStateOf(Offset.Zero)
+
+    fun scaleOf(v: MapView) = if (v == MapView.GLOBAL) worldScale else localScale
+    fun offsetOf(v: MapView) = if (v == MapView.GLOBAL) worldOffset else localOffset
+    fun setScale(v: MapView, value: Float) {
+        if (v == MapView.GLOBAL) worldScale = value else localScale = value
+    }
+    fun setOffset(v: MapView, value: Offset) {
+        if (v == MapView.GLOBAL) worldOffset = value else localOffset = value
+    }
+
+    /** The marker whose label is showing (a MapPlace, a DoorMarker or a MapNote) and its text. One
+     *  pair across both surfaces, so only one label is ever up. */
+    var selectedMarker by mutableStateOf<Any?>(null)
+    var selectedLabel by mutableStateOf("")
+
+    /** Note composer. [pendingWorld] is where a long-press landed; index >= 0 means editing an
+     *  existing note instead of creating one. */
+    var noteEditorOpen by mutableStateOf(false)
+    var noteEditIndex by mutableStateOf(-1)
+    var pendingWorld by mutableStateOf(Offset.Zero)
+    var noteDraft by mutableStateOf("")
+    var keyboardOpen by mutableStateOf(false)
+
+    fun reset() {
+        swapped = false
+        worldScale = MAP_GLOBAL_FIT; worldOffset = Offset.Zero
+        localScale = 620f; localOffset = Offset.Zero
+        worldInit = false; localInit = false
+        selectedMarker = null; selectedLabel = ""
+        noteEditorOpen = false; noteEditIndex = -1; noteDraft = ""; keyboardOpen = false
+    }
+}
+
+/**
+ * ONE map surface, used by BOTH screens — the top overlay and the bottom panel each render one of
+ * these with a different [view]. Owns its own gesture handling, zoom clamping and hit testing, all
+ * against the per-map pan/zoom in [MapDsUiState], so the two surfaces are fully independent and a
+ * swap simply hands each map to the other surface.
+ *
+ * The map imagery is ENGINE-ACCURATE throughout: the same local segment textures the HUD minimap
+ * draws, the engine's own world base and explored overlay, and the engine's own fog masks. Only the
+ * frame around it is DS-styled.
+ *
+ * [allowNotePlacement] is world-map-only, by design — a note is placed at a real exterior position,
+ * and the local map is the wrong surface to express that on.
+ */
+/** The map surface's own frame. Shared so the empty placeholder that holds the layout slot before
+ *  the first export arrives is pixel-identical to the real surface -- the panel is already there,
+ *  it just has no map in it yet, so nothing shifts when the data lands. */
+private fun Modifier.mapSurfaceFrame(): Modifier =
+    this.clip(RoundedCornerShape(3.dp)).background(Color(0xFF0B0906))
+        .border(2.dp, Bronze, RoundedCornerShape(3.dp))
+
+@Composable
+private fun MapSurface(
+    view: MapView,
+    /** Bottom surface only: an empty tap (one that hits no marker) closes the whole DS map. The top
+     *  overlay deliberately does not, since it sits over the game view. */
+    closeOnEmptyTap: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val s = GameStateRepository.mapDsState.collectAsState().value
+    // The map export is a full round trip behind this overlay mounting (the DisposableEffect's
+    // CMP:map_mount:1 -> the native push -> parse), so there are frames where the overlay is up
+    // with no state yet. Emitting NOTHING here would drop the parent Column's weight(1f) slot and
+    // let the action bar ride to the top of the screen for those frames -- the last of the reported
+    // open-flicker. Hold the slot with the empty frame instead. Do not restore the `?: return`.
+    if (s == null) {
+        Box(modifier.mapSurfaceFrame())
+        return
+    }
+    val exteriorMaps by GameStateRepository.exteriorMapBitmaps.collectAsState()
+    val interiorMaps by GameStateRepository.interiorMapBitmaps.collectAsState()
+    val fog by GameStateRepository.mapFog.collectAsState()
+    val base by GameStateRepository.globalMapBase.collectAsState()
+    val overlay by GameStateRepository.globalMapOverlay.collectAsState()
+    val info by GameStateRepository.globalMapInfo.collectAsState()
+    val notes by GameStateRepository.mapNotes.collectAsState()
+    val places by GameStateRepository.mapPlaces.collectAsState()
+    val doorMarkers by GameStateRepository.doorMarkers.collectAsState()
+
+    val isWorld = view == MapView.GLOBAL
+    // Player heading, and the game's own compass.dds arrow — the same asset and the same maths the
+    // HUD minimap uses, so the two agree. rotZ comes from COMPANION_STATS (the general state flow),
+    // not from the map export.
+    val playerRotZ = GameStateRepository.state.collectAsState().value.rotZ
+    val compassBitmap = rememberItemIcon("textures/compass.dds")
+    val frame = mapLocalFrame(s.interior, interiorMaps.values.firstOrNull())
+    val segmentKeys = if (s.interior) interiorMaps.keys else exteriorMaps.keys
+    // Notes belong to whichever map their cell does: exterior notes on the world map, interior ones
+    // on the local map. The `ext` flag is computed natively from the marker's own cell id, so it
+    // cannot disagree with how the note was filed.
+    val myNotes = remember(notes, isWorld) { notes.filter { it.exterior == isWorld } }
+
+    Box(modifier.mapSurfaceFrame()) {
+
+        // Measure this surface and clamp the map on it. Each surface measures ITSELF, so a map moved
+        // between screens is re-clamped against the new width without either surface knowing about
+        // the other.
+        BoxWithConstraints(Modifier.matchParentSize()) {
+            val d = LocalDensity.current
+            val wPx = with(d) { maxWidth.toPx() }
+            val hPx = with(d) { maxHeight.toPx() }
+            val vp = Size(wPx, hPx)
+            val bounds = mapZoomBounds(view, wPx, info, segmentKeys)
+            LaunchedEffect(view, bounds, vp, s, info, segmentKeys, MapDsUiState.scaleOf(view)) {
+                // ONE-SHOT INIT: default zoom + centred on the player. Runs on the first frame this
+                // surface has a size AND the data it needs, then never again for that map.
+                val gi = info   // local val: `info` is a delegated property and cannot smart-cast
+                if (isWorld && !MapDsUiState.worldInit && gi != null && wPx > 0f) {
+                    MapDsUiState.worldInit = true
+                    MapDsUiState.worldScale = MAP_GLOBAL_FIT.coerceIn(bounds.min, bounds.max)
+                    MapDsUiState.worldOffset = if (!s.interior)
+                        mapCentreOnPlayer(s, gi, MapDsUiState.worldScale) else Offset.Zero
+                } else if (!isWorld && !MapDsUiState.localInit && vp.minDimension > 0f) {
+                    MapDsUiState.localInit = true
+                    // The local map is player-centred by construction, so a zero offset already IS
+                    // centred on the player — only the zoom needs setting.
+                    MapDsUiState.localScale =
+                        mapLocalDefaultScale(vp).coerceIn(bounds.min, bounds.max)
+                    MapDsUiState.localOffset = Offset.Zero
+                }
+                val clamped = MapDsUiState.scaleOf(view).coerceIn(bounds.min, bounds.max)
+                if (clamped != MapDsUiState.scaleOf(view)) MapDsUiState.setScale(view, clamped)
+                MapDsUiState.setOffset(view, mapClampOffset(
+                    MapDsUiState.offsetOf(view), vp, clamped, view, s, info, segmentKeys, frame))
+            }
+        }
+
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(view, s, info, segmentKeys) {
+                    // One detector for pan AND pinch: a single finger reports pan with zoom == 1,
+                    // two fingers report both at once, so there is no mode switch to arbitrate.
+                    // This is the whole reason the DS map is Compose rather than a restyled native
+                    // window — OpenMW's SDL layer discards every touch and gesture event before
+                    // MyGUI sees it, so the native map has only ever had single-finger drag.
+                    detectTransformGestures { centroid, pan, zoom, _ ->
+                        val vp = Size(size.width.toFloat(), size.height.toFloat())
+                        val bounds = mapZoomBounds(view, vp.width, info, segmentKeys)
+                        val before = MapDsUiState.scaleOf(view)
+                        val after = (before * zoom).coerceIn(bounds.min, bounds.max)
+                        // Anchor on the pinch centroid so whatever is under the fingers stays there.
+                        // The map is drawn from an origin of (viewportCentre + offset), so keeping a
+                        // point fixed is centroid + (centre + offset - centroid) * k - centre.
+                        // Omitting the `centre` terms pivots around the panel's top-left instead — a
+                        // constant centre*(k-1) diagonal drift. Use the ACTUAL ratio, not the
+                        // requested one, or panning dies at a zoom limit.
+                        val k = after / before
+                        val centre = Offset(vp.width / 2f, vp.height / 2f)
+                        val moved = centroid + (centre + MapDsUiState.offsetOf(view) - centroid) * k -
+                            centre + pan
+                        MapDsUiState.setScale(view, after)
+                        MapDsUiState.setOffset(view, mapClampOffset(
+                            moved, vp, after, view, s, info, segmentKeys, frame))
+                    }
+                }
+                .pointerInput(view, places, info, doorMarkers, myNotes, s, interiorMaps, closeOnEmptyTap) {
+                    detectTapGestures(
+                        onLongPress = { tap ->
+                            // NOTE PLACEMENT — world map only. A note is an exterior position, and
+                            // the local map is the wrong surface to express that on.
+                            if (!isWorld) return@detectTapGestures
+                            val gi = info ?: return@detectTapGestures
+                            val vp = Size(size.width.toFloat(), size.height.toFloat())
+                            val k = MapDsUiState.scaleOf(view) / gi.cellPixels
+                            val o = mapWorldOrigin(gi, k, vp, MapDsUiState.offsetOf(view))
+                            val w = mapWorldFromScreen(tap, s, gi, k, o.x, o.y)
+                            UiSounds.play(UiSounds.Cue.TOGGLE)
+                            MapDsUiState.pendingWorld = w
+                            MapDsUiState.noteEditIndex = -1
+                            MapDsUiState.noteDraft = ""
+                            MapDsUiState.noteEditorOpen = true
+                            MapDsUiState.keyboardOpen = true
+                        },
+                        onTap = { tap ->
+                            val vp = Size(size.width.toFloat(), size.height.toFloat())
+                            val px = MapDsUiState.scaleOf(view)
+                            val off = MapDsUiState.offsetOf(view)
+                            val cx = vp.width / 2f + off.x
+                            val cy = vp.height / 2f + off.y
+                            val cells = if (isWorld) MAP_PLACE_CELLS else MAP_DOOR_CELLS
+                            val hit = maxOf(px * cells, MAP_PLACE_MIN_HIT.toPx())
+
+                            // Candidates as (key, screen position, label) so one nearest-wins test
+                            // serves places, doors and notes alike. NOTES FIRST in the list so a
+                            // note stacked on a town wins the tie — a note is the only thing here
+                            // the player can act on.
+                            val candidates = buildList<Triple<Any, Offset, String>> {
+                                val gi = info
+                                if (isWorld && gi != null) {
+                                    val k = px / gi.cellPixels
+                                    val o = mapWorldOrigin(gi, k, vp, off)
+                                    myNotes.forEach {
+                                        add(Triple(it, mapWorldPos(it.worldX, it.worldY, s, gi, k, o.x, o.y),
+                                            it.note))
+                                    }
+                                    places.filter { it.visible }.forEach {
+                                        add(Triple(it, mapPlaceCentre(it, gi, k, o.x, o.y),
+                                            if (it.count > 1) "${it.name} (${it.count})" else it.name))
+                                    }
+                                } else {
+                                    myNotes.forEach {
+                                        add(Triple(it, mapLocalPos(it.worldX, it.worldY, s, frame, px, cx, cy),
+                                            it.note))
+                                    }
+                                    doorMarkers.forEach {
+                                        add(Triple(it, mapLocalPos(it.worldX, it.worldY, s, frame, px, cx, cy),
+                                            it.name))
+                                    }
+                                }
+                            }
+                            val found = candidates
+                                .filter { (_, c, _) -> (c - tap).getDistance() <= hit }
+                                .minByOrNull { (_, c, _) -> (c - tap).getDistance() }
+
+                            when {
+                                found != null && found.first != MapDsUiState.selectedMarker -> {
+                                    MapDsUiState.selectedMarker = found.first
+                                    MapDsUiState.selectedLabel = found.third.ifBlank { "(empty note)" }
+                                }
+                                // A label is up: this tap DISMISSES it and is consumed — it must not
+                                // also close the map. A second tap then closes. Same rule the HUD
+                                // minimap uses for its door-marker bubble, and it is what stops a
+                                // dismiss from being read as "close".
+                                MapDsUiState.selectedMarker != null -> {
+                                    MapDsUiState.selectedMarker = null
+                                    MapDsUiState.selectedLabel = ""
+                                }
+                                // Empty tap on the bottom surface: close the DS map. Routed through
+                                // the same toggle the minimap tap uses, so the native mode pops via
+                                // the engine's own path rather than a special case.
+                                closeOnEmptyTap -> {
+                                    UiSounds.play(UiSounds.Cue.TOGGLE)
+                                    CompanionActions.openWorldMap()
+                                }
+                                else -> {
+                                    MapDsUiState.selectedMarker = null
+                                    MapDsUiState.selectedLabel = ""
+                                }
+                            }
+                        }
+                    )
+                }
+        ) {
+            // Nothing is drawn until this map has applied its default zoom and centring. The
+            // seed values in MapDsUiState are pre-measure placeholders — drawing with them paints
+            // one frame at the wrong scale (typically fully zoomed out) before the LaunchedEffect
+            // above corrects it, which is the second half of the open flicker. An empty panel for
+            // that frame is the honest thing to show.
+            val ready = if (isWorld) MapDsUiState.worldInit else MapDsUiState.localInit
+            if (ready) Canvas(Modifier.fillMaxSize()) {
+                val px = MapDsUiState.scaleOf(view)
+                val off = MapDsUiState.offsetOf(view)
+                val cx = size.width / 2f + off.x
+                val cy = size.height / 2f + off.y
+
+                if (!isWorld) {
+                    // ---- LOCAL: segment grid, centred on the player ----
+                    // Positions go through mapLocalRaw, which handles the interior NorthMarker
+                    // rotation. Plain world/cellSize is correct only for exteriors.
+                    val pr = mapLocalRaw(s.playerX, s.playerY, s, frame)
+                    for ((gx, gy) in segmentKeys) {
+                        val bmp = if (s.interior) interiorMaps[Pair(gx, gy)]?.bitmap
+                                  else exteriorMaps[Pair(gx, gy)]
+                        val left = cx + (gx - pr.x) * px
+                        val top = cy - ((gy + 1) - pr.y) * px
+                        if (bmp != null) {
+                            drawImage(bmp.asImageBitmap(),
+                                dstOffset = IntOffset(left.toInt(), top.toInt()),
+                                dstSize = IntSize(px.toInt(), px.toInt()))
+                        }
+                        val f = fog[Triple(gx, gy, s.interior)]
+                        if (f != null) {
+                            // ALPHA_8, opaque where unexplored; drawn over the segment in black,
+                            // which is how vanilla composites it.
+                            drawImage(f.asImageBitmap(),
+                                dstOffset = IntOffset(left.toInt(), top.toInt()),
+                                dstSize = IntSize(px.toInt(), px.toInt()),
+                                colorFilter = ColorFilter.tint(Color.Black))
+                        } else if (bmp != null) {
+                            // Imagery but NO fog mask means the player has never been in this cell:
+                            // the engine only calls initFogOfWar() for its own grid, while this
+                            // app's export force-renders the eight neighbours too. Drawing nothing
+                            // would render them FULLY EXPLORED — a free reveal — so fill solid.
+                            drawRect(Color.Black, topLeft = Offset(left, top), size = Size(px, px))
+                        }
+                    }
+                    doorMarkers.forEach { dm ->
+                        val c = mapLocalPos(dm.worldX, dm.worldY, s, frame, px, cx, cy)
+                        val half = px * MAP_DOOR_CELLS / 2f
+                        drawRect(
+                            color = if (MapDsUiState.selectedMarker == dm) BoneBright else BronzeLight,
+                            topLeft = Offset(c.x - half, c.y - half), size = Size(half * 2f, half * 2f),
+                            style = Stroke(width = (half * 0.3f).coerceIn(1.5f, 4f)))
+                    }
+                    myNotes.forEach { n ->
+                        val c = mapLocalPos(n.worldX, n.worldY, s, frame, px, cx, cy)
+                        drawMapNote(c, px * MAP_NOTE_CELLS / 2f, MapDsUiState.selectedMarker == n)
+                    }
+                    // Player arrow LAST so nothing can cover it. Indoors the heading is offset by
+                    // the map's own rotation — and SUBTRACTED, not added: the vertical bitmap flip
+                    // inverts the arrow's rotation sense, so position uses +angle (matching the
+                    // engine) while the arrow's screen convention is the mirror of it. Same
+                    // reasoning, and the same sign, as the HUD minimap.
+                    val deg = playerRotZ * (180f / PI.toFloat()) - frame.angle * (180f / PI.toFloat())
+                    drawPlayerArrow(
+                        Offset(cx, cy), px * MAP_DOOR_CELLS * MAP_ARROW_SCALE_LOCAL,
+                        deg, compassBitmap)
+                } else {
+                    // ---- WORLD: base terrain + explored overlay ----
+                    val gi = info
+                    val b = base
+                    if (gi != null && b != null) {
+                        val k = px / gi.cellPixels
+                        val o = mapWorldOrigin(gi, k, Size(size.width, size.height), off)
+                        val w = (gi.width * k).toInt(); val h = (gi.height * k).toInt()
+                        drawImage(b.asImageBitmap(),
+                            dstOffset = IntOffset(o.x.toInt(), o.y.toInt()), dstSize = IntSize(w, h))
+                        overlay?.let {
+                            drawImage(it.asImageBitmap(),
+                                dstOffset = IntOffset(o.x.toInt(), o.y.toInt()), dstSize = IntSize(w, h))
+                        }
+                        places.filter { it.visible }.forEach { p ->
+                            val c = mapPlaceCentre(p, gi, k, o.x, o.y)
+                            val half = px * MAP_PLACE_CELLS / 2f
+                            drawRect(
+                                color = if (MapDsUiState.selectedMarker == p) BoneBright else BronzeLight,
+                                topLeft = Offset(c.x - half, c.y - half),
+                                size = Size(half * 2f, half * 2f),
+                                style = Stroke(width = (px * 0.045f).coerceIn(1.5f, 6f)))
+                        }
+                        myNotes.forEach { n ->
+                            val c = mapWorldPos(n.worldX, n.worldY, s, gi, k, o.x, o.y)
+                            drawMapNote(c, px * MAP_PLACE_CELLS / 2.4f, MapDsUiState.selectedMarker == n)
+                        }
+                        // Player position — OUTDOORS ONLY. Indoors the player's coordinates are in
+                        // the interior's own space and mean nothing here; vanilla resolves a
+                        // last-known-exterior position, which is not exported, so the marker is
+                        // omitted rather than drawn somewhere wrong.
+                        if (!s.interior) {
+                            val c = mapWorldPos(s.playerX, s.playerY, s, gi, k, o.x, o.y)
+                            // No interior offset here: the world map is exterior-only, so the
+                            // heading is the raw yaw.
+                            drawPlayerArrow(c, px * MAP_PLACE_CELLS * MAP_ARROW_SCALE_WORLD,
+                                playerRotZ * (180f / PI.toFloat()), compassBitmap)
+                        }
+                    }
+                }
+            }
+
+            // Tapped marker's label. Auto-dismissed like the minimap's door-marker bubble.
+            MapDsUiState.selectedMarker?.let { marker ->
+                LaunchedEffect(marker) {
+                    delay(MAP_PLACE_LABEL_MS)
+                    if (MapDsUiState.selectedMarker == marker) {
+                        MapDsUiState.selectedMarker = null; MapDsUiState.selectedLabel = ""
+                    }
+                }
+                val isNote = marker is MapNote
+                Row(
+                    Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0xF2201A12))
+                        .border(1.dp, BronzeLight, RoundedCornerShape(3.dp))
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(MapDsUiState.selectedLabel, color = BoneBright, fontSize = 14.sp,
+                        fontFamily = MwDisplay, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 320.dp))
+                    // Note CRUD, relocated from the old list panel onto the marker itself — the
+                    // backend is unchanged, only the entry point moved.
+                    if (isNote) {
+                        val n = marker as MapNote
+                        Spacer(Modifier.width(10.dp))
+                        MapLabelAction("Edit") {
+                            MapDsUiState.noteEditIndex = n.index
+                            MapDsUiState.noteDraft = n.note
+                            MapDsUiState.noteEditorOpen = true
+                            MapDsUiState.keyboardOpen = true
+                            MapDsUiState.selectedMarker = null
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        MapLabelAction("Delete", BarterRed) {
+                            CompanionActions.mapDeleteNote(n.index)
+                            MapDsUiState.selectedMarker = null
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The player marker: the game's OWN `compass.dds` arrow, rotated to face. Falls back to the drawn
+ *  arrow while the texture is still being extracted or if extraction fails — the same asset, the
+ *  same fallback and the same neutral "up" orientation the HUD minimap uses, so the two cannot look
+ *  like different markers. */
+private fun DrawScope.drawPlayerArrow(
+    c: Offset, side: Float, degrees: Float, compass: androidx.compose.ui.graphics.ImageBitmap?
+) {
+    // [side] is in px, derived from the marker box side times MAP_ARROW_SCALE_* — so the arrow
+    // scales with the map exactly as the icons do, just drawn proportionally bigger. Taking the
+    // SIDE rather than a radius is deliberate: the call sites pass the same `px * <cells>`
+    // expression the boxes use, so the two cannot drift apart.
+    if (compass != null) {
+        rotate(degrees = degrees, pivot = c) {
+            drawImage(
+                image = compass,
+                dstOffset = IntOffset((c.x - side / 2f).toInt(), (c.y - side / 2f).toInt()),
+                dstSize = IntSize(side.toInt().coerceAtLeast(1), side.toInt().coerceAtLeast(1))
+            )
+        }
+    } else {
+        // drawArrow spans about 2.4r vertically, so this keeps the fallback's footprint equal to
+        // the box it stands in for.
+        drawArrow(c.x, c.y, side / 2.4f, degrees)
+    }
+}
+
+/** A note pin — a filled diamond, deliberately a different SHAPE from the hollow squares used for
+ *  door markers and discovered locations, so the two are distinguishable at any zoom. */
+private fun DrawScope.drawMapNote(c: Offset, half: Float, selected: Boolean) {
+    val r = half.coerceAtLeast(4f)
+    val path = Path().apply {
+        moveTo(c.x, c.y - r); lineTo(c.x + r, c.y); lineTo(c.x, c.y + r); lineTo(c.x - r, c.y); close()
+    }
+    drawPath(path, color = if (selected) BoneBright else BarterRed)
+    drawPath(path, color = Color.Black, style = Stroke(width = (r * 0.25f).coerceIn(1f, 3f)))
+}
+
+@Composable
+private fun MapLabelAction(label: String, colour: Color = BronzeLight, onTap: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(2.dp)).background(SlotBg)
+            .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+            .clickable { UiSounds.play(UiSounds.Cue.TOGGLE); onTap() }
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) { Text(label, color = colour, fontSize = 12.sp, fontFamily = MwDisplay) }
+}
+
+/** TOP-screen map surface — whichever map is currently assigned to the top display. */
+@Composable
+fun MapDsTopOverlay() {
+    // No `?: return` here either: MapSurface now draws its own empty frame, so the panel is painted
+    // from the first frame and the game view never shows through the gap before the export lands.
+    Box(Modifier.fillMaxSize().background(StoneDark).adaptiveDimTint().padding(8.dp)) {
+        MapSurface(MapDsUiState.topView, modifier = Modifier.fillMaxSize())
+    }
+}
+
+/**
+ * BOTTOM screen: the other map surface, plus the action bar.
+ *
+ * **This composable's `DisposableEffect` IS the native suppression flag** — mounting sends
+ * `CMP:map_mount:1` and disposing sends `:0`, which makes the flag mount-scoped by construction
+ * rather than by discipline, and is why the combined inventory view and the pinned HUD map stay
+ * native.
+ */
+@Composable
+private fun MapDsControls() {
+    val s = GameStateRepository.mapDsState.collectAsState().value
+    val info by GameStateRepository.globalMapInfo.collectAsState()
+    DisposableEffect(Unit) {
+        MapDsUiState.reset()
+        CompanionActions.mapMount(true)
+        onDispose {
+            CompanionActions.mapMount(false)
+            GameStateRepository.clearMapDs()
+            MapDsUiState.reset()
+        }
+    }
+
+    Box(
+        Modifier.fillMaxSize().zIndex(18f)
+            .pointerInput(Unit) { detectTapGestures { } }
+            .background(StoneDark)
+    ) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 6.dp)) {
+            MapSurface(
+                MapDsUiState.bottomView,
+                closeOnEmptyTap = true,
+                modifier = Modifier.weight(1f).fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+            MapDsActionBar(
+                onSwap = { MapDsUiState.swapped = !MapDsUiState.swapped },
+                onCentre = {
+                    // CENTRE recentres BOTH maps on the player, because both are on screen at once
+                    // and "where am I" is the question either one is being asked. On the local map
+                    // that is the origin (it is player-centred by construction); on the world map it
+                    // is the player's exterior position — and OUTDOORS ONLY, since indoors those
+                    // coordinates are in the interior's own space. Indoors the world map keeps its
+                    // current pan rather than jumping somewhere meaningless.
+                    MapDsUiState.localOffset = Offset.Zero
+                    val gi = info
+                    if (s != null && gi != null && !s.interior) {
+                        MapDsUiState.worldOffset =
+                            mapCentreOnPlayer(s, gi, MapDsUiState.worldScale)
+                    }
+                },
+                onClose = {
+                    // Closes via the same toggle the minimap tap uses, so the native mode pops
+                    // through the engine's own path rather than a special case.
+                    CompanionActions.openWorldMap()
+                }
+            )
+        }
+
+        // Note keyboard — touch-only by design, so it has to live on this panel even when the
+        // long-press happened on the top screen.
+        if (MapDsUiState.keyboardOpen) {
+            TextInputOverlay(
+                initialText = MapDsUiState.noteDraft,
+                title = if (MapDsUiState.noteEditIndex >= 0) "EDIT NOTE" else "NEW NOTE",
+                onConfirm = { text ->
+                    MapDsUiState.keyboardOpen = false
+                    MapDsUiState.noteEditorOpen = false
+                    if (MapDsUiState.noteEditIndex >= 0) {
+                        CompanionActions.mapEditNote(MapDsUiState.noteEditIndex, text)
+                    } else {
+                        // exterior = true: a world-map note is an exterior position even when the
+                        // player is standing in an interior. Without the flag the engine would file
+                        // it under the interior cell (getCellIdInWorldSpace ignores x/y there) and
+                        // it would never be drawn.
+                        CompanionActions.mapAddNote(
+                            MapDsUiState.pendingWorld.x, MapDsUiState.pendingWorld.y,
+                            exterior = true, note = text)
+                    }
+                },
+                onCancel = {
+                    MapDsUiState.keyboardOpen = false
+                    MapDsUiState.noteEditorOpen = false
+                }
+            )
+        }
+    }
+}
+
+/** Action bar along the bottom of the map panel. Styled as the app's [BottomTabBar] is — same frame,
+ *  same inner boxes — but these are ACTIONS, not a selection, so none is ever shown active. */
+@Composable
+private fun MapDsActionBar(onSwap: () -> Unit, onCentre: () -> Unit, onClose: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(3.dp))
+            .background(FloatStone)
+            .border(2.dp, Bronze, RoundedCornerShape(3.dp))
+            .padding(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        listOf("Swap Screens" to onSwap, "Centre" to onCentre, "Close" to onClose).forEach { (label, action) ->
+            Box(
+                Modifier.weight(1f)
+                    .clip(RoundedCornerShape(2.dp))
+                    .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                    .clickable { UiSounds.play(UiSounds.Cue.TOGGLE); action() }
+                    .padding(vertical = 13.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(label.uppercase(), color = Bone, fontSize = 14.sp, fontFamily = MwDisplay,
+                    textAlign = TextAlign.Center)
+            }
+        }
+    }
 }
 
 
@@ -17148,7 +17999,7 @@ private fun OptionsWelcomeBlock() {
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            "An app designed for use with the AYN Thor. This bottom screen is your companion. It shows Morrowind's menus (inventory, magic, " +
+            "An app designed for use with the AYN Thor. The bottom screen shows Morrowind's menus (inventory, magic, " +
                 "map, journal and stats) with touch. Tap Options below to set your layout. The options can also be accessed by pausing the game",
             color = Bone,
             fontSize = 18.sp,
@@ -17158,6 +18009,7 @@ private fun OptionsWelcomeBlock() {
         Spacer(Modifier.height(12.dp))
         Text(
             "New here? Options are set to Native by default but with touch screen enabled instead of mouse controls.\n" +
+                    "Tip: Try tapping and long tapping everything in the bottom screen UI.\n" +
             "Want your old UI (health, minimap) back? See the Top Screen section.\n",
             color = BoneDim,
             fontSize = 17.sp,

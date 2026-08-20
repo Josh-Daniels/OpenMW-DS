@@ -600,6 +600,72 @@ data class AlchemySession(
         tools.filter { it.type == type }.sortedBy { it.name.lowercase() }
 }
 
+/* ---------------- DS Map (COMPANION_MAP_*) ---------------- */
+
+/** One player-authored map note. [index] is its position in the last export and is the handle every
+ *  `CMP:map_note_*` command uses — safe as an ordinal because notes change only through those
+ *  commands, and each one re-exports. */
+data class MapNote(
+    val index: Int,
+    val worldX: Float,
+    val worldY: Float,
+    /** True when the note's cell is an EXTERIOR one — computed natively by asking what cell id this
+     *  note's own position would generate as an exterior and comparing, so it cannot disagree with
+     *  how the note was filed. Decides which map draws it: exterior notes belong to the world map,
+     *  interior ones to the local map. */
+    val exterior: Boolean = true,
+    val cell: String = "",
+    val note: String = ""
+)
+
+/** A discovered-location marker on the world map, ALREADY CLUSTERED by the engine.
+ *
+ *  [count] is how many same-named locations were merged onto this point; [x]/[y] are the barycentre
+ *  the native side computed. The clustering is not re-derived here on purpose — `addVisitedLocation`
+ *  builds MyGUI widgets directly and aggregates them, so a second implementation would be free to
+ *  drift from the one the native map draws. [visible] mirrors vanilla's own size-based hiding of
+ *  clusters too small to draw. */
+data class MapPlace(
+    val x: Float,
+    val y: Float,
+    val count: Int = 1,
+    val name: String = "",
+    val visible: Boolean = true
+)
+
+/** Header of a DS map push. Grid bounds are the local map's segment grid; [cellSize] is world units
+ *  per cell, which is what converts a world position into a segment-relative one. */
+data class MapDsState(
+    val interior: Boolean = false,
+    // Explicit MIN/MAX, deliberately NOT MyGUI's left/top/right/bottom. In an IntRect `top` is the
+    // MINIMUM Y and `bottom` the maximum (screen convention); carrying those names across meant the
+    // consumer looped bottom..top, which is an empty Kotlin range — the local map drew nothing.
+    val gridXMin: Int = 0,
+    val gridXMax: Int = 0,
+    val gridYMin: Int = 0,
+    val gridYMax: Int = 0,
+    val cellSize: Float = 8192f,
+    val playerX: Float = 0f,
+    val playerY: Float = 0f
+)
+
+/** Where the global map sits in cell space, so a world position can be placed on it.
+ *  `pixel = (worldCell - min) * cellPixels`. */
+data class GlobalMapInfo(
+    val width: Int,
+    val height: Int,
+    val minX: Int,
+    val minY: Int,
+    val cellPixels: Int
+)
+
+/** Which map. As of the Aug 20 2026 redesign this is the identity of a SURFACE'S CONTENT, not a
+ *  mode a screen is in: BOTH maps are on screen simultaneously, one per physical display, and
+ *  `MapDsUiState.swapped` decides which display each occupies. The engine keeps its own
+ *  single-view equivalent in `Settings::map().mGlobal`, a PERSISTED device-wide setting the DS map
+ *  deliberately never writes. */
+enum class MapView { LOCAL, GLOBAL }
+
 /* ---------------- DS Enchanting (COMPANION_ENCHANTING_*) ---------------- */
 
 /**

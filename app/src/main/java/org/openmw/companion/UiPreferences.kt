@@ -145,6 +145,17 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // slot order, the session-sticky apparatus prefill, countPotionsToBrew(), the validation order
     // and the per-potion success roll (CMP:alchemy_* bridges). The DS side is presentation only.
     GameUiElement("game_ui_alchemy", "Alchemy"),
+    // Map. Defaults to Vanilla like every element here (defaultMode is VANILLA for all of them —
+    // the app ships in an all-Vanilla state and the player opts in). That default matters more than
+    // usual for this one: the companion minimap tap already opened the native map long before the
+    // DS map existed, so leaving it alone until asked is the behaviour-preserving choice. While
+    // Vanilla the Kotlin side never sends the mount command, so the native suppression flag never
+    // goes true and the tap opens the plain native map exactly as it always did.
+    //
+    // SCOPE: this element governs ONLY the maximized map opened from the companion minimap. The
+    // combined inventory view (map beside Inventory/Spells/Stats) and the pinned HUD map are always
+    // native regardless of this setting — see companion-map-export.patch.
+    GameUiElement("game_ui_map", "Map"),
     GameUiElement("game_ui_restwait", "Rest / Wait"),
     // Crime "reported" alert: DS = a top-of-stack toast on the companion screen; Vanilla = the native
     // transient message (which renders bottom-center of the top screen, hidden behind DS panels).

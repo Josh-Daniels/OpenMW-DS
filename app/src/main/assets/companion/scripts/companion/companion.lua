@@ -3076,6 +3076,10 @@ local function dispatchCommand(command)
         -- a second minimap tap closes it instead of re-opening (mirrors B/Back).
         if interfaces.UI.getMode() == interfaces.UI.MODE.Interface then
             pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Interface) end)
+            -- DS map: report the CLOSE edge. Lua owns this toggle, so Lua is the only place that
+            -- reliably knows the map view's open state -- the companion cannot infer it from the
+            -- tap alone, because the same tap both opens and closes.
+            emit("COMPANION_MAPMODE:0")
         else
             -- Guard: only OPEN the map once the character is created. During character creation the
             -- in-game inventory/map GUI isn't available, and forcing it (AddUiMode Interface) wedges
@@ -3086,6 +3090,10 @@ local function dispatchCommand(command)
             pcall(function() ready = #types.Player.journal(self).journalTextEntries > 0 end)
             if ready then
                 self:sendEvent('AddUiMode', { mode = 'Interface', windows = { 'Map' } })
+                -- DS map: the OPEN edge. Gated by `ready` exactly like the open itself, so a
+                -- char-gen-suppressed tap reports nothing and the DS map never mounts over a
+                -- window that was never opened.
+                emit("COMPANION_MAPMODE:1")
             end
         end
         return
@@ -3419,6 +3427,17 @@ local function onUiModeChanged(data)
             emit('COMPANION_PAUSE_MENU_OPEN:')
         elseif data.oldMode == MM and data.newMode ~= MM then
             emit('COMPANION_PAUSE_MENU_CLOSED:')
+        end
+    end)
+
+    -- DS map: the CLOSE edge for every exit that is NOT the minimap tap -- controller B, Escape,
+    -- or anything else that pops the Interface mode. The tap's own two edges are emitted in the
+    -- openmap handler; this is what stops the DS map being left mounted (and the native map
+    -- suppressed) after the player backed out with B.
+    pcall(function()
+        local IF = interfaces.UI.MODE.Interface
+        if data.oldMode == IF and data.newMode ~= IF then
+            emit('COMPANION_MAPMODE:0')
         end
     end)
 

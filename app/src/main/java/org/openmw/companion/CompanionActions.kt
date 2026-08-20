@@ -242,6 +242,29 @@ object CompanionActions {
 
     fun enchantCancel() = runCommand("CMP:enchant_cancel")
 
+    // --- DS Map ---------------------------------------------------------------------------------
+    /** Mount/unmount the DS map. This is the MOUNT-SCOPED suppression flag the native side reads in
+     *  updateVisible(): true hides the native map window, false restores it. Deliberately not a
+     *  one-shot armed when the map is asked to open — that open can fail to happen (char-gen
+     *  suppression, a close toggle) and the stale flag would then suppress a later map open from a
+     *  vanilla path. Mounting also triggers the one full state push. */
+    fun mapMount(mounted: Boolean) = runCommand("CMP:map_mount:${if (mounted) 1 else 0}")
+
+    /** Re-push the whole map state. Rarely needed — the sim is paused while the DS map is up, so
+     *  nothing can change except through the note commands below, which re-export themselves. */
+    fun mapRefresh() = runCommand("CMP:map_refresh")
+
+    /** [exterior] forces the note to be filed against the EXTERIOR cell under the position, which
+     *  is what a world-map note always is. Without it the engine uses the player's active cell, and
+     *  `getCellIdInWorldSpace` ignores x/y for an interior — so a note dropped on the world map
+     *  while standing indoors would be filed under that interior and never drawn. */
+    fun mapAddNote(worldX: Float, worldY: Float, exterior: Boolean, note: String) =
+        runCommand("CMP:map_note_add:$worldX|$worldY|${if (exterior) 1 else 0}|$note")
+
+    fun mapEditNote(index: Int, note: String) = runCommand("CMP:map_note_edit:$index|$note")
+
+    fun mapDeleteNote(index: Int) = runCommand("CMP:map_note_delete:$index")
+
     fun trainSkill(index: Int) = runCommand("CMP:training_train:$index")
 
     // Cancel training (closes the native window + emits COMPANION_TRAINING_CLOSED). Idempotent —

@@ -156,6 +156,22 @@ object LogParser {
     // Resolved validation/result text, routed here INSTEAD of the native message box while
     // Enchanting is DS — that box renders bottom-centre of the TOP screen, behind the DS panels.
     const val P_ENCH_MSG = "COMPANION_ENCHANTING_MSG:"
+
+    // DS Map. The two big binary layers (global base / overlay) and fog do NOT come through here —
+    // they are megabytes and ride their own JNI byte-array deliveries. These prefixes carry only the
+    // small text state, pushed WHOLE once per DS-map mount (the sim is paused while it is up, so
+    // nothing can change underneath).
+    // Open/close of the map VIEW itself (the Interface mode showing only the Map window).
+    // Emitted from Lua, which owns the toggle -- the tap alone cannot tell open from close.
+    const val P_MAPMODE = "COMPANION_MAPMODE:"
+    const val P_MAP_STATE = "COMPANION_MAP_STATE:"
+    const val P_MAP_NOTES_START = "COMPANION_MAP_NOTES_START"
+    const val P_MAP_NOTE = "COMPANION_MAP_NOTE:"
+    const val P_MAP_NOTES_END = "COMPANION_MAP_NOTES_END"
+    const val P_MAP_PLACES_START = "COMPANION_MAP_PLACES_START"
+    const val P_MAP_PLACE = "COMPANION_MAP_PLACE:"
+    const val P_MAP_PLACES_END = "COMPANION_MAP_PLACES_END"
+    const val P_MAP_END = "COMPANION_MAP_END"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
     // Player standing (reputation/bounty/factions). Single small line, merged onto
@@ -793,6 +809,46 @@ object LogParser {
     } catch (e: Exception) {
         null
     }
+
+    /** Header of a COMPANION_MAP_STATE payload. */
+    fun parseMapState(json: String): MapDsState? = try {
+        val o = JSONObject(json)
+        MapDsState(
+            interior = o.optBoolean("interior", false),
+            gridXMin = o.optInt("gridXMin", 0),
+            gridXMax = o.optInt("gridXMax", 0),
+            gridYMin = o.optInt("gridYMin", 0),
+            gridYMax = o.optInt("gridYMax", 0),
+            cellSize = o.optDouble("cellSize", 8192.0).toFloat(),
+            playerX = o.optDouble("px", 0.0).toFloat(),
+            playerY = o.optDouble("py", 0.0).toFloat()
+        )
+    } catch (_: Exception) { null }
+
+    /** One COMPANION_MAP_NOTE row. */
+    fun parseMapNote(json: String): MapNote? = try {
+        val o = JSONObject(json)
+        MapNote(
+            index = o.optInt("i", 0),
+            worldX = o.optDouble("x", 0.0).toFloat(),
+            worldY = o.optDouble("y", 0.0).toFloat(),
+            exterior = o.optBoolean("ext", true),
+            cell = o.optString("cell", ""),
+            note = o.optString("note", "")
+        )
+    } catch (_: Exception) { null }
+
+    /** One COMPANION_MAP_PLACE row (a pre-clustered discovered location). */
+    fun parseMapPlace(json: String): MapPlace? = try {
+        val o = JSONObject(json)
+        MapPlace(
+            x = o.optDouble("x", 0.0).toFloat(),
+            y = o.optDouble("y", 0.0).toFloat(),
+            count = o.optInt("n", 1),
+            name = o.optString("name", ""),
+            visible = o.optBoolean("vis", true)
+        )
+    } catch (_: Exception) { null }
 
     /** Header of a COMPANION_ENCHANTING_STATE_START payload. Null if malformed, which leaves the
      *  buffered batch uncommitted (the previous session state stays on screen rather than blanking). */

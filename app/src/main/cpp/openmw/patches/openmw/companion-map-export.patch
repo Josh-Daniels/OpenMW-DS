@@ -1,0 +1,584 @@
+DS MAP: export the full map state and expose command bridges so the companion can replace the
+native MapWindow on the app-controlled maximize path, and suppress that window while it does.
+
+SCOPE IS DELIBERATELY NARROW. The DS map replaces the native map ONLY while its overlay is mounted,
+which happens only from the companion minimap tap (CMP:openmap). The combined GM_Inventory view
+(map alongside Inventory/Spells/Stats) and the pinned HUD map are untouched -- the map is one of
+four windows sharing GM_Inventory, so suppressing the MODE would have broken the four-pane layout,
+and the companion already has its own minimap for the pinned case.
+
+Four things are load-bearing:
+
+  * THE SUPPRESSION FLAG IS MOUNT-SCOPED, NOT A ONE-SHOT. companionDsMapActive() is
+    (element == DS) && (overlay currently mounted); Kotlin sets the mount half when the overlay
+    appears and clears it when it goes away, and updateVisible() reads the live value. A one-shot
+    armed when CMP:openmap is drained was rejected: that open can fail to happen at all (char-gen
+    suppression, a close toggle), and the stale flag would then suppress a LATER map open that came
+    from a vanilla path -- the same lifetime problem g_companionPendingMapActive already had to
+    solve. Exactly ONE window is gated, mMap, at both of its setVisible sites.
+
+  * THE STATE IS PUSHED WHOLE, ONCE PER MOUNT -- no live deltas. GM_Inventory is a GUI mode, so the
+    sim is PAUSED for as long as the DS map is up: the player cannot move, no cell can be explored,
+    no fog texel can change, and no marker can appear except through the note commands here (each
+    of which re-exports). A full snapshot is therefore not merely simpler, it is complete.
+    CONSEQUENTLY NOTHING HOOKS GlobalMap::copyResult. That hook would have been the live overlay
+    delta, and it is the one place in this design where a mistake leaks render cameras (copyResult
+    controls camera cleanup via its return value and its erase). Not needing it removes that risk
+    entirely rather than managing it.
+
+  * NEITHER LARGE PAYLOAD NEEDS A GPU READBACK. Both global map layers are already CPU-side images:
+    mBaseTexture carries its osg::Image, and mOverlayImage is a CPU copy the engine maintains
+    deliberately (exploreCell passes cpuCopy=true because write() PNG-encodes it into the save). Fog
+    is likewise authored on the CPU in LocalMap::updatePlayer and never rendered. So this is all
+    memcpy -- unlike the local map export's draw-callback + glReadPixels.
+
+  * FOG IS SENT ALPHA-ONLY. LocalMap::updatePlayer writes `val = alpha << 24` and never touches RGB,
+    so three quarters of a 32x32 RGBA segment is provably zero: 1024 bytes per segment instead of
+    4096, landing straight in an ALPHA_8 Bitmap.
+
+The World/Local toggle is deliberately NOT bridged. MapWindow::onWorldButtonClicked writes
+Settings::map().mGlobal, a persisted device-wide setting -- flipping the DS map's view would have
+silently and permanently changed the native map's own view state for a player who prefers it. The
+DS map owns its local/global choice entirely in Compose and writes nothing native.
+
+Discovered-location markers are exported ALREADY CLUSTERED, walked from mGlobalMapMarkers (the
+result of addVisitedLocation's barycentre aggregation) rather than re-derived on the Kotlin side --
+the same reasoning as the Enchanting effect display line.
+
+EditNoteDialog is gated inside its own setVisible(), so every show path is covered rather than just
+the call sites -- it is a WindowModal outside any GuiModeState, the same class of problem
+Enchanting's four modals had.
+
+Measured on the real load order (Morrowind+Tribunal+Bloodmoon): global map 954x864, base 2.36 MB,
+overlay 3.14 MB, ~6.3 MB peak for a single-shot base. Tiling would only be needed past roughly
+1400x1400, which takes a worldspace-expanding mod (e.g. Tamriel Rebuilt) to reach.
+
+Kotlin side: LogParser prefixes + three binary JNI deliveries -> MapDsSession in
+GameStateRepository -> MapDsTopOverlay (top screen) and MapDsControls (bottom). Added Aug 20 2026.
+
+--- a/apps/openmw/mwrender/globalmap.hpp
++++ b/apps/openmw/mwrender/globalmap.hpp
+@@ -70,6 +70,25 @@
+         osg::ref_ptr<osg::Texture2D> getBaseTexture();
+         osg::ref_ptr<osg::Texture2D> getOverlayTexture();
+ 
++#ifdef __ANDROID__
++        // COMPANION (DS map): read-only windows onto the two CPU-side images and the cell bounds.
++        //
++        // Both layers already live on the CPU -- mBaseTexture carries its osg::Image, and
++        // mOverlayImage is a CPU copy the engine maintains deliberately (requestOverlayTextureUpdate
++        // is called with cpuCopy=true from exploreCell, because write() PNG-encodes it into the
++        // savegame). So the DS export is a memcpy; there is NO GPU readback here, unlike the local
++        // map export's draw-callback + glReadPixels.
++        //
++        // The bounds are needed to map a world position to a pixel in these images, which is how the
++        // companion places the player arrow and the discovered-location markers.
++        // Defined in the .cpp: osg::Texture2D is only forward-declared in this header, so
++        // getImage() cannot be called inline here.
++        const osg::Image* companionBaseImage() const;
++        const osg::Image* companionOverlayImage() const { return mOverlayImage.get(); }
++        int companionMinX() const { return mMinX; }
++        int companionMinY() const { return mMinY; }
++#endif
++
+         void ensureLoaded();
+ 
+         void asyncWritePng();
+--- a/apps/openmw/mwrender/globalmap.cpp
++++ b/apps/openmw/mwrender/globalmap.cpp
+@@ -565,6 +565,13 @@
+         return mOverlayTexture;
+     }
+ 
++#ifdef __ANDROID__
++    const osg::Image* GlobalMap::companionBaseImage() const
++    {
++        return mBaseTexture ? mBaseTexture->getImage() : nullptr;
++    }
++#endif
++
+     void GlobalMap::ensureLoaded()
+     {
+         if (mWorkItem)
+--- a/apps/openmw/mwgui/mapwindow.hpp
++++ b/apps/openmw/mwgui/mapwindow.hpp
+@@ -202,6 +202,15 @@
+ 
+         void showDeleteButton(bool show);
+         bool getDeleteButtonShown();
++
++#ifdef __ANDROID__
++        // COMPANION: when the DS map owns note editing, this native modal must never be shown.
++        // It is a WindowModal created independently of any GuiModeState, so windowmanagerimp's
++        // window suppression does not reach it -- exactly the class of problem Enchanting's four
++        // modals had. Checked inside setVisible() so EVERY show path is covered, not just the two
++        // call sites in MapWindow.
++        void setVisible(bool visible) override;
++#endif
+         void setText(const std::string& text);
+         std::string getText();
+ 
+@@ -268,6 +277,25 @@
+ 
+         std::string_view getWindowIdForLua() const override { return "Map"; }
+ 
++#ifdef __ANDROID__
++        // COMPANION (DS map): called from drainCompanionCommands on the engine main thread.
++        //
++        // companionExportAll() pushes the ENTIRE map state in one go -- global base, global overlay,
++        // the fog of every loaded segment, custom notes and the clustered discovered locations. A
++        // full push (rather than live deltas) is correct and deliberate: the DS map only exists
++        // while GM_Inventory is up, which is a GUI mode, so the sim is PAUSED -- the player cannot
++        // move, no cell is explored, and none of this data can change while the map is on screen.
++        //
++        // That is also why nothing hooks GlobalMap::copyResult: with no live overlay delta there is
++        // no insertion point to get wrong, so the camera-cleanup leak that hook risked cannot occur.
++        void companionExportAll();
++        // Note CRUD, driven from the DS UI. All three go through CustomMarkerCollection, so the
++        // marker store, its per-cell keying and its eventMarkersChanged notification stay native.
++        void companionAddNote(float worldX, float worldY, bool exterior, std::string_view note);
++        void companionEditNote(int index, std::string_view note);
++        void companionDeleteNote(int index);
++#endif
++
+     protected:
+         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
+         void setActiveControllerWindow(bool active) override;
+@@ -331,6 +359,17 @@
+         EditNoteDialog mEditNoteDialog;
+         ESM::CustomMarker mEditingMarker;
+ 
++#ifdef __ANDROID__
++        // Flattened snapshot of the notes in the order they were exported, so the DS side can
++        // address them by index. Rebuilt on every export; the DS UI only ever acts on an index it
++        // was just given, and every mutation re-exports.
++        std::vector<ESM::CustomMarker> mCompanionNotes;
++        void companionExportGlobal();
++        void companionExportFog();
++        void companionExportNotes();
++        void companionExportPlaces();
++#endif
++
+         void onPinToggled() override;
+         void onTitleDoubleClicked() override;
+ 
+--- a/apps/openmw/mwgui/mapwindow.cpp
++++ b/apps/openmw/mwgui/mapwindow.cpp
+@@ -19,6 +19,17 @@
+ #include <components/myguiplatform/myguitexture.hpp>
+ #include <components/settings/values.hpp>
+ 
++#ifdef __ANDROID__
++#include <sstream>
++#include <vector>
++
++#include <MyGUI_LanguageManager.h>
++
++#include <components/debug/debuglog.hpp>
++
++#include "../mwmechanics/actorutil.hpp"
++#endif
++
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/windowmanager.hpp"
+ #include "../mwbase/world.hpp"
+@@ -59,6 +70,48 @@
+     };
+ }
+ 
++#ifdef __ANDROID__
++// COMPANION: true while the DS map overlay is actually MOUNTED and the "game_ui_map" element is DS.
++// Deliberately MOUNT-scoped rather than a one-shot armed when CMP:openmap is drained: the open can
++// fail to happen at all (char-gen suppression, a close toggle), and a stale one-shot would then
++// suppress a LATER map open that came from a vanilla path. Defined in androidmain.cpp.
++extern "C" bool companionDsMapActive();
++// Delivery of the large binary payloads. Text-sized state rides the ordinary COMPANION_ log push;
++// these do not, because they are megabytes.
++extern "C" void companionDeliverGlobalMapBase(
++    int width, int height, int minX, int minY, int cellSize, int channels, const unsigned char* data);
++extern "C" void companionDeliverGlobalMapOverlay(int width, int height, const unsigned char* rgba);
++extern "C" void companionDeliverMapFog(
++    int segX, int segY, int isInterior, int width, int height, const unsigned char* alpha);
++
++namespace
++{
++    // The live MapWindow, so the CMP:map_* bridges can reach it. Set in the ctor: unlike the
++    // service windows this one is constructed once and lives for the whole session, and the DS map
++    // is driven while it is hidden.
++    MWGui::MapWindow* gCompanionMapWindow = nullptr;
++
++    std::string companionMapJsonEscape(std::string_view sv)
++    {
++        std::string out;
++        out.reserve(sv.size() + 8);
++        for (const char c : sv)
++        {
++            switch (c)
++            {
++                case '"': out += "\\\""; break;
++                case '\\': out += "\\\\"; break;
++                case '\n': out += "\\n"; break;
++                case '\r': out += "\\r"; break;
++                case '\t': out += "\\t"; break;
++                default: out += c; break;
++            }
++        }
++        return out;
++    }
++}
++#endif
++
+ namespace MWGui
+ {
+     /// @brief A widget that changes its color when hovered.
+@@ -832,6 +885,9 @@
+ 
+         getWidget(mButton, "WorldButton");
+         mButton->eventMouseButtonClick += MyGUI::newDelegate(this, &MapWindow::onWorldButtonClicked);
++#ifdef __ANDROID__
++        gCompanionMapWindow = this;
++#endif
+ 
+         const bool global = Settings::map().mGlobal;
+ 
+@@ -1644,6 +1700,258 @@
+         if (!mLocalMapRender)
+             return true;
+         return mLocalMapRender->isPositionExplored(nX, nY, cellX, cellY);
++    }
++
++
++#ifdef __ANDROID__
++
++    // ================= Companion (DS map) =================
++    //
++    // The DS map replaces the native window ONLY on the app-controlled maximize path
++    // (companion minimap tap -> CMP:openmap). The combined GM_Inventory view and the pinned HUD
++    // map are deliberately untouched; the suppression flag is mount-scoped, so it is false in both.
++    //
++    // Everything here is a PUSH of engine state. Nothing about the map is reimplemented: the global
++    // map imagery is the engine's own two CPU images, fog is the engine's own per-segment alpha
++    // mask, notes go through CustomMarkerCollection, and the discovered-location clustering is the
++    // native barycentre aggregation, exported already-computed rather than re-derived on the far
++    // side (same reasoning as the Enchanting effect display line).
++
++    void MapWindow::companionExportGlobal()
++    {
++        if (!mGlobalMapRender)
++            return;
++        mGlobalMapRender->ensureLoaded();
++
++        const int w = mGlobalMapRender->getWidth();
++        const int h = mGlobalMapRender->getHeight();
++        if (w <= 0 || h <= 0)
++            return;
++
++        // BASE: GL_RGB, static, built once from the ESM land data. Measured 954x864 for
++        // Morrowind+Tribunal+Bloodmoon => ~2.36 MB, so it ships in ONE piece; tiling would only be
++        // needed past roughly 1400x1400, which takes a worldspace-expanding mod to reach.
++        if (const osg::Image* base = mGlobalMapRender->companionBaseImage())
++            if (base->data() && base->s() == w && base->t() == h)
++                companionDeliverGlobalMapBase(w, h, mGlobalMapRender->companionMinX(),
++                    mGlobalMapRender->companionMinY(), Settings::map().mGlobalMapCellSize,
++                    base->getPixelFormat() == GL_RGB ? 3 : 4, base->data());
++
++        // OVERLAY: GL_RGBA, the explored layer. Zero-filled at load; exploreCell blits each
++        // discovered cell in. Sent WHOLE rather than as deltas because it cannot change while the
++        // DS map is up (see companionExportAll).
++        if (const osg::Image* ov = mGlobalMapRender->companionOverlayImage())
++            if (ov->data() && ov->s() == w && ov->t() == h)
++                companionDeliverGlobalMapOverlay(w, h, ov->data());
++    }
++
++    void MapWindow::companionExportFog()
++    {
++        if (!mLocalMapRender)
++            return;
++        // Every segment currently on the local map, i.e. exactly what the player can see. The fog
++        // image is 32x32 RGBA but only ALPHA carries information -- LocalMap::updatePlayer writes
++        // `val = alpha << 24` and never touches RGB -- so only the alpha plane is sent: 1024 bytes
++        // per segment instead of 4096, and it lands straight in an ALPHA_8 Bitmap.
++        // NOTE the Y bounds: MyGUI::IntRect is a SCREEN rect, so createRect() builds it as
++        // {top = centreY - radius, bottom = centreY + radius} -- `top` holds the MINIMUM and
++        // `bottom` the MAXIMUM. Iterating bottom..top is an empty range, which is exactly the bug
++        // this loop had: no fog was ever exported. Both of the engine's own segment loops walk
++        // mGrid.top -> mGrid.bottom, and so does this one.
++        for (int x = mGrid.left; x <= mGrid.right; ++x)
++        {
++            for (int y = mGrid.top; y <= mGrid.bottom; ++y)
++            {
++                osg::ref_ptr<osg::Texture2D> tex = mLocalMapRender->getFogOfWarTexture(x, y);
++                if (!tex)
++                    continue;
++                const osg::Image* img = tex->getImage();
++                if (!img || !img->data())
++                    continue;
++                const int fw = img->s(), fh = img->t();
++                std::vector<unsigned char> alpha(static_cast<size_t>(fw) * fh);
++                const unsigned char* src = img->data();
++                for (size_t i = 0; i < alpha.size(); ++i)
++                    alpha[i] = src[i * 4 + 3];
++                // LocalMap keeps mInterior private and exposes no getter; LocalMapBase already
++                // knows which kind of cell is active, and the two cannot disagree -- the
++                // segment maps are switched by the same cell change.
++                const int isInterior = (mActiveCell && !mActiveCell->isExterior()) ? 1 : 0;
++                companionDeliverMapFog(x, y, isInterior, fw, fh, alpha.data());
++            }
++        }
++    }
++
++    void MapWindow::companionExportNotes()
++    {
++        mCompanionNotes.clear();
++        Log(Debug::Info) << "COMPANION_MAP_NOTES_START";
++        // Walked in the SAME order the export index refers to, so an index the DS side sends back
++        // addresses the marker it was shown.
++        for (auto it = mCustomMarkers.begin(); it != mCustomMarkers.end(); ++it)
++        {
++            const ESM::CustomMarker& m = it->second;
++            std::ostringstream o;
++            // Is this note an EXTERIOR one (world map) or an interior one (local map)? Derived by
++            // asking what cell id this note's own position WOULD generate as an exterior and
++            // comparing -- no RefId type introspection needed, and it cannot disagree with how
++            // companionAddNote files them.
++            const ESM::ExteriorCellLocation nloc = ESM::positionToExteriorCellLocation(m.mWorldX, m.mWorldY);
++            const bool nExt = (m.mCell == ESM::Cell::generateIdForCell(true, {}, nloc.mX, nloc.mY));
++            o << "COMPANION_MAP_NOTE:{\"i\":" << mCompanionNotes.size()
++              << ",\"ext\":" << (nExt ? "true" : "false")
++              << ",\"x\":" << m.mWorldX << ",\"y\":" << m.mWorldY
++              << ",\"cell\":\"" << companionMapJsonEscape(m.mCell.serializeText()) << "\""
++              << ",\"note\":\"" << companionMapJsonEscape(m.mNote) << "\"}";
++            Log(Debug::Info) << o.str();
++            mCompanionNotes.push_back(m);
++        }
++        Log(Debug::Info) << "COMPANION_MAP_NOTES_END";
+     }
+ 
++    void MapWindow::companionExportPlaces()
++    {
++        // The discovered-location markers, exported ALREADY CLUSTERED. addVisitedLocation builds
++        // MyGUI widgets directly and aggregates same-named locations onto their barycentre, scaling
++        // the widget by how many were merged -- there is no list to read, so mGlobalMapMarkers (the
++        // aggregation result) is what gets walked. Re-deriving that clustering on the Kotlin side
++        // would be a second implementation free to drift from this one.
++        Log(Debug::Info) << "COMPANION_MAP_PLACES_START";
++        for (const auto& entry : mGlobalMapMarkers)
++        {
++            const MapMarkerType& marker = entry.first;
++            if (!marker.widget)
++                continue;
++            std::ostringstream o;
++            o << "COMPANION_MAP_PLACE:{"
++              << "\"x\":" << marker.position.x() << ",\"y\":" << marker.position.y()
++              << ",\"n\":" << entry.second.size()
++              // RESOLVED, not the raw user string. createMarker stores the caption as the MyGUI
++              // tag "#{sCell=<name>}", and OpenMW's own handler (WindowManager::onRetrieveTag)
++              // turns that into translateCellName(<name>) — so replaceTags is what produces the
++              // name a player should see, correctly localised. Exporting the raw string put
++              // "#{sCell=Ebonheart}" on screen; stripping the wrapper in Kotlin instead would have
++              // hard-coded a tag format and skipped the translation.
++              << ",\"name\":\"" << companionMapJsonEscape(MyGUI::LanguageManager::getInstance()
++                     .replaceTags(MyGUI::UString(std::string(
++                         marker.widget->getUserString("Caption_TextOneLine")))).asUTF8()) << "\""
++              << ",\"vis\":" << (marker.widget->getVisible() ? "true" : "false") << "}";
++            Log(Debug::Info) << o.str();
++        }
++        Log(Debug::Info) << "COMPANION_MAP_PLACES_END";
++    }
++
++    void MapWindow::companionExportAll()
++    {
++        // ONE full push per DS-map mount. GM_Inventory is a GUI mode, so the sim is paused for as
++        // long as the DS map is up: the player cannot move, no cell can be explored, no fog texel
++        // can change and no marker can appear except through the DS note commands below (each of
++        // which re-exports). A full snapshot is therefore not merely simpler than live deltas -- it
++        // is complete.
++        const MWWorld::Ptr player = MWMechanics::getPlayer();
++        std::ostringstream o;
++        o << "COMPANION_MAP_STATE:{"
++          << "\"interior\":" << ((mActiveCell && !mActiveCell->isExterior()) ? "true" : "false")
++          // Exported as explicit MIN/MAX rather than MyGUI's left/top/right/bottom: in an
++          // IntRect `top` is the minimum Y and `bottom` the maximum (screen convention), which
++          // reads backwards for cell coordinates and is what made the consumer loop empty.
++          << ",\"gridXMin\":" << mGrid.left << ",\"gridXMax\":" << mGrid.right
++          << ",\"gridYMin\":" << mGrid.top << ",\"gridYMax\":" << mGrid.bottom
++          << ",\"cellSize\":" << cellSize;
++        if (!player.isEmpty())
++        {
++            const osg::Vec3f pos = player.getRefData().getPosition().asVec3();
++            o << ",\"px\":" << pos.x() << ",\"py\":" << pos.y();
++        }
++        o << "}";
++        Log(Debug::Info) << o.str();
++
++        companionExportGlobal();
++        companionExportFog();
++        companionExportNotes();
++        companionExportPlaces();
++        Log(Debug::Info) << "COMPANION_MAP_END";
++    }
++
++    void MapWindow::companionAddNote(float worldX, float worldY, bool exterior, std::string_view note)
++    {
++        if (!mActiveCell)
++            return;
++        // The cell a world position belongs to. The marker store is keyed BY CELL, so getting this
++        // wrong files the note somewhere it will never be drawn.
++        //
++        // `exterior` is forced true for a note dropped on the WORLD map, and that is not a
++        // convenience: getCellIdInWorldSpace returns mActiveCell->getId() whenever the active cell
++        // is an interior, IGNORING x/y — so long-pressing the world map while standing indoors
++        // would file an exterior position under the interior you happen to be in.
++        ESM::CustomMarker marker;
++        marker.mWorldX = worldX;
++        marker.mWorldY = worldY;
++        if (exterior || mActiveCell->isExterior())
++        {
++            const ESM::ExteriorCellLocation loc = ESM::positionToExteriorCellLocation(worldX, worldY);
++            marker.mCell = ESM::Cell::generateIdForCell(true, {}, loc.mX, loc.mY);
++        }
++        else
++            marker.mCell = mActiveCell->getId();
++        marker.mNote = std::string(note);
++        mCustomMarkers.addMarker(marker);
++        companionExportNotes();
++    }
++
++    void MapWindow::companionEditNote(int index, std::string_view note)
++    {
++        if (index < 0 || index >= static_cast<int>(mCompanionNotes.size()))
++            return;
++        // updateMarker (not delete+add): it is the collection's own edit path and keeps the
++        // marker's identity, so the eventMarkersChanged consumers see an update rather than a
++        // remove followed by an unrelated insert.
++        mCustomMarkers.updateMarker(mCompanionNotes[index], std::string(note));
++        companionExportNotes();
++    }
++
++    void MapWindow::companionDeleteNote(int index)
++    {
++        if (index < 0 || index >= static_cast<int>(mCompanionNotes.size()))
++            return;
++        mCustomMarkers.deleteMarker(mCompanionNotes[index]);
++        companionExportNotes();
++    }
++
++    void EditNoteDialog::setVisible(bool visible)
++    {
++        // COMPANION: never show this modal while the DS map owns note editing. Gated here rather
++        // than at the call sites so every path is covered. Hiding is always allowed, so a dialog
++        // already up when the element flips can still be dismissed.
++        if (visible && companionDsMapActive())
++            return;
++        WindowModal::setVisible(visible);
++    }
++
++// COMPANION: DS map bridges, driven from drainCompanionCommands on the engine main thread. Each is
++// a no-op unless the map window exists, so a stale command can do nothing.
++extern "C" void companionMapExportAll()
++{
++    if (gCompanionMapWindow)
++        gCompanionMapWindow->companionExportAll();
+ }
++
++extern "C" void companionMapAddNote(float worldX, float worldY, bool exterior, const char* note)
++{
++    if (gCompanionMapWindow && note)
++        gCompanionMapWindow->companionAddNote(worldX, worldY, exterior, note);
++}
++
++extern "C" void companionMapEditNote(int index, const char* note)
++{
++    if (gCompanionMapWindow && note)
++        gCompanionMapWindow->companionEditNote(index, note);
++}
++
++extern "C" void companionMapDeleteNote(int index)
++{
++    if (gCompanionMapWindow)
++        gCompanionMapWindow->companionDeleteNote(index);
++}
++#endif
++}
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -358,6 +358,10 @@
+         // move/resize (onWindowChangeCoord). Not on the MWBase interface -- reached from
+         // androidmain.cpp via the companionForceMapMaximized() bridge (downcast).
+         void companionForceMapMaximized();
++
++        // COMPANION (DS map): public wrapper so the extern "C" bridge can re-assert window
++        // visibility the moment the DS-map mount flag flips. updateVisible() itself is private.
++        void companionMapUpdateVisible();
+ 
+         // COMPANION: when GM_Inventory is the active mode and it is the companion's map-only view
+         // (AddUiMode windows={'Map'}), make the Map the active controller window so it is
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -680,6 +680,10 @@
+     extern "C" bool companionDsEnchanting();
+     extern "C" bool companionDsAlchemy();
+     extern "C" bool companionDsRestWait();
++    // COMPANION (DS map): true only while the DS map overlay is MOUNTED and "game_ui_map" is DS.
++    // Mount-scoped by design -- see the note in mapwindow.cpp. False for the combined GM_Inventory
++    // view and for the pinned HUD map, which stay native and untouched.
++    extern "C" bool companionDsMapActive();
+ #endif
+ 
+ #ifdef __ANDROID__
+@@ -809,7 +813,11 @@
+         // If in game mode (or interactive messagebox), show the pinned windows
+         if (mGuiModes.empty())
+         {
+-            mMap->setVisible(mMap->pinned() && !isConsoleMode() && !(mForceHidden & GW_Map) && (mAllowed & GW_Map));
++            // COMPANION: `&& !companionDsMapActive()` -- the DS map only ever mounts from the
++            // app's own CMP:openmap path, so this is false here in normal play and the pinned map
++            // behaves exactly as before.
++            mMap->setVisible(mMap->pinned() && !isConsoleMode() && !(mForceHidden & GW_Map)
++                && (mAllowed & GW_Map) && !companionDsMapActive());
+             mStatsWindow->setVisible(
+                 mStatsWindow->pinned() && !isConsoleMode() && !(mForceHidden & GW_Stats) && (mAllowed & GW_Stats));
+             mInventoryWindow->setVisible(mInventoryWindow->pinned() && !isConsoleMode()
+@@ -864,7 +872,10 @@
+             // user has opened/closed (the 'shown' variable) and by what
+             // windows we are allowed to show (the 'allowed' var.)
+             int eff = mShown & mAllowed & ~mForceHidden;
+-            mMap->setVisible(eff & GW_Map);
++            // COMPANION: the ONLY window touched here. Inventory/Spells/Stats are deliberately
++            // left alone -- suppressing the whole mode would have broken the four-pane layout, so
++            // the DS map replaces just this one, and only while its overlay is mounted.
++            mMap->setVisible((eff & GW_Map) && !companionDsMapActive());
+             mInventoryWindow->setVisible(eff & GW_Inventory);
+             mSpellWindow->setVisible(eff & GW_Magic);
+             mStatsWindow->setVisible(eff & GW_Stats);
+@@ -2319,6 +2330,30 @@
+     // is reachable without a header; downcasts the single concrete WindowManager to reach the
+     // member (companionForceMapMaximized is not on the MWBase interface). MyGUI is
+     // single-threaded, so this MUST run on the engine main thread (drainCompanionCommands does).
++    // COMPANION (DS map): re-assert window visibility right after the mount flag flips, so the
++    // native map hides on the same frame the DS overlay appears instead of waiting for the next
++    // GUI state change. updateVisible() is private and not on the MWBase interface, so this lives
++    // here and downcasts exactly as companionForceMapMaximized does.
++    void WindowManager::companionMapUpdateVisible()
++    {
++        updateVisible();
++    }
++
++    // COMPANION (DS map): is the companion's map view mode actually open? Used by the suppression
++    // flag's self-clear in drainCompanionCommands, so a map open that never happened cannot leave
++    // the native map hidden. GM_Inventory is the mode the map view runs in — there is no GM_Map.
++    extern "C" bool companionMapModeOpen()
++    {
++        MWBase::WindowManager* wm = MWBase::Environment::get().getWindowManager();
++        return wm->containsMode(MWGui::GM_Inventory);
++    }
++
++    extern "C" void companionMapUpdateVisible()
++    {
++        MWBase::WindowManager* wm = MWBase::Environment::get().getWindowManager();
++        static_cast<WindowManager*>(wm)->companionMapUpdateVisible();
++    }
++
+     extern "C" void companionForceMapMaximized()
+     {
+         // getWindowManager() returns a Misc::NotNullPtr (never null) that converts to the base
