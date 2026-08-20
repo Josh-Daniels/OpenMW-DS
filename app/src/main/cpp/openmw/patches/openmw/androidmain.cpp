@@ -217,6 +217,28 @@ extern "C" void companionAlchemyClearIngredient(int slot);
 extern "C" void companionAlchemySetName(const char* text);
 extern "C" void companionAlchemyCreate(int count);
 extern "C" void companionAlchemyCancel();
+// DS ENCHANTING (enchantingdialog.cpp). The item and the soul gem are addressed by SERIALIZED
+// RefId — their pickers browse a container store whose order is not stable — while EFFECTS are
+// addressed by INDEX, which is safe because mEffects is an ordered vector the player mutates
+// directly and GM_Enchanting pauses the sim. Every bridge forwards to the window's OWN handlers, so
+// the cast-style state machine, the accumulating cost, the capacity check, the price/charge/chance
+// formulas, the seven Buy validations (including the stolen-item confiscation) and the self-enchant
+// roll that consumes the soul gem whatever the outcome all stay native.
+extern "C" void companionEnchantSelectItem(const char* refId);
+extern "C" void companionEnchantClearItem();
+extern "C" void companionEnchantSelectSoul(const char* refId);
+extern "C" void companionEnchantClearSoul();
+extern "C" void companionEnchantSetName(const char* text);
+extern "C" void companionEnchantEffectAdd(const char* effectId);
+extern "C" void companionEnchantEffectArg(const char* effectId, const char* argId, bool isSkill);
+extern "C" void companionEnchantEffectEdit(int index);
+extern "C" void companionEnchantEffectSet(int index, int range, int magMin, int magMax, int duration, int area);
+extern "C" void companionEnchantEffectDelete(int index);
+extern "C" void companionEnchantEffectOk();
+extern "C" void companionEnchantEffectCancel();
+extern "C" void companionEnchantCastTypeNext();
+extern "C" void companionEnchantBuy();
+extern "C" void companionEnchantCancel();
 // Bottom-screen merchant repair (merchantrepair.cpp). Items addressed by ordinal index.
 extern "C" void companionRepairItem(int index);
 extern "C" void companionRepairAll();
@@ -551,6 +573,103 @@ void drainCompanionCommands()
         else if (cmd.rfind("CMP:alchemy_create:", 0) == 0)
         {
             companionAlchemyCreate(std::atoi(cmd.c_str() + (sizeof("CMP:alchemy_create:") - 1)));
+        }
+        // Enchanting (CMP:enchant_*) is driven natively — MWMechanics::Enchanting owns the cast-style
+        // state machine, the accumulating per-effect cost (and its deliberate precise/imprecise
+        // split), the enchant-points capacity check, the price/charge/success-chance formulas and the
+        // self-enchant roll; EffectEditorBase owns the effect list, the 8-effect cap and the
+        // add-then-remove-on-cancel semantics. None of it is reachable from Lua and none of it is
+        // reimplemented. See companion-enchanting-export.patch.
+        //
+        // ORDERING NOTE: the longer prefixes must be tested BEFORE their shorter relatives —
+        // "CMP:enchant_cancel" would otherwise swallow nothing, but "CMP:enchant_effect_cancel"
+        // shares the "CMP:enchant_" stem with everything here, and "CMP:enchant_item_clear" shares
+        // "CMP:enchant_item_" with _item_select. Each branch below matches a full, distinct prefix,
+        // and the two _c forms (_cancel vs _casttype_next) are distinct from the third character on.
+        else if (cmd.rfind("CMP:enchant_item_select:", 0) == 0)
+        {
+            companionEnchantSelectItem(cmd.c_str() + (sizeof("CMP:enchant_item_select:") - 1));
+        }
+        else if (cmd.rfind("CMP:enchant_item_clear", 0) == 0)
+        {
+            companionEnchantClearItem();
+        }
+        else if (cmd.rfind("CMP:enchant_soul_select:", 0) == 0)
+        {
+            companionEnchantSelectSoul(cmd.c_str() + (sizeof("CMP:enchant_soul_select:") - 1));
+        }
+        else if (cmd.rfind("CMP:enchant_soul_clear", 0) == 0)
+        {
+            companionEnchantClearSoul();
+        }
+        else if (cmd.rfind("CMP:enchant_name:", 0) == 0)
+        {
+            // Raw tail — an enchantment name may contain spaces and ':'.
+            std::string text = cmd.substr(sizeof("CMP:enchant_name:") - 1);
+            companionEnchantSetName(text.c_str());
+        }
+        else if (cmd.rfind("CMP:enchant_effect_add:", 0) == 0)
+        {
+            companionEnchantEffectAdd(cmd.c_str() + (sizeof("CMP:enchant_effect_add:") - 1));
+        }
+        else if (cmd.rfind("CMP:enchant_effect_skill:", 0) == 0
+            || cmd.rfind("CMP:enchant_effect_attribute:", 0) == 0)
+        {
+            // "<effectId>|<skillId or attributeId>". Both ids can contain spaces, so split on the
+            // first '|' only — the effect id never contains one.
+            const bool isSkill = cmd.rfind("CMP:enchant_effect_skill:", 0) == 0;
+            const std::size_t head
+                = isSkill ? sizeof("CMP:enchant_effect_skill:") - 1 : sizeof("CMP:enchant_effect_attribute:") - 1;
+            std::string arg = cmd.substr(head);
+            const std::size_t bar = arg.find('|');
+            if (bar != std::string::npos)
+                companionEnchantEffectArg(arg.substr(0, bar).c_str(), arg.substr(bar + 1).c_str(), isSkill);
+        }
+        else if (cmd.rfind("CMP:enchant_effect_edit:", 0) == 0)
+        {
+            companionEnchantEffectEdit(std::atoi(cmd.c_str() + (sizeof("CMP:enchant_effect_edit:") - 1)));
+        }
+        else if (cmd.rfind("CMP:enchant_effect_set:", 0) == 0)
+        {
+            // "<index>|<range>|<magMin>|<magMax>|<duration>|<area>" — six plain integers.
+            std::string arg = cmd.substr(sizeof("CMP:enchant_effect_set:") - 1);
+            int v[6] = { -1, 0, 1, 1, 1, 0 };
+            std::size_t pos = 0;
+            int n = 0;
+            while (n < 6)
+            {
+                const std::size_t bar = arg.find('|', pos);
+                v[n++] = std::atoi(arg.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos).c_str());
+                if (bar == std::string::npos)
+                    break;
+                pos = bar + 1;
+            }
+            if (n == 6)
+                companionEnchantEffectSet(v[0], v[1], v[2], v[3], v[4], v[5]);
+        }
+        else if (cmd.rfind("CMP:enchant_effect_delete:", 0) == 0)
+        {
+            companionEnchantEffectDelete(std::atoi(cmd.c_str() + (sizeof("CMP:enchant_effect_delete:") - 1)));
+        }
+        else if (cmd.rfind("CMP:enchant_effect_ok", 0) == 0)
+        {
+            companionEnchantEffectOk();
+        }
+        else if (cmd.rfind("CMP:enchant_effect_cancel", 0) == 0)
+        {
+            companionEnchantEffectCancel();
+        }
+        else if (cmd.rfind("CMP:enchant_casttype_next", 0) == 0)
+        {
+            companionEnchantCastTypeNext();
+        }
+        else if (cmd.rfind("CMP:enchant_buy", 0) == 0)
+        {
+            companionEnchantBuy();
+        }
+        else if (cmd.rfind("CMP:enchant_cancel", 0) == 0)
+        {
+            companionEnchantCancel();
         }
         else if (cmd.rfind("CMP:training_cancel", 0) == 0)
         {

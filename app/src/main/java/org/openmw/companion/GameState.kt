@@ -600,6 +600,211 @@ data class AlchemySession(
         tools.filter { it.type == type }.sortedBy { it.name.lowercase() }
 }
 
+/* ---------------- DS Enchanting (COMPANION_ENCHANTING_*) ---------------- */
+
+/**
+ * `ESM::MagicEffect::Flags` — the bits the enchanting screen reads. The RAW flag word is exported
+ * rather than precomputed booleans because which range options and which sliders are legal depends
+ * on the LIVE cast style as well as the record: Constant Effect force-allows Self, force-denies
+ * Touch/Target and hides Duration, and the player flips that with the Type button while the browse
+ * list stands still. Recompute with [EnchantSession.allowSelf] and friends, never cache.
+ */
+object MagicEffectFlag {
+    const val TARGET_SKILL = 0x1
+    const val TARGET_ATTRIBUTE = 0x2
+    const val NO_DURATION = 0x4
+    const val NO_MAGNITUDE = 0x8
+    const val CAST_SELF = 0x40
+    const val CAST_TOUCH = 0x80
+    const val CAST_TARGET = 0x100
+}
+
+/** `ESM::RangeType`. */
+object EnchantRange {
+    const val SELF = 0
+    const val TOUCH = 1
+    const val TARGET = 2
+
+    fun label(range: Int): String = when (range) {
+        SELF -> "Self"
+        TOUCH -> "Touch"
+        else -> "Target"
+    }
+}
+
+/** `ESM::Enchantment::Type`. Which of these are REACHABLE depends on the item and the soul — the
+ *  engine's own `nextCastStyle()` state machine — so the DS side never derives it; the exporter
+ *  sends the current one plus [EnchantSession.castCycle]. */
+object EnchantCastType {
+    const val CAST_ONCE = 0
+    const val WHEN_STRIKES = 1
+    const val WHEN_USED = 2
+    const val CONSTANT_EFFECT = 3
+}
+
+/** Fixed slider bounds, straight out of `openmw_edit_effect.layout`. They are NOT adjusted at
+ *  runtime — not by skill, not by the soul gem, not by the effect's base cost — so these are plain
+ *  constants on both sides of the bridge (the native `companionEffectSet` clamps to the same
+ *  numbers, so a malformed command cannot write out of range either). */
+object EnchantBounds {
+    const val MAG_MIN = 1
+    const val MAG_MAX = 100
+    const val DURATION_MIN = 1
+    const val DURATION_MAX = 1440
+    const val AREA_MIN = 0
+    const val AREA_MAX = 50
+}
+
+/** The item or the soul-gem slot. A cleared slot is `present = false`; [maxPoints] is only
+ *  meaningful on the item slot and [charge]/[soul] only on the soul slot. */
+data class EnchantSlotItem(
+    val present: Boolean = false,
+    val id: String = "",
+    val name: String = "",
+    val icon: String = "",
+    /** Item slot: `mData.mEnchant * fEnchantmentMult` — the capacity THIS item would give. */
+    val maxPoints: Int = 0,
+    /** Soul slot: the soul's raw `mData.mSoul`, NOT the gem's own capacity. */
+    val charge: Int = 0,
+    /** Soul slot: the trapped creature's display name. */
+    val soul: String = ""
+)
+
+/** One row of the Magic Effects browse list — the union of every effect appearing in any
+ *  `ST_Spell`-type spell the player knows, filtered to `AllowEnchanting`, deduplicated by record and
+ *  sorted by display name. Built ONCE at window open and never rebuilt, matching vanilla. */
+data class EnchantAvailEffect(
+    val id: String,
+    val name: String,
+    val icon: String,
+    val flags: Int
+)
+
+/** One effect currently on the enchantment. [index] is its position in the native `mEffects` vector
+ *  and is the handle every `CMP:enchant_effect_*` command uses — safe as an ordinal because that
+ *  vector is mutated only by the player and GM_Enchanting pauses the sim. [text] is composed
+ *  NATIVELY (a transcription of `MWSpellEffect::updateWidgets`) so it cannot drift from the wording
+ *  vanilla shows. */
+data class EnchantEffect(
+    val index: Int,
+    val id: String,
+    val skill: String = "",
+    val attribute: String = "",
+    val range: Int = EnchantRange.SELF,
+    val magMin: Int = 1,
+    val magMax: Int = 1,
+    val duration: Int = 1,
+    val area: Int = 0,
+    val flags: Int = 0,
+    val icon: String = "",
+    val text: String = ""
+)
+
+/** One row of the item or soul picker. Both browse the PLAYER's own inventory, never the
+ *  enchanter's, and are addressed by serialized RefId rather than by ordinal. */
+data class EnchantPickOption(
+    val id: String,
+    val name: String,
+    val icon: String,
+    val count: Int = 1,
+    /** Item picker: the capacity this item would give. */
+    val maxPoints: Int = 0,
+    /** Soul picker: the trapped soul's value and name. */
+    val charge: Int = 0,
+    val soul: String = ""
+)
+
+/** A request from the engine to open the Skill or Attribute selector — the third popup type, raised
+ *  when the tapped effect carries `TargetSkill` / `TargetAttribute`. Vanilla opens SelectSkillDialog
+ *  / SelectAttributeDialog at this point; the DS screen draws its own and answers with
+ *  `CMP:enchant_effect_skill` / `_attribute`. NOTE there is deliberately no duplicate check on this
+ *  path — vanilla has none, so the same skill may be added twice. */
+data class EnchantArgPick(val kind: String, val effectId: String) {
+    val isSkill: Boolean get() = kind == "skill"
+}
+
+/** A request from the engine to open the effect editor. [isNew] marks an effect that `_add` just
+ *  pushed onto `mEffects` — it is ALREADY on the enchantment and shows in the top-screen readout
+ *  while the editor is open, exactly as vanilla's `eventEffectAdded` does it, and Cancel is what
+ *  removes it again. `isNew = false` means an existing effect was tapped; Cancel restores it. */
+data class EnchantEditRequest(val index: Int, val isNew: Boolean)
+
+/**
+ * A live DS enchanting screen; null when GM_Enchanting is not open.
+ *
+ * PRESENTATION ONLY. Everything here is read off the live `MWMechanics::Enchanting` after every
+ * mutation. The cast-style state machine, the accumulating per-effect cost, the capacity check, the
+ * price / charge / chance formulas, the seven Buy validations and the self-enchant roll (which
+ * consumes the soul gem whatever the outcome) all stay native.
+ *
+ * Two visibility rules are the ENGINE's and are exported rather than decided here:
+ *  - [showPrice] is on only when buying from an enchanter (vanilla hides it when self-enchanting).
+ *  - [showChance] additionally requires OpenMW's own `[Game] show enchant chance` setting, which
+ *    ships FALSE in both the engine defaults and this app's `settings.fallback.cfg`. [chance] is
+ *    exported regardless, so if that setting is ever turned on the DS screen starts showing it too.
+ */
+data class EnchantSession(
+    /** Self-enchanting (entered from a filled soul gem) vs buying from an enchanter NPC. */
+    val self: Boolean = true,
+    val enchanter: String = "",
+    val gold: Int = 0,
+    val name: String = "",
+    /** `int(getEnchantPoints(false))` — the FLOORED-per-effect sum. This is what the native label
+     *  shows and what the Buy capacity check compares, and it is deliberately NOT the precise=true
+     *  value the chance / item-count / type-multiplier paths use. */
+    val points: Int = 0,
+    /** The selected item's `mData.mEnchant * fEnchantmentMult`. Item-dependent, NOT soul-dependent. */
+    val maxPoints: Int = 0,
+    val castCost: Int = 0,
+    /** The soul's raw value. Unaffected by the effects or the cast type. */
+    val charge: Int = 0,
+    val price: Int = 0,
+    val chance: Int = 0,
+    val showPrice: Boolean = false,
+    val showChance: Boolean = false,
+    val castType: Int = EnchantCastType.CAST_ONCE,
+    val castLabel: String = "",
+    /** Can the Type button do anything for this item? Books/scrolls and ammo/thrown are locked, and
+     *  bows only unlock a second option with a soul >= iSoulAmountForConstantEffect. Exported, never
+     *  re-derived here. */
+    val castCycle: Boolean = false,
+    val constant: Boolean = false,
+    val effectCap: Int = 8,
+    val item: EnchantSlotItem = EnchantSlotItem(),
+    val soul: EnchantSlotItem = EnchantSlotItem(),
+    val available: List<EnchantAvailEffect> = emptyList(),
+    val effects: List<EnchantEffect> = emptyList(),
+    val itemOptions: List<EnchantPickOption> = emptyList(),
+    val soulOptions: List<EnchantPickOption> = emptyList()
+) {
+    /** Range availability, recomputed from the raw flags against the LIVE cast style — the exact
+     *  expressions `EditEffectDialog::onRangeButtonClicked` uses. */
+    fun allowSelf(flags: Int): Boolean = (flags and MagicEffectFlag.CAST_SELF) != 0 || constant
+    fun allowTouch(flags: Int): Boolean = (flags and MagicEffectFlag.CAST_TOUCH) != 0 && !constant
+    fun allowTarget(flags: Int): Boolean = (flags and MagicEffectFlag.CAST_TARGET) != 0 && !constant
+
+    /** The legal ranges in Self -> Touch -> Target order. Empty means the effect is unusable under
+     *  the current cast style, which vanilla handles by silently ignoring the tap (its own
+     *  unresolved TODO) — so no error message is shown here either. */
+    fun ranges(flags: Int): List<Int> = buildList {
+        if (allowSelf(flags)) add(EnchantRange.SELF)
+        if (allowTouch(flags)) add(EnchantRange.TOUCH)
+        if (allowTarget(flags)) add(EnchantRange.TARGET)
+    }
+
+    /** The three slider-visibility tests, independent of each other — `EditEffectDialog::updateBoxes`
+     *  verbatim. Area is keyed to the CURRENT range rather than to a flag of its own, so it appears
+     *  and disappears live as the player cycles range inside the editor. */
+    fun showMagnitude(flags: Int): Boolean = (flags and MagicEffectFlag.NO_MAGNITUDE) == 0
+    fun showDuration(flags: Int): Boolean = (flags and MagicEffectFlag.NO_DURATION) == 0 && !constant
+    fun showArea(range: Int): Boolean = range != EnchantRange.SELF
+
+    /** Over capacity — the same comparison the Buy validation makes before rejecting with
+     *  sNotifyMessage29. Shown as a warning colour; Buy is still pressable, because pressing it is
+     *  how vanilla produces that message. */
+    val overCapacity: Boolean get() = item.present && points > maxPoints
+}
+
 data class TrainingSession(
     val npcName: String,
     val playerGold: Int,

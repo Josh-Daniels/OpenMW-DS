@@ -129,6 +129,33 @@ object LogParser {
     // native message box only while Alchemy is DS, because that box renders bottom-centre of the TOP
     // screen, behind the DS panels. Same GMSTs and same order as vanilla — only the delivery differs.
     const val P_ALCHEMY_MSG = "COMPANION_ALCHEMY_MSG:"
+
+    // DS Enchanting. ALL native (enchantingdialog.cpp) — the whole batch is read off the live
+    // MWMechanics::Enchanting + EffectEditorBase::mEffects after every mutation, from the tail of
+    // updateLabels(), the one hook every mutation path reaches. OPEN/CLOSED bracket the session;
+    // STATE_START .. STATE_END bracket one full republish.
+    //
+    // ORDERING NOTE for the repo's contains()-based dispatch: _ITEMSLOT / _ITEMOPT and
+    // _SOULSLOT / _SOULOPT share no prefix with each other, but _STATE_START must be tested before
+    // _STATE_END would ever match (they differ) and _OPEN is the SHORTEST of them all, so it is
+    // checked last.
+    const val P_ENCH_OPEN = "COMPANION_ENCHANTING_OPEN"
+    const val P_ENCH_STATE_START = "COMPANION_ENCHANTING_STATE_START:"
+    const val P_ENCH_ITEMSLOT = "COMPANION_ENCHANTING_ITEMSLOT:"
+    const val P_ENCH_SOULSLOT = "COMPANION_ENCHANTING_SOULSLOT:"
+    const val P_ENCH_AVAIL = "COMPANION_ENCHANTING_AVAIL:"
+    const val P_ENCH_EFFECT = "COMPANION_ENCHANTING_EFFECT:"
+    const val P_ENCH_ITEMOPT = "COMPANION_ENCHANTING_ITEMOPT:"
+    const val P_ENCH_SOULOPT = "COMPANION_ENCHANTING_SOULOPT:"
+    const val P_ENCH_STATE_END = "COMPANION_ENCHANTING_STATE_END"
+    const val P_ENCH_CLOSED = "COMPANION_ENCHANTING_CLOSED"
+    // One-shot requests: open the Skill/Attribute selector, or open the effect editor. Both are
+    // emitted in reply to a command, never periodically.
+    const val P_ENCH_ARGPICK = "COMPANION_ENCHANTING_ARGPICK:"
+    const val P_ENCH_EDIT = "COMPANION_ENCHANTING_EDIT:"
+    // Resolved validation/result text, routed here INSTEAD of the native message box while
+    // Enchanting is DS — that box renders bottom-centre of the TOP screen, behind the DS panels.
+    const val P_ENCH_MSG = "COMPANION_ENCHANTING_MSG:"
     private const val P_ACTIVE_EFFECTS = "COMPANION_ACTIVE_EFFECTS:"
     const val P_CHARACTER = "COMPANION_CHARACTER:"
     // Player standing (reputation/bounty/factions). Single small line, merged onto
@@ -766,6 +793,105 @@ object LogParser {
     } catch (e: Exception) {
         null
     }
+
+    /** Header of a COMPANION_ENCHANTING_STATE_START payload. Null if malformed, which leaves the
+     *  buffered batch uncommitted (the previous session state stays on screen rather than blanking). */
+    fun parseEnchantStart(json: String): EnchantSession? = try {
+        val o = JSONObject(json)
+        EnchantSession(
+            self = o.optBoolean("self", true),
+            enchanter = o.optString("enchanter", ""),
+            gold = o.optInt("gold", 0),
+            name = o.optString("name", ""),
+            points = o.optInt("points", 0),
+            maxPoints = o.optInt("maxPoints", 0),
+            castCost = o.optInt("castCost", 0),
+            charge = o.optInt("charge", 0),
+            price = o.optInt("price", 0),
+            chance = o.optInt("chance", 0),
+            showPrice = o.optBoolean("showPrice", false),
+            showChance = o.optBoolean("showChance", false),
+            castType = o.optInt("castType", EnchantCastType.CAST_ONCE),
+            castLabel = o.optString("castLabel", ""),
+            castCycle = o.optBoolean("castCycle", false),
+            constant = o.optBoolean("constant", false),
+            effectCap = o.optInt("effectCap", 8)
+        )
+    } catch (_: Exception) { null }
+
+    /** COMPANION_ENCHANTING_ITEMSLOT / _SOULSLOT. An empty slot parses to `present = false`. */
+    fun parseEnchantSlot(json: String): EnchantSlotItem? = try {
+        val o = JSONObject(json)
+        EnchantSlotItem(
+            present = o.optBoolean("present", false),
+            id = o.optString("id", ""),
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            maxPoints = o.optInt("maxPoints", 0),
+            charge = o.optInt("charge", 0),
+            soul = o.optString("soul", "")
+        )
+    } catch (_: Exception) { null }
+
+    /** One COMPANION_ENCHANTING_AVAIL row (a known, enchantable magic effect). */
+    fun parseEnchantAvail(json: String): EnchantAvailEffect? = try {
+        val o = JSONObject(json)
+        val id = o.optString("id", "")
+        if (id.isBlank()) null else EnchantAvailEffect(
+            id = id,
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            flags = o.optInt("flags", 0)
+        )
+    } catch (_: Exception) { null }
+
+    /** One COMPANION_ENCHANTING_EFFECT row (an effect on the enchantment being built). */
+    fun parseEnchantEffect(json: String): EnchantEffect? = try {
+        val o = JSONObject(json)
+        EnchantEffect(
+            index = o.optInt("index", 0),
+            id = o.optString("id", ""),
+            skill = o.optString("skill", ""),
+            attribute = o.optString("attribute", ""),
+            range = o.optInt("range", EnchantRange.SELF),
+            magMin = o.optInt("magMin", 1),
+            magMax = o.optInt("magMax", 1),
+            duration = o.optInt("duration", 1),
+            area = o.optInt("area", 0),
+            flags = o.optInt("flags", 0),
+            icon = o.optString("icon", ""),
+            text = o.optString("text", "")
+        )
+    } catch (_: Exception) { null }
+
+    /** One COMPANION_ENCHANTING_ITEMOPT / _SOULOPT row (a picker option). */
+    fun parseEnchantPick(json: String): EnchantPickOption? = try {
+        val o = JSONObject(json)
+        val id = o.optString("id", "")
+        if (id.isBlank()) null else EnchantPickOption(
+            id = id,
+            name = o.optString("name", ""),
+            icon = o.optString("icon", ""),
+            count = o.optInt("count", 1),
+            maxPoints = o.optInt("maxPoints", 0),
+            charge = o.optInt("charge", 0),
+            soul = o.optString("soul", "")
+        )
+    } catch (_: Exception) { null }
+
+    /** COMPANION_ENCHANTING_ARGPICK — open the Skill or Attribute selector for this effect. */
+    fun parseEnchantArgPick(json: String): EnchantArgPick? = try {
+        val o = JSONObject(json)
+        val effect = o.optString("effect", "")
+        if (effect.isBlank()) null else EnchantArgPick(o.optString("kind", "skill"), effect)
+    } catch (_: Exception) { null }
+
+    /** COMPANION_ENCHANTING_EDIT — open the effect editor on this index. */
+    fun parseEnchantEdit(json: String): EnchantEditRequest? = try {
+        val o = JSONObject(json)
+        EnchantEditRequest(o.optInt("index", -1), o.optBoolean("new", false))
+            .takeIf { it.index >= 0 }
+    } catch (_: Exception) { null }
 
     /** One COMPANION_ALCHEMY_ITEM row (a carried ingredient). Its `effects` array keeps one entry
      *  per NON-EMPTY effect slot, in slot order, with `k` = known — so an ingredient with a known

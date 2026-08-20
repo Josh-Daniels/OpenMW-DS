@@ -1,0 +1,1501 @@
+DS ENCHANTING: export the live enchanting state and expose command bridges so the companion can
+replace the native EnchantingDialog, which windowmanagerimp already suppresses when the
+"game_ui_enchanting" element is DS (companion-hide-gamewindows-on-dsmode.patch — the gate was wired
+dormant long before this patch existed).
+
+PRESENTATION + INPUT FORWARDING ONLY. MWMechanics::Enchanting keeps every rule: the cast-style state
+machine (nextCastStyle's per-item-class table), the ACCUMULATING per-effect cost, the enchant-points
+capacity check, the price / charge / success-chance formulas, the self-enchant roll and the soul-gem
+consumption that happens whatever the outcome. EffectEditorBase keeps the effect list, the 8-effect
+cap, the non-uniform duplicate rule and the add-then-remove-on-cancel semantics.
+
+Five things are load-bearing:
+
+  * THE FOUR WindowModals NEEDED THEIR OWN GATES. windowmanagerimp's GM_Enchanting suppression only
+    hides mGuiModeStates[GM_Enchanting].mWindows — it does NOT reach EditEffectDialog (a member of
+    EffectEditorBase), ItemSelectionDialog (created on demand), SelectSkillDialog or
+    SelectAttributeDialog, all of which are shown independently via setVisible(true). Without the
+    gates added here they would pop up ALONE on the TOP screen in DS mode — the same class of
+    problem as the Persuasion modal. The EffectEditorBase gate tests mType as well as the element,
+    because SpellCreationDialog shares that base and is still Vanilla-only.
+
+  * THE CLOSE SIGNAL IS EMITTED EXPLICITLY from exit(), onCancelButtonClicked, onReferenceUnavailable
+    and both removeGuiMode paths inside onBuyButtonClicked. In DS mode the window is hidden, so
+    WindowBase::setVisible() produces no visible->hidden edge and the ordinary onClose() never runs
+    on the real mode-pop. onClose() is still overridden (with the usual !containsMode guard, which
+    also suppresses the spurious emit the DS suppression's own transient hide would produce) to
+    cover Vanilla mode. All paths funnel through the once-guarded companionEmitClosed().
+
+  * THE STATE BATCH IS EMITTED FROM THE TAIL OF updateLabels(), which is the one hook EVERY mutation
+    path reaches: setPtr, item/soul select and clear, onTypeButtonClicked, and notifyEffectsChanged
+    — which updateEffectsView calls after every effect add / modify / remove. STREAMED one small
+    line per record: the two picker lists are bounded only by how much the player is carrying, so a
+    single line would hit the 4096-byte stdout-flush truncation.
+
+  * THE EFFECT DISPLAY LINE IS COMPOSED IN C++ (companionEnchantEffectLine), a faithful
+    transcription of Widgets::MWSpellEffect::updateWidgets — getMagicEffectString plus a
+    magnitude-display-type switch and eleven GMSTs. It lives beside the original so the DS readout
+    cannot drift from the wording vanilla shows on the top screen. The only difference is that the
+    "#{sin}"/"#{sfootarea}" tags vanilla leaves for setCaptionWithReplacing are resolved here.
+
+  * RAW FLAG WORDS ARE EXPORTED, NOT PRECOMPUTED BOOLEANS. Which range options and which sliders are
+    legal depends on the LIVE cast style as well as the effect record (Constant Effect force-allows
+    Self, force-denies Touch/Target and hides Duration), and the player changes that with the Type
+    button while the browse list stands still — so the DS side must recompute the same way the
+    engine does rather than cache an answer.
+
+ONE DELIBERATE DIVERGENCE, requested and confirmed, and it is deliberately NARROW:
+companionInitialRange reproduces vanilla's real two-step behaviour (newEffect's cascade, then the
+unconditional onRangeButtonClicked that advances once and re-checks) for EVERY availability
+combination, with a single exception — an effect allowing Touch and Target but NOT Self opens on
+Touch instead of vanilla's Target. That combination is the reported bug: the cascade leaves Touch
+and the unconditional advance steps straight past it. Every other combination matches vanilla
+exactly, including the Touch-only case where vanilla itself lands on an ILLEGAL Self (documented at
+the function; the DS editor's own legality guard corrects it on open, so no second exception is
+hard-coded here). A separate companionFirstLegalRange handles the different question of repairing an
+out-of-range _effect_set. Everything else about the editor is vanilla's, including the fixed slider bounds
+(Magnitude 1..100, Duration 1..1440, Area 0..50, max >= min) which live in openmw_edit_effect.layout
+and are never adjusted at runtime.
+
+Validation and result text is routed to the bottom screen in DS mode only
+(COMPANION_ENCHANTING_MSG, same shape as COMPANION_ALCHEMY_MSG) because the native transient message
+box renders bottom-centre of the TOP screen, behind the DS panels. Same GMSTs, same order, same
+sounds — only the delivery changes. There is deliberately no separate "validate without committing"
+path: CMP:enchant_buy calls the real onBuyButtonClicked.
+
+Kotlin side: LogParser prefixes -> EnchantSession in GameStateRepository -> EnchantingOverlay
+(bottom) and EnchantingTopOverlay (top). Added Aug 20 2026.
+
+--- a/apps/openmw/mwgui/enchantingdialog.hpp
++++ b/apps/openmw/mwgui/enchantingdialog.hpp
+@@ -8,6 +8,11 @@
+ 
+ #include "../mwmechanics/enchanting.hpp"
+ 
++#ifdef __ANDROID__
++#include <components/esm/refid.hpp>
++#include <components/esm3/loadmgef.hpp>
++#endif
++
+ namespace MWGui
+ {
+ 
+@@ -33,6 +38,48 @@
+ 
+         void onClose() override;
+ 
++#ifdef __ANDROID__
++        // COMPANION: B / Escape. No refusal (unlike LevelupDialog) -- enchanting is genuinely
++        // cancellable in vanilla. Overridden ONLY to emit the close signal, because in DS mode the
++        // window is hidden and WindowBase::setVisible() therefore produces no visible->hidden edge,
++        // so the ordinary onClose() never runs on the real mode-pop.
++        bool exit() override;
++
++        // COMPANION: bottom/top-screen bridges, called from drainCompanionCommands (androidmain.cpp)
++        // on the engine main thread. Public so the extern "C" wrappers in the .cpp can reach them.
++        //
++        // PRESENTATION + INPUT FORWARDING ONLY. MWMechanics::Enchanting keeps every rule: the cast-
++        // style state machine, the accumulating per-effect cost, the enchant-points capacity check,
++        // the price/charge/chance formulas, the self-enchant success roll and the soul-gem
++        // consumption that happens whatever the outcome.
++        //
++        // The item and the soul gem are addressed by SERIALIZED RefId, never by a list ordinal:
++        // their pickers browse a container store whose order is not stable across mutations.
++        // EFFECTS are addressed by INDEX, which is safe -- mEffects is an ordered vector the player
++        // mutates directly and GM_Enchanting pauses the sim.
++        void companionSelectItem(std::string_view refId);
++        void companionClearItem();
++        void companionSelectSoul(std::string_view refId);
++        void companionClearSoul();
++        void companionSetName(std::string_view text);
++        // Effect flow, mirroring vanilla's exactly: _add runs the 8-effect cap, the no-legal-range
++        // check and the duplicate check, then either asks the DS for a skill/attribute argument
++        // (COMPANION_ENCHANTING_ARGPICK) or adds the effect and asks it to open the editor
++        // (COMPANION_ENCHANTING_EDIT). The effect is in mEffects from the moment the editor opens,
++        // exactly as EditEffectDialog::newEffect's eventEffectAdded does it -- _effect_cancel is
++        // what removes it again.
++        void companionEffectAdd(std::string_view effectId);
++        void companionEffectArg(std::string_view effectId, std::string_view argId, bool isSkill);
++        void companionEffectEdit(int index);
++        void companionEffectSet(int index, int range, int magMin, int magMax, int duration, int area);
++        void companionEffectDelete(int index);
++        void companionEffectOk();
++        void companionEffectCancel();
++        void companionCastTypeNext();
++        void companionBuy();
++        void companionCancel();
++#endif
++
+         void resetReference() override;
+ 
+         std::string_view getWindowIdForLua() const override { return "EnchantingDialog"; }
+@@ -76,6 +123,41 @@
+         MWMechanics::Enchanting mEnchanting;
+         ESM::EffectList mEffectList;
+ 
++#ifdef __ANDROID__
++        // COMPANION: the full state batch, emitted from the tail of updateLabels() -- the one hook
++        // EVERY mutation path reaches (setPtr, item/soul select+clear, notifyEffectsChanged, which
++        // updateEffectsView calls after every effect add/modify/remove, and onTypeButtonClicked).
++        void companionEmitState();
++        // Once-guarded COMPANION_ENCHANTING_CLOSED emit; also clears the file-static window pointer.
++        void companionEmitClosed();
++        // The range a newly-added effect opens on. Reproduces vanilla's real two-step behaviour
++        // (EditEffectDialog::newEffect's cascade, then the unconditional onRangeButtonClicked that
++        // advances it once and re-checks) for EVERY availability combination, with exactly ONE
++        // deliberate exception -- see the definition.
++        int companionInitialRange(const ESM::MagicEffect* effect) const;
++        // First LEGAL range in Self -> Touch -> Target order. A different question from the one
++        // above, and used for a different purpose: repairing an out-of-range value that arrived on a
++        // _effect_set command. Never used to pick an opening range.
++        int companionFirstLegalRange(const ESM::MagicEffect* effect) const;
++        // Shared tail of _effect_add and _effect_skill/_attribute: route through the REAL
++        // EditEffectDialog::newEffect (so eventEffectAdded fires and the effect is in mEffects while
++        // the editor is open), apply the optional skill/attribute argument, then override the range
++        // to the first legal one.
++        void companionBeginNewEffect(
++            const ESM::MagicEffect* effect, const ESM::RefId& skill, const ESM::RefId& attribute);
++        // Can the cast style actually be cycled for the currently-selected item? Exported rather
++        // than re-derived on the DS side, because the answer is the shape of nextCastStyle()'s
++        // per-item-class state machine (book/scroll and ammo/thrown are locked; bows only unlock
++        // with a powerful soul).
++        bool companionCastCyclable();
++        // Index of the effect the DS editor currently has open, or -1. mCompanionEditIsNew marks an
++        // effect added by _add (Cancel erases it) as opposed to one opened by _edit (Cancel restores
++        // mCompanionOldEffect) -- the two halves of EditEffectDialog::exit().
++        int mCompanionEditIndex = -1;
++        bool mCompanionEditIsNew = false;
++        ESM::ENAMstruct mCompanionOldEffect{};
++#endif
++
+         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
+     };
+ 
+--- a/apps/openmw/mwgui/enchantingdialog.cpp
++++ b/apps/openmw/mwgui/enchantingdialog.cpp
+@@ -15,6 +15,27 @@
+ 
+ #include <components/debug/debuglog.hpp>
+ 
++#ifdef __ANDROID__
++#include <algorithm>
++#include <sstream>
++
++#include <components/esm/attr.hpp>
++#include <components/esm3/loadarmo.hpp>
++#include <components/esm3/loadbook.hpp>
++#include <components/esm3/loadclot.hpp>
++#include <components/esm3/loadcrea.hpp>
++#include <components/esm3/loadmgef.hpp>
++#include <components/esm3/loadskil.hpp>
++#include <components/esm3/loadweap.hpp>
++#include <components/misc/resourcehelpers.hpp>
++#include <components/resource/resourcesystem.hpp>
++#include <components/vfs/manager.hpp>
++
++#include "../mwmechanics/creaturestats.hpp"
++#include "../mwmechanics/magiceffects.hpp"
++#include "../mwmechanics/weapontype.hpp"
++#endif
++
+ #include "../mwbase/environment.hpp"
+ #include "../mwbase/mechanicsmanager.hpp"
+ #include "../mwbase/windowmanager.hpp"
+@@ -30,6 +51,188 @@
+ 
+ #include "sortfilteritemmodel.hpp"
+ 
++#ifdef __ANDROID__
++// COMPANION: true when Enchanting is routed to the DS (bottom) screen, in which case
++// windowmanagerimp suppresses the native EnchantingDialog
++// (companion-hide-gamewindows-on-dsmode.patch) and the companion is the sole surface. Defined in
++// androidmain.cpp. A block-scope extern "C" is ill-formed, so it is declared here at namespace
++// scope and only CALLED inside functions.
++extern "C" bool companionDsEnchanting();
++
++namespace
++{
++    // COMPANION: the live EnchantingDialog, so the CMP:enchant_* bridges can drive the REAL window
++    // while it is hidden in DS mode. Set in setPtr (not the ctor): the window is built once at
++    // startup and reused, so the ctor fires long before any enchanting session.
++    MWGui::EnchantingDialog* gCompanionEnchantingWindow = nullptr;
++
++    // JSON-escape a string for a COMPANION_ENCHANTING_* payload. Icon paths contain backslashes and
++    // item names can contain quotes, so both must be escaped.
++    std::string companionEnchantJsonEscape(std::string_view s)
++    {
++        std::string out;
++        out.reserve(s.size() + 8);
++        for (const char c : s)
++        {
++            switch (c)
++            {
++                case '"': out += "\\\""; break;
++                case '\\': out += "\\\\"; break;
++                case '\n': out += "\\n"; break;
++                case '\r': out += "\\r"; break;
++                case '\t': out += "\\t"; break;
++                default: out += c; break;
++            }
++        }
++        return out;
++    }
++
++    // Raw ESM icon field -> the uniform VFS path the companion's icon pipeline expects.
++    std::string companionEnchantIcon(std::string_view raw)
++    {
++        if (raw.empty())
++            return {};
++        const VFS::Manager* const vfs = MWBase::Environment::get().getResourceSystem()->getVFS();
++        if (!vfs)
++            return {};
++        return Misc::ResourceHelpers::correctIconPath(VFS::Path::toNormalized(raw), *vfs);
++    }
++
++    // COMPANION: player-facing validation/result text. In DS mode the native window is hidden and
++    // the transient native message box renders bottom-centre of the TOP screen, behind the DS
++    // panels -- so the RESOLVED text is routed to the bottom screen instead (identical shape to
++    // COMPANION_ALCHEMY_MSG). Vanilla mode takes the untouched native path, tag and all.
++    void companionEnchantMessage(MWBase::WindowManager* winMgr, const char* gmst)
++    {
++        if (companionDsEnchanting())
++        {
++            Log(Debug::Info) << "COMPANION_ENCHANTING_MSG:" << winMgr->getGameSettingString(gmst, {});
++            return;
++        }
++        winMgr->messageBox("#{" + std::string(gmst) + "}");
++    }
++
++    // Same, for an already-resolved string (the stolen-item message is built with StringUtils::
++    // format from a fetched GMST, not from a #{} tag).
++    void companionEnchantMessageRaw(MWBase::WindowManager* winMgr, const std::string& text)
++    {
++        if (companionDsEnchanting())
++        {
++            Log(Debug::Info) << "COMPANION_ENCHANTING_MSG:" << text;
++            return;
++        }
++        winMgr->messageBox(text);
++    }
++
++    // COMPANION: the effect's display line, composed HERE rather than on the Kotlin side.
++    //
++    // This is a faithful transcription of Widgets::MWSpellEffect::updateWidgets (widgets.cpp) --
++    // getMagicEffectString plus a magnitude-display-type switch and eleven GMSTs. It lives in C++
++    // beside the original so the DS readout cannot drift from the wording vanilla shows two feet
++    // away on the top screen. The ONLY difference: the "#{sin}"/"#{sfootarea}" tags that vanilla
++    // leaves for setCaptionWithReplacing are resolved here, since this string is emitted, not set
++    // as a MyGUI caption.
++    //
++    // The parameters mNoTarget / mNoMagnitude / mKnown are omitted because EffectEditorBase::
++    // updateEffectsView never sets them -- only mIsConstant, which IS handled.
++    std::string companionEnchantEffectLine(const ESM::ENAMstruct& effect, bool constant)
++    {
++        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
++        const ESM::MagicEffect* magicEffect = store.get<ESM::MagicEffect>().search(effect.mEffectID);
++        if (!magicEffect)
++            return {};
++        const ESM::Attribute* attribute = store.get<ESM::Attribute>().search(effect.mAttribute);
++        const ESM::Skill* skill = store.get<ESM::Skill>().search(effect.mSkill);
++
++        MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
++        const std::string_view pt = winMgr->getGameSettingString("spoint", {});
++        const std::string_view pts = winMgr->getGameSettingString("spoints", {});
++        const std::string_view pct = winMgr->getGameSettingString("spercent", {});
++        const std::string_view ft = winMgr->getGameSettingString("sfeet", {});
++        const std::string_view lvl = winMgr->getGameSettingString("sLevel", {});
++        const std::string_view lvls = winMgr->getGameSettingString("sLevels", {});
++        const std::string to = " " + std::string{ winMgr->getGameSettingString("sTo", {}) } + " ";
++        const std::string sec = " " + std::string{ winMgr->getGameSettingString("ssecond", {}) };
++        const std::string secs = " " + std::string{ winMgr->getGameSettingString("sseconds", {}) };
++
++        std::string line = MWMechanics::getMagicEffectString(*magicEffect, attribute, skill);
++
++        if (effect.mMagnMin || effect.mMagnMax)
++        {
++            const ESM::MagicEffect::MagnitudeDisplayType displayType = magicEffect->getMagnitudeDisplayType();
++            if (displayType == ESM::MagicEffect::MDT_TimesInt)
++            {
++                std::ostringstream formatter;
++                formatter << std::fixed << std::setprecision(1) << " " << (effect.mMagnMin / 10.0f);
++                if (effect.mMagnMin != effect.mMagnMax)
++                    formatter << to << (effect.mMagnMax / 10.0f);
++                formatter << winMgr->getGameSettingString("sXTimesINT", {});
++                line += formatter.str();
++            }
++            else if (displayType != ESM::MagicEffect::MDT_None)
++            {
++                line += " " + std::to_string(effect.mMagnMin);
++                if (effect.mMagnMin != effect.mMagnMax)
++                    line += to + std::to_string(effect.mMagnMax);
++
++                if (displayType == ESM::MagicEffect::MDT_Percentage)
++                    line += pct;
++                else if (displayType == ESM::MagicEffect::MDT_Feet)
++                {
++                    line += ' ';
++                    line += ft;
++                }
++                else if (displayType == ESM::MagicEffect::MDT_Level)
++                {
++                    line += ' ';
++                    line += (effect.mMagnMin == effect.mMagnMax && std::abs(effect.mMagnMin) == 1) ? lvl : lvls;
++                }
++                else // MDT_Points
++                {
++                    line += ' ';
++                    line += (effect.mMagnMin == effect.mMagnMax && std::abs(effect.mMagnMin) == 1) ? pt : pts;
++                }
++            }
++        }
++
++        // Constant effects have no duration and no target -- vanilla's own comment.
++        if (!constant)
++        {
++            int duration = effect.mDuration;
++            if (!(magicEffect->mData.mFlags & ESM::MagicEffect::AppliedOnce))
++                duration = std::max(1, duration);
++
++            if (duration > 0 && !(magicEffect->mData.mFlags & ESM::MagicEffect::NoDuration))
++            {
++                line += ' ';
++                line += winMgr->getGameSettingString("sfor", {});
++                line += ' ' + std::to_string(duration) + ((duration == 1) ? sec : secs);
++            }
++
++            if (effect.mArea > 0)
++            {
++                line += ' ';
++                line += winMgr->getGameSettingString("sin", {});
++                line += ' ' + std::to_string(effect.mArea) + ' ';
++                line += winMgr->getGameSettingString("sfootarea", {});
++            }
++
++            line += ' ';
++            line += winMgr->getGameSettingString("sonword", {});
++            line += ' ';
++            if (effect.mRange == ESM::RT_Self)
++                line += winMgr->getGameSettingString("sRangeSelf", {});
++            else if (effect.mRange == ESM::RT_Touch)
++                line += winMgr->getGameSettingString("sRangeTouch", {});
++            else if (effect.mRange == ESM::RT_Target)
++                line += winMgr->getGameSettingString("sRangeTarget", {});
++        }
++
++        return line;
++    }
++}
++#endif
++
+ namespace MWGui
+ {
+ 
+@@ -146,9 +349,17 @@
+                 setConstantEffect(true);
+                 break;
+         }
++
++#ifdef __ANDROID__
++        // COMPANION: re-publish the whole state. updateLabels() is the one hook EVERY mutation path
++        // reaches -- setPtr, item/soul select and clear, onTypeButtonClicked, and
++        // notifyEffectsChanged (which updateEffectsView calls after every effect add / modify /
++        // remove) -- so the bottom screen never has to track anything itself.
++        companionEmitState();
++#endif
+     }
+ 
+-    // COMPANION: true between COMPANION_ENCHANTING_OPEN and _CLOSED (Vanilla-only window).
++    // COMPANION: true between COMPANION_ENCHANTING_OPEN and _CLOSED.
+     static bool sEnchantingDialogCompanionOpen = false;
+ 
+     void EnchantingDialog::setPtr(const MWWorld::Ptr& ptr)
+@@ -157,6 +368,14 @@
+             throw std::runtime_error("Invalid argument in EnchantingDialog::setPtr");
+ 
+         sEnchantingDialogCompanionOpen = true;
++#ifdef __ANDROID__
++        // Publish the window for the CMP:enchant_* bridges and reset the editor handshake BEFORE
++        // startEditing() below, whose updateEffectsView -> notifyEffectsChanged -> updateLabels
++        // chain already emits the first state batch.
++        gCompanionEnchantingWindow = this;
++        mCompanionEditIndex = -1;
++        mCompanionEditIsNew = false;
++#endif
+         Log(Debug::Info) << "COMPANION_ENCHANTING_OPEN";
+ 
+         mName->setCaption({});
+@@ -193,6 +412,9 @@
+ 
+     void EnchantingDialog::onReferenceUnavailable()
+     {
++#ifdef __ANDROID__
++        companionEmitClosed();
++#endif
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Enchanting);
+         resetReference();
+     }
+@@ -208,28 +430,62 @@
+ 
+     void EnchantingDialog::onCancelButtonClicked(MyGUI::Widget* /*sender*/)
+     {
++#ifdef __ANDROID__
++        // COMPANION: in DS mode the window is hidden, so the pop below produces no visible->hidden
++        // edge and onClose() never runs -- emit the close signal here. Once-guarded, so the Vanilla
++        // path (where onClose() does fire) is unaffected.
++        companionEmitClosed();
++#endif
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Enchanting);
+     }
+ 
+     void EnchantingDialog::onClose()
+     {
+         WindowBase::onClose();
+-        // COMPANION: emit the close signal only on the real mode-pop (containsMode false),
+-        // not on a transient hide, matching TradeWindow::onClose. Lets the bottom-screen
+-        // conversation overlay come back once this native window is gone (Vanilla mode).
+-        if (sEnchantingDialogCompanionOpen
+-            && !MWBase::Environment::get().getWindowManager()->containsMode(GM_Enchanting))
+-        {
+-            sEnchantingDialogCompanionOpen = false;
+-            Log(Debug::Info) << "COMPANION_ENCHANTING_CLOSED";
+-        }
++        // COMPANION: emit the close signal only on the real mode-pop (containsMode false), not on a
++        // transient hide -- which also suppresses the spurious emit the DS suppression's own hide
++        // would otherwise produce one frame after the mode is pushed. In DS mode this rarely fires
++        // at all (the window is already hidden, so there is no visible->hidden edge); exit() and
++        // onCancelButtonClicked cover that case.
++        if (!MWBase::Environment::get().getWindowManager()->containsMode(GM_Enchanting))
++            companionEmitClosed();
+     }
+ 
++#ifdef __ANDROID__
++    bool EnchantingDialog::exit()
++    {
++        // B / Escape. Deliberately NO refusal (unlike LevelupDialog): enchanting is genuinely
++        // cancellable in vanilla and the DS screen keeps that. Emit the close signal and return
++        // true exactly as WindowBase did, so the mode pops as before.
++        companionEmitClosed();
++        return true;
++    }
+ 
++    void EnchantingDialog::companionEmitClosed()
++    {
++        if (!sEnchantingDialogCompanionOpen)
++            return;
++        sEnchantingDialogCompanionOpen = false;
++        gCompanionEnchantingWindow = nullptr;
++        mCompanionEditIndex = -1;
++        mCompanionEditIsNew = false;
++        Log(Debug::Info) << "COMPANION_ENCHANTING_CLOSED";
++    }
++#endif
++
++
+     void EnchantingDialog::onSelectItem(MyGUI::Widget* /*sender*/)
+     {
+         if (mEnchanting.getOldItem().isEmpty())
+         {
++#ifdef __ANDROID__
++            // COMPANION: ItemSelectionDialog is a WindowModal created on demand and is NOT reached
++            // by windowmanagerimp's GM_Enchanting suppression, so in DS mode it would pop up alone
++            // on the TOP screen. The bottom screen draws its own picker from
++            // COMPANION_ENCHANTING_ITEMOPT and answers with CMP:enchant_item_select.
++            if (companionDsEnchanting())
++                return;
++#endif
+             mItemSelectionDialog = std::make_unique<ItemSelectionDialog>("#{sEnchantItems}");
+             mItemSelectionDialog->eventItemSelected += MyGUI::newDelegate(this, &EnchantingDialog::onItemSelected);
+             mItemSelectionDialog->eventDialogCanceled += MyGUI::newDelegate(this, &EnchantingDialog::onItemCancel);
+@@ -266,7 +522,11 @@
+         mEnchanting.setSoulGem(item);
+         if (mEnchanting.getGemCharge() == 0)
+         {
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage32");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage32}");
++#endif
+             return;
+         }
+ 
+@@ -284,6 +544,12 @@
+     {
+         if (mEnchanting.getGem().isEmpty())
+         {
++#ifdef __ANDROID__
++            // COMPANION: as onSelectItem -- the soul picker is drawn on the bottom screen from
++            // COMPANION_ENCHANTING_SOULOPT.
++            if (companionDsEnchanting())
++                return;
++#endif
+             mItemSelectionDialog = std::make_unique<ItemSelectionDialog>("#{sSoulGemsWithSouls}");
+             mItemSelectionDialog->eventItemSelected += MyGUI::newDelegate(this, &EnchantingDialog::onSoulSelected);
+             mItemSelectionDialog->eventDialogCanceled += MyGUI::newDelegate(this, &EnchantingDialog::onSoulCancel);
+@@ -328,31 +594,51 @@
+     {
+         if (mEffects.size() <= 0)
+         {
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sEnchantmentMenu11");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sEnchantmentMenu11}");
++#endif
+             return;
+         }
+ 
+         if (mName->getCaption().empty())
+         {
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage10");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage10}");
++#endif
+             return;
+         }
+ 
+         if (mEnchanting.soulEmpty())
+         {
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage52");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage52}");
++#endif
+             return;
+         }
+ 
+         if (mEnchanting.itemEmpty())
+         {
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage11");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage11}");
++#endif
+             return;
+         }
+ 
+         if (static_cast<int>(mEnchanting.getEnchantPoints(false)) > mEnchanting.getMaxEnchantValue())
+         {
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage29");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage29}");
++#endif
+             return;
+         }
+ 
+@@ -363,7 +649,11 @@
+         int playerGold = player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId);
+         if (mPtr != player && mEnchanting.getEnchantPrice() > playerGold)
+         {
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage18");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage18}");
++#endif
+             return;
+         }
+ 
+@@ -382,11 +672,18 @@
+                                           .find("sNotifyMessage49")
+                                           ->mValue.getString();
+                     msg = Misc::StringUtils::format(msg, item.getClass().getName(item));
++#ifdef __ANDROID__
++                    companionEnchantMessageRaw(MWBase::Environment::get().getWindowManager(), msg);
++#else
+                     MWBase::Environment::get().getWindowManager()->messageBox(msg);
++#endif
+ 
+                     MWBase::Environment::get().getMechanicsManager()->confiscateStolenItemToOwner(
+                         player, item, mPtr, 1);
+ 
++#ifdef __ANDROID__
++                    companionEmitClosed();
++#endif
+                     MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Enchanting);
+                     MWBase::Environment::get().getWindowManager()->exitCurrentGuiMode();
+                     return;
+@@ -397,13 +694,22 @@
+         if (mEnchanting.create())
+         {
+             MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("enchant success"));
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sEnchantmentMenu12");
++            companionEmitClosed();
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sEnchantmentMenu12}");
++#endif
+             MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Enchanting);
+         }
+         else
+         {
+             MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("enchant fail"));
++#ifdef __ANDROID__
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage34");
++#else
+             MWBase::Environment::get().getWindowManager()->messageBox("#{sNotifyMessage34}");
++#endif
+             if (!mEnchanting.getGem().isEmpty() && !mEnchanting.getGem().getCellRef().getCount())
+             {
+                 setSoulGem(MWWorld::Ptr());
+@@ -430,5 +736,742 @@
+             return EffectEditorBase::onControllerButtonEvent(arg);
+ 
+         return true;
++    }
++
++#ifdef __ANDROID__
++
++    // ================= Companion (DS enchanting) =================
++    //
++    // PRESENTATION + INPUT FORWARDING ONLY. MWMechanics::Enchanting keeps every rule: the cast-style
++    // state machine, the accumulating per-effect cost, the enchant-points capacity check, the
++    // price / charge / success-chance formulas, the self-enchant roll and the soul-gem consumption
++    // that happens whatever the outcome. EffectEditorBase still owns the effect list, the 8-effect
++    // cap and the add-then-remove-on-cancel semantics.
++
++    // The range a NEW effect opens on.
++    //
++    // This is a faithful reproduction of vanilla's actual two-step behaviour, not a simplification:
++    //   1. EditEffectDialog::newEffect runs a cascade that consults allowSelf and allowTouch only
++    //      (allowTarget is never read there), and then
++    //   2. calls onRangeButtonClicked UNCONDITIONALLY, which advances one step and applies three
++    //      SEQUENTIAL (not else-if) legality checks in Self, Touch, Target order -- so a value can
++    //      be advanced more than once, and the final Target->Self wrap is never re-checked.
++    //
++    // Reproduced case by case (S/T/G = Self/Touch/Target allowed under the LIVE cast style):
++    //      S T G -> vanilla
++    //      1 1 1 -> Touch        1 1 0 -> Touch
++    //      1 0 1 -> Self         1 0 0 -> Self
++    //      0 1 1 -> Target  <== the one exception, see below
++    //      0 1 0 -> Self (ILLEGAL -- a genuine vanilla bug; step 2's final wrap lands on a range the
++    //                    effect does not allow, and nothing re-checks it)
++    //      0 0 1 -> Target       0 0 0 -> unreachable (rejected before the editor opens)
++    //
++    // THE ONE DELIBERATE EXCEPTION: Touch+Target-with-no-Self opens on TOUCH rather than vanilla's
++    // Target. That combination is the reported bug -- the cascade leaves Touch and the unconditional
++    // advance then steps past it onto Target, so the first range the player is offered is the last
++    // one they would expect. Nothing else here deviates.
++    //
++    // The 0/1/0 row is reproduced as-is even though the result is illegal: the DS editor's own
++    // range-legality guard corrects it to Touch as soon as the popup opens, so the faithful value
++    // never survives contact with the player, and hard-coding a second exception here would be a
++    // silent second divergence.
++    int EnchantingDialog::companionInitialRange(const ESM::MagicEffect* effect) const
++    {
++        if (!effect)
++            return ESM::RT_Self;
++
++        // Constant Effect force-allows Self and force-denies Touch/Target, exactly as both
++        // newEffect and onRangeButtonClicked compute it.
++        const bool constant = mEnchanting.getCastStyle() == ESM::Enchantment::ConstantEffect;
++        const bool allowSelf = (effect->mData.mFlags & ESM::MagicEffect::CastSelf) != 0 || constant;
++        const bool allowTouch = (effect->mData.mFlags & ESM::MagicEffect::CastTouch) && !constant;
++        const bool allowTarget = (effect->mData.mFlags & ESM::MagicEffect::CastTarget) && !constant;
++
++        // The exception, applied before the cascade so the rest stays a straight transcription.
++        if (!allowSelf && allowTouch && allowTarget)
++            return ESM::RT_Touch;
++
++        // Step 1 -- newEffect's cascade, verbatim (allowTarget deliberately not consulted).
++        int range = ESM::RT_Self;
++        if (!allowSelf)
++            range = ESM::RT_Touch;
++        if (!allowTouch)
++            range = ESM::RT_Target;
++
++        // Step 2 -- onRangeButtonClicked, verbatim: advance once, then three sequential checks.
++        range = (range + 1) % 3;
++        if (range == ESM::RT_Self && !allowSelf)
++            range = (range + 1) % 3;
++        if (range == ESM::RT_Touch && !allowTouch)
++            range = (range + 1) % 3;
++        if (range == ESM::RT_Target && !allowTarget)
++            range = (range + 1) % 3;
++
++        return range;
+     }
++
++    int EnchantingDialog::companionFirstLegalRange(const ESM::MagicEffect* effect) const
++    {
++        if (!effect)
++            return ESM::RT_Self;
++        const bool constant = mEnchanting.getCastStyle() == ESM::Enchantment::ConstantEffect;
++        if ((effect->mData.mFlags & ESM::MagicEffect::CastSelf) || constant)
++            return ESM::RT_Self;
++        if ((effect->mData.mFlags & ESM::MagicEffect::CastTouch) && !constant)
++            return ESM::RT_Touch;
++        if ((effect->mData.mFlags & ESM::MagicEffect::CastTarget) && !constant)
++            return ESM::RT_Target;
++        return ESM::RT_Self;
++    }
++
++    bool EnchantingDialog::companionCastCyclable()
++    {
++        MWWorld::ConstPtr item = mEnchanting.getOldItem();
++        if (item.isEmpty())
++            return false;
++
++        const int soulForConstant = MWBase::Environment::get()
++                                        .getESMStore()
++                                        ->get<ESM::GameSetting>()
++                                        .find("iSoulAmountForConstantEffect")
++                                        ->mValue.getInteger();
++        const bool powerfulSoul = mEnchanting.getGemCharge() >= soulForConstant;
++
++        // The shape of Enchanting::nextCastStyle()'s per-item-class state machine.
++        const unsigned int type = item.getType();
++        if (type == ESM::Book::sRecordId)
++            return false; // scrolls/books are locked to Cast Once
++        if (type == ESM::Armor::sRecordId || type == ESM::Clothing::sRecordId)
++            return powerfulSoul; // WhenUsed <-> ConstantEffect, and only with a powerful soul
++        if (type == ESM::Weapon::sRecordId)
++        {
++            const int weaponType = item.get<ESM::Weapon>()->mBase->mData.mType;
++            const ESM::WeaponType::Class weapclass = MWMechanics::getWeaponType(weaponType)->mWeaponClass;
++            if (weapclass == ESM::WeaponType::Ammo || weapclass == ESM::WeaponType::Thrown)
++                return false; // locked to When Strikes, and Constant is explicitly excluded
++            if (weapclass == ESM::WeaponType::Ranged)
++                return powerfulSoul; // bows reach only When Used, unless a powerful soul unlocks Constant
++            return true; // melee: When Strikes <-> When Used (<-> Constant)
++        }
++        return false;
++    }
++
++    // The full state batch, streamed one small line per record: the two pickers' contents are
++    // bounded only by how much the player is carrying, so this must not ride a single line (the
++    // 4096-byte stdout-flush truncation would silently cut it).
++    void EnchantingDialog::companionEmitState()
++    {
++        if (!sEnchantingDialogCompanionOpen)
++            return;
++
++        const MWWorld::Ptr player = MWMechanics::getPlayer();
++        if (player.isEmpty())
++            return;
++
++        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
++        MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
++
++        // setPtr assigns mPtr = getPlayer() for the self-enchant (soul gem) entry point and the
++        // actor for the buy-from-an-enchanter one, which is exactly the mSelfEnchanting split.
++        const bool self = (mPtr == player);
++        const int castStyle = mEnchanting.getCastStyle();
++        const bool constant = castStyle == ESM::Enchantment::ConstantEffect;
++
++        const char* castGmst = "sItemCastOnce";
++        switch (castStyle)
++        {
++            case ESM::Enchantment::WhenStrikes: castGmst = "sItemCastWhenStrikes"; break;
++            case ESM::Enchantment::WhenUsed: castGmst = "sItemCastWhenUsed"; break;
++            case ESM::Enchantment::ConstantEffect: castGmst = "sItemCastConstant"; break;
++            default: break;
++        }
++
++        {
++            std::ostringstream o;
++            o << "COMPANION_ENCHANTING_STATE_START:{"
++              << "\"self\":" << (self ? "true" : "false")
++              << ",\"enchanter\":\"" << companionEnchantJsonEscape(self ? std::string{} : mPtr.getClass().getName(mPtr)) << "\""
++              << ",\"gold\":" << player.getClass().getContainerStore(player).count(MWWorld::ContainerStore::sGoldId)
++              << ",\"name\":\"" << companionEnchantJsonEscape(mName->getCaption().asUTF8()) << "\""
++              // int(getEnchantPoints(false)) -- the FLOORED-per-effect sum. This is what the native
++              // label shows AND what the Buy capacity check compares, and it is deliberately NOT the
++              // precise=true value used by the chance / item-count / type-multiplier paths.
++              << ",\"points\":" << static_cast<int>(mEnchanting.getEnchantPoints(false))
++              << ",\"maxPoints\":" << mEnchanting.getMaxEnchantValue()
++              << ",\"castCost\":" << mEnchanting.getEffectiveCastCost()
++              << ",\"charge\":" << mEnchanting.getGemCharge()
++              << ",\"price\":" << mEnchanting.getEnchantPrice()
++              << ",\"chance\":" << std::clamp(mEnchanting.getEnchantChance(), 0, 100)
++              // Price is shown only when buying; the success chance only when self-enchanting AND
++              // the engine's own "show enchant chance" setting is on -- the exact pair of
++              // conditions setPtr applies to mPrice/mPriceText and mChanceLayout. Exported rather
++              // than decided on the DS side so the screen tracks that setting if it is ever turned on.
++              << ",\"showPrice\":" << (self ? "false" : "true")
++              << ",\"showChance\":" << ((self && Settings::game().mShowEnchantChance) ? "true" : "false")
++              << ",\"castType\":" << castStyle
++              << ",\"castLabel\":\"" << companionEnchantJsonEscape(winMgr->getGameSettingString(castGmst, {})) << "\""
++              << ",\"castCycle\":" << (companionCastCyclable() ? "true" : "false")
++              << ",\"constant\":" << (constant ? "true" : "false")
++              << ",\"effectCap\":8}";
++            Log(Debug::Info) << o.str();
++        }
++
++        // --- Item slot ---------------------------------------------------------------------------
++        {
++            MWWorld::ConstPtr item = mEnchanting.getOldItem();
++            std::ostringstream o;
++            o << "COMPANION_ENCHANTING_ITEMSLOT:{";
++            if (item.isEmpty())
++                o << "\"present\":false}";
++            else
++                o << "\"present\":true"
++                  << ",\"id\":\"" << companionEnchantJsonEscape(item.getCellRef().getRefId().serializeText()) << "\""
++                  << ",\"name\":\"" << companionEnchantJsonEscape(item.getClass().getName(item)) << "\""
++                  << ",\"icon\":\"" << companionEnchantJsonEscape(companionEnchantIcon(item.getClass().getInventoryIcon(item))) << "\""
++                  << ",\"maxPoints\":" << mEnchanting.getMaxEnchantValue() << "}";
++            Log(Debug::Info) << o.str();
++        }
++
++        // --- Soul slot ---------------------------------------------------------------------------
++        {
++            MWWorld::ConstPtr gem = mEnchanting.getGem();
++            std::ostringstream o;
++            o << "COMPANION_ENCHANTING_SOULSLOT:{";
++            if (gem.isEmpty())
++                o << "\"present\":false}";
++            else
++            {
++                std::string soulName;
++                const ESM::Creature* soul = store.get<ESM::Creature>().search(gem.getCellRef().getSoul());
++                if (soul)
++                    soulName = soul->mName;
++                o << "\"present\":true"
++                  << ",\"id\":\"" << companionEnchantJsonEscape(gem.getCellRef().getRefId().serializeText()) << "\""
++                  << ",\"name\":\"" << companionEnchantJsonEscape(gem.getClass().getName(gem)) << "\""
++                  << ",\"icon\":\"" << companionEnchantJsonEscape(companionEnchantIcon(gem.getClass().getInventoryIcon(gem))) << "\""
++                  << ",\"soul\":\"" << companionEnchantJsonEscape(soulName) << "\""
++                  << ",\"charge\":" << mEnchanting.getGemCharge() << "}";
++            }
++            Log(Debug::Info) << o.str();
++        }
++
++        // --- Browse list: the effects the player can enchant with ---------------------------------
++        // mButtonMapping is EffectEditorBase::startEditing's snapshot -- the union of every effect
++        // appearing in any ST_Spell the player knows, filtered to AllowEnchanting, deduplicated by
++        // record and sorted by display name. It is built ONCE at window open and never rebuilt,
++        // which the DS side inherits for free by reading it here.
++        //
++        // The RAW flag word is exported, not precomputed booleans: which range options and which
++        // sliders are legal also depends on the LIVE cast style (Constant force-allows Self and
++        // force-denies Touch/Target, and hides Duration), which the player changes with the Type
++        // button while the browse list stands still.
++        for (const auto& [index, effectId] : mButtonMapping)
++        {
++            const ESM::MagicEffect* mgef = store.get<ESM::MagicEffect>().search(effectId);
++            if (!mgef)
++                continue;
++            std::ostringstream o;
++            o << "COMPANION_ENCHANTING_AVAIL:{"
++              << "\"id\":\"" << companionEnchantJsonEscape(effectId.serializeText()) << "\""
++              << ",\"name\":\"" << companionEnchantJsonEscape(mgef->mName) << "\""
++              << ",\"icon\":\"" << companionEnchantJsonEscape(companionEnchantIcon(mgef->mIcon)) << "\""
++              << ",\"flags\":" << mgef->mData.mFlags << "}";
++            Log(Debug::Info) << o.str();
++        }
++
++        // --- The effects currently on the enchantment ---------------------------------------------
++        // Emission order IS mEffects order, which is the order the DS addresses them by index.
++        {
++            int index = 0;
++            for (const ESM::ENAMstruct& effect : mEffects)
++            {
++                const ESM::MagicEffect* mgef = store.get<ESM::MagicEffect>().search(effect.mEffectID);
++                std::ostringstream o;
++                o << "COMPANION_ENCHANTING_EFFECT:{"
++                  << "\"index\":" << index
++                  << ",\"id\":\"" << companionEnchantJsonEscape(effect.mEffectID.serializeText()) << "\""
++                  << ",\"skill\":\"" << companionEnchantJsonEscape(effect.mSkill.serializeText()) << "\""
++                  << ",\"attribute\":\"" << companionEnchantJsonEscape(effect.mAttribute.serializeText()) << "\""
++                  << ",\"range\":" << effect.mRange
++                  << ",\"magMin\":" << effect.mMagnMin
++                  << ",\"magMax\":" << effect.mMagnMax
++                  << ",\"duration\":" << effect.mDuration
++                  << ",\"area\":" << effect.mArea
++                  << ",\"flags\":" << (mgef ? mgef->mData.mFlags : 0)
++                  << ",\"icon\":\"" << companionEnchantJsonEscape(mgef ? companionEnchantIcon(mgef->mIcon) : std::string{}) << "\""
++                  // Composed HERE, not on the Kotlin side -- see companionEnchantEffectLine.
++                  << ",\"text\":\"" << companionEnchantJsonEscape(companionEnchantEffectLine(effect, constant)) << "\"}";
++                Log(Debug::Info) << o.str();
++                ++index;
++            }
++        }
++
++        // --- Item picker contents ------------------------------------------------------------------
++        // SortFilterItemModel::Filter_OnlyEnchantable, verbatim: not already enchanted, and of a
++        // type that can carry an enchantment -- with Book accepted only when it is a scroll.
++        {
++            MWWorld::Ptr playerPtr = player;
++            MWWorld::ContainerStore& cstore = playerPtr.getClass().getContainerStore(playerPtr);
++            const int mask = MWWorld::ContainerStore::Type_Armor | MWWorld::ContainerStore::Type_Clothing
++                | MWWorld::ContainerStore::Type_Weapon | MWWorld::ContainerStore::Type_Book;
++            for (auto it = cstore.begin(mask); it != cstore.end(); ++it)
++            {
++                MWWorld::Ptr item = *it;
++                if (!item.getClass().getEnchantment(item).empty())
++                    continue;
++                if (item.getType() == ESM::Book::sRecordId && !item.get<ESM::Book>()->mBase->mData.mIsScroll)
++                    continue;
++                std::ostringstream o;
++                o << "COMPANION_ENCHANTING_ITEMOPT:{"
++                  << "\"id\":\"" << companionEnchantJsonEscape(item.getCellRef().getRefId().serializeText()) << "\""
++                  << ",\"name\":\"" << companionEnchantJsonEscape(item.getClass().getName(item)) << "\""
++                  << ",\"icon\":\"" << companionEnchantJsonEscape(companionEnchantIcon(item.getClass().getInventoryIcon(item))) << "\""
++                  << ",\"count\":" << item.getCellRef().getCount()
++                  // The capacity this item would give, so the picker can be chosen against the
++                  // effects already planned. Same source as the label: mData.mEnchant * fEnchantmentMult.
++                  << ",\"maxPoints\":" << static_cast<int>(item.getClass().getEnchantmentPoints(item)
++                         * store.get<ESM::GameSetting>().find("fEnchantmentMult")->mValue.getFloat()) << "}";
++                Log(Debug::Info) << o.str();
++            }
++        }
++
++        // --- Soul picker contents --------------------------------------------------------------------
++        // SortFilterItemModel::Filter_OnlyChargedSoulstones, verbatim: a Miscellaneous item whose
++        // CellRef carries a soul that resolves to a real creature record.
++        {
++            MWWorld::Ptr playerPtr = player;
++            MWWorld::ContainerStore& cstore = playerPtr.getClass().getContainerStore(playerPtr);
++            for (auto it = cstore.begin(MWWorld::ContainerStore::Type_Miscellaneous); it != cstore.end(); ++it)
++            {
++                MWWorld::Ptr gem = *it;
++                if (gem.getCellRef().getSoul().empty())
++                    continue;
++                const ESM::Creature* soul = store.get<ESM::Creature>().search(gem.getCellRef().getSoul());
++                if (!soul)
++                    continue;
++                std::ostringstream o;
++                o << "COMPANION_ENCHANTING_SOULOPT:{"
++                  << "\"id\":\"" << companionEnchantJsonEscape(gem.getCellRef().getRefId().serializeText()) << "\""
++                  << ",\"name\":\"" << companionEnchantJsonEscape(gem.getClass().getName(gem)) << "\""
++                  << ",\"icon\":\"" << companionEnchantJsonEscape(companionEnchantIcon(gem.getClass().getInventoryIcon(gem))) << "\""
++                  << ",\"soul\":\"" << companionEnchantJsonEscape(soul->mName) << "\""
++                  // The soul's raw mData.mSoul -- the same number getGemCharge() reports, NOT the
++                  // gem's own capacity.
++                  << ",\"charge\":" << soul->mData.mSoul << "}";
++                Log(Debug::Info) << o.str();
++            }
++        }
++
++        Log(Debug::Info) << "COMPANION_ENCHANTING_STATE_END";
++    }
++
++    // ---- Item / soul slots -----------------------------------------------------------------------
++
++    void EnchantingDialog::companionSelectItem(std::string_view refId)
++    {
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        if (player.isEmpty())
++            return;
++        MWWorld::ContainerStore& cstore = player.getClass().getContainerStore(player);
++        const int mask = MWWorld::ContainerStore::Type_Armor | MWWorld::ContainerStore::Type_Clothing
++            | MWWorld::ContainerStore::Type_Weapon | MWWorld::ContainerStore::Type_Book;
++        for (auto it = cstore.begin(mask); it != cstore.end(); ++it)
++        {
++            MWWorld::Ptr item = *it;
++            if (item.getCellRef().getRefId().serializeText() != refId)
++                continue;
++            // Re-check the picker's own filter here: the bottom screen could be acting on a stale
++            // list (the item was enchanted or dropped since the batch was sent).
++            if (!item.getClass().getEnchantment(item).empty())
++                return;
++            if (item.getType() == ESM::Book::sRecordId && !item.get<ESM::Book>()->mBase->mData.mIsScroll)
++                return;
++
++            // onItemSelected's body, minus the mItemSelectionDialog->setVisible(false) -- that
++            // dialog is never constructed in DS mode. setItem() also overwrites the name field with
++            // the item's own name, exactly as vanilla does on every item selection.
++            setItem(item);
++            MWBase::Environment::get().getWindowManager()->playSound(item.getClass().getDownSoundId(item));
++            mEnchanting.nextCastStyle();
++            updateLabels();
++            return;
++        }
++    }
++
++    void EnchantingDialog::companionClearItem()
++    {
++        // onSelectItem's filled-slot branch. Deliberately asymmetric with the soul clear below:
++        // clearing the item does NOT re-run nextCastStyle() or refresh the effects view.
++        setItem(MWWorld::Ptr());
++        updateLabels();
++    }
++
++    void EnchantingDialog::companionSelectSoul(std::string_view refId)
++    {
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        if (player.isEmpty())
++            return;
++        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
++        MWWorld::ContainerStore& cstore = player.getClass().getContainerStore(player);
++        for (auto it = cstore.begin(MWWorld::ContainerStore::Type_Miscellaneous); it != cstore.end(); ++it)
++        {
++            MWWorld::Ptr gem = *it;
++            if (gem.getCellRef().getRefId().serializeText() != refId)
++                continue;
++            if (gem.getCellRef().getSoul().empty() || !store.get<ESM::Creature>().search(gem.getCellRef().getSoul()))
++                return;
++
++            // onSoulSelected's body, minus the dialog hide. The zero-charge rejection is kept even
++            // though the picker filter makes it unreachable, so the two cannot drift.
++            mEnchanting.setSoulGem(gem);
++            if (mEnchanting.getGemCharge() == 0)
++            {
++                companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage32");
++                return;
++            }
++            setSoulGem(gem);
++            MWBase::Environment::get().getWindowManager()->playSound(gem.getClass().getDownSoundId(gem));
++            updateLabels();
++            return;
++        }
++    }
++
++    void EnchantingDialog::companionClearSoul()
++    {
++        // onSelectSoul's filled-slot branch -- which, unlike the item clear, DOES re-run the cast
++        // style (losing the soul can put Constant Effect out of reach) and refresh the effects view.
++        setSoulGem(MWWorld::Ptr());
++        mEnchanting.nextCastStyle();
++        updateLabels();
++        updateEffectsView();
++    }
++
++    void EnchantingDialog::companionSetName(std::string_view text)
++    {
++        mName->setCaption(MyGUI::UString(std::string(text)));
++        updateLabels();
++    }
++
++    // ---- Effects ---------------------------------------------------------------------------------
++
++    void EnchantingDialog::companionEffectAdd(std::string_view effectId)
++    {
++        // EffectEditorBase::onAvailableEffectClicked's gates, in its order.
++        if (mEffects.size() >= 8)
++        {
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage28");
++            return;
++        }
++
++        const ESM::RefId id = ESM::RefId::deserializeText(effectId);
++        const ESM::MagicEffect* effect = MWBase::Environment::get().getESMStore()->get<ESM::MagicEffect>().search(id);
++        if (!effect)
++            return;
++
++        const bool constant = mEnchanting.getCastStyle() == ESM::Enchantment::ConstantEffect;
++        const bool allowSelf = (effect->mData.mFlags & ESM::MagicEffect::CastSelf) != 0 || constant;
++        const bool allowTouch = (effect->mData.mFlags & ESM::MagicEffect::CastTouch) && !constant;
++        const bool allowTarget = (effect->mData.mFlags & ESM::MagicEffect::CastTarget) && !constant;
++        if (!allowSelf && !allowTouch && !allowTarget)
++            return; // silently unusable, matching vanilla's own unresolved TODO -- no message
++
++        // A skill- or attribute-targeted effect needs its argument chosen FIRST. Vanilla opens
++        // SelectSkillDialog / SelectAttributeDialog here; the DS screen draws that picker itself and
++        // answers with CMP:enchant_effect_skill / _attribute. Note there is deliberately NO
++        // duplicate check on this path -- vanilla has none, so the same skill may be added twice.
++        if (effect->mData.mFlags & ESM::MagicEffect::TargetSkill)
++        {
++            Log(Debug::Info) << "COMPANION_ENCHANTING_ARGPICK:{\"kind\":\"skill\",\"effect\":\""
++                             << companionEnchantJsonEscape(id.serializeText()) << "\"}";
++            return;
++        }
++        if (effect->mData.mFlags & ESM::MagicEffect::TargetAttribute)
++        {
++            Log(Debug::Info) << "COMPANION_ENCHANTING_ARGPICK:{\"kind\":\"attribute\",\"effect\":\""
++                             << companionEnchantJsonEscape(id.serializeText()) << "\"}";
++            return;
++        }
++
++        // Plain effects DO get the strict one-per-record check.
++        for (const ESM::ENAMstruct& existing : mEffects)
++        {
++            if (existing.mEffectID == id)
++            {
++                companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sOnetypeEffectMessage");
++                return;
++            }
++        }
++
++        companionBeginNewEffect(effect, ESM::RefId(), ESM::RefId());
++    }
++
++    void EnchantingDialog::companionEffectArg(std::string_view effectId, std::string_view argId, bool isSkill)
++    {
++        // The same two gates vanilla applies before it opens the skill/attribute picker; they are
++        // re-run here because the DS picker sits between the two halves of that flow.
++        if (mEffects.size() >= 8)
++        {
++            companionEnchantMessage(MWBase::Environment::get().getWindowManager(), "sNotifyMessage28");
++            return;
++        }
++        const ESM::RefId id = ESM::RefId::deserializeText(effectId);
++        const ESM::MagicEffect* effect = MWBase::Environment::get().getESMStore()->get<ESM::MagicEffect>().search(id);
++        if (!effect)
++            return;
++        const bool constant = mEnchanting.getCastStyle() == ESM::Enchantment::ConstantEffect;
++        const bool allowSelf = (effect->mData.mFlags & ESM::MagicEffect::CastSelf) != 0 || constant;
++        const bool allowTouch = (effect->mData.mFlags & ESM::MagicEffect::CastTouch) && !constant;
++        const bool allowTarget = (effect->mData.mFlags & ESM::MagicEffect::CastTarget) && !constant;
++        if (!allowSelf && !allowTouch && !allowTarget)
++            return;
++
++        const ESM::RefId arg = ESM::RefId::deserializeText(argId);
++        if (isSkill)
++            companionBeginNewEffect(effect, arg, ESM::RefId());
++        else
++            companionBeginNewEffect(effect, ESM::RefId(), arg);
++    }
++
++    void EnchantingDialog::companionBeginNewEffect(
++        const ESM::MagicEffect* effect, const ESM::RefId& skill, const ESM::RefId& attribute)
++    {
++        // Route through the REAL EditEffectDialog::newEffect, so eventEffectAdded fires and the
++        // effect is in mEffects the moment the DS editor opens -- vanilla's add-then-remove-on-
++        // cancel behaviour, which the top-screen live readout depends on. The modal itself is
++        // suppressed (setCompanionSuppressed), so nothing appears on the top screen.
++        mAddEffectDialog.setCompanionSuppressed(companionSuppressModals());
++        mAddEffectDialog.newEffect(effect);
++        if (!skill.empty())
++            mAddEffectDialog.setSkill(skill);
++        else if (!attribute.empty())
++            mAddEffectDialog.setAttribute(attribute);
++
++        if (mEffects.empty())
++            return;
++
++        // The opening range. newEffect has already run vanilla's own two steps and written their
++        // result through eventEffectModified; this replaces it with companionInitialRange, which
++        // reproduces those same two steps EXCEPT for the single Touch+Target case (see there).
++        ESM::ENAMstruct& added = mEffects.back();
++        added.mRange = companionInitialRange(effect);
++        if (added.mRange == ESM::RT_Self)
++            added.mArea = 0; // as onRangeButtonClicked zeroes the area slider when it lands on Self
++
++        mCompanionEditIndex = static_cast<int>(mEffects.size()) - 1;
++        mCompanionEditIsNew = true;
++        mCompanionOldEffect = added;
++
++        updateEffectsView();
++        Log(Debug::Info) << "COMPANION_ENCHANTING_EDIT:{\"index\":" << mCompanionEditIndex << ",\"new\":true}";
++    }
++
++    void EnchantingDialog::companionEffectEdit(int index)
++    {
++        if (index < 0 || index >= static_cast<int>(mEffects.size()))
++            return;
++        // Snapshot for _effect_cancel, mirroring EditEffectDialog::mOldEffect.
++        mCompanionEditIndex = index;
++        mCompanionEditIsNew = false;
++        mCompanionOldEffect = mEffects[index];
++        Log(Debug::Info) << "COMPANION_ENCHANTING_EDIT:{\"index\":" << index << ",\"new\":false}";
++    }
++
++    void EnchantingDialog::companionEffectSet(int index, int range, int magMin, int magMax, int duration, int area)
++    {
++        if (index < 0 || index >= static_cast<int>(mEffects.size()))
++            return;
++
++        ESM::ENAMstruct effect = mEffects[index];
++        const ESM::MagicEffect* mgef
++            = MWBase::Environment::get().getESMStore()->get<ESM::MagicEffect>().search(effect.mEffectID);
++
++        // The slider bounds are FIXED constants in openmw_edit_effect.layout and never adjusted at
++        // runtime: Magnitude 1..100 (pos+1), Duration 1..1440 (pos+1), Area 0..50 (pos, no offset).
++        // Clamped here as well as on the DS side so a malformed command cannot write out of range.
++        magMin = std::clamp(magMin, 1, 100);
++        magMax = std::clamp(magMax, 1, 100);
++        if (magMax < magMin)
++            magMax = magMin; // the only coupling: onMagnitudeMaxChanged forces max >= min
++        duration = std::clamp(duration, 1, 1440);
++        area = std::clamp(area, 0, 50);
++
++        // Keep the range legal under the live cast style.
++        const bool constant = mEnchanting.getCastStyle() == ESM::Enchantment::ConstantEffect;
++        const int flags = mgef ? mgef->mData.mFlags : 0;
++        const bool ok = (range == ESM::RT_Self && ((flags & ESM::MagicEffect::CastSelf) || constant))
++            || (range == ESM::RT_Touch && (flags & ESM::MagicEffect::CastTouch) && !constant)
++            || (range == ESM::RT_Target && (flags & ESM::MagicEffect::CastTarget) && !constant);
++        if (!ok)
++            range = companionFirstLegalRange(mgef); // a repair, not an opening choice
++        if (range == ESM::RT_Self)
++            area = 0;
++
++        effect.mRange = range;
++        effect.mMagnMin = magMin;
++        effect.mMagnMax = magMax;
++        effect.mDuration = duration;
++        effect.mArea = area;
++        mEffects[index] = effect;
++
++        updateEffectsView();
++    }
++
++    void EnchantingDialog::companionEffectDelete(int index)
++    {
++        if (index < 0 || index >= static_cast<int>(mEffects.size()))
++            return;
++        mEffects.erase(mEffects.begin() + index);
++        if (mCompanionEditIndex == index)
++        {
++            mCompanionEditIndex = -1;
++            mCompanionEditIsNew = false;
++        }
++        else if (mCompanionEditIndex > index)
++            --mCompanionEditIndex;
++        mSelectedEffect = 0;
++        updateEffectsView();
++    }
++
++    void EnchantingDialog::companionEffectOk()
++    {
++        // OK: keep what the sliders wrote and forget the snapshot.
++        mCompanionEditIndex = -1;
++        mCompanionEditIsNew = false;
++    }
++
++    void EnchantingDialog::companionEffectCancel()
++    {
++        // The two halves of EditEffectDialog::exit(): a NEW effect is removed outright, an edited
++        // one is restored to the values it had when the editor opened.
++        if (mCompanionEditIndex < 0 || mCompanionEditIndex >= static_cast<int>(mEffects.size()))
++        {
++            mCompanionEditIndex = -1;
++            mCompanionEditIsNew = false;
++            return;
++        }
++        if (mCompanionEditIsNew)
++            mEffects.erase(mEffects.begin() + mCompanionEditIndex);
++        else
++            mEffects[mCompanionEditIndex] = mCompanionOldEffect;
++        mCompanionEditIndex = -1;
++        mCompanionEditIsNew = false;
++        mSelectedEffect = 0;
++        updateEffectsView();
++    }
++
++    void EnchantingDialog::companionCastTypeNext()
++    {
++        // The real handler: nextCastStyle() + updateLabels() + updateEffectsView(). updateLabels
++        // calls setConstantEffect(), which on the switch INTO Constant force-rewrites every
++        // already-added effect's range to Self -- and does not restore them on the way back out.
++        // That destructive side effect is vanilla's and is deliberately preserved.
++        onTypeButtonClicked(mTypeButton);
++    }
++
++    void EnchantingDialog::companionBuy()
++    {
++        // The real handler, so all seven validations run in their exact order with their exact
++        // messages, the stolen-item confiscation still happens, and the self-enchant roll (which
++        // consumes the soul gem whatever the outcome) is the engine's.
++        onBuyButtonClicked(mBuyButton);
++    }
++
++    void EnchantingDialog::companionCancel()
++    {
++        onCancelButtonClicked(mCancelButton);
++    }
++
++// COMPANION: DS enchanting bridges, driven from drainCompanionCommands (androidmain.cpp) on the
++// engine main thread. Every one is a no-op unless an enchanting session is actually open, so a
++// stale command after the window closed cannot do anything.
++extern "C" void companionEnchantSelectItem(const char* refId)
++{
++    if (gCompanionEnchantingWindow && refId)
++        gCompanionEnchantingWindow->companionSelectItem(refId);
+ }
++
++extern "C" void companionEnchantClearItem()
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionClearItem();
++}
++
++extern "C" void companionEnchantSelectSoul(const char* refId)
++{
++    if (gCompanionEnchantingWindow && refId)
++        gCompanionEnchantingWindow->companionSelectSoul(refId);
++}
++
++extern "C" void companionEnchantClearSoul()
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionClearSoul();
++}
++
++extern "C" void companionEnchantSetName(const char* text)
++{
++    if (gCompanionEnchantingWindow && text)
++        gCompanionEnchantingWindow->companionSetName(text);
++}
++
++extern "C" void companionEnchantEffectAdd(const char* effectId)
++{
++    if (gCompanionEnchantingWindow && effectId)
++        gCompanionEnchantingWindow->companionEffectAdd(effectId);
++}
++
++extern "C" void companionEnchantEffectArg(const char* effectId, const char* argId, bool isSkill)
++{
++    if (gCompanionEnchantingWindow && effectId && argId)
++        gCompanionEnchantingWindow->companionEffectArg(effectId, argId, isSkill);
++}
++
++extern "C" void companionEnchantEffectEdit(int index)
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionEffectEdit(index);
++}
++
++extern "C" void companionEnchantEffectSet(int index, int range, int magMin, int magMax, int duration, int area)
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionEffectSet(index, range, magMin, magMax, duration, area);
++}
++
++extern "C" void companionEnchantEffectDelete(int index)
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionEffectDelete(index);
++}
++
++extern "C" void companionEnchantEffectOk()
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionEffectOk();
++}
++
++extern "C" void companionEnchantEffectCancel()
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionEffectCancel();
++}
++
++extern "C" void companionEnchantCastTypeNext()
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionCastTypeNext();
++}
++
++extern "C" void companionEnchantBuy()
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionBuy();
++}
++
++extern "C" void companionEnchantCancel()
++{
++    if (gCompanionEnchantingWindow)
++        gCompanionEnchantingWindow->companionCancel();
++}
++#endif
++}
+--- a/apps/openmw/mwgui/spellcreationdialog.hpp
++++ b/apps/openmw/mwgui/spellcreationdialog.hpp
+@@ -36,6 +36,19 @@
+ 
+         void newEffect(const ESM::MagicEffect* effect);
+         void editEffect(ESM::ENAMstruct effect);
++
++#ifdef __ANDROID__
++        // COMPANION: when the DS enchanting screen owns this editor, the native modal must never be
++        // shown -- the main EnchantingDialog is hidden by windowmanagerimp's GM_Enchanting
++        // suppression, but this is a WindowModal created independently and is NOT reached by that
++        // block, so without this it would pop up alone on the TOP screen. Set by EffectEditorBase
++        // immediately before each newEffect/editEffect, so it tracks the live element mode rather
++        // than a value cached at window-open. Everything else in this class still runs: the DS
++        // screen drives the same mEffect through the same handlers and only the widgets go unseen.
++        void setCompanionSuppressed(bool suppressed) { mCompanionSuppressed = suppressed; }
++        // The live edit target, so the DS bridges can read back what the native handlers produced.
++        const ESM::ENAMstruct& companionEffect() const { return mEffect; }
++#endif
+         typedef MyGUI::delegates::MultiDelegate<ESM::ENAMstruct> EventHandle_Effect;
+ 
+         EventHandle_Effect eventEffectAdded;
+@@ -92,6 +105,10 @@
+ 
+         bool mConstantEffect;
+ 
++#ifdef __ANDROID__
++        bool mCompanionSuppressed = false;
++#endif
++
+         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
+         void updateControllerFocus(int prevFocus, int newFocus);
+         int mControllerFocus = 0;
+@@ -148,6 +165,13 @@
+ 
+         virtual void notifyEffectsChanged() {}
+ 
++#ifdef __ANDROID__
++        // COMPANION: true when THIS editor is the enchanting one AND Enchanting is routed to the DS
++        // screen. Deliberately checks mType as well as the element: the same EffectEditorBase backs
++        // SpellCreationDialog, which is still Vanilla-only, and must keep its own modals.
++        bool companionSuppressModals() const;
++#endif
++
+         virtual bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg);
+ 
+     private:
+--- a/apps/openmw/mwgui/spellcreationdialog.cpp
++++ b/apps/openmw/mwgui/spellcreationdialog.cpp
+@@ -53,6 +53,14 @@
+     }
+ }
+ 
++#ifdef __ANDROID__
++// COMPANION: true when Enchanting is routed to the DS (bottom) screen. Defined in androidmain.cpp.
++// A block-scope extern "C" is ill-formed, so it is declared here at namespace scope and only CALLED
++// inside functions. Used ONLY through EffectEditorBase::companionSuppressModals(), which also tests
++// mType -- SpellCreationDialog shares this base and is still Vanilla-only.
++extern "C" bool companionDsEnchanting();
++#endif
++
+ namespace MWGui
+ {
+ 
+@@ -170,7 +178,13 @@
+             mControllerFocus = 0;
+         }
+ 
+-        setVisible(true);
++#ifdef __ANDROID__
++        // COMPANION: in DS mode the bottom screen draws this editor, so the native modal stays down.
++        // Everything above still ran, so mEffect and the eventEffectAdded that fired at the top of
++        // this function are exactly as vanilla left them.
++        if (!mCompanionSuppressed)
++#endif
++            setVisible(true);
+     }
+ 
+     void EditEffectDialog::editEffect(ESM::ENAMstruct effect)
+@@ -924,6 +938,14 @@
+         if (!allowSelf && !allowTouch && !allowTarget)
+             return; // TODO: Show an error message popup?
+ 
++#ifdef __ANDROID__
++        // COMPANION: in DS mode this path is never taken (the bottom screen sends
++        // CMP:enchant_effect_* instead), but the native window can still be reached by a stray
++        // click or controller event, and SelectSkillDialog / SelectAttributeDialog are WindowModals
++        // that the GM_Enchanting suppression block does not cover -- so they are gated here too.
++        if (companionSuppressModals())
++            return;
++#endif
+         if (effect->mData.mFlags & ESM::MagicEffect::TargetSkill)
+         {
+             mSelectSkillDialog = std::make_unique<SelectSkillDialog>();
+@@ -1035,10 +1057,23 @@
+ 
+         mSelectedEffect = id;
+ 
++#ifdef __ANDROID__
++        mAddEffectDialog.setCompanionSuppressed(companionSuppressModals());
++#endif
+         mAddEffectDialog.editEffect(mEffects[id]);
+-        mAddEffectDialog.setVisible(true);
++#ifdef __ANDROID__
++        if (!companionSuppressModals())
++#endif
++            mAddEffectDialog.setVisible(true);
+     }
+ 
++#ifdef __ANDROID__
++    bool EffectEditorBase::companionSuppressModals() const
++    {
++        return mType == Enchanting && companionDsEnchanting();
++    }
++#endif
++
+     void EffectEditorBase::setConstantEffect(bool constant)
+     {
+         mAddEffectDialog.setConstantEffect(constant);

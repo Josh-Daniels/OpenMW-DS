@@ -161,6 +161,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.Density
 import org.openmw.ui.theme.GAME_FONT_SIZE_SCALE
 import org.openmw.ui.theme.loadGameFont
@@ -427,22 +428,50 @@ private fun ProvideCompanionFont(content: @Composable () -> Unit) {
     )
 }
 
+// Height reserved for the HUD's top/bottom bars. TOP_BAR_SPACE is currently unreferenced — the
+// SPLIT dialogue band stopped using it on Aug 20 2026 (see [splitDialoguePanel]); kept as the
+// documented counterpart to BOTTOM_BAR_SPACE, which the tab pages still pad by.
+@Suppress("unused")
 private const val TOP_BAR_SPACE = 76
 private const val BOTTOM_BAR_SPACE = 76
 // Unified row font size for the SPLIT-conversation bottom-screen surfaces: the dialogue
 // topics/services list plus the persuade / repair / travel popups. BOTTOM/TOP modes keep their
-// own smaller defaults.
-private val SPLIT_ROW_FONT_SIZE = 16.sp
-// Unified panel size for those same SPLIT surfaces: width matches the topics popup and height
-// spans the HUD map box's vertical band (TOP_BAR_SPACE..BOTTOM_BAR_SPACE), so topics, persuade,
-// repair and travel are all identically sized and line up with the map on the HUD page. Applied
-// via [splitDialoguePanel]; the outer scrim supplies the band padding.
-private const val SPLIT_PANEL_WIDTH = 0.65f
+// own smaller defaults. Bumped 16 -> 18 (Aug 20 2026) together with the panel widening below —
+// the rows are the primary touch targets on this screen and 16sp read small at arm's length.
+private val SPLIT_ROW_FONT_SIZE = 18.sp
+// Vertical padding of a SPLIT topic/service row. Larger than the 9dp BOTTOM default so the wider,
+// larger-font rows read as chunkier buttons; the panel fills a fixed band, so this trades row
+// count for row height rather than growing the panel. Goodbye deliberately keeps its own 10dp.
+private val SPLIT_ROW_VERTICAL_PADDING = 13.dp
+// Unified panel size for those same SPLIT surfaces, applied via [splitDialoguePanel]: this width
+// plus a matching top/bottom inset, so topics, persuade, repair, travel, training and spell-buying
+// are all identically sized and sit the same distance from every screen edge.
+// 0.65 -> 0.84 (Aug 20 2026): deliberately the SAME fraction as [BARTER_CONTROLS_PANEL_WIDTH], so
+// every SPLIT bottom-screen service panel (topics, persuade, repair, travel, barter controls) is
+// one width. Keep the two in step if either moves.
+private const val SPLIT_PANEL_WIDTH = 0.84f
 
-/** Sizes a SPLIT-view dialogue panel (topics/persuade/repair/travel) uniformly: [SPLIT_PANEL_WIDTH]
- *  of the screen width, full height of the band its parent Box pads to. */
-private fun Modifier.splitDialoguePanel(): Modifier =
-    this.fillMaxWidth(SPLIT_PANEL_WIDTH).fillMaxHeight()
+/** Sizes a SPLIT-view dialogue panel (topics/persuade/repair/travel/training/spell-buying)
+ *  uniformly: [SPLIT_PANEL_WIDTH] of the screen width, inset from the top and bottom by the SAME
+ *  margin that width leaves at the sides, so the panel sits equidistant from all four edges of the
+ *  bottom screen.
+ *
+ *  The vertical inset lives HERE rather than as padding on each caller's scrim Box (which is what
+ *  the old fixed `TOP_BAR_SPACE`/`BOTTOM_BAR_SPACE` band was, until Aug 20 2026): it has to be
+ *  derived from the measured screen width to track [SPLIT_PANEL_WIDTH], and putting it in the one
+ *  shared modifier is what keeps all six surfaces identical. The old band was sized to line up with
+ *  the HUD map box, which left far more room above/below than beside once the panel widened.
+ *
+ *  Width comes from `LocalWindowInfo.containerSize` — the window this composition is drawn in, i.e.
+ *  the Presentation (bottom screen) — NOT `LocalConfiguration`, so it is right on both displays.
+ *  Modifier ORDER is load-bearing: fillMaxWidth reads the parent's width, then padding shrinks the
+ *  height constraint, then fillMaxHeight fills what remains. */
+@Composable
+private fun Modifier.splitDialoguePanel(): Modifier {
+    val widthPx = LocalWindowInfo.current.containerSize.width
+    val inset = with(LocalDensity.current) { (widthPx * (1f - SPLIT_PANEL_WIDTH) / 2f).toDp() }
+    return this.fillMaxWidth(SPLIT_PANEL_WIDTH).padding(vertical = inset).fillMaxHeight()
+}
 // Shared height for the "top box" on Inventory (EQUIPPED strip) and Spells
 // (Active Spell) so the two panels line up. Content is vertically centered.
 private val TOP_BOX_HEIGHT = 54.dp
@@ -1356,6 +1385,19 @@ private fun CompanionScreenContent() {
             }
         }
 
+        // Enchanting overlay. Driven by COMPANION_ENCHANTING_* (native EnchantingDialog) — the whole
+        // batch is read off the live MWMechanics::Enchanting after every mutation, so nothing about
+        // the mechanic lives here. Shown while Enchanting is DS. zIndex 18f, like alchemy: it fully
+        // REPLACES a native window, and the TOP half (name + stats + effects readout) is its own
+        // overlay in EngineActivity.
+        val enchantDs by UiPreferences.gameUiModeFlow("game_ui_enchanting").collectAsState()
+        val enchantSession by GameStateRepository.enchantSession.collectAsState()
+        if (enchantDs == GameUiMode.DS) {
+            enchantSession?.let { session ->
+                EnchantingOverlay(session = session)
+            }
+        }
+
         // Spell-buying overlay. Driven by COMPANION_SPELLBUYING_* (native SpellBuyingWindow). Shown
         // whenever a session exists AND Spell buying is DS. The engine re-exports the list after each
         // purchase (bought spell flips to known=1, keeping its slot). zIndex 17f (repair tier).
@@ -1486,16 +1528,14 @@ private fun DialogueTopicsOverlay(
             ConversationLocation.TOP -> Unit
 
             // SPLIT: history is on the top screen; the bottom screen shows ONLY the controls
-            // (disposition, Barter, Repair, Persuade, topics, Goodbye) centred at 65% width,
+            // (disposition, Barter, Repair, Persuade, topics, Goodbye) centred at [SPLIT_PANEL_WIDTH],
             // with the persuasion/choices popups over it.
             ConversationLocation.SPLIT -> {
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        // Same vertical band as the HUD map box (TOP_BAR_SPACE..BOTTOM_BAR_SPACE)
-                        // so the topics panel lines up with the map on the HUD page.
-                        .padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp),
-                    contentAlignment = Alignment.TopCenter
+                    modifier = Modifier.fillMaxSize(),
+                    // The panel supplies its own vertical inset (see [splitDialoguePanel]); this box
+                    // just centres it in the leftover space.
+                    contentAlignment = Alignment.Center
                 ) {
                     Column(
                         modifier = Modifier
@@ -1517,6 +1557,9 @@ private fun DialogueTopicsOverlay(
                             // bottom screen — matches the persuade/repair/travel popups).
                             // BOTTOM/TOP keep the default 13sp.
                             rowFontSize = SPLIT_ROW_FONT_SIZE,
+                            // Chunkier rows + centred labels: SPLIT only (see the two params).
+                            rowVerticalPadding = SPLIT_ROW_VERTICAL_PADDING,
+                            centerRows = true,
                             modifier = Modifier.fillMaxSize().padding(8.dp)
                         )
                     }
@@ -1649,10 +1692,11 @@ private fun DialogueConversationOverlay(
  * TOP-screen conversation overlay (Display 0). Hosted by [org.openmw.EngineActivity] in a
  * WindowManager panel window while a conversation is active AND the Conversation location is
  * SPLIT or TOP. Its content depends on the location:
- *  - SPLIT: a read-only, bottom-anchored history box (75% width, 51% height) — NPC name +
- *    scrolling history. The controls live on the bottom screen. (Touchable only for scrolling.)
+ *  - SPLIT: a read-only, bottom-anchored history box (full width inside the 12dp inset, 51%
+ *    height) — NPC name + scrolling history. The controls live on the bottom screen. (Touchable
+ *    only for scrolling.)
  *  - TOP: the full interactive two-column conversation (history + controls + popups), the SAME
- *    75% width, expanded to 92% height. The bottom screen is a dimmed, inert scrim.
+ *    full width, expanded to 92% height. The bottom screen is a dimmed, inert scrim.
  */
 @Composable
 fun ConversationHistoryOverlay() {
@@ -1689,7 +1733,7 @@ fun ConversationHistoryOverlay() {
         return
     }
 
-    // SPLIT: read-only history box (bottom-anchored, 75% width, 51% height). A mid-dialogue
+    // SPLIT: read-only history box (bottom-anchored, full width inside the inset, 51% height). A mid-dialogue
     // choice question renders inline here (with the conversation), controller-navigable — the
     // controls live on the bottom screen but the choices live with the text, matching vanilla.
     val choices by GameStateRepository.dialogueChoices.collectAsState()
@@ -1701,7 +1745,10 @@ fun ConversationHistoryOverlay() {
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.75f)             // ~25% narrower than full width
+                // Full width inside the 12dp inset — the SAME width TOP mode uses (which passes
+                // panelWidthFraction = null), so switching Conversation location doesn't resize the
+                // history box. Was 0.75f (~25% narrower) until Aug 20 2026.
+                .fillMaxWidth()
                 .fillMaxHeight(0.51f)            // ~10% taller than the previous 0.46
                 .adaptiveDimTint()
                 .clip(RoundedCornerShape(3.dp))
@@ -2026,6 +2073,13 @@ private fun DialogueRightColumn(
     interactive: Boolean,
     onPersuadeTapped: () -> Unit,
     rowFontSize: TextUnit = 13.sp,
+    // Row height. Null = derive from [compact] (7dp) / the BOTTOM default (9dp); SPLIT passes
+    // [SPLIT_ROW_VERTICAL_PADDING] so its larger-font rows get proportionally chunkier buttons.
+    rowVerticalPadding: Dp? = null,
+    // Centre the row labels instead of left-aligning them. SPLIT only — the wide, short band panel
+    // reads better centred; the tall BOTTOM/TOP columns stay left-aligned (a long topic list scans
+    // faster down a straight left edge).
+    centerRows: Boolean = false,
     // TOP compact layout: the caller renders the disposition bar in the name bar instead (so skip
     // it here); tighten the topic-row padding and match the Goodbye font to the topics font, to fit
     // more topic rows in the shorter panel.
@@ -2173,7 +2227,8 @@ private fun DialogueRightColumn(
                     fontSize = rowFontSize,
                     focused = index == focusIndex,
                     // Tighter rows in compact/TOP mode so more topics fit.
-                    verticalPadding = if (compact) 7.dp else 9.dp,
+                    verticalPadding = rowVerticalPadding ?: if (compact) 7.dp else 9.dp,
+                    centered = centerRows,
                     // Only the below-divider topic rows carry the read-status colour; the service
                     // block (Persuade/Barter/…/Beds) stays the normal colour. Service rows below the
                     // divider aren't in the flags map either, so they resolve to 0.
@@ -2219,6 +2274,8 @@ private fun DialogueOptionRow(
     fontSize: TextUnit = 13.sp,
     focused: Boolean = false,
     verticalPadding: Dp = 9.dp,
+    // Centre the label instead of left-aligning it (SPLIT topics band).
+    centered: Boolean = false,
     // "color topic" read-status (0 none, 1 Specific-unheard, 2 Exhausted-read) — 0 for service/choice
     // rows. Colours a topic like the native list: BronzeLight = new/unheard, BoneDim = already read.
     topicFlag: Int = 0,
@@ -2245,6 +2302,7 @@ private fun DialogueOptionRow(
                 else -> Bone
             },
             fontSize = fontSize, fontFamily = MwBody,
+            textAlign = if (centered) TextAlign.Center else TextAlign.Start,
             modifier = Modifier.fillMaxWidth().padding(vertical = verticalPadding, horizontal = 4.dp)
         )
         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.5f)))
@@ -2254,6 +2312,42 @@ private fun DialogueOptionRow(
 // "color topic" read-status bit flags (mirror MWBase::DialogueManager::TopicType).
 private const val TOPIC_SPECIFIC = 1
 private const val TOPIC_EXHAUSTED = 2
+
+/** One persuasion option row + its hairline divider. Extracted so the SPLIT (LazyColumn) and
+ *  BOTTOM/TOP (plain Column) branches of [PersuasionPopup] render identical rows. [alternate]
+ *  draws the lighter of the two alternating row backgrounds. */
+@Composable
+private fun PersuasionOptionRow(
+    label: String,
+    enabled: Boolean,
+    focused: Boolean,
+    alternate: Boolean,
+    fontSize: TextUnit,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                if (focused) BronzeLight.copy(alpha = 0.15f)
+                else if (alternate) Color(0x22000000) else Color(0x11000000)
+            )
+            .then(if (focused) Modifier.border(2.dp, BronzeLight) else Modifier)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Text(
+            label,
+            color = when {
+                !enabled -> BoneDim
+                focused -> BoneBright
+                else -> Bone
+            },
+            fontSize = fontSize, fontFamily = MwBody
+        )
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+}
 
 /** Persuasion popup — a centred in-window overlay (NOT a Dialog; that crashes on the
  *  Presentation display) + scrim. Six persuasion option rows (bribes greyed + non-tappable
@@ -2302,18 +2396,17 @@ private fun PersuasionPopup(gold: Int, bandSized: Boolean, onPersuade: (Int) -> 
         },
         onCancel = onCancel,
     )
+    // Keep the D-pad-focused option on screen in SPLIT (the only mode where the list scrolls).
+    val optionListState = rememberLazyListState()
+    LaunchedEffect(focusIndex) {
+        if (splitMode && focusIndex in options.indices) optionListState.animateScrollToItem(focusIndex)
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .zIndex(30f)
             .background(Color(0x99000000))
-            // In SPLIT view this popup matches the unified topics-panel band; otherwise it stays
-            // a centred, content-sized card.
-            .then(
-                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
-                else Modifier
-            )
             // No tap-outside dismiss — the scrim swallows taps; only the Cancel button closes it.
             .pointerInput(Unit) { detectTapGestures {} },
         contentAlignment = Alignment.Center
@@ -2332,37 +2425,35 @@ private fun PersuasionPopup(gold: Int, bandSized: Boolean, onPersuade: (Int) -> 
             Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 
             // Options. In SPLIT the panel is height-bounded (fills the topics band), so the options
-            // take weight(1f) and SCROLL — otherwise 6 rows at the larger split font overflow and push
-            // the gold/Cancel row past the clipped panel edge (bug). In BOTTOM/TOP the panel wraps its
-            // content, so the options render plain and the whole box grows to fit.
-            Column(
-                modifier = if (splitMode)
-                    Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
-                else Modifier.fillMaxWidth()
-            ) {
-                options.forEachIndexed { i, (label, type, cost) ->
-                    val enabled = gold >= cost
-                    // Alternating row backgrounds for readability.
-                    val rowBg = if (i % 2 == 0) Color(0x22000000) else Color(0x11000000)
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(if (i == focusIndex) BronzeLight.copy(alpha = 0.15f) else rowBg)
-                            .then(if (i == focusIndex) Modifier.border(2.dp, BronzeLight) else Modifier)
-                            .then(if (enabled) Modifier.clickable { onPersuade(type) } else Modifier)
-                            .padding(horizontal = 16.dp, vertical = 12.dp)
-                    ) {
-                        Text(
-                            label,
-                            color = when {
-                                !enabled -> BoneDim
-                                i == focusIndex -> BoneBright
-                                else -> Bone
-                            },
-                            fontSize = optionFontSize, fontFamily = MwBody
+            // SCROLL — otherwise 6 rows at the larger split font overflow and push the gold/Cancel
+            // row past the clipped panel edge (bug). In BOTTOM/TOP the panel wraps its content, so
+            // the options render plain and the whole box grows to fit.
+            //
+            // SPLIT uses a LazyColumn + animateScrollToItem, NOT a verticalScroll Column: D-pad
+            // focus has to drag the viewport with it. A plain scrollable Column has no way to do
+            // that (rememberListNavFocus only moves an index; nothing scrolls a ScrollState), so
+            // focus walked off the bottom edge invisibly — the reported bug, Aug 20 2026. Repair,
+            // travel, training and spell-buying were already on this pattern; persuasion was the
+            // one straggler.
+            if (splitMode) {
+                LazyColumn(state = optionListState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    itemsIndexed(options) { i, opt ->
+                        PersuasionOptionRow(
+                            label = opt.first, enabled = gold >= opt.third, focused = i == focusIndex,
+                            alternate = i % 2 == 0, fontSize = optionFontSize,
+                            onClick = { onPersuade(opt.second) }
                         )
                     }
-                    Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+                }
+            } else {
+                Column(Modifier.fillMaxWidth()) {
+                    options.forEachIndexed { i, opt ->
+                        PersuasionOptionRow(
+                            label = opt.first, enabled = gold >= opt.third, focused = i == focusIndex,
+                            alternate = i % 2 == 0, fontSize = optionFontSize,
+                            onClick = { onPersuade(opt.second) }
+                        )
+                    }
                 }
             }
 
@@ -5973,11 +6064,6 @@ private fun RepairOverlay(session: RepairSession) {
             .fillMaxSize()
             .zIndex(17f)
             .background(Color(0xCC0F0C08))
-            // In SPLIT view match the unified topics-panel band; otherwise centre a 0.7×0.86 card.
-            .then(
-                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
-                else Modifier
-            )
             // Swallow taps so nothing falls through to the tab underneath. NO dismiss.
             .pointerInput(Unit) { detectTapGestures {} },
         contentAlignment = Alignment.Center
@@ -6176,6 +6262,24 @@ private val ALCHEMY_APPARATUS_NAMES = listOf("Mortar & Pestle", "Alembic", "Calc
  *  1920x1080 at density 369, i.e. ~832 x ~468 dp, so this is a small inset on a ~468dp-tall screen —
  *  enough that the panel is not flush against the edge, not so much that it creeps back to centre. */
 private val ALCHEMY_TOP_PANEL_INSET = 24.dp
+
+/** Width fraction shared by BOTH top-screen DS service panels (alchemy and enchanting), so the two
+ *  are the same size. Extracted from alchemy's inline 0.82f when enchanting adopted it. */
+private const val ALCHEMY_TOP_PANEL_WIDTH = 0.82f
+
+/** Cap on the enchanting readout's height. The panel is intrinsically sized, so without this a full
+ *  eight effects (several of them two lines) would push it off the top of the screen. */
+private val ENCHANT_TOP_EFFECTS_MAX = 240.dp
+
+/** Floor under the enchanting top panel, so it keeps its size when there is little in it — with no
+ *  effects yet the left column alone would set the height and the panel would visibly shrink as the
+ *  player works. ~25% taller than the height the stat column produces on its own. */
+private val ENCHANT_TOP_PANEL_MIN_HEIGHT = 215.dp
+
+/** Control height for the BOTTOM enchanting screen — deliberately its own constant rather than the
+ *  shared ALCHEMY_CONTROL_HEIGHT: this screen is denser (three popup types, a slider editor) and was
+ *  sized up on its own without dragging alchemy's proportions along with it. */
+private val ENCHANT_CONTROL_HEIGHT = 56.dp
 
 /**
  * Cross-screen alchemy UI state. Both companion surfaces are separate compositions in separate
@@ -6696,7 +6800,7 @@ fun AlchemyTopOverlay() {
                 // Outside the panel frame, so it is a gap from the screen edge and not interior
                 // padding — hence before mwPanel() in the chain, not after.
                 .padding(bottom = ALCHEMY_TOP_PANEL_INSET)
-                .fillMaxWidth(0.82f)
+                .fillMaxWidth(ALCHEMY_TOP_PANEL_WIDTH)
                 // IntrinsicSize.Min so the divider's fillMaxHeight() below resolves to the TALLEST
                 // COLUMN rather than to the incoming (full-screen) constraint, which would stretch
                 // this whole panel down the screen.
@@ -6913,6 +7017,957 @@ private fun AlchemyTopFocusBox(
             .then(if (onTap != null) Modifier.clickable { onTap() } else Modifier)
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) { content() }
+}
+
+
+/* ================= DS Enchanting ================= */
+
+/**
+ * Cross-screen enchanting UI state. Both companion surfaces are separate compositions in separate
+ * windows, so anything one has to tell the other lives here — the same technique [AlchemyUiState]
+ * uses. All of it is pure presentation: it only decides which popup is drawn and which command a
+ * tap will send.
+ */
+private object EnchantUiState {
+    /** Which slot picker is open: "item", "soul", or null. Drawn on the BOTTOM screen even though
+     *  the slots can also be reached from there — vanilla puts every one of these popups on the
+     *  window's own screen, and the bottom panel is the one with the room and the touch precision. */
+    var picker by mutableStateOf<String?>(null)
+    /** True while the BOTTOM screen's name keyboard is up (raised by a tap on the TOP screen's name
+     *  field). The keyboard has to live on the bottom panel — it is touch-only by design. */
+    var nameComposer by mutableStateOf(false)
+    /** Browse-list filter. Purely presentational. */
+    var filter by mutableStateOf("")
+
+    /** The effect editor, when open. Mirrors the native EditEffectDialog's working copy: the values
+     *  are pushed to the engine live (CMP:enchant_effect_set) so the top-screen readout and the
+     *  Enchantment/Cast Cost numbers track the sliders, and OK / Cancel are what commit or revert. */
+    var editIndex by mutableStateOf(-1)
+    var editIsNew by mutableStateOf(false)
+    var editRange by mutableStateOf(EnchantRange.SELF)
+    var editMagMin by mutableStateOf(1)
+    var editMagMax by mutableStateOf(1)
+    var editDuration by mutableStateOf(1)
+    var editArea by mutableStateOf(0)
+
+    /** Non-null while the Skill / Attribute selector is up — the third popup type, raised by the
+     *  engine (COMPANION_ENCHANTING_ARGPICK) when the tapped effect targets one. */
+    var argPick by mutableStateOf<EnchantArgPick?>(null)
+
+    val editing: Boolean get() = editIndex >= 0
+
+    fun closeEditor() {
+        editIndex = -1
+        editIsNew = false
+    }
+
+    fun reset() {
+        picker = null
+        nameComposer = false
+        filter = ""
+        argPick = null
+        closeEditor()
+    }
+}
+
+/** How long the enchanting result/validation banner stays up. Matched to alchemy's. */
+private const val ENCHANT_MSG_MS = 4200L
+
+/** Push the editor's working values at the engine. Called on every slider tick and range change, so
+ *  the live readout, the Enchantment X/Y figure and the Cast Cost all move with the sliders — the
+ *  native editor behaves the same way (each handler fires eventEffectModified immediately). */
+private fun enchantPushEdit() {
+    if (!EnchantUiState.editing) return
+    CompanionActions.enchantSetEffect(
+        EnchantUiState.editIndex,
+        EnchantUiState.editRange,
+        EnchantUiState.editMagMin,
+        EnchantUiState.editMagMax,
+        EnchantUiState.editDuration,
+        EnchantUiState.editArea
+    )
+}
+
+/**
+ * BOTTOM-screen enchanting: the item and soul slots, the Magic Effects browse list, the cast-type
+ * and Buy/Cancel controls, and ALL THREE popup types (item/soul picker, effect editor, skill or
+ * attribute selector).
+ *
+ * TOUCH ONLY, by design — the companion panel is `FLAG_NOT_FOCUSABLE`, so no D-pad input reaches it.
+ *
+ * PRESENTATION ONLY. Every tap sends a `CMP:enchant_*` command to the native EnchantingDialog and
+ * the screen is redrawn from the batch that comes back, so the cast-style state machine, the
+ * accumulating per-effect cost, the capacity check, the seven Buy validations and the self-enchant
+ * roll are all still the engine's.
+ */
+@Composable
+private fun EnchantingOverlay(session: EnchantSession) {
+    DisposableEffect(Unit) {
+        EnchantUiState.reset()
+        onDispose { EnchantUiState.reset() }
+    }
+
+    var searching by remember { mutableStateOf(false) }
+    val message by GameStateRepository.enchantMessage.collectAsState()
+    val argPick by GameStateRepository.enchantArgPick.collectAsState()
+    val editReq by GameStateRepository.enchantEdit.collectAsState()
+
+    // The engine drives both popups: tapping a browse row sends _add, and the ENGINE decides whether
+    // that means "pick a skill first" or "open the editor". Keyed on the sequence number so adding
+    // the same effect twice raises the popup twice.
+    LaunchedEffect(argPick?.second) {
+        argPick?.let { (pick, _) ->
+            EnchantUiState.argPick = pick
+            GameStateRepository.clearEnchantArgPick()
+        }
+    }
+    LaunchedEffect(editReq?.second) {
+        editReq?.let { (req, _) ->
+            // Seed the editor from the effect as the engine actually stored it — for a NEW effect
+            // that is after companionFirstRange has overridden the range, so the popup opens on the
+            // first LEGAL range rather than on vanilla's cascade result.
+            val eff = GameStateRepository.enchantSession.value?.effects?.getOrNull(req.index)
+            EnchantUiState.editIndex = req.index
+            EnchantUiState.editIsNew = req.isNew
+            EnchantUiState.editRange = eff?.range ?: EnchantRange.SELF
+            EnchantUiState.editMagMin = eff?.magMin ?: 1
+            EnchantUiState.editMagMax = eff?.magMax ?: 1
+            EnchantUiState.editDuration = eff?.duration ?: 1
+            EnchantUiState.editArea = eff?.area ?: 0
+            EnchantUiState.argPick = null
+            GameStateRepository.clearEnchantEdit()
+        }
+    }
+
+    val visible = remember(session.available, EnchantUiState.filter) {
+        val needle = EnchantUiState.filter.trim().lowercase()
+        if (needle.isEmpty()) session.available
+        else session.available.filter { it.name.lowercase().contains(needle) }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .zIndex(18f)
+            // Swallow stray taps: this fully replaces a native window and there is no
+            // tap-outside-to-dismiss (Cancel is an explicit button, as in vanilla).
+            .pointerInput(Unit) { detectTapGestures { } }
+            .background(StoneDark)
+    ) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 6.dp)) {
+
+            // --- Header ---------------------------------------------------------------------------
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "ENCHANTING",
+                    color = BronzeLight, fontSize = 18.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.weight(1f))
+                // Gold only matters when there is a bill to pay; self-enchanting costs nothing.
+                if (session.showPrice) {
+                    Text(
+                        "Gold: ${session.gold}",
+                        color = BronzeLight, fontSize = 15.sp, fontFamily = MwData
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Bronze))
+            Spacer(Modifier.height(6.dp))
+
+            // --- Item + soul slots ------------------------------------------------------------------
+            // Tap-to-remove is a straight empty/filled branch, exactly as onSelectItem/onSelectSoul
+            // do it: an empty slot opens the picker, a filled one CLEARS. So changing a filled slot
+            // takes two taps. The asymmetry between the two clears (the soul clear also re-runs the
+            // cast style and refreshes the effects view) is handled natively.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                EnchantSlotBox(
+                    label = "ITEM",
+                    slot = session.item,
+                    detail = if (session.item.present) "${session.maxPoints} pts" else "",
+                    modifier = Modifier.weight(1f),
+                    onTap = {
+                        UiSounds.play(UiSounds.Cue.TOGGLE)
+                        if (session.item.present) CompanionActions.enchantClearItem()
+                        else EnchantUiState.picker = "item"
+                    }
+                )
+                EnchantSlotBox(
+                    label = "SOUL",
+                    slot = session.soul,
+                    detail = if (session.soul.present) "${session.soul.charge}" else "",
+                    modifier = Modifier.weight(1f),
+                    onTap = {
+                        UiSounds.play(UiSounds.Cue.TOGGLE)
+                        if (session.soul.present) CompanionActions.enchantClearSoul()
+                        else EnchantUiState.picker = "soul"
+                    }
+                )
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            // --- Filter ------------------------------------------------------------------------------
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+                        .clickable { searching = true }
+                        .padding(horizontal = 11.dp, vertical = 12.dp)
+                ) {
+                    Text(
+                        EnchantUiState.filter.ifBlank { "Search magic effects…" },
+                        color = if (EnchantUiState.filter.isBlank()) BoneDim else BoneBright,
+                        fontSize = 15.sp, fontFamily = MwBody, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (EnchantUiState.filter.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    EnchantChip(label = "Clear", active = false, onTap = { EnchantUiState.filter = "" })
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            // --- Magic Effects browse list -------------------------------------------------------------
+            // The union of every effect in any ST_Spell the player knows, filtered to AllowEnchanting,
+            // deduplicated and name-sorted by the engine. A row whose effect has NO legal range under
+            // the current cast style is greyed: vanilla ignores that tap silently (its own unresolved
+            // TODO), so no message is invented here — the row simply reads as unavailable.
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                if (visible.isEmpty()) {
+                    Text(
+                        if (session.available.isEmpty()) "No known enchantable effects"
+                        else "No effects match",
+                        color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                } else visible.forEach { avail ->
+                    val usable = session.ranges(avail.flags).isNotEmpty()
+                    val room = session.effects.size < session.effectCap
+                    EnchantEffectRow(
+                        icon = avail.icon,
+                        title = avail.name,
+                        subtitle = if (!usable) "Not available for this enchantment" else null,
+                        enabled = usable && room,
+                        onTap = {
+                            UiSounds.play(UiSounds.Cue.TOGGLE)
+                            CompanionActions.enchantAddEffect(avail.id)
+                        }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            Spacer(Modifier.height(6.dp))
+
+            // --- Cast type + Buy / Cancel ---------------------------------------------------------------
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                // Disabled when the engine says this item has nothing to cycle to — books/scrolls and
+                // ammo/thrown are locked to a single type, and bows only gain a second option with a
+                // soul of at least iSoulAmountForConstantEffect. That answer is exported, never
+                // re-derived here.
+                EnchantActionButton(
+                    label = session.castLabel.ifBlank { "Cast Once" },
+                    color = if (session.castCycle) BronzeLight else BoneDim,
+                    enabled = session.castCycle
+                ) {
+                    UiSounds.play(UiSounds.Cue.TOGGLE)
+                    CompanionActions.enchantCastTypeNext()
+                }
+                Spacer(Modifier.weight(1f))
+                // ALWAYS enabled, exactly as in vanilla: pressing Buy with something missing is how
+                // the validation message is produced, and there is no native "validate without
+                // committing" call to grey it out with.
+                EnchantActionButton(
+                    label = if (session.self) "Create" else "Buy",
+                    color = BronzeLight
+                ) {
+                    UiSounds.play(UiSounds.Cue.ACTION)
+                    CompanionActions.enchantBuy()
+                }
+                Spacer(Modifier.width(8.dp))
+                EnchantActionButton(label = "Cancel", color = Bone) {
+                    UiSounds.play(UiSounds.Cue.TOGGLE)
+                    CompanionActions.enchantCancel()
+                }
+            }
+        }
+
+        // --- Validation / result banner --------------------------------------------------------------
+        message?.let { (text, seq) ->
+            LaunchedEffect(seq) {
+                delay(ENCHANT_MSG_MS)
+                GameStateRepository.clearEnchantMessage()
+            }
+            Box(
+                Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 34.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text,
+                    color = BoneBright, fontSize = 13.sp, fontFamily = MwDisplay,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xF2201A12))
+                        .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
+                )
+            }
+        }
+
+        // --- Popup 1: item / soul picker ---------------------------------------------------------------
+        EnchantUiState.picker?.let { which ->
+            val soul = which == "soul"
+            EnchantPickerPopup(
+                title = if (soul) "SOUL GEMS" else "ITEMS TO ENCHANT",
+                options = if (soul) session.soulOptions else session.itemOptions,
+                soul = soul,
+                empty = if (soul) "No filled soul gems" else "Nothing enchantable carried",
+                onPick = { id ->
+                    // The item's DOWN sound is played NATIVELY on selection (getDownSoundId, as
+                    // vanilla does for both slots) — deliberately not duplicated here.
+                    if (soul) CompanionActions.enchantSelectSoul(id) else CompanionActions.enchantSelectItem(id)
+                    EnchantUiState.picker = null
+                },
+                onCancel = { EnchantUiState.picker = null }
+            )
+        }
+
+        // --- Popup 2: skill / attribute selector -------------------------------------------------------
+        EnchantUiState.argPick?.let { pick ->
+            EnchantArgPickerPopup(
+                pick = pick,
+                onPick = { argId ->
+                    if (pick.isSkill) CompanionActions.enchantEffectSkill(pick.effectId, argId)
+                    else CompanionActions.enchantEffectAttribute(pick.effectId, argId)
+                    EnchantUiState.argPick = null
+                },
+                onCancel = { EnchantUiState.argPick = null }
+            )
+        }
+
+        // --- Popup 3: effect editor --------------------------------------------------------------------
+        if (EnchantUiState.editing) {
+            val effect = session.effects.getOrNull(EnchantUiState.editIndex)
+            if (effect == null) {
+                // The effect vanished under us (a Cancel raced a republish). Close rather than draw
+                // an editor pointed at nothing.
+                EnchantUiState.closeEditor()
+            } else {
+                EnchantEffectEditorPopup(session = session, effect = effect)
+            }
+        }
+
+        // --- Search entry --------------------------------------------------------------------------
+        if (searching) {
+            TextInputOverlay(
+                initialText = EnchantUiState.filter,
+                title = "SEARCH MAGIC EFFECTS",
+                onConfirm = { EnchantUiState.filter = it; searching = false },
+                onCancel = { searching = false }
+            )
+        }
+
+        // --- Enchantment name entry ------------------------------------------------------------------
+        // Raised from the TOP screen's name field, because the keyboard is touch-only and touch only
+        // reaches the bottom panel. `!searching` keeps the two keyboards mutually exclusive.
+        if (EnchantUiState.nameComposer && !searching) {
+            TextInputOverlay(
+                initialText = session.name,
+                title = "ENCHANTMENT NAME",
+                onConfirm = {
+                    CompanionActions.enchantSetName(it)
+                    EnchantUiState.nameComposer = false
+                },
+                onCancel = { EnchantUiState.nameComposer = false }
+            )
+        }
+    }
+}
+
+/** The item or soul slot box. Shows the filled item, or a prompt when empty. */
+@Composable
+private fun EnchantSlotBox(
+    label: String,
+    slot: EnchantSlotItem,
+    detail: String,
+    modifier: Modifier = Modifier,
+    onTap: () -> Unit
+) {
+    val icon = rememberItemIcon(slot.icon)
+    Row(
+        modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(SlotBg)
+            .border(1.dp, if (slot.present) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
+            .clickable { onTap() }
+            .padding(horizontal = 11.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (icon != null) {
+            Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(42.dp))
+            Spacer(Modifier.width(9.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+            )
+            Text(
+                if (slot.present) slot.name else "Tap to select",
+                color = if (slot.present) BoneBright else BoneDim,
+                fontSize = 15.sp, fontFamily = MwBody, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (detail.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            Text(detail, color = BronzeLight, fontSize = 14.sp, fontFamily = MwData)
+        }
+    }
+}
+
+/** One row of the browse list, or of the current-effects list. */
+@Composable
+private fun EnchantEffectRow(
+    icon: String,
+    title: String,
+    subtitle: String?,
+    enabled: Boolean,
+    onTap: () -> Unit
+) {
+    val bmp = rememberItemIcon(icon)
+    Column {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .then(if (enabled) Modifier.clickable { onTap() } else Modifier)
+                .padding(vertical = 11.dp, horizontal = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (bmp != null) {
+                Image(bitmap = bmp, contentDescription = null, modifier = Modifier.size(30.dp))
+                Spacer(Modifier.width(9.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = if (enabled) Bone else BoneMuted,
+                    fontSize = 16.sp, fontFamily = MwBody, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (subtitle != null) {
+                    Text(subtitle, color = BoneMuted, fontSize = 12.sp, fontFamily = MwBody)
+                }
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
+    }
+}
+
+/** Shared action button for the enchanting screen. */
+@Composable
+private fun EnchantActionButton(
+    label: String,
+    color: Color,
+    enabled: Boolean = true,
+    onTap: () -> Unit
+) {
+    Box(
+        Modifier
+            .height(ENCHANT_CONTROL_HEIGHT)
+            .clip(RoundedCornerShape(3.dp))
+            .background(SlotBg)
+            .border(1.dp, if (enabled) BronzeDark else Color(0xFF2A2118), RoundedCornerShape(3.dp))
+            .then(if (enabled) Modifier.clickable { onTap() } else Modifier)
+            .padding(horizontal = 18.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (enabled) color else BoneMuted,
+            fontSize = 16.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold, maxLines = 1
+        )
+    }
+}
+
+/** Chip for the enchanting screen — the range selector and the filter's Clear. Same shape as
+ *  [AlchemyChip], sized for this screen. */
+@Composable
+private fun EnchantChip(label: String, active: Boolean, onTap: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (active) PillActiveBg else SlotBg)
+            .border(if (active) 2.dp else 1.dp, if (active) BronzeLight else BronzeDark, RoundedCornerShape(3.dp))
+            .clickable { onTap() }
+            .padding(horizontal = 16.dp, vertical = 11.dp)
+    ) {
+        Text(
+            label,
+            color = if (active) BoneBright else BoneDim,
+            fontSize = 15.sp, fontFamily = MwDisplay, maxLines = 1
+        )
+    }
+}
+
+/** Square +/- stepper for the effect editor's sliders, at the enchanting screen's own control
+ *  height rather than alchemy's smaller one. */
+@Composable
+private fun EnchantStepButton(label: String, enabled: Boolean = true, onTap: () -> Unit) {
+    Box(
+        Modifier
+            .size(ENCHANT_CONTROL_HEIGHT)
+            .clip(RoundedCornerShape(3.dp))
+            .background(SlotBg)
+            .border(1.dp, if (enabled) BronzeDark else Color(0xFF2A2118), RoundedCornerShape(3.dp))
+            .then(if (enabled) Modifier.clickable { onTap() } else Modifier),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (enabled) BronzeLight else BoneMuted,
+            fontSize = 20.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+/** Shared popup frame for the three enchanting popups. In-window overlay, never a Compose Dialog
+ *  (that crashes on the Presentation display — see ItemInfoOverlay). The scrim swallows taps: none
+ *  of vanilla's equivalents dismiss on an outside click either. */
+@Composable
+private fun EnchantPopupFrame(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .zIndex(22f)
+            .background(Color(0xCC000000))
+            .pointerInput(Unit) { detectTapGestures { } },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.92f)
+                .fillMaxHeight(0.9f)
+                .mwPanel()
+                .pointerInput(Unit) { detectTapGestures { } }
+                .padding(10.dp)
+        ) {
+            Text(
+                title,
+                color = BronzeLight, fontSize = 16.sp, fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Bronze))
+            Spacer(Modifier.height(6.dp))
+            content()
+        }
+    }
+}
+
+/** Popup 1 — the item or soul-gem picker. Both browse the PLAYER's own inventory (never the
+ *  enchanter's) and are answered with a serialized RefId, because the underlying container store
+ *  reorders as its contents change. */
+@Composable
+private fun EnchantPickerPopup(
+    title: String,
+    options: List<EnchantPickOption>,
+    soul: Boolean,
+    empty: String,
+    onPick: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    EnchantPopupFrame(title) {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            if (options.isEmpty()) {
+                Text(empty, color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
+                    modifier = Modifier.padding(vertical = 12.dp))
+            } else options.forEach { opt ->
+                EnchantEffectRow(
+                    icon = opt.icon,
+                    title = if (opt.count > 1) "${opt.name} (${opt.count})" else opt.name,
+                    // Soul gems show the trapped soul and its value — the number that becomes the
+                    // enchantment's Charge. Items show the capacity they would give.
+                    subtitle = if (soul) "${opt.soul} — ${opt.charge}" else "${opt.maxPoints} enchantment points",
+                    enabled = true,
+                    onTap = { UiSounds.play(UiSounds.Cue.TOGGLE); onPick(opt.id) }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            EnchantActionButton(label = "Cancel", color = Bone) {
+                UiSounds.play(UiSounds.Cue.TOGGLE); onCancel()
+            }
+        }
+    }
+}
+
+/** Popup 2 — the Skill or Attribute selector, raised by the ENGINE for a TargetSkill/TargetAttribute
+ *  effect. The lists come from the character batch, which walks the record stores, so a mod adding
+ *  skills or attributes flows through. Deliberately offers EVERY entry with no duplicate filtering:
+ *  vanilla has no such check on this path, so the same skill may be picked twice. */
+@Composable
+private fun EnchantArgPickerPopup(
+    pick: EnchantArgPick,
+    onPick: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    val state by GameStateRepository.state.collectAsState()
+    val rows: List<Pair<String, String>> = remember(pick, state.character) {
+        if (pick.isSkill) state.character.skills.map { it.id to it.name }
+        else state.character.attributes.map { it.id to it.name }
+    }
+    EnchantPopupFrame(if (pick.isSkill) "SELECT SKILL" else "SELECT ATTRIBUTE") {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            if (rows.isEmpty()) {
+                Text("Unavailable", color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
+                    modifier = Modifier.padding(vertical = 12.dp))
+            } else rows.forEach { (id, name) ->
+                EnchantEffectRow(
+                    icon = "", title = name, subtitle = null, enabled = true,
+                    onTap = { UiSounds.play(UiSounds.Cue.TOGGLE); onPick(id) }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            EnchantActionButton(label = "Cancel", color = Bone) {
+                UiSounds.play(UiSounds.Cue.TOGGLE); onCancel()
+            }
+        }
+    }
+}
+
+/**
+ * Popup 3 — the effect editor: the Range button plus whichever of the Magnitude / Duration / Area
+ * sliders apply.
+ *
+ * The three visibility tests are INDEPENDENT and are recomputed here on every recomposition rather
+ * than cached, because two of them move under the player: Duration disappears the moment the cast
+ * type becomes Constant, and Area is keyed to the CURRENT range, so it appears and vanishes as the
+ * Range button is cycled. An effect like Almsivi Intervention (Self-only, NoMagnitude, NoDuration)
+ * correctly shows the Range control and nothing else.
+ *
+ * Every change is pushed to the engine immediately, so the top-screen readout and the
+ * Enchantment / Cast Cost figures track the sliders live — the native editor does the same. OK
+ * keeps the result; Cancel removes a newly-added effect or restores an edited one, which is
+ * `EditEffectDialog::exit()`'s two halves and is executed NATIVELY.
+ */
+@Composable
+private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEffect) {
+    val flags = effect.flags
+    val ranges = session.ranges(flags)
+    val showMag = session.showMagnitude(flags)
+    val showDur = session.showDuration(flags)
+    val showArea = session.showArea(EnchantUiState.editRange)
+
+    // The cast type can change while the editor is open (it cannot be reached from here, but a
+    // republish can arrive), so keep the working range legal.
+    LaunchedEffect(flags, session.constant, EnchantUiState.editRange) {
+        if (ranges.isNotEmpty() && EnchantUiState.editRange !in ranges) {
+            EnchantUiState.editRange = ranges.first()
+            EnchantUiState.editArea = 0
+            enchantPushEdit()
+        }
+    }
+
+    EnchantPopupFrame(effect.text.ifBlank { "EFFECT" }.uppercase()) {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+
+            // --- Range ------------------------------------------------------------------------------
+            // Only the legal options are drawn. An effect with a single legal range shows that one
+            // as an inert label rather than a button that cannot change anything.
+            Text("Range", color = BronzeLight, fontSize = 14.sp, fontFamily = MwDisplay)
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ranges.forEach { r ->
+                    EnchantChip(
+                        label = EnchantRange.label(r),
+                        active = r == EnchantUiState.editRange,
+                        onTap = {
+                            UiSounds.play(UiSounds.Cue.TICK)
+                            EnchantUiState.editRange = r
+                            // onRangeButtonClicked zeroes the area slider whenever it lands on Self.
+                            if (r == EnchantRange.SELF) EnchantUiState.editArea = 0
+                            enchantPushEdit()
+                        }
+                    )
+                }
+            }
+
+            if (showMag) {
+                Spacer(Modifier.height(10.dp))
+                EnchantSliderRow(
+                    label = "Magnitude (min)",
+                    value = EnchantUiState.editMagMin,
+                    min = EnchantBounds.MAG_MIN, max = EnchantBounds.MAG_MAX
+                ) { v ->
+                    EnchantUiState.editMagMin = v
+                    // The ONE coupling vanilla has: max is forced up to meet min.
+                    if (EnchantUiState.editMagMax < v) EnchantUiState.editMagMax = v
+                    enchantPushEdit()
+                }
+                Spacer(Modifier.height(6.dp))
+                EnchantSliderRow(
+                    label = "Magnitude (max)",
+                    value = EnchantUiState.editMagMax,
+                    min = EnchantUiState.editMagMin, max = EnchantBounds.MAG_MAX
+                ) { v ->
+                    EnchantUiState.editMagMax = v.coerceAtLeast(EnchantUiState.editMagMin)
+                    enchantPushEdit()
+                }
+            }
+
+            if (showDur) {
+                Spacer(Modifier.height(10.dp))
+                EnchantSliderRow(
+                    label = "Duration (s)",
+                    value = EnchantUiState.editDuration,
+                    min = EnchantBounds.DURATION_MIN, max = EnchantBounds.DURATION_MAX
+                ) { v ->
+                    EnchantUiState.editDuration = v
+                    enchantPushEdit()
+                }
+            }
+
+            if (showArea) {
+                Spacer(Modifier.height(10.dp))
+                EnchantSliderRow(
+                    label = "Area (ft)",
+                    value = EnchantUiState.editArea,
+                    min = EnchantBounds.AREA_MIN, max = EnchantBounds.AREA_MAX
+                ) { v ->
+                    EnchantUiState.editArea = v
+                    enchantPushEdit()
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            // The live cost of the whole enchantment, so the player can see the capacity fill up
+            // while dragging. Over capacity is coloured, not blocked — Buy is what refuses.
+            Text(
+                "Enchantment ${session.points} / ${session.maxPoints}",
+                color = if (session.overCapacity) BarterRed else BoneDim,
+                fontSize = 15.sp, fontFamily = MwData
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            // Delete is offered only for an EXISTING effect, matching vanilla (mDeleteButton is
+            // hidden by newEffect and shown by editEffect).
+            if (!EnchantUiState.editIsNew) {
+                EnchantActionButton(label = "Delete", color = BarterRed) {
+                    UiSounds.play(UiSounds.Cue.TOGGLE)
+                    CompanionActions.enchantDeleteEffect(EnchantUiState.editIndex)
+                    EnchantUiState.closeEditor()
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            EnchantActionButton(label = "OK", color = BronzeLight) {
+                UiSounds.play(UiSounds.Cue.ACTION)
+                CompanionActions.enchantEffectOk()
+                EnchantUiState.closeEditor()
+            }
+            Spacer(Modifier.width(8.dp))
+            EnchantActionButton(label = "Cancel", color = Bone) {
+                UiSounds.play(UiSounds.Cue.TOGGLE)
+                CompanionActions.enchantEffectCancel()
+                EnchantUiState.closeEditor()
+            }
+        }
+    }
+}
+
+/** One editor slider: a label, the value, and −/+ steppers either side of a drag track. The bounds
+ *  are the FIXED layout constants ([EnchantBounds]) — never adjusted by skill, soul or base cost. */
+@Composable
+private fun EnchantSliderRow(
+    label: String,
+    value: Int,
+    min: Int,
+    max: Int,
+    onChange: (Int) -> Unit
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = BronzeLight, fontSize = 14.sp, fontFamily = MwDisplay,
+            modifier = Modifier.width(140.dp))
+        Text(
+            "$value", color = BoneBright, fontSize = 16.sp, fontFamily = MwData,
+            fontWeight = FontWeight.Bold, modifier = Modifier.width(58.dp), textAlign = TextAlign.End
+        )
+    }
+    Spacer(Modifier.height(3.dp))
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        EnchantStepButton("−", enabled = value > min) { onChange((value - 1).coerceAtLeast(min)) }
+        Spacer(Modifier.width(8.dp))
+        // A one-point range would make Slider divide by zero working out the thumb fraction. That is
+        // reachable: dragging Magnitude(min) to its 100 ceiling forces Magnitude(max)'s own minimum
+        // to 100 as well. Widen the TRACK in that case and keep the value clamped to the real bound.
+        val trackMax = if (max > min) max else min + 1
+        Slider(
+            value = value.toFloat(),
+            // Only fire on a real INTEGER change: Slider reports every touch-move sample, so an
+            // unguarded handler would push dozens of identical CMP:enchant_effect_set commands per
+            // step of the drag.
+            onValueChange = { raw ->
+                val v = raw.toInt().coerceIn(min, max)
+                if (v != value) onChange(v)
+            },
+            valueRange = min.toFloat()..trackMax.toFloat(),
+            colors = SliderDefaults.colors(
+                thumbColor = BronzeLight,
+                activeTrackColor = Bronze,
+                inactiveTrackColor = BronzeDark
+            ),
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        EnchantStepButton("+", enabled = value < max) { onChange((value + 1).coerceAtMost(max)) }
+    }
+}
+
+/**
+ * TOP-screen enchanting half: the name field, the stat column and the live effects readout.
+ *
+ * Hosted by [org.openmw.EngineActivity] in an INTERACTIVE panel window while an enchanting session
+ * is live AND Enchanting is DS — interactive because the name field and the effect rows answer to a
+ * tap (the name field raises the bottom screen's keyboard; an effect row opens the editor down
+ * there).
+ *
+ * The readout shows the effects as they are RIGHT NOW, including one that is only half-configured:
+ * a newly-added effect is on the enchantment from the moment the editor opens (vanilla's
+ * eventEffectAdded), and Cancel is what takes it back off.
+ */
+@Composable
+fun EnchantingTopOverlay() {
+    val session by GameStateRepository.enchantSession.collectAsState()
+    val s = session ?: return
+
+    // Bottom-aligned, and sized IDENTICALLY to the alchemy top panel — same width fraction, same
+    // bottom inset, same interior padding and column gap — so the two DS service screens read as one
+    // family rather than as two windows that happen to be near each other.
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+        Row(
+            Modifier
+                // Outside the panel frame, so it is a gap from the screen edge and not interior
+                // padding — hence before mwPanel() in the chain, not after.
+                .padding(bottom = ALCHEMY_TOP_PANEL_INSET)
+                .fillMaxWidth(ALCHEMY_TOP_PANEL_WIDTH)
+                // IntrinsicSize.Min so the divider's fillMaxHeight() below resolves to the TALLEST
+                // COLUMN rather than to the incoming (full-screen) constraint, which would stretch
+                // this whole panel down the screen.
+                .height(IntrinsicSize.Min)
+                .heightIn(min = ENCHANT_TOP_PANEL_MIN_HEIGHT)
+                .mwPanel()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            // --- Left: name + stats ------------------------------------------------------------------
+            Column(Modifier.weight(0.44f)) {
+                Text(
+                    "ENCHANTMENT", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+                        .clickable { EnchantUiState.nameComposer = true }
+                        .padding(horizontal = 10.dp, vertical = 11.dp)
+                ) {
+                    Text(
+                        s.name.ifBlank { "Tap to name" },
+                        color = if (s.name.isBlank()) BoneDim else BoneBright,
+                        fontSize = 16.sp, fontFamily = MwBody, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+
+                // Enchantment X / Y — points used against the ITEM's capacity. Over capacity is
+                // coloured; Buy is still what refuses (with sNotifyMessage29).
+                EnchantStatRow(
+                    "Enchantment", "${s.points} / ${s.maxPoints}",
+                    if (s.overCapacity) BarterRed else BoneBright
+                )
+                // Constant Effect has no cast cost at all (getBaseCastCost returns 0 for it).
+                EnchantStatRow("Cast Cost", "${s.castCost}", BoneBright)
+                EnchantStatRow("Charge", "${s.charge}", BoneBright)
+                if (s.showPrice) EnchantStatRow("Price", "${s.price}", BronzeLight)
+                // Gated on the ENGINE's own "show enchant chance" setting, which ships false — the
+                // exact condition vanilla applies to mChanceLayout. The value is exported either
+                // way, so turning that setting on makes this appear with no further change.
+                if (s.showChance) EnchantStatRow("Chance", "${s.chance}%", BronzeLight)
+            }
+
+            Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
+
+            // --- Right: live effects readout -----------------------------------------------------------
+            Column(Modifier.weight(0.56f)) {
+                Text(
+                    "EFFECTS ${s.effects.size}/${s.effectCap}", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                if (s.effects.isEmpty()) {
+                    Text(
+                        "None", color = BoneDim, fontSize = 14.sp, fontFamily = MwBody,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                } else {
+                    Column(Modifier.heightIn(max = ENCHANT_TOP_EFFECTS_MAX).verticalScroll(rememberScrollState())) {
+                        s.effects.forEach { eff ->
+                            val bmp = rememberItemIcon(eff.icon)
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { CompanionActions.enchantEditEffect(eff.index) }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (bmp != null) {
+                                    Image(bitmap = bmp, contentDescription = null,
+                                        modifier = Modifier.size(22.dp))
+                                    Spacer(Modifier.width(7.dp))
+                                }
+                                Text(
+                                    // Composed natively from MWSpellEffect's own formatting, so this
+                                    // reads exactly as the vanilla list does.
+                                    eff.text,
+                                    color = Bone, fontSize = 13.sp, fontFamily = MwBody,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EnchantStatRow(label: String, value: String, valueColor: Color) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = BoneDim, fontSize = 14.sp, fontFamily = MwBody, modifier = Modifier.weight(1f))
+        Text(value, color = valueColor, fontSize = 16.sp, fontFamily = MwData, fontWeight = FontWeight.Bold)
+    }
 }
 
 /**
@@ -7325,10 +8380,6 @@ private fun TrainingOverlayHost(session: TrainingSession?) {
             .fillMaxSize()
             .zIndex(17f)
             .background(Color(0xCC0F0C08))
-            .then(
-                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
-                else Modifier
-            )
             .pointerInput(Unit) { detectTapGestures {} }, // swallow taps; NO tap-outside dismiss
         contentAlignment = Alignment.Center
     ) {
@@ -7477,10 +8528,6 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
             .fillMaxSize()
             .zIndex(17f)
             .background(Color(0xCC0F0C08))
-            .then(
-                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
-                else Modifier
-            )
             .pointerInput(Unit) { detectTapGestures {} }, // swallow taps; NO tap-outside dismiss
         contentAlignment = Alignment.Center
     ) {
@@ -7650,11 +8697,6 @@ private fun TravelOverlay(session: TravelSession) {
             .fillMaxSize()
             .zIndex(17f)
             .background(Color(0xCC0F0C08))
-            // In SPLIT view match the unified topics-panel band; otherwise centre a 0.7×0.86 card.
-            .then(
-                if (splitMode) Modifier.padding(top = TOP_BAR_SPACE.dp, bottom = BOTTOM_BAR_SPACE.dp)
-                else Modifier
-            )
             // Swallow taps so nothing falls through to the tab underneath. NO dismiss.
             .pointerInput(Unit) { detectTapGestures {} },
         contentAlignment = Alignment.Center
@@ -17660,6 +18702,23 @@ private fun DeveloperActionsPanel() {
                 "and armour. For testing scrolling, sorting and the category tabs with a full bag.",
             button = "Fill Inventory"
         ) { CompanionActions.devAddBulkItems() }
+        // The two item halves of the enchanting kit. Kept in Items rather than in a section of
+        // their own so the groups stay by KIND, as the rest of this screen is organised; the spell
+        // half sits under Magic for the same reason.
+        DevActionButton(
+            title = "Enchantable items",
+            description = "One unenchanted item of every kind the enchanting screen treats " +
+                "differently: armour, clothing, a melee weapon, a bow, a stack of ammo and a " +
+                "scroll. Each one unlocks a different set of cast types.",
+            button = "Add Enchantable Items"
+        ) { CompanionActions.devAddEnchantItems() }
+        DevActionButton(
+            title = "Filled soul gems",
+            description = "Three soul gems holding a weak, a middling and a powerful soul. The " +
+                "powerful one is the smallest soul that still unlocks Constant Effect, which " +
+                "nothing weaker can reach.",
+            button = "Add Filled Soul Gems"
+        ) { CompanionActions.devAddSoulGems() }
 
         DevSectionLabel("Magic")
         DevActionButton(
@@ -17673,6 +18732,13 @@ private fun DeveloperActionsPanel() {
                 "effects list on the HUD and Stats screen.",
             button = "Stack Many Effects"
         ) { CompanionActions.devStackEffects() }
+        DevActionButton(
+            title = "Enchanting and spellmaking spells",
+            description = "Teaches spells chosen so both the enchanting and the spellmaking " +
+                "effect lists cover every range and slider combination, including the two that " +
+                "ask for a skill or an attribute first.",
+            button = "Add Crafting Spells"
+        ) { CompanionActions.devAddCraftSpells() }
 
         DevSectionLabel("World")
         // The two ends of the clock, mainly for exercising lighting-dependent behaviour such as

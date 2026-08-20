@@ -129,7 +129,16 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     GameUiElement("game_ui_spellbuying", "Spell buying"),
     GameUiElement("game_ui_training", "Training"),
     GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
-    GameUiElement("game_ui_enchanting", "Enchanting", pending = true),
+    // Enchanting is non-pending as of Aug 20 2026: EnchantingOverlay (bottom) + EnchantingTopOverlay
+    // (top) exist, and DS suppresses the native GM_Enchanting window via the already-wired
+    // companionDsEnchanting() gate. The native EnchantingDialog still owns the whole mechanic — the
+    // cast-style state machine, the accumulating per-effect cost, the capacity check, the
+    // price/charge/chance formulas, the seven Buy validations and the self-enchant roll
+    // (CMP:enchant_* bridges). The DS side is presentation only. NOTE the four WindowModals
+    // (effect editor, item/soul picker, skill and attribute selectors) needed their OWN gates —
+    // windowmanagerimp's mode-window suppression does not reach them. See
+    // companion-enchanting-export.patch.
+    GameUiElement("game_ui_enchanting", "Enchanting"),
     // Alchemy is non-pending as of Aug 19 2026: AlchemyOverlay (bottom) + AlchemyTopOverlay (top)
     // exist, and DS suppresses the native GM_Alchemy window via the already-wired companionDsAlchemy()
     // gate. The native AlchemyWindow still owns the whole mechanic — the combination rule and its

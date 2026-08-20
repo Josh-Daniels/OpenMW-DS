@@ -20,6 +20,7 @@ import org.openmw.companion.UiSounds
 import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
 import org.openmw.companion.AlchemyTopOverlay
+import org.openmw.companion.EnchantingTopOverlay
 import org.openmw.companion.LevelUpTopOverlay
 import org.openmw.companion.LootingTopOverlay
 import org.openmw.companion.ManualJournalDraftTopOverlay
@@ -176,6 +177,7 @@ class EngineActivity : SDLActivity() {
     private var manualJournalTopView: View? = null
     private var levelUpTopView: View? = null
     private var alchemyTopView: View? = null
+    private var enchantingTopView: View? = null
 
     // INTERACTIVE looting grids on the TOP screen (this activity's own window / Display 0), shown
     // while a container session is active AND Looting is routed to SPLIT (game_ui_looting == DS).
@@ -324,6 +326,7 @@ class EngineActivity : SDLActivity() {
         hideManualJournalTopOverlay()
         hideLevelUpTopOverlay()
         hideAlchemyTopOverlay()
+        hideEnchantingTopOverlay()
         hideLootingTopOverlay()
         hideBarterTopOverlay()
 
@@ -1129,8 +1132,21 @@ class EngineActivity : SDLActivity() {
                 session != null && mode == GameUiMode.DS && loc == ScreenLocation.SPLIT
             }
 
-            combine(wantConversationTop, anyServiceVanillaUp, barterTopActive) { show, serviceUp, barterTop ->
-                show && !serviceUp && !barterTop
+            // And for a DS ENCHANTING session, for the same reason plus a sharper one: enchanting is
+            // a dialogue SERVICE, so it is always entered from a conversation and its top-screen
+            // panel is bottom-anchored in exactly the space the conversation history box occupies.
+            // Unlike barter there is no location option to check — the enchanting top half is drawn
+            // whenever the element is DS. Reappears when the session clears
+            // (COMPANION_ENCHANTING_CLOSED → back to the conversation).
+            val enchantTopActive = combine(
+                GameStateRepository.enchantSession,
+                UiPreferences.gameUiModeFlow("game_ui_enchanting"),
+            ) { session, mode -> session != null && mode == GameUiMode.DS }
+
+            combine(
+                wantConversationTop, anyServiceVanillaUp, barterTopActive, enchantTopActive
+            ) { show, serviceUp, barterTop, enchantTop ->
+                show && !serviceUp && !barterTop && !enchantTop
             }.distinctUntilChanged().collect { show ->
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()
             }
@@ -1207,6 +1223,22 @@ class EngineActivity : SDLActivity() {
             ) { session, mode -> session != null && mode == GameUiMode.DS }
                 .distinctUntilChanged()
                 .collect { show -> if (show) showAlchemyTopOverlay() else hideAlchemyTopOverlay() }
+        }
+
+        // Top-screen ENCHANTING half: the name field, the Enchantment/Cast Cost/Charge stat column
+        // and the live effects readout, shown while an enchanting session is live AND Enchanting is
+        // DS. INTERACTIVE like alchemy's — the name field raises the bottom screen's keyboard and an
+        // effect row opens the editor down there. The session flow is nulled by
+        // COMPANION_ENCHANTING_CLOSED, which the native window emits from EVERY close path (exit /
+        // Cancel / onClose / onReferenceUnavailable / both removeGuiMode paths inside Buy), so it
+        // cannot be left stranded.
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.enchantSession,
+                UiPreferences.gameUiModeFlow("game_ui_enchanting"),
+            ) { session, mode -> session != null && mode == GameUiMode.DS }
+                .distinctUntilChanged()
+                .collect { show -> if (show) showEnchantingTopOverlay() else hideEnchantingTopOverlay() }
         }
 
         // Top-screen INTERACTIVE looting grids: shown while a container session is active AND
@@ -1291,10 +1323,14 @@ class EngineActivity : SDLActivity() {
             // controller must be re-emitted as COMPANION_NAV_* rather than driving the hidden
             // native AlchemyWindow.
             val alchemyNav = sessionNav(GameStateRepository.alchemySession, "game_ui_alchemy")
+            // Enchanting needs the gate for the same reason as the rest: the native window is
+            // hidden in DS mode, so leaving the controller on it would drive a window nobody can
+            // see (and B would pop the mode out from under the DS screen).
+            val enchantNav = sessionNav(GameStateRepository.enchantSession, "game_ui_enchanting")
 
             combine(
                 dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav, trainingNav,
-                spellBuyingNav, alchemyNav
+                spellBuyingNav, alchemyNav, enchantNav
             ) { arr ->
                 arr.any { it }
             }.combine(GameStateRepository.pauseMenuVisible) { anyOverlay, paused ->
@@ -1487,6 +1523,20 @@ class EngineActivity : SDLActivity() {
         val overlay = alchemyTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         alchemyTopView = null
+    }
+
+    // INTERACTIVE for the same reason as the alchemy one: the name field and the effect rows are a
+    // real control surface, so they answer to a TAP. Still FLAG_NOT_FOCUSABLE, so the controller
+    // keeps arriving as COMPANION_NAV_* rather than being taken by this window.
+    private fun showEnchantingTopOverlay() = showInteractiveTopScreenOverlay(
+        alreadyShown = { enchantingTopView != null },
+        onAdded = { enchantingTopView = it },
+    ) { ProvideTopPanelOpacity { EnchantingTopOverlay() } }
+
+    private fun hideEnchantingTopOverlay() {
+        val overlay = enchantingTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        enchantingTopView = null
     }
 
     private fun showManualJournalTopOverlay() = showTopScreenOverlay(

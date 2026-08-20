@@ -452,6 +452,52 @@ object GameStateRepository {
 
     fun clearAlchemyMessage() { _alchemyMessage.value = null }
 
+    // --- DS Enchanting session (COMPANION_ENCHANTING_*) ---
+    // null = GM_Enchanting is not open. OPEN starts the session (as an EMPTY placeholder, so a
+    // stale session from a previous visit can never linger if the first batch is lost); STATE_START
+    // .. STATE_END commits one full republish; CLOSED tears it down.
+    private val _enchantSession = MutableStateFlow<EnchantSession?>(null)
+    val enchantSession: StateFlow<EnchantSession?> = _enchantSession.asStateFlow()
+    private var enchantHeader: EnchantSession? = null
+    private var enchantItemSlot: EnchantSlotItem? = null
+    private var enchantSoulSlot: EnchantSlotItem? = null
+    private var enchantAvailBuffer: MutableList<EnchantAvailEffect>? = null
+    private var enchantEffectBuffer: MutableList<EnchantEffect>? = null
+    private var enchantItemOptBuffer: MutableList<EnchantPickOption>? = null
+    private var enchantSoulOptBuffer: MutableList<EnchantPickOption>? = null
+
+    // Validation / result text for the DS enchanting banner. text + monotonic seq so an IDENTICAL
+    // repeat (pressing Buy twice with the same thing missing) re-fires instead of being deduped.
+    private var enchantMsgSeq = 0L
+    private val _enchantMessage = MutableStateFlow<Pair<String, Long>?>(null)
+    val enchantMessage: StateFlow<Pair<String, Long>?> = _enchantMessage.asStateFlow()
+
+    fun clearEnchantMessage() { _enchantMessage.value = null }
+
+    // One-shot popup requests from the engine, both seq'd for the same reason as the message above:
+    // adding the same Fortify Skill twice must raise the selector twice.
+    private var enchantArgPickSeq = 0L
+    private val _enchantArgPick = MutableStateFlow<Pair<EnchantArgPick, Long>?>(null)
+    val enchantArgPick: StateFlow<Pair<EnchantArgPick, Long>?> = _enchantArgPick.asStateFlow()
+
+    fun clearEnchantArgPick() { _enchantArgPick.value = null }
+
+    private var enchantEditSeq = 0L
+    private val _enchantEdit = MutableStateFlow<Pair<EnchantEditRequest, Long>?>(null)
+    val enchantEdit: StateFlow<Pair<EnchantEditRequest, Long>?> = _enchantEdit.asStateFlow()
+
+    fun clearEnchantEdit() { _enchantEdit.value = null }
+
+    private fun resetEnchantBuffers() {
+        enchantHeader = null
+        enchantItemSlot = null
+        enchantSoulSlot = null
+        enchantAvailBuffer = null
+        enchantEffectBuffer = null
+        enchantItemOptBuffer = null
+        enchantSoulOptBuffer = null
+    }
+
     private var trainingSkillBuffer: MutableList<TrainingSkill>? = null
     private var trainingNpcName: String = ""
     private var trainingPlayerGold: Int = 0
@@ -933,6 +979,102 @@ object GameStateRepository {
                 alchemyToolBuffer = null
                 alchemyItemBuffer = null
             }
+            // DS Enchanting. Per-record lines first (most frequent inside a batch), then the
+            // brackets, then the one-shot requests, and OPEN last — it is the SHORTEST prefix here
+            // and this dispatch is contains()-based.
+            trimmed.contains(LogParser.P_ENCH_EFFECT) -> {
+                enchantEffectBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ENCH_EFFECT) + LogParser.P_ENCH_EFFECT.length
+                    LogParser.parseEnchantEffect(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ENCH_AVAIL) -> {
+                enchantAvailBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ENCH_AVAIL) + LogParser.P_ENCH_AVAIL.length
+                    LogParser.parseEnchantAvail(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ENCH_ITEMOPT) -> {
+                enchantItemOptBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ENCH_ITEMOPT) + LogParser.P_ENCH_ITEMOPT.length
+                    LogParser.parseEnchantPick(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ENCH_SOULOPT) -> {
+                enchantSoulOptBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_ENCH_SOULOPT) + LogParser.P_ENCH_SOULOPT.length
+                    LogParser.parseEnchantPick(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_ENCH_ITEMSLOT) -> {
+                val idx = trimmed.indexOf(LogParser.P_ENCH_ITEMSLOT) + LogParser.P_ENCH_ITEMSLOT.length
+                LogParser.parseEnchantSlot(trimmed.substring(idx).trim())?.let { enchantItemSlot = it }
+            }
+            trimmed.contains(LogParser.P_ENCH_SOULSLOT) -> {
+                val idx = trimmed.indexOf(LogParser.P_ENCH_SOULSLOT) + LogParser.P_ENCH_SOULSLOT.length
+                LogParser.parseEnchantSlot(trimmed.substring(idx).trim())?.let { enchantSoulSlot = it }
+            }
+            trimmed.contains(LogParser.P_ENCH_STATE_START) -> {
+                val idx = trimmed.indexOf(LogParser.P_ENCH_STATE_START) + LogParser.P_ENCH_STATE_START.length
+                enchantHeader = LogParser.parseEnchantStart(trimmed.substring(idx).trim())
+                enchantItemSlot = null
+                enchantSoulSlot = null
+                enchantAvailBuffer = mutableListOf()
+                enchantEffectBuffer = mutableListOf()
+                enchantItemOptBuffer = mutableListOf()
+                enchantSoulOptBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_ENCH_STATE_END) -> {
+                val header = enchantHeader
+                if (header != null) {
+                    _enchantSession.value = header.copy(
+                        item = enchantItemSlot ?: EnchantSlotItem(),
+                        soul = enchantSoulSlot ?: EnchantSlotItem(),
+                        // The browse list keeps EMISSION order, which is the engine's own
+                        // sort-by-display-name from startEditing.
+                        available = (enchantAvailBuffer ?: mutableListOf()).toList(),
+                        // Effects keep emission order too — that IS mEffects order, and the index in
+                        // each row is the handle every command uses, so it must never be re-sorted.
+                        effects = (enchantEffectBuffer ?: mutableListOf()).toList(),
+                        itemOptions = (enchantItemOptBuffer ?: mutableListOf()).toList(),
+                        soulOptions = (enchantSoulOptBuffer ?: mutableListOf()).toList()
+                    )
+                }
+                resetEnchantBuffers()
+            }
+            trimmed.contains(LogParser.P_ENCH_ARGPICK) -> {
+                val idx = trimmed.indexOf(LogParser.P_ENCH_ARGPICK) + LogParser.P_ENCH_ARGPICK.length
+                LogParser.parseEnchantArgPick(trimmed.substring(idx).trim())?.let {
+                    _enchantArgPick.value = it to enchantArgPickSeq++
+                }
+            }
+            trimmed.contains(LogParser.P_ENCH_EDIT) -> {
+                val idx = trimmed.indexOf(LogParser.P_ENCH_EDIT) + LogParser.P_ENCH_EDIT.length
+                LogParser.parseEnchantEdit(trimmed.substring(idx).trim())?.let {
+                    _enchantEdit.value = it to enchantEditSeq++
+                }
+            }
+            trimmed.contains(LogParser.P_ENCH_MSG) -> {
+                val idx = trimmed.indexOf(LogParser.P_ENCH_MSG) + LogParser.P_ENCH_MSG.length
+                val text = trimmed.substring(idx).trim()
+                if (text.isNotEmpty()) _enchantMessage.value = text to enchantMsgSeq++
+            }
+            trimmed.contains(LogParser.P_ENCH_CLOSED) -> {
+                // Also the Vanilla-mode signal: the conversation overlay steps aside while this
+                // dialogue-service window is up, and this is the only place that line is handled.
+                _enchantingWindowOpen.value = false
+                _enchantSession.value = null
+                _enchantMessage.value = null
+                _enchantArgPick.value = null
+                _enchantEdit.value = null
+                resetEnchantBuffers()
+            }
+            trimmed.contains(LogParser.P_ENCH_OPEN) -> {
+                _enchantingWindowOpen.value = true
+                // Mount the overlay immediately on an EMPTY session; the first batch follows in the
+                // same frame (setPtr emits OPEN, then startEditing -> updateLabels emits the batch).
+                if (_enchantSession.value == null) _enchantSession.value = EnchantSession()
+            }
             trimmed.contains(LogParser.P_ALCHEMY_OPEN) -> {
                 // Mount the overlay immediately on an EMPTY session. The first batch follows in the
                 // same frame (onOpen emits OPEN then calls update()), but starting from null here
@@ -1267,8 +1409,10 @@ object GameStateRepository {
             }
             trimmed.contains(LogParser.P_SPELLMAKING_CLOSED) -> { _spellmakingWindowOpen.value = false }
             trimmed.contains(LogParser.P_SPELLMAKING_OPEN) -> { _spellmakingWindowOpen.value = true }
-            trimmed.contains(LogParser.P_ENCHANTING_CLOSED) -> { _enchantingWindowOpen.value = false }
-            trimmed.contains(LogParser.P_ENCHANTING_OPEN) -> { _enchantingWindowOpen.value = true }
+            // COMPANION_ENCHANTING_OPEN / _CLOSED are handled with the rest of the DS enchanting
+            // batch further up this chain (that branch also flips _enchantingWindowOpen, the
+            // Vanilla-mode conversation step-aside flag) — a duplicate pair here would be dead code,
+            // since `when` takes the first match.
             // CLOSED before OPEN (neither token is a substring of the other, but keep the convention).
             trimmed.contains(LogParser.P_PERSUASION_CLOSED) -> { _persuasionWindowOpen.value = false }
             trimmed.contains(LogParser.P_PERSUASION_OPEN) -> { _persuasionWindowOpen.value = true }

@@ -2535,6 +2535,281 @@ local function devBulkItems()
     devGiveItems(items)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Enchanting test kit (three buttons). Enchanting branches on more record properties than any
+-- other DS screen -- five item categories with different cast-type cycling rules, seven
+-- range/slider combinations, and a duplicate rule that behaves differently for skill/attribute
+-- effects -- and none of that is reachable on an ordinary low-level character. Every record here
+-- is chosen by its PROPERTIES at runtime rather than from a hardcoded id list, for the same reason
+-- devPickRecords does: a wrong id silently adds nothing, and hardcoded ids break on any load order
+-- whose base game is not plain Morrowind.esm.
+
+-- How many soul gems the kit tries to add.
+local DEV_SOULGEM_KINDS = 3
+
+-- Soul gem RECORDS. MWClass::Miscellaneous::isSoulGem is a RefId PREFIX test --
+-- `getRefId().startsWith("misc_soulgem")` -- not a record flag, so this mirrors the engine's own
+-- (only) definition rather than guessing. NOTE the enchanting soul picker does not actually
+-- require this: Filter_OnlyChargedSoulstones accepts ANY Miscellaneous carrying a valid soul. Real
+-- gems are used anyway so the kit looks like something a player could have.
+local function devSoulGemRecords()
+    local gems = {}
+    pcall(function()
+        for _, rec in ipairs(types.Miscellaneous.records) do
+            local id = tostring(rec.id)
+            if string.sub(id, 1, 12) == "misc_soulgem" then gems[#gems + 1] = rec end
+        end
+    end)
+    table.sort(gems, function(a, b) return tostring(a.id) < tostring(b.id) end)
+    return gems
+end
+
+-- Pick creature souls by STRENGTH. The number that matters everywhere in enchanting is the
+-- creature's own mData.mSoul (exposed as `soulValue`): Enchanting::getGemCharge() reads the SOUL's
+-- value, NOT the gem's capacity, so a petty soul in a grand gem still charges as petty.
+--
+-- The threshold is read live from iSoulAmountForConstantEffect rather than assuming vanilla's 400,
+-- because that GMST is what nextCastStyle() actually compares against and a mod can move it.
+local function devPickSouls()
+    local threshold = 400
+    pcall(function() threshold = core.getGMST("iSoulAmountForConstantEffect") or 400 end)
+
+    local souls = {}
+    pcall(function()
+        for _, rec in ipairs(types.Creature.records) do
+            local v = rec.soulValue or 0
+            if v > 0 then souls[#souls + 1] = { id = tostring(rec.id), value = v, name = rec.name } end
+        end
+    end)
+    if #souls == 0 then return {}, threshold end
+    table.sort(souls, function(a, b)
+        if a.value ~= b.value then return a.value < b.value end
+        return a.id < b.id
+    end)
+
+    -- WEAKEST: the low-charge end.
+    local weak = souls[1]
+    -- POWERFUL: the SMALLEST soul at or above the threshold, so it proves the threshold rather than
+    -- blowing past it -- a soul of 400 unlocking Constant Effect is the actual thing being tested.
+    -- Falls back to the strongest available if nothing in this load order reaches it.
+    local powerful = nil
+    for _, s in ipairs(souls) do
+        if s.value >= threshold then powerful = s break end
+    end
+    powerful = powerful or souls[#souls]
+    -- MID: whichever soul sits closest to half the threshold, for ordinary variety.
+    local mid, bestGap = souls[1], math.huge
+    for _, s in ipairs(souls) do
+        local gap = math.abs(s.value - threshold / 2)
+        if gap < bestGap then mid, bestGap = s, gap end
+    end
+
+    return { weak, mid, powerful }, threshold
+end
+
+local function devSoulGemKit()
+    local gems = devSoulGemRecords()
+    if #gems == 0 then
+        emit("COMPANION_DEBUG: dev soul gems - no misc_soulgem records found")
+        return
+    end
+    local souls, threshold = devPickSouls()
+    if #souls == 0 then
+        emit("COMPANION_DEBUG: dev soul gems - no creature records with a soul value")
+        return
+    end
+
+    -- One entry per soul, each count = 1: a soul is per-instance CellRef state, so gems carrying
+    -- different souls must be separate objects. Gem records are cycled so the three are visually
+    -- distinct; if fewer gem records exist than souls, the first is reused (harmless -- the gem
+    -- record contributes nothing but the icon and the name).
+    local items = {}
+    local summary = {}
+    for i, soul in ipairs(souls) do
+        if i > DEV_SOULGEM_KINDS then break end
+        local gem = gems[math.min(i, #gems)]
+        items[#items + 1] = { id = tostring(gem.id), count = 1, soul = soul.id }
+        summary[#summary + 1] = (soul.name or soul.id) .. "=" .. soul.value
+    end
+    devGiveItems(items)
+    emit("COMPANION_DEBUG: dev soul gems " .. table.concat(summary, ", ")
+        .. " (constant-effect threshold " .. threshold .. ")")
+end
+
+-- One item per category the cast-type state machine treats differently, so every branch of
+-- Enchanting::nextCastStyle()'s table can be reached:
+--   armour / clothing -> When Used <-> Constant Effect (Constant only with a powerful soul)
+--   melee weapon      -> When Strikes -> When Used -> (Constant) -> When Strikes
+--   bow / crossbow    -> When Used only (+ Constant with a powerful soul); When Strikes unreachable
+--   ammo / thrown     -> When Strikes only, never Constant
+--   scroll            -> Cast Once only, no cycling
+--
+-- Everything is filtered to be ELIGIBLE in the first place: SortFilterItemModel's
+-- Filter_OnlyEnchantable rejects anything already enchanted, and accepts a Book only when it is a
+-- scroll. enchantCapacity > 0 is required as well -- a zero-capacity item is technically eligible
+-- but gives "Enchantment 0 / 0", which tests nothing.
+local function devEnchantItemKit()
+    local items = {}
+    local missing = {}
+    local function unenchanted(rec)
+        return (rec.enchant == nil or rec.enchant == "") and (rec.enchantCapacity or 0) > 0
+    end
+    local function take(label, recs)
+        if recs[1] then items[#items + 1] = { id = tostring(recs[1].id), count = 1 }
+        else missing[#missing + 1] = label end
+    end
+
+    local WT = types.Weapon.TYPE
+    local meleeTypes = {
+        [WT.ShortBladeOneHand] = true, [WT.LongBladeOneHand] = true, [WT.LongBladeTwoHand] = true,
+        [WT.BluntOneHand] = true, [WT.BluntTwoClose] = true, [WT.BluntTwoWide] = true,
+        [WT.SpearTwoWide] = true, [WT.AxeOneHand] = true, [WT.AxeTwoHand] = true,
+    }
+    local rangedTypes = { [WT.MarksmanBow] = true, [WT.MarksmanCrossbow] = true }
+    -- MarksmanThrown sits with Arrow/Bolt here because nextCastStyle groups them: its weapon CLASS
+    -- is Thrown, which is excluded from Constant Effect alongside Ammo.
+    local ammoTypes = { [WT.Arrow] = true, [WT.Bolt] = true, [WT.MarksmanThrown] = true }
+
+    take("armour", devPickRecords(types.Armor.records, unenchanted, function() return "armor" end, 1))
+    -- Clothing is the same branch as armour in nextCastStyle, but included separately so an
+    -- edge case in one would not be hidden by the other passing.
+    take("clothing", devPickRecords(types.Clothing.records, unenchanted, function() return "clothing" end, 1))
+    take("melee weapon", devPickRecords(types.Weapon.records,
+        function(rec) return unenchanted(rec) and meleeTypes[rec.type] end,
+        function() return "melee" end, 1))
+    take("bow/crossbow", devPickRecords(types.Weapon.records,
+        function(rec) return unenchanted(rec) and rangedTypes[rec.type] end,
+        function() return "ranged" end, 1))
+    -- Ammo comes as a stack: a thrown weapon or arrow is enchanted in bulk, and getEnchantItemsCount
+    -- only has something to count when more than one is carried.
+    local ammo = devPickRecords(types.Weapon.records,
+        function(rec) return unenchanted(rec) and ammoTypes[rec.type] end,
+        function() return "ammo" end, 1)
+    if ammo[1] then items[#items + 1] = { id = tostring(ammo[1].id), count = 20 }
+    else missing[#missing + 1] = "ammo/thrown" end
+    -- A SCROLL specifically, not an ordinary book: Filter_OnlyEnchantable rejects a Book unless
+    -- isScroll. Most vanilla scrolls already CARRY an enchantment (that is what makes them
+    -- castable), which the same filter also rejects — so an unenchanted one may genuinely not
+    -- exist in this load order. Reported rather than substituted, so an empty scroll row reads as
+    -- "none exists" instead of looking like a bug in the picker.
+    take("unenchanted scroll", devPickRecords(types.Book.records,
+        function(rec) return rec.isScroll and unenchanted(rec) end,
+        function() return "scroll" end, 1))
+
+    devGiveItems(items)
+    if #missing > 0 then
+        emit("COMPANION_DEBUG: dev enchant items - none found for: " .. table.concat(missing, ", "))
+    end
+end
+
+-- Teach spells chosen so their EFFECTS populate the Magic Effects browse list with the full spread
+-- of range / slider combinations.
+--
+-- The browse list is the union of every effect appearing in any ST_Spell the player knows, filtered
+-- to AllowEnchanting -- so what is taught is a spell, but what is being selected for is an EFFECT.
+-- Each case below is matched against the MagicEffect record's own flags (onSelf / onTouch /
+-- onTarget / hasMagnitude / hasDuration / hasSkill / hasAttribute, all exposed on
+-- core.magic.effects.records), which is exactly what the editor's visibility rules read.
+local function devMagicCraftSpellKit()
+    local cases = {
+        -- Self-only, no magnitude, no duration -> the editor shows the Range control and NOTHING
+        -- else. This is the Almsivi Intervention shape.
+        { name = "self/no-mag/no-dur", test = function(e)
+            return e.onSelf and not e.onTouch and not e.onTarget
+                and not e.hasMagnitude and not e.hasDuration
+        end },
+        -- Touch+Target with NO Self -> the one combination whose opening range diverges from vanilla.
+        { name = "touch+target", test = function(e)
+            return not e.onSelf and e.onTouch and e.onTarget
+        end },
+        -- Duration but no Area: Area is keyed to the RANGE, not to a flag, so "no area" means an
+        -- effect that can sit at Self.
+        { name = "self+duration", test = function(e)
+            return e.onSelf and e.hasDuration and not e.hasSkill and not e.hasAttribute
+        end },
+        -- Reaches a non-Self range, so the Area slider appears.
+        { name = "area-capable", test = function(e)
+            return (e.onTouch or e.onTarget) and e.hasMagnitude
+        end },
+        -- The two that bypass the duplicate check entirely and open the extra selector popup first.
+        { name = "target-skill", test = function(e) return e.hasSkill end },
+        { name = "target-attribute", test = function(e) return e.hasAttribute end },
+    }
+
+    -- BOTH crafting screens are served by ONE kit, because EffectEditorBase::startEditing is
+    -- literally the same function for both: the same known-ST_Spell pool, the same dedupe, the same
+    -- name sort -- the ONLY difference is
+    --     requiredFlags = (mType == Spellmaking) ? AllowSpellmaking : AllowEnchanting
+    -- so an effect carrying one flag but not the other appears on one screen and is invisible on
+    -- the other. Teaching a spell for one screen therefore guarantees nothing about the other, and
+    -- which effects carry which flag is content-defined (both are "originally modifiable" flags in
+    -- loadmgef.hpp, so a mod can move them) -- it is not something to hardcode a table for.
+    local flags = {
+        { name = "enchant", test = function(e) return e.allowsEnchanting and true or false end },
+        { name = "spellmaking", test = function(e) return e.allowsSpellmaking and true or false end },
+    }
+
+    local known = {}
+    pcall(function()
+        for _, s in ipairs(types.Actor.spells(self)) do known[tostring(s.id)] = true end
+    end)
+
+    -- Effect record for a spell's effect entry, or nil.
+    local function effectRecord(entry)
+        local rec = nil
+        pcall(function() rec = core.magic.effects.records[entry.id] end)
+        return rec
+    end
+
+    -- Cheapest known-castable spell carrying an effect that satisfies BOTH predicates, or nil.
+    local function findSpell(caseTest, flagTest)
+        for _, spell in ipairs(devSpellCandidates()) do
+            local hit = false
+            pcall(function()
+                for _, entry in ipairs(spell.effects) do
+                    local eff = effectRecord(entry)
+                    if eff and flagTest(eff) and caseTest(eff) then hit = true break end
+                end
+            end)
+            if hit then return spell end
+        end
+        return nil
+    end
+
+    local added = 0
+    local function learn(spell)
+        if not spell then return end
+        local id = tostring(spell.id)
+        if known[id] then return end
+        if pcall(function() types.Actor.spells(self):add(id) end) then
+            known[id] = true
+            added = added + 1
+        end
+    end
+
+    -- Per case, prefer ONE spell whose effect carries both flags -- that covers both screens with a
+    -- single spell and is the common outcome, since most effects allow both. Only when no such
+    -- effect exists does this fall back to a spell per screen.
+    local misses = {}
+    for _, case in ipairs(cases) do
+        local both = findSpell(case.test, function(e) return flags[1].test(e) and flags[2].test(e) end)
+        if both then
+            learn(both)
+        else
+            for _, flag in ipairs(flags) do
+                local spell = findSpell(case.test, flag.test)
+                learn(spell)
+                if not spell then misses[#misses + 1] = case.name .. "/" .. flag.name end
+            end
+        end
+    end
+
+    exportSpells()
+    emit("COMPANION_DEBUG: dev craft spells added " .. added .. " spell(s)"
+        .. (#misses > 0 and ("; NO effect exists for: " .. table.concat(misses, ", "))
+            or "; all cases covered for enchanting and spellmaking"))
+end
+
 local function devDispatch(action)
     if action == "gold" or action == "gold10k" then
         -- createObject lowercases ESM3 ids, so 'gold_001' is the canonical form of Gold_001.
@@ -2630,6 +2905,15 @@ local function devDispatch(action)
 
     elseif action == "regressionkit" then
         devRegressionKit()
+
+    elseif action == "soulgems" then
+        devSoulGemKit()
+
+    elseif action == "enchantitems" then
+        devEnchantItemKit()
+
+    elseif action == "craftspells" then
+        devMagicCraftSpellKit()
 
     elseif action == "bulkitems" then
         devBulkItems()

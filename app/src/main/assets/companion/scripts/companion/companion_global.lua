@@ -250,7 +250,16 @@ end
 -- SELECTION is done in companion.lua (types.*.records is readable from any context), so this
 -- handler stays dumb: it just instantiates the ids it is handed.
 --
--- data.items = { { id = <recordId>, count = <n> }, ... }
+-- data.items = { { id = <recordId>, count = <n>, soul = <creatureRefId or nil> }, ... }
+--
+-- `soul` fills a soul gem, and it has to happen HERE rather than in the player script: itemData's
+-- setter takes its immediate path only for a GObject (`if (mObject.isGObject())` in itemdata.cpp)
+-- and otherwise throws "Only global or self scripts can set the value" — and a freshly created
+-- object is not `self`, so the player script could not write it at all. That is the opposite of the
+-- stat setters, which are self-only.
+--
+-- The ENGINE validates the creature id and raises for an unknown one, so a bad soul is contained by
+-- the same pcall as a bad item id.
 local function onDevGiveItems(data)
     if not (data and data.actor and data.items) then return end
     local inv = types.Actor.inventory(data.actor)
@@ -258,7 +267,14 @@ local function onDevGiveItems(data)
         -- Per item: a bad/absent record id raises rather than returning nil, and one bad entry
         -- must not abandon the rest of the batch.
         pcall(function()
-            world.createObject(entry.id, entry.count or 1):moveInto(inv)
+            local obj = world.createObject(entry.id, entry.count or 1)
+            if entry.soul then
+                -- Set BEFORE moveInto so the gem arrives already filled. A soul is per-INSTANCE
+                -- CellRef state, which is also why souled gems are created one at a time rather
+                -- than as a stack.
+                types.Item.itemData(obj).soul = entry.soul
+            end
+            obj:moveInto(inv)
         end)
     end
 end

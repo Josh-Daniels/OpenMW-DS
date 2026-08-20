@@ -180,6 +180,68 @@ object CompanionActions {
 
     fun alchemyCancel() = runCommand("CMP:alchemy_cancel")
 
+    // --- DS Enchanting -------------------------------------------------------------------------
+    // All handled natively in androidmain.cpp → enchantingdialog.cpp, which drives the REAL
+    // MWMechanics::Enchanting and EffectEditorBase. Nothing about enchanting is reimplemented on
+    // this side: the cast-style state machine, the accumulating per-effect cost, the enchant-points
+    // capacity check, the price/charge/success-chance formulas, the seven Buy validations (including
+    // the stolen-item confiscation) and the self-enchant roll that consumes the soul gem whatever
+    // the outcome all stay in the engine.
+    //
+    // The item and the soul gem take a SERIALIZED RefId (their pickers browse a container store
+    // whose order is not stable); EFFECTS take an INDEX into the native mEffects vector, which is
+    // safe because only the player mutates it and GM_Enchanting pauses the sim.
+    fun enchantSelectItem(itemId: String) = runCommand("CMP:enchant_item_select:$itemId")
+
+    fun enchantClearItem() = runCommand("CMP:enchant_item_clear")
+
+    fun enchantSelectSoul(itemId: String) = runCommand("CMP:enchant_soul_select:$itemId")
+
+    fun enchantClearSoul() = runCommand("CMP:enchant_soul_clear")
+
+    fun enchantSetName(text: String) = runCommand("CMP:enchant_name:$text")
+
+    /** Tap a browse-list effect. The ENGINE decides what happens next and says so: a
+     *  TargetSkill/TargetAttribute effect answers with COMPANION_ENCHANTING_ARGPICK (open the
+     *  selector), anything else is added and answers with COMPANION_ENCHANTING_EDIT. The 8-effect
+     *  cap, the no-legal-range check and the plain-effect duplicate rule are all applied there. */
+    fun enchantAddEffect(effectId: String) = runCommand("CMP:enchant_effect_add:$effectId")
+
+    /** Answer an ARGPICK. No duplicate check runs on this path — vanilla has none, so the same skill
+     *  or attribute may deliberately be added more than once. */
+    fun enchantEffectSkill(effectId: String, skillId: String) =
+        runCommand("CMP:enchant_effect_skill:$effectId|$skillId")
+
+    fun enchantEffectAttribute(effectId: String, attributeId: String) =
+        runCommand("CMP:enchant_effect_attribute:$effectId|$attributeId")
+
+    /** Open the editor on an existing effect. The engine snapshots it so _cancel can restore it. */
+    fun enchantEditEffect(index: Int) = runCommand("CMP:enchant_effect_edit:$index")
+
+    /** Live slider/range write. Values are clamped to the fixed native bounds on both sides. */
+    fun enchantSetEffect(index: Int, range: Int, magMin: Int, magMax: Int, duration: Int, area: Int) =
+        runCommand("CMP:enchant_effect_set:$index|$range|$magMin|$magMax|$duration|$area")
+
+    fun enchantDeleteEffect(index: Int) = runCommand("CMP:enchant_effect_delete:$index")
+
+    /** Editor OK — keep what the sliders wrote. */
+    fun enchantEffectOk() = runCommand("CMP:enchant_effect_ok")
+
+    /** Editor Cancel — the two halves of EditEffectDialog::exit(): a newly-added effect is removed,
+     *  an edited one is restored to the values it had when the editor opened. */
+    fun enchantEffectCancel() = runCommand("CMP:enchant_effect_cancel")
+
+    /** Cycle the cast type. Switching INTO Constant Effect force-rewrites every already-added
+     *  effect's range to Self and does NOT restore them on the way back out — vanilla's own
+     *  destructive side effect, deliberately preserved. */
+    fun enchantCastTypeNext() = runCommand("CMP:enchant_casttype_next")
+
+    /** Buy / Create. Routed at the REAL handler, so all seven validations run in their exact order
+     *  with their exact messages; there is no separate "validate without committing" path. */
+    fun enchantBuy() = runCommand("CMP:enchant_buy")
+
+    fun enchantCancel() = runCommand("CMP:enchant_cancel")
+
     fun trainSkill(index: Int) = runCommand("CMP:training_train:$index")
 
     // Cancel training (closes the native window + emits COMPANION_TRAINING_CLOSED). Idempotent —
@@ -244,6 +306,22 @@ object CompanionActions {
     fun devStackEffects() = dev("stackeffects")
     fun devAddRegressionKit() = dev("regressionkit")
     fun devAddBulkItems() = dev("bulkitems")
+
+    // --- Enchanting / Spellmaking test kit ---------------------------------------------------------
+    // Enchanting branches on more record properties than any other DS screen — five item categories
+    // with different cast-type cycling rules, seven range/slider combinations, and a duplicate rule
+    // that behaves differently for skill/attribute effects — and none of that is reachable on an
+    // ordinary low-level character. All three pick their records by PROPERTY at runtime; see the
+    // helpers of the same name in companion.lua.
+    fun devAddSoulGems() = dev("soulgems")
+
+    fun devAddEnchantItems() = dev("enchantitems")
+
+    /** ONE kit for BOTH crafting screens. `EffectEditorBase::startEditing` is literally the same
+     *  function for Enchanting and Spellmaking — same known-spell pool, same dedupe, same sort — and
+     *  the only difference is which flag it requires (`AllowEnchanting` vs `AllowSpellmaking`), so a
+     *  spell taught for one screen guarantees nothing about the other. The Lua side covers both. */
+    fun devAddCraftSpells() = dev("craftspells")
     fun devSetDay() = dev("day")
     fun devSetNight() = dev("night")
 
