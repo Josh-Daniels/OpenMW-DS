@@ -821,7 +821,19 @@ extern "C" void companionDeliverMapTexture(
     int width, int height, int segX, int segY, int isInterior, float boundsMinX, float boundsMinY,
     float angle, float centerX, float centerY, const unsigned char* rgba)
 {
-    Log(Debug::Info) << "companion map: w=" << width << " h=" << height
+    // COMPANION_DEBUG: prefix, NOT the old "companion map:" wording. The disk-log filter in
+    // DebugOutputBase::write matches msg.starts_with("COMPANION_") (companion-skip-disk-log.patch),
+    // and lowercase-with-a-space missed it -- so every segment capture wrote a line to openmw.log.
+    // Captures fire continuously while walking outdoors, which is precisely the unbounded disk
+    // growth that filter exists to prevent.
+    //
+    // COMPANION_DEBUG is the established channel for a trace like this rather than a new prefix of
+    // its own: it skips the disk write AND reaches logcat, because onRawLine Log.d()s any line
+    // containing COMPANION_DEBUG. A bespoke prefix would skip disk but then match nothing on the
+    // Kotlin side, i.e. cost the JNI hop and show the developer nothing.
+    //
+    // Same fields in the same order -- only the prefix changed.
+    Log(Debug::Info) << "COMPANION_DEBUG: map w=" << width << " h=" << height
                       << " segX=" << segX << " segY=" << segY << " interior=" << isInterior
                       << " boundsMinX=" << boundsMinX << " boundsMinY=" << boundsMinY
                       << " angle=" << angle << " centerX=" << centerX << " centerY=" << centerY;
