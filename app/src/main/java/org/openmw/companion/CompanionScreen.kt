@@ -901,6 +901,44 @@ fun ProvideTopPanelOpacity(content: @Composable () -> Unit) {
 }
 
 /**
+ * The BRIGHT end of the dimming ramp for the scene the player is actually in — the day ceiling
+ * outdoors in daylight and everywhere the weather system does not light, crossfaded toward the
+ * night ceiling as the sun goes down.
+ *
+ * WHY A SECOND CEILING RATHER THAN A SMARTER RAMP. [adaptiveDimAlpha] reads ONE number, the
+ * scene's ambient luminance, and the Game Brightness night lift raises that number at night. At
+ * the shipped 0.15 lift the day and night bands overlap outright: lifted Overcast night reports
+ * 0.384 against Overcast day's 0.377, so the ramp reads night as the brighter of the two and
+ * leaves it at alpha 0.03. No value of [DIM_LUMINANCE_BRIGHT] can separate them either —
+ * Thunderstorm DAY sits at 0.353, below both. Night has to be identified independently, which is
+ * what `GameStateRepository.nightWeight` is for.
+ *
+ * TWO THINGS HERE ARE LOAD-BEARING:
+ *  - **`min(day, night)`.** The night slider only ever LOWERS the ceiling. Without it, dragging
+ *    the day slider below the night one would make night the BRIGHTER of the two — the ramp
+ *    inverting under the player's hand. With it, lowering either slider darkens night.
+ *  - **Blending the CEILING, before the ramp.** The alternative — ramping twice and mixing the
+ *    resulting alphas — would need its own smoothing and its own top-screen handling. Done here,
+ *    there is still one ramp function, one `projectBrightness` seam, and one 800ms fade; both
+ *    screens inherit the night ceiling with no screen-specific code, and the crossfade rides the
+ *    animation that is already there.
+ *
+ * The weight itself is the engine's own dawn/dusk interpolation factor (see the Lua exporter), so
+ * the ceiling crossfades on the game's curve rather than snapping at an hour we chose. Interiors
+ * report 0 and therefore keep the day ceiling — correct, because their ambient comes from
+ * `configureAmbient` and the night lift cannot reach it.
+ */
+@Composable
+private fun rememberDimMaxBrightness(): Float {
+    val dayMax by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
+    val nightMaxPref by UiPreferences.adaptiveDimNightMaxBrightnessFlow().collectAsState()
+    val nightWeight by GameStateRepository.nightWeight.collectAsState()
+
+    val nightMax = kotlin.math.min(dayMax, nightMaxPref)
+    return dayMax + (nightMax - dayMax) * nightWeight.coerceIn(0f, 1f)
+}
+
+/**
  * The current top-screen dim alpha: the SHARED dimming sliders, re-projected into the top screen's
  * tighter band, run through the SHARED ramp, and animated with the same 800ms fade the bottom
  * screen uses (so a cell transition reads as one adjustment across both screens rather than two).
@@ -913,7 +951,10 @@ fun ProvideTopPanelOpacity(content: @Composable () -> Unit) {
 private fun rememberTopScreenDimAlpha(): Float {
     val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
     val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
-    val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
+    // Day or night ceiling, already blended — projected through the DAY range because the two
+    // ceiling ranges are identical, so one projection covers both and the top screen needs no
+    // night-specific code of its own.
+    val maxBrightness = rememberDimMaxBrightness()
     val luminance by GameStateRepository.ambientLuminance.collectAsState()
 
     val target = if (!enabled) 0f else adaptiveDimAlpha(
@@ -18060,8 +18101,9 @@ private fun QuickSetRow() {
             // Names EVERY side effect. The old subtitle mentioned only the hint bar, so All DS
             // silently overwriting the player's own layout choices was invisible here. (All DS no
             // longer touches the Item List Style — keep this in step if a side effect is added.)
-            "Sets every row in Game Menus at once. All DS also moves Conversation to the top " +
-                "screen. Both presets change the controller hint bar.",
+            "Sets every row in Game Menus at once. All DS also splits Conversation across both " +
+                "screens and hides equipped items from the inventory list. Both presets change " +
+                "the controller hint bar.",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -18562,6 +18604,10 @@ private const val DIM_ANIM_MS = 800
  * we draw) — hence the inversion here: t = 0 (brightest scene) lands on [maxBrightness], t = 1
  * (darkest scene) on [minBrightness].
  *
+ * [maxBrightness] is the ALREADY-BLENDED day/night ceiling from [rememberDimMaxBrightness], not a
+ * slider value read straight off a preference — the ramp itself deliberately knows nothing about
+ * time of day, so that both callers keep the same single mapping.
+ *
  * The [ceiling] clamp is a BACKSTOP. Each screen's slider range and setter already enforce its own
  * cap, so reaching it here means something upstream was bypassed (a corrupt stored value, a future
  * call site) — keeping it means the readability guarantee holds even then.
@@ -18616,7 +18662,7 @@ private fun projectBrightness(
 private fun rememberBottomScreenDimAlpha(): Float {
     val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
     val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
-    val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
+    val maxBrightness = rememberDimMaxBrightness()
     val luminance by GameStateRepository.ambientLuminance.collectAsState()
     val target = if (!enabled) 0f else
         adaptiveDimAlpha(luminance, minBrightness, maxBrightness, DIM_ABSOLUTE_MAX_ALPHA)
@@ -18685,10 +18731,16 @@ private fun AdaptiveDimOverlay() {
     if (BuildConfig.DEBUG) {
         val luminance by GameStateRepository.ambientLuminance.collectAsState()
         val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
-        LaunchedEffect(kotlin.math.round(luminance * 100f), enabled, alpha) {
+        // night + the resulting ceiling are logged too: since the night lift landed, luminance
+        // alone no longer tells you which end of the ramp a scene is being measured against, so a
+        // line without them cannot be used to tune anything.
+        val nightWeight by GameStateRepository.nightWeight.collectAsState()
+        val maxBrightness = rememberDimMaxBrightness()
+        LaunchedEffect(kotlin.math.round(luminance * 100f), enabled, alpha, nightWeight) {
             Log.d(
                 "AdaptiveDim",
-                "luminance=${"%.3f".format(luminance)} -> alpha=${"%.2f".format(alpha)} (on=$enabled)"
+                "luminance=${"%.3f".format(luminance)} night=${"%.2f".format(nightWeight)} " +
+                        "max=${"%.2f".format(maxBrightness)} -> alpha=${"%.2f".format(alpha)} (on=$enabled)"
             )
         }
     }
@@ -18832,7 +18884,7 @@ private fun JournalPageTurnRow() {
 //     a different panel, which is exactly the "advanced, leave it alone" category.
 // Do NOT promote it back to a main section without solving the adjacency problem some other way.
 //
-// ONE pair of sliders governs both screens. They set the ENDS of the dimming ramp, and each screen
+// ONE set of sliders governs both screens. They set the ENDS of the dimming ramp, and each screen
 // re-projects the same positions through its own range: the top screen's is deliberately tighter
 // (see TOP_DIM_ABSOLUTE_MAX_ALPHA), because a top-screen panel is already thinned by the manual
 // opacity slider and already sits over a dark scene. Shown only while the feature is on: off, they
@@ -18844,6 +18896,7 @@ private fun AdaptiveDimmingRow() {
     val enabled by UiPreferences.adaptiveDimmingFlow().collectAsState()
     val minBrightness by UiPreferences.adaptiveDimMinBrightnessFlow().collectAsState()
     val maxBrightness by UiPreferences.adaptiveDimMaxBrightnessFlow().collectAsState()
+    val nightMaxBrightness by UiPreferences.adaptiveDimNightMaxBrightnessFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Screen Dimming", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
@@ -18869,8 +18922,10 @@ private fun AdaptiveDimmingRow() {
         }
 
         if (enabled) {
-            // Named so the two sliders read as one paired control (the ends of the ramp) rather
-            // than as loose settings that happen to sit under a toggle.
+            // Named so the sliders read as one control (the ends of the ramp) rather than as
+            // loose settings that happen to sit under a toggle. There are three because the BRIGHT
+            // end is scene-dependent: the ambient signal alone can no longer separate outdoor
+            // night from day (see rememberDimMaxBrightness), so night carries its own ceiling.
             OptionsSubLabel("Dimming range")
             PercentSlider(
                 label = "Darkest (in dark places)",
@@ -18884,6 +18939,17 @@ private fun AdaptiveDimmingRow() {
                 value = maxBrightness,
                 range = ADAPTIVE_DIM_MAX_RANGE
             ) { UiPreferences.setAdaptiveDimMaxBrightness(context, it) }
+            // Night gets its own bright end because the ambient signal cannot tell it apart from
+            // day any more — the Game Brightness night lift pushes the night reading up into (and
+            // for some weathers past) the daytime band. Never brighter than the day slider above;
+            // see rememberDimMaxBrightness.
+            PercentSlider(
+                label = "Brightest (at night)",
+                blurb = "How bright the UI stays outdoors at night. Never brighter than the " +
+                        "daylight setting above.",
+                value = nightMaxBrightness,
+                range = ADAPTIVE_DIM_NIGHT_MAX_RANGE
+            ) { UiPreferences.setAdaptiveDimNightMaxBrightness(context, it) }
         }
     }
 }

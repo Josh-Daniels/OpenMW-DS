@@ -234,10 +234,44 @@ const val ADAPTIVE_DIM_MIN_DEFAULT = 0.30f
 const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
 
 /**
- * TOP-screen adaptive dimming. ONE pair of sliders drives BOTH screens — the player sets the
+ * Brightest the companion stays OUTDOORS AT NIGHT — the bright end of the same ramp, selected by
+ * the night weight instead of [ADAPTIVE_DIM_MAX_RANGE].
+ *
+ * WHY NIGHT NEEDS ITS OWN CEILING AT ALL. The ramp reads one number, the scene's ambient
+ * luminance, and the Game Brightness night lift deliberately RAISES that number at night. At the
+ * shipped 0.15 lift the day and night bands genuinely cross over for part of the weather table:
+ * lifted Overcast night reports 0.384 against Overcast day's 0.377, so night measures as brighter
+ * than day of the same weather and the ramp leaves it essentially undimmed (alpha 0.03). Lowering
+ * `DIM_LUMINANCE_BRIGHT` cannot fix that — Thunderstorm day sits at 0.353, BELOW both — so the
+ * only separation available is an independent "is it night" signal, which is what
+ * `GameStateRepository.nightWeight` supplies.
+ *
+ * Deliberately NOT solved by cancelling the lift out of the signal instead. That interaction —
+ * raise a game-brightness floor, the companion dims itself less, for free and with no extra
+ * plumbing — is the reason a post-processing shader was rejected for Game Brightness in the first
+ * place. A separate ceiling keeps it: a bigger lift still reduces night dimming, just from a
+ * darker baseline.
+ *
+ * Same range as the day ceiling so the two sliders read as a pair and neither can invert the ramp.
+ * The default is the value that play-tested best on this panel (day 100% / night 60%).
+ */
+val ADAPTIVE_DIM_NIGHT_MAX_RANGE = 0.60f..1.00f
+/** 0.70 — measured, not round: 100% is right for daylight and 70% for outdoor night, which is the
+ *  whole reason this setting exists rather than one shared ceiling. Shipped at 0.60 for one day
+ *  (Aug 20 2026) and settled at 0.70 after play-testing the finished feature; the 0.60 figure came
+ *  from a pre-implementation estimate, this one from the real ramp on the real panel. */
+const val ADAPTIVE_DIM_NIGHT_MAX_DEFAULT = 0.70f
+
+/**
+ * TOP-screen adaptive dimming. ONE set of sliders drives BOTH screens — the player sets the
  * dimming range once, in the ranges above — and the top screen re-projects those same positions
  * through the constants here before they become an alpha. There is no second stored setting and no
- * second pair of sliders; these are mapping targets, not preferences.
+ * second set of sliders; these are mapping targets, not preferences.
+ *
+ * The day/night ceiling blend happens UPSTREAM of this projection: the top screen projects the
+ * already-blended value from `rememberDimMaxBrightness`, which is only correct because
+ * [ADAPTIVE_DIM_NIGHT_MAX_RANGE] matches [ADAPTIVE_DIM_MAX_RANGE] exactly. If a retune ever makes
+ * those two differ, the blend has to move to the other side of the projection.
  *
  * TUNED ON DEVICE (Aug 2026), and the result was not what the original estimate assumed. The two
  * screens were first given DIFFERENT brightness bands on the theory that a top-screen panel, being
@@ -387,6 +421,7 @@ object UiPreferences {
     // which are what keeps the darkest setting short of unreadable.
     private const val ADAPTIVE_DIM_MIN_BRIGHTNESS = "adaptive_dim_min_brightness"
     private const val ADAPTIVE_DIM_MAX_BRIGHTNESS = "adaptive_dim_max_brightness"
+    private const val ADAPTIVE_DIM_NIGHT_MAX_BRIGHTNESS = "adaptive_dim_night_max_brightness"
     private const val JOURNAL_PAGE_TURN = "journal_page_turn"
     private const val EFFECT_TIMERS = "effect_timers"
     // Master switch + level for the companion's own interface sounds (keyboard, options pills and
@@ -471,10 +506,12 @@ object UiPreferences {
     // mid-loop mixed states. Main-thread only.
     private var bulkGameUi = false
 
-    // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). Default TOP. This MutableStateFlow
-    // init IS the fresh-install fallback: the load below passes null to getString and only overrides
-    // when a value is actually stored, so there is no second default site.
-    private val conversationLocationFlow = MutableStateFlow(ConversationLocation.TOP).rememberDefault()
+    // Where the conversation UI is drawn (BOTTOM / SPLIT / TOP). **Default SPLIT as of Aug 20 2026**
+    // (was TOP since Jul 2026, and SPLIT before that), matching what [setAllGameUi]'s All DS preset
+    // writes — so pressing that preset no longer moves this for a player who never touched it. This
+    // MutableStateFlow init IS the fresh-install fallback: the load below passes null to getString
+    // and only overrides when a value is actually stored, so there is no second default site.
+    private val conversationLocationFlow = MutableStateFlow(ConversationLocation.SPLIT).rememberDefault()
 
     // Item-list layout for the two-panel screens (looting/pickpocket, barter): Classic grid vs
     // Shelf. One switch, all those contexts. Default CLASSIC (the proven layout).
@@ -517,6 +554,13 @@ object UiPreferences {
     // fully clear outdoors, i.e. the pre-slider behaviour. Lowering it applies a baseline dim that
     // is present even in daylight, for players who find the bottom screen too bright everywhere.
     private val adaptiveDimMaxBrightnessFlow = MutableStateFlow(ADAPTIVE_DIM_MAX_DEFAULT)
+
+    // How bright the companion stays OUTDOORS AT NIGHT — the same bright end of the ramp, chosen by
+    // the night weight rather than by luminance. See [ADAPTIVE_DIM_NIGHT_MAX_RANGE] for why night
+    // cannot share the ceiling above. Only ever LOWERS the effective ceiling: the mapping takes
+    // min(day, night), so dragging the day slider down still darkens night too.
+    private val adaptiveDimNightMaxBrightnessFlow =
+        MutableStateFlow(ADAPTIVE_DIM_NIGHT_MAX_DEFAULT)
 
     // Whether the journal's chronological view turns pages as a spine-hinged 3D leaf instead of the
     // pager's plain horizontal slide. Purely visual — the two-column spread, the swipe gesture and
@@ -566,9 +610,13 @@ object UiPreferences {
     private val developerModeFlow = MutableStateFlow(false)
 
     // Whether equipped (worn) items are ALSO shown inline in the Inventory "All" list. Independent of
-    // the bar: worn items are always reachable via the "Equipped" filter tab and/or the bar. Default
-    // true (worn items listed inline, floated to the front of their section).
-    private val showEquippedInListFlow = MutableStateFlow(true)
+    // the bar: worn items are always reachable via the "Equipped" filter tab and/or the bar.
+    // **Default FALSE as of Aug 20 2026** (was true — worn items listed inline, floated to the front
+    // of their section): the equipment row is already on screen, so the inline duplicates are noise.
+    // Brought into line with what [setAllGameUi]'s All DS preset writes, so pressing that preset no
+    // longer changes this for a player who never touched it. Change at BOTH this init and the
+    // getBoolean load fallback.
+    private val showEquippedInListFlow = MutableStateFlow(false)
 
     // Where the looting / bartering service UIs are drawn (BOTTOM / SPLIT / TOP). Default SPLIT
     // (icon grid on top, controls on the bottom). TOP is pending — the menu greys that pill.
@@ -697,7 +745,7 @@ object UiPreferences {
             ?.let { runCatching { InventoryTabStyle.valueOf(it) }.getOrNull() }
             ?.let { inventoryTabStyleFlow.value = it }
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
-        showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, true)
+        showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, false)
         adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
         // Clamped on read as well as on write (same reasoning as topPanelOpacity below): a stored
         // value from a corrupt prefs file, or from a build whose ranges differed, must never be able
@@ -708,6 +756,9 @@ object UiPreferences {
         adaptiveDimMaxBrightnessFlow.value =
             p.getFloat(ADAPTIVE_DIM_MAX_BRIGHTNESS, ADAPTIVE_DIM_MAX_DEFAULT)
                 .coerceIn(ADAPTIVE_DIM_MAX_RANGE)
+        adaptiveDimNightMaxBrightnessFlow.value =
+            p.getFloat(ADAPTIVE_DIM_NIGHT_MAX_BRIGHTNESS, ADAPTIVE_DIM_NIGHT_MAX_DEFAULT)
+                .coerceIn(ADAPTIVE_DIM_NIGHT_MAX_RANGE)
         journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, true)
         effectTimersFlow.value = p.getBoolean(EFFECT_TIMERS, true)
         uiSoundsFlow.value = p.getBoolean(UI_SOUNDS, true)
@@ -794,8 +845,9 @@ object UiPreferences {
      *  menus). **That write still happens during the early-game window, but does not take effect
      *  until the first journal entry** — the bar is forced on until then regardless of preset; see
      *  [controllerTooltipsEffectiveFlow]. DS additionally forces the Conversation Screen Layout to
-     *  TOP (the other per-window
-     *  layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at their own settings).
+     *  SPLIT (the other per-window
+     *  layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at their own settings)
+     *  and turns "Show equipped in list" OFF.
      *  The Input section (Touch input / Game cursor) is deliberately NOT touched by either preset —
      *  it's the player's own choice and survives a quick-set. The Item List Style (Classic/Shelf) is
      *  on that same side of the line as of Aug 2026: All DS used to force SHELF, which silently
@@ -810,11 +862,15 @@ object UiPreferences {
         GAME_UI_ELEMENTS.filter { !it.pending }.forEach { setGameUiMode(context, it.key, mode) }
         bulkGameUi = false
         setHudOn(context, CONTROLLER_TOOLTIPS_KEY, on = mode == GameUiMode.VANILLA)
-        // All DS also drops the DS conversation onto the top screen (Conversation layout -> TOP).
-        // It does NOT touch the Item List Style any more — see the KDoc; Classic is the default and
-        // a player who picked Shelf keeps it. All Native changes nothing beyond the elements.
+        // All DS also splits the DS conversation across both screens (Conversation layout -> SPLIT,
+        // changed from TOP on Aug 20 2026) and hides worn items from the inventory list — with the
+        // Game Menus all on DS, the equipment row is already on screen and the duplicate inline
+        // entries are noise. It does NOT touch the Item List Style — see the KDoc; Classic is the
+        // default and a player who picked Shelf keeps it. All Native changes nothing beyond the
+        // elements.
         if (mode == GameUiMode.DS) {
-            setConversationLocation(context, ConversationLocation.TOP)
+            setConversationLocation(context, ConversationLocation.SPLIT)
+            setShowEquippedInList(context, false)
         }
     }
 
@@ -1010,6 +1066,20 @@ object UiPreferences {
         val v = value.coerceIn(ADAPTIVE_DIM_MAX_RANGE)
         adaptiveDimMaxBrightnessFlow.value = v
         editor(context).putFloat(ADAPTIVE_DIM_MAX_BRIGHTNESS, v).apply()
+    }
+
+    /** Screen brightness (1f = undimmed) the companion keeps OUTDOORS AT NIGHT. Blended in by
+     *  `GameStateRepository.nightWeight`, and only ever as `min(day, night)` — see
+     *  [ADAPTIVE_DIM_NIGHT_MAX_RANGE]. */
+    fun adaptiveDimNightMaxBrightnessFlow(): StateFlow<Float> =
+        adaptiveDimNightMaxBrightnessFlow.asStateFlow()
+
+    /** Set the night bright-end brightness and persist. Clamped to
+     *  [ADAPTIVE_DIM_NIGHT_MAX_RANGE]. */
+    fun setAdaptiveDimNightMaxBrightness(context: Context, value: Float) {
+        val v = value.coerceIn(ADAPTIVE_DIM_NIGHT_MAX_RANGE)
+        adaptiveDimNightMaxBrightnessFlow.value = v
+        editor(context).putFloat(ADAPTIVE_DIM_NIGHT_MAX_BRIGHTNESS, v).apply()
     }
 
     /**

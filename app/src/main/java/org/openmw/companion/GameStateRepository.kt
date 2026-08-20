@@ -85,6 +85,22 @@ object GameStateRepository {
     private val _ambientLuminance = MutableStateFlow(1f)
     val ambientLuminance: StateFlow<Float> = _ambientLuminance.asStateFlow()
 
+    // How much of the CURRENT exterior ambient colour is the weather's NIGHT value: 1 deep at
+    // night, tapering through dawn/dusk, 0 across the day window and 0 in every cell the weather
+    // system does not light (interiors). From COMPANION_NIGHT_WEIGHT (companion.lua), which
+    // reproduces TimeOfDayInterpolator::getValue's own night factor rather than picking an hour.
+    //
+    // It exists because [ambientLuminance] ALONE can no longer tell night from day: the Game
+    // Brightness night lift raises the night ambient, and at the shipped default the two bands
+    // overlap (lifted Overcast night 0.384 vs Overcast day 0.377). This selects which bright-end
+    // ceiling the dimming ramp uses — see UiPreferences.ADAPTIVE_DIM_NIGHT_MAX_RANGE.
+    //
+    // Quantized to 0.05 and change-detected Lua-side, so it arrives a handful of times per in-game
+    // night rather than continuously. Default 0f = day, so nothing shifts to the night ceiling
+    // before the first line arrives.
+    private val _nightWeight = MutableStateFlow(0f)
+    val nightWeight: StateFlow<Float> = _nightWeight.asStateFlow()
+
     // true while the in-game pause/options menu (GM_MainMenu) is open. Driven by
     // COMPANION_PAUSE_MENU_OPEN / _CLOSED lines from companion.lua. Gates the
     // bottom-screen options/display-settings overlay (EngineActivity).
@@ -1335,6 +1351,14 @@ object GameStateRepository {
             trimmed.contains("COMPANION_AMBIENT:") -> {
                 trimmed.substringAfter("COMPANION_AMBIENT:").trim().toFloatOrNull()
                     ?.let { _ambientLuminance.value = it }
+            }
+            // Exterior night weight for the dimming ramp's bright-end ceiling. Clamped here as
+            // well as Lua-side: this multiplies a ceiling, so a value outside 0..1 would push the
+            // blend past either endpoint. A malformed line is ignored rather than read as 0, which
+            // would silently drop back to the daytime ceiling in the middle of the night.
+            trimmed.contains("COMPANION_NIGHT_WEIGHT:") -> {
+                trimmed.substringAfter("COMPANION_NIGHT_WEIGHT:").trim().toFloatOrNull()
+                    ?.let { _nightWeight.value = it.coerceIn(0f, 1f) }
             }
             // Barter session. ITEM first (most frequent). Each ITEM carries its own side,
             // so vendor/player items go to separate buffers. None of these prefixes is a

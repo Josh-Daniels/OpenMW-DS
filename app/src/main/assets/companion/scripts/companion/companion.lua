@@ -3058,6 +3058,145 @@ local function setNightLift(value)
     applyNightAmbientFloor()
 end
 
+-- ===== Exterior night weight =====
+--
+-- How much of the CURRENT exterior ambient colour is the weather's NIGHT value: 1 deep at night,
+-- tapering through dawn and dusk, 0 across the day window (and 0 wherever the weather system does
+-- not own the lighting at all).
+--
+-- WHY THIS EXISTS. The companion's screen dimming ramps purely on the exported ambient luminance,
+-- and `applyNightAmbientFloor` above deliberately raises the night ambient — so the same number now
+-- describes two very different scenes. At the shipped 0.15 lift the two genuinely CROSS OVER for
+-- part of the weather table: lifted Overcast night reports 0.384 against Overcast day's 0.377, i.e.
+-- night is measured as BRIGHTER than day of the same weather. No luminance threshold can separate
+-- those (Thunderstorm day is 0.353, below both), so the dimming ramp needs an independent
+-- "is it night" signal to pick its bright-end ceiling. That is this.
+--
+-- It is a WEIGHT, not a boolean, on purpose: it is the exact interpolation factor the engine gives
+-- mNightValue, so the companion's ceiling crossfades on the game's own dawn/dusk curve instead of
+-- snapping at some hour we picked.
+
+-- Reads a numeric `fallback=` parameter. Same shape as fallbackColour above (core.getFallback is
+-- our own binding — companion-core-fallback.patch — because these are NOT in the GMST store).
+-- `default` is returned when the parameter is missing or unparseable.
+local function fallbackNumber(name, default)
+    local raw = nil
+    pcall(function() raw = core.getFallback(name) end)
+    if type(raw) ~= "string" then return default end
+    return tonumber(raw) or default
+end
+
+-- The engine's TimeOfDaySettings, plus the AMBIENT transition window (WeatherSetting).
+--
+-- Cached: these come from Morrowind.ini and cannot change at runtime, and re-reading eight
+-- fallbacks on every slow tick would be pure waste.
+--
+-- The four boundaries are built exactly as WeatherManager's constructor builds them
+-- (weather.cpp:638-641), and the four transition times are the "Ambient" prefix specifically --
+-- TimeOfDaySettings::getSetting(prefix) is per-CONSUMER, and Sky/Fog/Sun each have their own,
+-- differently-valued set. Using the wrong prefix would taper on the wrong curve.
+--
+-- The per-parameter default is 1, which is what getSetting() itself falls back to for an unknown
+-- prefix ({1,1,1,1}, weather.hpp:82) -- NOT 0. In the shipped config these are present and are
+-- 0.5 / 2 / 1 / 1.25, giving ambient bands of night <5.5 or >21.25, sunrise 5.5-10, day 10-17,
+-- sunset 17-21.25.
+local todSettings = nil
+local function timeOfDaySettings()
+    if todSettings then return todSettings end
+    local sunrise = fallbackNumber("Weather_Sunrise_Time", 6)
+    local sunset = fallbackNumber("Weather_Sunset_Time", 18)
+    todSettings = {
+        nightEnd = sunrise,
+        dayStart = sunrise + fallbackNumber("Weather_Sunrise_Duration", 2),
+        dayEnd = sunset,
+        nightStart = sunset + fallbackNumber("Weather_Sunset_Duration", 2),
+        preSunrise = fallbackNumber("Weather_Ambient_Pre-Sunrise_Time", 1),
+        postSunrise = fallbackNumber("Weather_Ambient_Post-Sunrise_Time", 1),
+        preSunset = fallbackNumber("Weather_Ambient_Pre-Sunset_Time", 1),
+        postSunset = fallbackNumber("Weather_Ambient_Post-Sunset_Time", 1),
+    }
+    return todSettings
+end
+
+-- A line-by-line transcription of TimeOfDayInterpolator<T>::getValue (weather.cpp:65-133),
+-- returning the weight it gives mNightValue instead of the interpolated colour.
+--
+-- Kept in the engine's own branch ORDER and with its own degenerate-duration behaviour, because
+-- both are load-bearing: the sunrise fade-in initialises its factor to 0 and the sunset fade-out
+-- to 1, so a zero-length band resolves to "not night" at dawn and "night" at dusk rather than to
+-- one shared value. The clamps are ours -- the engine lets the factor sit exactly on 0/1 at the
+-- band edges and never overshoots, but we are producing a weight a UI multiplies by, so pinning
+-- the range costs nothing.
+local function nightWeightForHour(hour)
+    local s = timeOfDaySettings()
+    local sunriseBegin = s.nightEnd - s.preSunrise
+    local sunriseEnd = s.dayStart + s.postSunrise
+    local sunsetBegin = s.dayEnd - s.preSunset
+    local sunsetEnd = s.nightStart + s.postSunset
+
+    -- night
+    if hour < sunriseBegin or hour > sunsetEnd then return 1 end
+    -- sunrise: night -> sunrise for the first half, sunrise -> day for the second
+    if hour <= sunriseEnd then
+        local duration = sunriseEnd - sunriseBegin
+        if duration <= 0 then return 0 end
+        local middle = sunriseBegin + duration / 2
+        if hour > middle then return 0 end
+        local f = (middle - hour) / duration * 2
+        return math.max(0, math.min(1, f))
+    end
+    -- day
+    if hour < sunsetBegin then return 0 end
+    -- sunset: day -> sunset for the first half, sunset -> night for the second
+    local duration = sunsetEnd - sunsetBegin
+    if duration <= 0 then return 1 end
+    local middle = sunsetBegin + duration / 2
+    if hour <= middle then return 0 end
+    local f = (hour - middle) / duration * 2
+    return math.max(0, math.min(1, f))
+end
+
+-- Quantum for the emitted weight. Coarse on purpose: the consumer crossfades a dimming ceiling
+-- over ~800ms, so finer steps would only put more lines on the wire. At the default timescale a
+-- full dawn sweep is ~9 real minutes, so this is one line every ~27 real seconds while the sun is
+-- actually moving, and nothing at all the rest of the time.
+local NIGHT_WEIGHT_QUANTUM = 0.05
+local lastNightWeightStr = nil
+
+local function exportNightWeight()
+    -- WHICH AMBIENT PATH OWNS THIS CELL. This is the predicate worldimp.cpp:3305 uses to decide
+    -- whether WeatherManager::update runs -- `isCellExterior() || isCellQuasiExterior()` -- and it
+    -- must match, because quasi-exteriors (Vivec cantons, and similar roofed-but-outdoor cells) DO
+    -- get weather ambient and therefore DO have a night. The COMPANION_STATS `cellExt` field is
+    -- isExterior ALONE and would file them as interior; do not reuse it here.
+    --
+    -- Interiors report 0 because their ambient comes from configureAmbient (cell mood past the
+    -- minimum-interior-brightness clamp), which the night lift cannot reach and time of day does
+    -- not touch -- so they must keep ramping on the daytime ceiling.
+    --
+    -- Two separate pcalls: hasTag is a method call and isExterior a property, and folding them into
+    -- one block would let a failure on the second silently discard the first.
+    local isExt, isQuasi = false, false
+    pcall(function() isExt = self.cell and self.cell.isExterior or false end)
+    pcall(function() isQuasi = self.cell and self.cell:hasTag("QuasiExterior") or false end)
+
+    local weight = 0
+    if isExt or isQuasi then
+        -- core.getGameTime() is (mDaysPassed * 24 + mGameHour) * 3600, so this is exactly the
+        -- time.getHour() WeatherManager passes to getValue. The whole-days term is integral, so
+        -- the modulo recovers mGameHour without drift.
+        local hour = nil
+        pcall(function() hour = (core.getGameTime() / 3600) % 24 end)
+        if hour then weight = nightWeightForHour(hour) end
+    end
+
+    local q = math.floor(weight / NIGHT_WEIGHT_QUANTUM + 0.5) * NIGHT_WEIGHT_QUANTUM
+    local line = string.format('COMPANION_NIGHT_WEIGHT:%.2f', math.max(0, math.min(1, q)))
+    if line == lastNightWeightStr then return end
+    lastNightWeightStr = line
+    emit(line)
+end
+
 local function dispatchCommand(command)
     if string.sub(command, 1, 4) ~= "CMP:" then return end
     local payload = string.sub(command, 5)
@@ -3512,6 +3651,7 @@ local function onUpdate(dt)
         exportTarget()
         exportPlayerStatus()
         exportDoorMarkers()
+        exportNightWeight()
         exportDevState()
     end
     journalTimer = journalTimer + dt
