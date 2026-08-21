@@ -110,10 +110,13 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // Repair + Rest/Wait have companion (DS) overlays (RepairOverlay / RestWaitOverlay +
     // companion-repair-export / companion-restwait-export patches), so they are non-pending
     // (default DS): the native GM_MerchantRepair / GM_Rest windows are suppressed and the bottom
-    // screen is the sole surface. Spellmaking/Enchanting: native suppression is wired (companionDs*)
-    // but no companion overlay exists yet, so they stay pending -> locked to VANILLA and the
-    // suppression stays dormant (companionDs*() always false) until an overlay lands. See
-    // companion-hide-gamewindows-on-dsmode.patch.
+    // screen is the sole surface.
+    //
+    // NOTE as of Aug 21 2026 NO element in this list is pending any more — spellmaking was the last
+    // one. The `pending` flag and its "not yet available" row are kept because this is exactly how
+    // every DS screen was staged: the native gate lands first and sits dormant (companionDs*()
+    // always false) while the element stays locked to VANILLA, then the flag comes off when the
+    // overlay ships. See companion-hide-gamewindows-on-dsmode.patch.
     GameUiElement("game_ui_repair", "Repair"),
     // Travel has a companion (DS) overlay (TravelOverlay + companion-travel-export /
     // companion-hide-travel-on-dsmode patches), so it is non-pending (default DS): the native
@@ -132,6 +135,13 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // the conversation step-aside).
     GameUiElement("game_ui_spellbuying", "Spell buying"),
     GameUiElement("game_ui_training", "Training"),
+    // Spellmaking is non-pending as of Aug 21 2026: SpellmakingOverlay (bottom) +
+    // SpellmakingTopOverlay (top) exist, and DS suppresses the native GM_SpellCreation window via
+    // the already-wired companionDsSpellmaking() gate. The native SpellCreationDialog still owns the
+    // whole mechanic — the ORDER-DEPENDENT magicka cost (the Target x1.5 scales the running total),
+    // calcSpellBaseSuccessChance, the barter-adjusted price and the four Buy validations
+    // (CMP:spellmaking_* bridges). Its effect editor is literally enchanting's: both windows derive
+    // from EffectEditorBase, which owns the bridges, so the same WindowModal gates cover both.
     GameUiElement("game_ui_spellmaking", "Spellmaking"),
     // Enchanting is non-pending as of Aug 20 2026: EnchantingOverlay (bottom) + EnchantingTopOverlay
     // (top) exist, and DS suppresses the native GM_Enchanting window via the already-wired
