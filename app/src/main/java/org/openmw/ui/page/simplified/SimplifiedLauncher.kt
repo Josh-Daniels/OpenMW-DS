@@ -1250,7 +1250,7 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                         // The dot itself is a decorative Box, so the badge is announced here
                         // instead — otherwise it would be invisible to a screen reader.
                         contentDescription = if (offeredUpdate != null) {
-                            stringResource(R.string.setting) + " — " +
+                            stringResource(R.string.setting) + ", " +
                                 stringResource(R.string.updates_badge_desc)
                         } else {
                             stringResource(R.string.setting)

@@ -52,6 +52,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.DropdownMenu
@@ -140,7 +142,6 @@ import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.time.Duration.Companion.milliseconds
 import android.content.Context
@@ -413,17 +414,27 @@ private val MwData: FontFamily
 /**
  * The typeface for the CURRENT composition, or null to use the Android system fonts.
  *
- * Null by default, which is what keeps the options menu on the system fonts: it is hosted in its
- * own window with no provider, so the switch that controls this setting is always legible in a
- * known typeface — including when the chosen one turns out to be hard to read.
+ * Null by default; every surface that wants the game font declares it by sitting inside a
+ * [ProvideCompanionFont]. Three do, and between them that is now everything the companion draws:
+ * [CompanionScreen] (bottom), [ProvideTopPanelOpacity] (each top-screen overlay) and
+ * [OptionsMenuOverlay] (the settings window).
+ *
+ * **The settings window was deliberately EXCLUDED until Aug 21 2026**, on the reasoning that the
+ * switch controlling this setting should always be legible in a known typeface even if the chosen
+ * one turned out not to be. That reasoning was overridden: the setting ships ON, so the exclusion
+ * meant the screen a new player looks at first was the one screen that did not look like the app.
+ * The escape hatch it protected still exists — the Game Font row is plain text on a plain pill, in
+ * the game's own UI face, and turning it off restyles the menu back on the next frame.
  */
 private val LocalGameFont = compositionLocalOf<FontFamily?> { null }
 
 /**
- * Supplies the font setting to a companion composition. Applied at the two roots that between them
- * cover both physical screens: [CompanionScreen] (bottom) and [ProvideTopPanelOpacity] (each
- * top-screen overlay window). Providing at the root rather than threading a parameter means
- * overlays added later inherit it for free.
+ * Supplies the font setting to a companion composition. Applied at the three roots that between
+ * them cover everything the companion draws on either physical screen: [CompanionScreen] (bottom),
+ * [ProvideTopPanelOpacity] (each top-screen overlay window) and [OptionsMenuOverlay] (the settings
+ * window, which is its own WindowManager panel and so inherits nothing from the first two).
+ * Providing at the root rather than threading a parameter means overlays added later inherit it
+ * for free.
  */
 @Composable
 private fun ProvideCompanionFont(content: @Composable () -> Unit) {
@@ -6306,7 +6317,10 @@ private fun RowScope.KbKey(
             .clip(RoundedCornerShape(4.dp))
             .background(if (highlight) SlotWorn else SlotBg)
             .border(1.dp, if (highlight) Bronze else BronzeDark, RoundedCornerShape(4.dp))
-            .clickable { press() },
+            // [tapFlash], not a bare clickable: an on-screen keyboard is the one place where every
+            // single tap needs its own visible acknowledgement, and Foundation's default press
+            // indication is 30% BLACK over an already-dark key — see the tapFlash block comment.
+            .tapFlash { press() },
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -6364,7 +6378,7 @@ private fun RepairOverlay(session: RepairSession) {
         ) {
             // ---- Title bar ----
             Text(
-                "Repair — ${session.npcName.ifBlank { "Merchant" }}",
+                "Repair: ${session.npcName.ifBlank { "Merchant" }}",
                 color = BronzeLight, fontSize = 15.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -7145,7 +7159,7 @@ fun AlchemyTopOverlay() {
                                     fontSize = 9.sp, fontFamily = MwData
                                 )
                                 Text(
-                                    if (appa.present) appa.name else "— none —",
+                                    if (appa.present) appa.name else "(none)",
                                     color = if (appa.present) BoneBright else BoneMuted,
                                     fontSize = 12.sp, fontFamily = MwBody,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis
@@ -9040,7 +9054,7 @@ private fun EnchantPickerPopup(
                             title = if (opt.count > 1) "${opt.name} (${opt.count})" else opt.name,
                             // Soul gems show the trapped soul and its value — the number that becomes
                             // the enchantment's Charge. Items show the capacity they would give.
-                            subtitle = if (soul) "${opt.soul} — ${opt.charge}"
+                            subtitle = if (soul) "${opt.soul} (${opt.charge})"
                             else "${opt.maxPoints} enchantment points",
                             enabled = true,
                             focused = i == focusIndex,
@@ -9813,7 +9827,7 @@ private fun LevelUpOverlay(session: LevelUpSession) {
                     Text(
                         if (attr.count > 0)
                             "${attr.count} skill increase${if (attr.count == 1) "" else "s"} " +
-                                "since your last level — worth x${attr.mult} here."
+                                "since your last level, worth x${attr.mult} here."
                         else
                             "No skill increases since your last level, so this rises by 1.",
                         color = BoneBright, fontSize = 11.sp, fontFamily = MwBody
@@ -10060,7 +10074,7 @@ private fun TrainingOverlayHost(session: TrainingSession?) {
         ) {
             // ---- Title bar ----
             Text(
-                "Training — ${cachedNpcName.ifBlank { "Trainer" }}",
+                "Training: ${cachedNpcName.ifBlank { "Trainer" }}",
                 color = BronzeLight, fontSize = 15.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -10163,7 +10177,7 @@ private fun TrainingRow(
             )
         }
         Text(
-            if (skill.capped) "—" else "${skill.cost}g",
+            if (skill.capped) "-" else "${skill.cost}g",
             color = when {
                 skill.capped -> BoneDim
                 affordable -> BronzeLight
@@ -10208,7 +10222,7 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
         ) {
             // ---- Title bar ----
             Text(
-                "Spells — ${session.npcName.ifBlank { "Merchant" }}",
+                "Spells: ${session.npcName.ifBlank { "Merchant" }}",
                 color = BronzeLight, fontSize = 15.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -10330,7 +10344,7 @@ private fun SpellForSaleRow(
             )
         }
         Text(
-            if (spell.known) "—" else "${spell.cost}g",
+            if (spell.known) "-" else "${spell.cost}g",
             color = when {
                 spell.known -> BoneDim
                 affordable -> BronzeLight
@@ -10378,7 +10392,7 @@ private fun TravelOverlay(session: TravelSession) {
         ) {
             // ---- Title bar ----
             Text(
-                "Travel — ${session.npcName.ifBlank { "Caravaner" }}",
+                "Travel: ${session.npcName.ifBlank { "Caravaner" }}",
                 color = BronzeLight, fontSize = 15.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -10987,7 +11001,7 @@ private fun BarterOverlay(session: BarterSession, disposition: Int, location: Sc
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "${session.vendorName.ifBlank { "Merchant" }} — Barter",
+                    "Barter: ${session.vendorName.ifBlank { "Merchant" }}",
                     color = BronzeLight, fontSize = 14.sp,
                     fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -11219,7 +11233,7 @@ private fun BarterControlsOnly(session: BarterSession) {
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                "${session.vendorName.ifBlank { "Merchant" }} — Barter",
+                "Barter: ${session.vendorName.ifBlank { "Merchant" }}",
                 color = BronzeLight, fontSize = 14.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis
@@ -12118,7 +12132,7 @@ private fun BarterRejectedAlert(reason: String, onDismiss: () -> Unit) {
         "player_gold" -> "You don't have enough gold for that."
         "vendor_gold" -> "The merchant can't afford that."
         "no_items" -> "Select something to trade first."
-        "stolen" -> "That item was stolen — it has been confiscated."
+        "stolen" -> "That item was stolen, so it has been confiscated."
         else -> "The merchant refused your offer."
     }
     Box(
@@ -12746,7 +12760,7 @@ private fun MapPanel(
         // Excise Office" is shown); anything past two lines still truncates with an ellipsis.
         // textAlign centres both rows.
         Text(
-            if (state.hasData) state.cell.ifEmpty { "Exterior" } else "—",
+            if (state.hasData) state.cell.ifEmpty { "Exterior" } else "-",
             color = Bone, fontSize = 16.sp, fontFamily = MwDisplay,
             fontWeight = FontWeight.SemiBold,
             maxLines = 2,
@@ -17498,7 +17512,7 @@ private fun StatInfo.toContent(showEffectTimer: Boolean = true): StatPopupConten
         sections = emptyList(),
         description = "Your bounty is the total fine for crimes witnessed by others. " +
             "While it is above zero, guards will demand you pay the fine, go to jail, " +
-            "or resist arrest — clearing it restores your standing with the law.",
+            "or resist arrest. Clearing it restores your standing with the law.",
         // Match the row's red-when-wanted styling in the popup header.
         titleColor = if (value > 0) Color(0xFFC75C5C) else BronzeLight
     )
@@ -17543,8 +17557,10 @@ private fun formatRemaining(seconds: Int): String =
  * A PERMANENT effect appends nothing whatever the toggle says, because `remainingSeconds` is null
  * for it — so the switch only ever changes what timed effects show.
  *
- * The separator is an em dash: the game typeface (MysticCards) has no `·` glyph, and `—` is one of
- * the few punctuation marks it does carry.
+ * The timer is PARENTHESISED rather than set off by a separator. It used to be an em dash, chosen
+ * because the game typeface (MysticCards) has no `·` glyph and `—` is one of the few punctuation
+ * marks it does carry — but em dashes are now out of the app's text entirely, and brackets say
+ * "this is how long is left" more plainly than any separator did.
  */
 private fun effectSubtitle(e: ActiveEffect, showTimer: Boolean = true): String {
     val base = when {
@@ -17557,7 +17573,7 @@ private fun effectSubtitle(e: ActiveEffect, showTimer: Boolean = true): String {
     return when {
         timer == null -> base
         base.isEmpty() -> timer
-        else -> "$base — $timer"
+        else -> "$base ($timer)"
     }
 }
 
@@ -17795,7 +17811,7 @@ private fun CharacterHeaderPanel(character: CharacterInfo, onSelectStat: (StatIn
     ) {
         Column {
             Text(
-                character.name.ifBlank { "—" },
+                character.name.ifBlank { "-" },
                 color = Bone, fontSize = 18.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.SemiBold
             )
@@ -18254,128 +18270,236 @@ private val ResetWarnRed = Color(0xFFC75C5C)
 /** How long "Default settings" stays armed before disarming itself. */
 private const val RESET_CONFIRM_MS = 4000L
 
-/** Remembers the options-menu scroll position across pause open/close cycles. The menu's host
- *  window is added/removed each time the pause menu opens, destroying any compose-scoped state, so
- *  this plain object (like [UiPreferences]/[GameStateRepository]) survives to restore the position. */
-private object OptionsMenuScrollState {
-    var index: Int = 0
-    var offset: Int = 0
-}
-
-/**
- * Which options sections are expanded, held OUTSIDE composition for the same reason as
- * [OptionsMenuScrollState]: the pause overlay is a separate window that is recreated on every
- * open, so a plain `remember` would re-collapse every section each time the menu is opened.
+/* ---- Tap flash: the options menu's press feedback ----
  *
- * `mutableStateMapOf` (not a plain map) so toggling recomposes the LazyColumn — the section rows
- * are emitted conditionally from these flags, so a non-observable map would flip the arrow without
- * ever showing/hiding the content.
+ * WHY THIS EXISTS RATHER THAN THE BUILT-IN PRESS INDICATION (investigated Aug 21 2026; the report
+ * was "the flash is too brief to notice and doesn't always fire"). Two independent causes, both
+ * confirmed against the Compose Foundation 1.11.2 sources rather than guessed at:
  *
- * **Default is COLLAPSED (absent key ⇒ false).** The five sections together emit ~35 rows, which
- * is several screens of scrolling on the 1240x1080 bottom panel; all-collapsed turns the menu into
- * a five-line index that fits without scrolling, which is the whole point of the rework. The cost
- * is one extra tap to reach a setting — paid back immediately because the section you want is now
- * visible on screen instead of somewhere down a long scroll. Scroll position still persists
- * independently, so returning to the menu lands where you left it.
+ *  1. **TIMING — `Modifier.clickable` delays its press interaction inside a scrollable container.**
+ *     `AbstractClickableNode.handlePressInteractionStart` checks `delayPressInteraction()`, which is
+ *     true whenever the composition root is in a scrollable container — which the options list
+ *     always is — and defers emitting `PressInteraction.Press` by `TapIndicationDelay`
+ *     (`ViewConfiguration.getTapTimeout()`, 100 ms on Android). If the finger lifts first,
+ *     `handlePressInteractionRelease` cancels that job and emits Press and Release back-to-back from
+ *     ONE coroutine. The indication node's collector therefore sees its press count go 1 → 0 with no
+ *     frame in between, so a normal quick tap draws a pressed frame for 0–1 frames, or none at all,
+ *     while a deliberate >100 ms hold lights up properly. That is exactly "too brief, and
+ *     inconsistent" — the inconsistency was tap SPEED, not a missed event.
+ *  2. **CONTRAST — what gets drawn is near-invisible here.** No `MaterialTheme` wraps the options
+ *     overlay (EngineActivity composes it as `AdaptiveDimmedWindow { OptionsMenuOverlay() }`), so
+ *     `LocalIndication` is Foundation's fallback `DefaultDebugIndication`, whose entire effect is
+ *     `drawRect(Color.Black.copy(alpha = 0.3f))`. Over this menu's near-black palette (OptionsBg
+ *     #1A1410, SlotBg, PillActiveBg #3A2A10) that is 30% black on almost-black — imperceptible even
+ *     on the holds where it does fire.
+ *
+ * So the fix has to change both halves: drive the flash from the CLICK (which is emitted exactly
+ * once per registered tap, with no timing gate) and give it a minimum on-screen life; and draw it in
+ * a colour that reads on a dark panel. The built-in indication is deliberately left in place
+ * underneath — it costs nothing, and it still gives press-down feedback on a long hold.
  */
-// Section titles double as their expansion-state keys — one string per section, so a title
-// change can't silently desync from a separate key constant. (A retitled section therefore starts
-// collapsed exactly once, since its old key is never looked up again. Harmless — every section
-// defaults to collapsed anyway.)
-//
-// The five sections are grouped by the QUESTION the player is asking, not by the mechanism:
-// which menus do I want ‧ what is on the top screen ‧ how does the bottom screen look ‧ how do I
-// control it ‧ developer stuff. The predecessors ("DS Screen Layout", "DS or Native", "Native HUD",
-// "Input", "Companion Tabs") cut across each other: the same twelve menus were configured twice in
-// two different sections, a typeface switch lived under "Screen Layout", and a whole-screen dimming
-// effect lived under "Companion Tabs".
-//
-// "Native" (not "Vanilla") is the player-facing word for "OpenMW draws it itself": "vanilla" is
-// modding jargon, and the menu was using it for a plain who-draws-this distinction. The
-// [GameUiMode.VANILLA] enum constant is deliberately NOT renamed — its `name` is what gets written
-// into SharedPreferences, so renaming it would orphan every stored setting.
 
-/** Per-menu: who draws it, and (when the companion does) on which screen — one row per menu. */
-private const val SECTION_GAME_MENUS = "Game Menus"
-/** What appears on the top screen: the game's own HUD, plus the DS overlays drawn over it. */
-private const val SECTION_TOP_SCREEN = "Top Screen"
-/** How the companion screen itself looks. */
-private const val SECTION_BOTTOM_SCREEN = "Bottom Screen"
-/** Settings that span BOTH screens rather than belonging to either — currently just Screen
- *  Dimming, which drives the bottom screen, the top screen's DS panels and the options menu from
- *  one control. (Game Font is arguably a second candidate; left in Bottom Screen for now.) */
-private const val SECTION_DISPLAY = "Display"
-/** How the game is controlled from the two screens. */
-private const val SECTION_CONTROLS = "Controls"
-private const val SECTION_DEVELOPER_TOOLS = "Developer Tools"
-
-private object OptionsSectionState {
-    private val expanded = mutableStateMapOf<String, Boolean>()
-
-    fun isExpanded(key: String): Boolean = expanded[key] == true
-
-    fun toggle(key: String) {
-        expanded[key] = !isExpanded(key)
-    }
-}
+/** How long a tap flash stays at full strength before fading. Comfortably longer than a frame at
+ *  any refresh rate, which is the entire failure mode being fixed. */
+private const val TAP_FLASH_HOLD_MS = 110L
+/** Fade-out length. Long enough to register in peripheral vision, short enough not to smear when
+ *  tapping several pills in a row. */
+private const val TAP_FLASH_FADE_MS = 260
+/** Peak opacity of the flash overlay. Bright enough to be unmistakable on the dark palette; below
+ *  the point where the label underneath washes out. */
+private const val TAP_FLASH_MAX_ALPHA = 0.42f
 
 /**
- * Collapsible section heading for the options menu — the [OptionsSectionHeader] look (uppercase
- * BronzeLight MwDisplay + Bronze underline) plus a chevron and a tap target.
+ * A [Modifier.clickable] that also flashes the element for [TAP_FLASH_HOLD_MS] + [TAP_FLASH_FADE_MS]
+ * on every registered tap. See the block comment above for why the built-in press indication could
+ * not do this.
  *
- * Deliberately NOT built on `IniSectionCard`: that composable takes ini-shaped data
- * (`List<Triple<…>>`) and renders `IniSettingItem`s itself with no content slot, is Material-themed
- * rather than using this file's private Morrowind palette, and wraps its children in a Column —
- * which would flatten these rows out of the LazyColumn and lose their keys. This follows the same
- * visual PATTERN while leaving the rows as real lazy items emitted by the caller.
+ * Driven by a click COUNTER rather than by the press state: a re-tap during the fade bumps the
+ * counter, which restarts the effect and snaps back to full — where re-setting a boolean that is
+ * already true would do nothing and the second tap would go unacknowledged.
+ *
+ * Draws with [drawWithContent] AFTER `drawContent()`, so the flash covers fill, border and label
+ * alike and needs no background of its own — an element with a transparent background flashes
+ * exactly as visibly as a filled one.
  */
 @Composable
-private fun OptionsCollapsibleHeader(
-    title: String,
-    expanded: Boolean,
-    onToggle: () -> Unit,
-    dimmed: Boolean = false
-) {
-    Column(
-        Modifier
-            .alpha(if (dimmed) 0.4f else 1f)
+private fun Modifier.tapFlash(
+    enabled: Boolean = true,
+    flashColor: Color = BronzeLight,
+    onClick: () -> Unit,
+): Modifier {
+    // State is remembered UNCONDITIONALLY, and [enabled] is applied at the end — an early return
+    // above the remembers would make the slot structure of this call site depend on a value that
+    // can change (a pill going from disabled to enabled), which is the one thing composable slot
+    // tables dislike. Costs two slots on a disabled pill; buys never having to think about it.
+    var flashes by remember { mutableIntStateOf(0) }
+    var lit by remember { mutableStateOf(false) }
+    LaunchedEffect(flashes) {
+        if (flashes == 0) return@LaunchedEffect
+        lit = true
+        delay(TAP_FLASH_HOLD_MS)
+        lit = false
+    }
+    // tween(0) on the way UP so the flash is instant, and only the fade is animated.
+    val alpha by animateFloatAsState(
+        targetValue = if (lit) TAP_FLASH_MAX_ALPHA else 0f,
+        animationSpec = tween(
+            durationMillis = if (lit) 0 else TAP_FLASH_FADE_MS,
+            easing = LinearEasing
+        ),
+        label = "tapFlash"
+    )
+    if (!enabled) return this
+    return this
+        .clickable { flashes++; onClick() }
+        .drawWithContent {
+            drawContent()
+            if (alpha > 0.001f) drawRect(flashColor, alpha = alpha)
+        }
+}
+
+/**
+ * The options menu's top level is a list of CATEGORIES; each one opens as its own page.
+ *
+ * Replaces the collapsible in-place sections (Aug 21 2026). Those turned the menu into a five-line
+ * index only while everything happened to be collapsed — open one section and every other heading
+ * was pushed off-screen, so "where am I" was answered by scroll position rather than by the screen.
+ * A page per category means the top level is ALWAYS the short scannable list, and a category always
+ * starts at its own top.
+ *
+ * Two things follow from the restructure and are deliberate, not oversights:
+ *  - **Nothing is remembered between visits.** The old menu carried a module-level
+ *    `OptionsMenuScrollState` and `OptionsSectionState` purely because the pause overlay is a
+ *    separate window destroyed and rebuilt on every open, so a plain `remember` could not survive
+ *    it. With a category list there is no position worth restoring, so both objects are gone and
+ *    the page state is an ordinary `remember` — the menu opens at the category list every time.
+ *  - **The title is what identifies a page**, exactly as the section headings were, so there is no
+ *    separate key constant that could drift from the label.
+ */
+private enum class OptionsPage(val title: String) {
+    /** Per-menu: who draws it, and (when the companion does) on which screen. */
+    GAME_MENUS("Game Menus"),
+    /**
+     * Everything about the top screen: the game's own HUD, the DS overlays drawn over it, and the
+     * game-world brightness floors.
+     *
+     * Merges the old "Display" section into "Top Screen" (Aug 21 2026). Display existed for one row
+     * — Game Brightness — which lifts dark scenes in the GAME WORLD, i.e. the top screen; a section
+     * of its own overstated how cross-cutting it was now that Screen Dimming had moved out to
+     * Developer Tools.
+     */
+    TOP_DISPLAY("Top Display Settings"),
+    /** How the companion screen itself looks. */
+    BOTTOM_DISPLAY("Bottom Display Settings"),
+    /** How the game is controlled from the two screens. */
+    CONTROLS("Controls"),
+    /** Cheats, test helpers, and the settings that are correct by default. */
+    DEVELOPER_TOOLS("Developer Tools"),
+}
+
+/**
+ * A category button on the options menu's top level — the title, a one-line description of what is
+ * inside, and a "▸" affordance.
+ *
+ * The description is what makes the category list usable as an index: a bare five-word list gives no
+ * clue which page a given setting is on, which is the one thing the old always-visible section
+ * headings did well.
+ */
+@Composable
+private fun OptionsCategoryButton(page: OptionsPage, blurb: String, onOpen: () -> Unit) {
+    Row(
+        modifier = Modifier
             .fillMaxWidth()
-            .clickable { onToggle() }
-            .padding(top = 20.dp, bottom = 4.dp)
+            .padding(vertical = 5.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(SlotBg)
+            .border(1.dp, BronzeDark, RoundedCornerShape(4.dp))
+            .tapFlash { onOpen() }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Column(Modifier.weight(1f)) {
             Text(
-                title.uppercase(),
+                page.title.uppercase(),
                 color = BronzeLight,
-                fontSize = 22.sp,
+                fontSize = 17.sp,
                 fontFamily = MwDisplay,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp,
-                modifier = Modifier.weight(1f)
+                letterSpacing = 1.2.sp
             )
             Text(
-                if (expanded) "▾" else "▸",
-                color = BronzeLight,
-                fontSize = 20.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold
+                blurb,
+                color = BoneDim,
+                fontSize = 11.sp,
+                fontFamily = MwBody,
+                lineHeight = 14.sp,
+                modifier = Modifier.padding(top = 2.dp)
             )
         }
-        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+        // A VECTOR, not a "▸": MysticCards has no arrow/chevron coverage, and this row is now
+        // drawn in it (the settings window joined the game font on Aug 21 2026). Same call the
+        // sort affordance and the favourite star already make, for the same reason.
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = BronzeLight,
+            modifier = Modifier.size(24.dp)
+        )
     }
 }
 
-/** [OptionsCollapsibleHeader] bound to [OptionsSectionState] — the form every section uses. */
+/**
+ * The header every settings sub-page carries: a Back button and the page title, over the same bronze
+ * rule the section headings used.
+ *
+ * A back button per page rather than a persistent sidebar — the companion panel is ~538 x 469 dp, so
+ * a sidebar would cost roughly a third of the width permanently to save one tap.
+ *
+ * Shared with [DsControlsPage] so the two kinds of sub-page cannot drift apart.
+ */
 @Composable
-private fun CollapsibleSection(title: String) {
-    OptionsCollapsibleHeader(
-        title = title,
-        expanded = OptionsSectionState.isExpanded(title),
-        onToggle = { OptionsSectionState.toggle(title) }
-    )
+private fun OptionsSubPageHeader(title: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(PillActiveBg.copy(alpha = 0.94f))
+                .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                .tapFlash { UiSounds.play(UiSounds.Cue.TOGGLE); onBack() }
+                .padding(start = 8.dp, end = 14.dp, top = 8.dp, bottom = 8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Vector arrow rather than a "◀" glyph — see [OptionsCategoryButton].
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = null,
+                    tint = BronzeLight,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Back",
+                    color = BronzeLight, fontSize = 15.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            title.uppercase(),
+            color = BronzeLight,
+            fontSize = 18.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.5.sp
+        )
+    }
+    Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 }
 
 /* ---- DS Controls reference page ---- */
@@ -18385,7 +18509,7 @@ private fun CollapsibleSection(title: String) {
  * quantity picker's `MAX [Y]`): monospace [MwData] on a dark slot fill with a bronze hairline.
  *
  * ONE treatment for every control on the page — face buttons (`R3`, `X`, `Y`, `B`), sticks
- * (`Left stick`), and gestures (`Tap`, `Long press`, `Swipe ↔`) all render identically. That is
+ * (`Left stick`), and gestures (`Tap`, `Long press`, `Swipe`) all render identically. That is
  * deliberate: roughly a third of the reference is gestures, which have no honest unbranded glyph,
  * so an icon set would inevitably become icons-for-some, text-for-the-rest. A fixed [minWidth]
  * keeps the description column aligned down the page.
@@ -18430,7 +18554,7 @@ private val DS_CONTROL_GROUPS = listOf(
         listOf(
             ControlEntry("Tap", "Equip or use the item"),
             ControlEntry("Long press", "More options"),
-            ControlEntry("Swipe ↔", "Switch category")
+            ControlEntry("Swipe", "Left or right to switch category")
         )
     ),
     ControlGroup(
@@ -18454,7 +18578,7 @@ private val DS_CONTROL_GROUPS = listOf(
         "Journal",
         listOf(
             ControlEntry("Long press", "A quest to hide it or follow it on the HUD"),
-            ControlEntry("Swipe ↔", "Page through entries")
+            ControlEntry("Swipe", "Left or right to page through entries")
         )
     ),
     ControlGroup(
@@ -18502,30 +18626,13 @@ private val DS_CONTROL_GROUPS = listOf(
     )
 )
 
-/** Entry point to [DsControlsPage], pinned above Quick Set in the options list. */
-@Composable
-private fun DsControlsButton(onOpen: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 12.dp, bottom = 2.dp)
-            .clip(RoundedCornerShape(4.dp))
-            .background(PillActiveBg.copy(alpha = 0.94f))
-            .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-            .clickable { onOpen() }
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            "DS Controls",
-            color = BronzeLight,
-            fontSize = 16.sp,
-            fontFamily = MwDisplay,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.sp
-        )
-    }
-}
+// DsControlsButton — the pinned "DS Controls" button that used to sit above Presets on the top
+// level. REMOVED Aug 21 2026: it did exactly what the Controls page's own "View DS UI Controls"
+// button does, and duplicating it made the top level longer than the scannable category list it is
+// meant to be. Its original justification is gone with the collapsible sections — back then the
+// in-page row could be scrolled far off screen, whereas now Controls is one tap from the top level
+// and the button is the last thing on that page.
+
 
 /**
  * The controls reference. Replaces the settings list in place (rather than being an overlay) so it
@@ -18535,37 +18642,9 @@ private fun DsControlsButton(onOpen: () -> Unit) {
 @Composable
 private fun DsControlsPage(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(PillActiveBg.copy(alpha = 0.94f))
-                    .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-                    .clickable { onBack() }
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    "◀ Back",
-                    color = BronzeLight, fontSize = 15.sp,
-                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Text(
-                "DS CONTROLS",
-                color = BronzeLight,
-                fontSize = 18.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp
-            )
-        }
-        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+        // Shares [OptionsSubPageHeader] with the settings categories: two kinds of sub-page, one
+        // back affordance, so the two cannot drift apart.
+        OptionsSubPageHeader("DS UI Controls", onBack)
 
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -18615,6 +18694,16 @@ private fun DsControlsPage(onBack: () -> Unit) {
 fun OptionsMenuOverlay() {
     val context = LocalContext.current
     remember(context) { UiPreferences.init(context); true }
+    // The settings window is its own WindowManager panel, outside both CompanionScreen and the
+    // top-screen overlays, so it has to declare the game font for itself. It was excluded from it
+    // until Aug 21 2026 — see [LocalGameFont] for what that exclusion was protecting and why it
+    // lost. init() above runs FIRST, so the preference is read at its real value on the very first
+    // composition instead of defaulting and re-fonting the screen a frame later.
+    ProvideCompanionFont { OptionsMenuContent() }
+}
+
+@Composable
+private fun OptionsMenuContent() {
 
     // True while shown for the TITLE-screen main menu (no game loaded), vs the in-game pause menu.
     val onTitleScreen by GameStateRepository.titleMenuVisible.collectAsState()
@@ -18663,172 +18752,130 @@ private fun OptionsTitleBar(titleScreen: Boolean) {
     ) {
         Column(horizontalAlignment = if (titleScreen) Alignment.CenterHorizontally else Alignment.Start) {
             Text(
-                "OpenMW-DS",
+                // The in-game bar names the SCREEN ("DS Settings"), the title screen names the APP.
+                // Renamed from "OpenMW-DS" + a "Display settings" subtitle on Aug 21 2026: this menu
+                // has never been only about display, and the app name is already on the title screen
+                // and in the version footer.
+                if (titleScreen) "OpenMW-DS" else "DS Settings",
                 color = BronzeLight,
                 fontSize = if (titleScreen) 46.sp else 18.sp,
                 fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
                 letterSpacing = if (titleScreen) 3.sp else 1.sp
             )
             if (!titleScreen) {
-                Text("Display settings", color = BoneDim, fontSize = 11.sp, fontFamily = MwBody)
+                Text(
+                    "Settings for the OpenMW-DS companion screens",
+                    color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+                )
             }
         }
     }
     Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
 }
 
-/** The scrollable list of all settings sections. Rendered inline for the in-game pause menu and
- *  inside [OptionsPopup] for the title screen. Scroll position persists via OptionsMenuScrollState
- *  (the pause overlay window is recreated each open, so a plain rememberLazyListState would reset).
+/**
+ * The settings UI below the title bar: the top-level CATEGORY LIST, or whichever sub-page is open.
+ * Rendered inline for the in-game pause menu and inside [OptionsPopup] for the title screen.
  *
- *  The DS Controls page is hosted HERE rather than in [OptionsMenuOverlay] so both entry points —
- *  the in-game pause menu (which renders this inline) and the title screen (which renders it inside
- *  [OptionsPopup]) — get it from one wiring. Its open state is a plain `remember`, deliberately:
- *  reopening the options menu should land on the settings, not on whatever sub-page was last shown. */
+ * **Nothing here persists between visits, deliberately** (see [OptionsPage]). The page state and the
+ * DS Controls flag are plain `remember`s, and the pause overlay's window is destroyed and rebuilt on
+ * every open — so pausing always lands on the category list, never on the page you were last in or
+ * the scroll position you left. The module-level scroll/section state the old menu carried for the
+ * opposite behaviour is gone.
+ *
+ * The DS Controls page is hosted HERE rather than in [OptionsMenuOverlay] so both entry points — the
+ * in-game pause menu (which renders this inline) and the title screen (which renders it inside
+ * [OptionsPopup]) — get it from one wiring.
+ */
 @Composable
-private fun OptionsSettingsList() {
-    var showControls by remember { mutableStateOf(false) }
-    if (showControls) {
-        DsControlsPage(onBack = { showControls = false })
-        return
+private fun OptionsSettingsList(nav: OptionsNavState = remember { OptionsNavState() }) {
+    when {
+        nav.showControls -> DsControlsPage(onBack = { nav.showControls = false })
+        nav.page != null -> OptionsSubPage(
+            page = nav.page!!,
+            onBack = { nav.page = null },
+            // Only the Controls page opens the reference now, so this goes straight there rather
+            // than through a shared lambda the category list also used to take.
+            onOpenControls = { nav.showControls = true },
+        )
+        else -> OptionsCategoryListContent(onOpenPage = { nav.page = it })
     }
-    OptionsSettingsListContent(onOpenControls = { showControls = true })
 }
 
+/**
+ * Where the settings UI currently is: the category list, one category's page, or the DS Controls
+ * reference.
+ *
+ * Hoisted out of [OptionsSettingsList] so a HOST can see it. The title-screen [OptionsPopup] wraps
+ * the list in chrome of its own — a Back button and a heading — which must disappear the moment a
+ * sub-page opens, or the screen carries two Back buttons and two headings at once. The host cannot
+ * ask that question without owning the state, so it owns it.
+ *
+ * A holder class rather than an `onNestedChange` callback: reporting the change back up would be a
+ * side effect fired from composition, and would leave the host's copy able to disagree with the
+ * real one for a frame. This way there is one value and both read it.
+ */
+@Stable
+private class OptionsNavState {
+    /** The open category page, or null for the top-level category list. */
+    var page by mutableStateOf<OptionsPage?>(null)
+    /** Whether the DS Controls reference is open (it replaces the list, from either level). */
+    var showControls by mutableStateOf(false)
+    /** True only on the category list — i.e. when a host's own back/heading chrome should show. */
+    val atTopLevel: Boolean get() = page == null && !showControls
+}
+
+/**
+ * The top level: the Presets row, then one button per [OptionsPage].
+ *
+ * Presets stays at this level rather than being filed into a category. It is a single row, not a
+ * section, and it is the fastest path from "I just installed this" to a working layout, so burying
+ * it a page deep would cost exactly the players it exists for. (A pinned "DS Controls" button sat
+ * here too until Aug 21 2026; it duplicated the button on the Controls page.)
+ */
 @Composable
-private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
-    val listState = rememberLazyListState(
-        OptionsMenuScrollState.index, OptionsMenuScrollState.offset
-    )
-    // Read here rather than inside the Developer Tools section because the section's rows are
-    // emitted from the LazyColumn's item scope, which is not a composable context.
-    val developerMode by UiPreferences.developerModeFlow().collectAsState()
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-            .collect { (index, offset) ->
-                OptionsMenuScrollState.index = index
-                OptionsMenuScrollState.offset = offset
-            }
-    }
+private fun OptionsCategoryListContent(onOpenPage: (OptionsPage) -> Unit) {
     LazyColumn(
-        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
     ) {
-        // Controls reference. Sits ABOVE Presets because it is the one entry a new player needs
-        // before they can use anything else on this screen.
-        item { DsControlsButton(onOpen = onOpenControls) }
-
-        // Presets row: bulk-set every (non-pending) Game UI element. Never touches HUD except the
-        // controller hint bar. Deliberately left unheaded/always-visible — a single row, not a section.
         item { QuickSetRow() }
 
-        // Each section below: a collapsible header, then its rows emitted ONLY while expanded.
-        // Conditional emission (rather than wrapping the rows in a card) keeps every row a real
-        // lazy item with its own key.
-
-        // GAME MENUS: one row per game menu, answering "who draws this, and where?" as a single
-        // decision. This replaces the old pair of sections ("DS or Native" for the mode + "DS Screen
-        // Layout" for the location), which asked the same question twice, pages apart, with the
-        // location row dimmed until the mode row further down the page was set to DS.
-        item { CollapsibleSection(SECTION_GAME_MENUS) }
-        if (OptionsSectionState.isExpanded(SECTION_GAME_MENUS)) {
-            item { ConversationMenuRow() }
-            item { LootingMenuRow() }
-            item { BarteringMenuRow() }
-            // Directly under the two rows it governs — its dim condition is now adjacent to its cause.
-            item { InventoryLayoutRow() }
-            item { PersuasionMenuRow() }
-            item { RepairMenuRow() }
-            item { TravelMenuRow() }
-            item { SpellBuyingMenuRow() }
-            item { TrainingMenuRow() }
-            item { RestwaitMenuRow() }
-            item { CrimeMenuRow() }
-            // The menus with no companion version yet: one muted line each rather than two locked
-            // pill rows apiece (which is what they cost across the two old sections).
-            items(GAME_UI_ELEMENTS.filter { it.pending }, key = { "unavail_" + it.key }) {
-                UnavailableMenuRow(it.label)
-            }
+        item {
+            OptionsCategoryButton(
+                OptionsPage.GAME_MENUS,
+                "Which menus the companion draws, and on which screen."
+            ) { onOpenPage(OptionsPage.GAME_MENUS) }
+        }
+        item {
+            OptionsCategoryButton(
+                OptionsPage.TOP_DISPLAY,
+                "The game's own HUD, the DS overlays over it, and game brightness."
+            ) { onOpenPage(OptionsPage.TOP_DISPLAY) }
+        }
+        item {
+            OptionsCategoryButton(
+                OptionsPage.BOTTOM_DISPLAY,
+                "How the companion screen itself looks and sounds."
+            ) { onOpenPage(OptionsPage.BOTTOM_DISPLAY) }
+        }
+        item {
+            OptionsCategoryButton(
+                OptionsPage.CONTROLS,
+                "Touch, cursor, and the button and gesture reference."
+            ) { onOpenPage(OptionsPage.CONTROLS) }
+        }
+        item {
+            OptionsCategoryButton(
+                OptionsPage.DEVELOPER_TOOLS,
+                "Restore defaults, plus cheats and testing tools."
+            ) { onOpenPage(OptionsPage.DEVELOPER_TOOLS) }
         }
 
-        // DISPLAY: cross-screen appearance. Sits ahead of the two per-screen sections because it
-        // governs both of them; Screen Dimming moved here from "Bottom Screen" when it grew to
-        // cover the top screen's DS panels and the options menu too.
-        item { CollapsibleSection(SECTION_DISPLAY) }
-        if (OptionsSectionState.isExpanded(SECTION_DISPLAY)) {
-            item { GameBrightnessRow() }
-        }
-
-        // TOP SCREEN: everything drawn on the game's screen — the game's own HUD elements, then the
-        // DS overlays drawn over them.
-        item { CollapsibleSection(SECTION_TOP_SCREEN) }
-        if (OptionsSectionState.isExpanded(SECTION_TOP_SCREEN)) {
-            item { TopScreenBlurb() }
-            item { OptionsSubLabel("The game's own HUD") }
-            items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
-            item { OptionsSubLabel("DS overlays on the top screen") }
-            item { TargetHealthLocationRow() }
-            item { PlayerCombatRow() }
-            item { TopPanelOpacityRow() }
-        }
-
-        // BOTTOM SCREEN: how the companion screen itself looks. (Screen Dimming used to lead here;
-        // it moved to DISPLAY once it stopped being bottom-screen-only.)
-        item { CollapsibleSection(SECTION_BOTTOM_SCREEN) }
-        if (OptionsSectionState.isExpanded(SECTION_BOTTOM_SCREEN)) {
-            item { GameFontRow() }
-            item { UiSoundsRow() }
-            item { OptionsSubLabel("Inventory tab") }
-            item { InventoryTabStyleRow() }
-            item { EquippedBarRow() }
-            item { EquippedInListRow() }
-            item { OptionsSubLabel("HUD favourites") }
-            item { FavSlotCountRow(isGear = false) }
-            item { FavSlotCountRow(isGear = true) }
-            item { OptionsSubLabel("Active effects") }
-            item { EffectTimersRow() }
-            item { OptionsSubLabel("Journal") }
-            item { JournalPageTurnRow() }
-        }
-        // "Spells Display" (Standard / Compact) removed — the compact spell list is now the only
-        // version. The old SpellsListStyleRow composable is commented out below for reference.
-
-        // CONTROLS: how the game is driven from the two screens. The Alpha3 launcher overlay lives
-        // here rather than under TOP SCREEN because it is a cluster of touch BUTTONS, not a HUD
-        // readout — its subtitle names where it sits, so it is still findable from "what is that
-        // thing on my top screen".
-        item { CollapsibleSection(SECTION_CONTROLS) }
-        if (OptionsSectionState.isExpanded(SECTION_CONTROLS)) {
-            item { TouchInputRow() }
-            item { GameCursorRow() }
-            item { InputPairNote() }
-            item { Alpha3OverlayRow() }
-            item { ControlsReferenceRow(onOpen = onOpenControls) }
-        }
-
-        // DEVELOPER TOOLS: cheats / test helpers. Placed last so it is the least prominent section,
-        // and EVERYTHING in it (the console included) is gated behind the "Developer mode" toggle
-        // (default off) so a fresh install never puts any of it one tap from the pause menu.
-        item { CollapsibleSection(SECTION_DEVELOPER_TOOLS) }
-        if (OptionsSectionState.isExpanded(SECTION_DEVELOPER_TOOLS)) {
-            item { DeveloperToolsBlurb() }
-            // Above the gate on purpose: restoring defaults is not a developer action and must not
-            // require turning Developer mode on to reach.
-            item(key = "dev_reset_settings") { ResetSettingsRow() }
-            item { DeveloperModeRow() }
-            if (developerMode) {
-                // Tuning, not a cheat — kept ahead of the action rows so it does not interrupt
-                // their grouping. Here rather than in Display: see AdaptiveDimmingRow.
-                item(key = "dev_dimming") { AdaptiveDimmingRow() }
-                item(key = "dev_console") { OpenConsoleRow() }
-                item(key = "dev_actions") { DeveloperActionsPanel() }
-            }
-        }
-
-        // Quiet release-version footer (diagnostic/reference; `v` prefix added here).
+        // Quiet release-version footer (diagnostic/reference; `v` prefix added here). Stays on the
+        // top level, which is the page someone reporting a bug is always able to reach.
         item {
             Text(
                 text = "OpenMW-DS v${BuildConfig.RELEASE_VERSION}",
@@ -18844,7 +18891,115 @@ private fun OptionsSettingsListContent(onOpenControls: () -> Unit) {
     }
 }
 
-/** The title-screen "Options" button that opens the settings popup. */
+/** One settings category, on its own page: the shared [OptionsSubPageHeader] over that page's rows. */
+@Composable
+private fun OptionsSubPage(
+    page: OptionsPage,
+    onBack: () -> Unit,
+    onOpenControls: () -> Unit,
+) {
+    // Read here rather than inside the page's own branch: the rows are emitted from the LazyColumn's
+    // item scope, which is not a composable context.
+    val developerMode by UiPreferences.developerModeFlow().collectAsState()
+
+    Column(Modifier.fillMaxSize()) {
+        OptionsSubPageHeader(page.title, onBack)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
+        ) {
+            when (page) {
+                // GAME MENUS: one row per game menu, answering "who draws this, and where?" as a
+                // single decision — the mode and the screen on one row.
+                OptionsPage.GAME_MENUS -> {
+                    item { ConversationMenuRow() }
+                    item { LootingMenuRow() }
+                    item { BarteringMenuRow() }
+                    item { PersuasionMenuRow() }
+                    item { RepairMenuRow() }
+                    item { TravelMenuRow() }
+                    item { SpellBuyingMenuRow() }
+                    item { TrainingMenuRow() }
+                    item { RestwaitMenuRow() }
+                    item { CrimeMenuRow() }
+                    // The menus with no companion version yet: one muted line each.
+                    items(GAME_UI_ELEMENTS.filter { it.pending }, key = { "unavail_" + it.key }) {
+                        UnavailableMenuRow(it.label)
+                    }
+                }
+
+                // TOP DISPLAY SETTINGS: everything drawn on the game's screen, plus the game-world
+                // brightness floors that were their own "Display" section until Aug 21 2026.
+                OptionsPage.TOP_DISPLAY -> {
+                    item { OptionsSubLabel("The game world") }
+                    item { GameBrightnessRow() }
+                    item { OptionsSubLabel("The game's own HUD") }
+                    // The blurb belongs UNDER its label and above the switches it is about:
+                    // "Minimap -> Off" otherwise reads as "remove my minimap".
+                    item { TopScreenBlurb() }
+                    items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
+                    item { OptionsSubLabel("DS overlays on the top screen") }
+                    item { TopPanelOpacityRow() }
+                }
+
+                // BOTTOM DISPLAY SETTINGS: how the companion screen itself looks.
+                OptionsPage.BOTTOM_DISPLAY -> {
+                    item { UiSoundsRow() }
+                    item { OptionsSubLabel("Inventory tab") }
+                    item { EquippedInListRow() }
+                    item { OptionsSubLabel("HUD favourites") }
+                    item { FavSlotCountRow(isGear = false) }
+                    item { FavSlotCountRow(isGear = true) }
+                }
+
+                // CONTROLS: how the game is driven from the two screens.
+                OptionsPage.CONTROLS -> {
+                    // The reference leads the page. It is the only thing here that TEACHES rather
+                    // than configures, so it is what someone opening "Controls" for the first time
+                    // is most likely to be after — and it is now the sole way in, since the pinned
+                    // top-level button was removed.
+                    item { ControlsReferenceRow(onOpen = onOpenControls) }
+                    item { TouchInputRow() }
+                    item { GameCursorRow() }
+                    item { InputPairNote() }
+                }
+
+                // DEVELOPER TOOLS: cheats and test helpers, plus the settings that are correct by
+                // default and only want touching by someone who knows why. Everything except
+                // "Default settings" is gated behind the Developer mode toggle.
+                OptionsPage.DEVELOPER_TOOLS -> {
+                    item { DeveloperToolsBlurb() }
+                    // Above the gate on purpose: restoring defaults is not a developer action and
+                    // must not require turning Developer mode on to reach.
+                    item(key = "dev_reset_settings") { ResetSettingsRow() }
+                    item { DeveloperModeRow() }
+                    if (developerMode) {
+                        // Console FIRST: it is the reason most people turn Developer mode on, and
+                        // the one entry here that is a general-purpose tool rather than a specific
+                        // cheat or a tuning knob.
+                        item(key = "dev_console") { OpenConsoleRow() }
+                        // Correct-by-default settings, relocated here Aug 21 2026 so the main pages
+                        // hold only the choices a player has a reason to make.
+                        item(key = "dev_dimming") { AdaptiveDimmingRow() }
+                        item(key = "dev_target_health") { TargetHealthLocationRow() }
+                        item(key = "dev_player_combat") { PlayerCombatRow() }
+                        item(key = "dev_game_font") { GameFontRow() }
+                        item(key = "dev_inv_tab_style") { InventoryTabStyleRow() }
+                        item(key = "dev_journal_page_turn") { JournalPageTurnRow() }
+                        item(key = "dev_alpha3_overlay") { Alpha3OverlayRow() }
+                        item(key = "dev_actions") { DeveloperActionsPanel() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The title-screen button that opens the settings popup. Labelled with the destination — "DS
+ *  Settings", the same name the popup's heading and the in-game title bar carry — rather than the
+ *  generic "Options" it read until Aug 21 2026. */
 @Composable
 private fun OptionsOpenButton(onClick: () -> Unit) {
     Box(
@@ -18853,12 +19008,12 @@ private fun OptionsOpenButton(onClick: () -> Unit) {
             .clip(RoundedCornerShape(4.dp))
             .background(PillActiveBg.copy(alpha = 0.94f))
             .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-            .clickable { onClick() }
+            .tapFlash { UiSounds.play(UiSounds.Cue.TOGGLE); onClick() }
             .padding(vertical = 16.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
-            "Options",
+            "DS Settings",
             color = BronzeLight, fontSize = 24.sp, fontFamily = MwDisplay,
             fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp
         )
@@ -18887,37 +19042,57 @@ private fun OptionsPopup(onDismiss: () -> Unit) {
                 // Swallow taps so tapping the panel doesn't reach the dismiss scrim.
                 .pointerInput(Unit) { detectTapGestures {} }
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(StonePanel)
-                    .padding(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Prominent Back button (top-left) — returns to the title/intro screen.
-                Box(
+            // The popup owns the nav state so it can hide its OWN chrome while a sub-page is open:
+            // that page brings its own Back button and heading, and showing both left two Back
+            // buttons and two headings stacked, with no way to tell which one left which level.
+            // At the top level this bar is the only way back to the title screen, so it stays.
+            //
+            // Back therefore always means "up one level", wherever you are: out of DS Controls or a
+            // category to the category list, then out of the popup to the title screen.
+            val nav = remember { OptionsNavState() }
+            if (nav.atTopLevel) {
+                Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(PillActiveBg.copy(alpha = 0.94f))
-                        .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-                        .clickable { onDismiss() }
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .fillMaxWidth()
+                        .background(StonePanel)
+                        .padding(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Prominent Back button (top-left) — returns to the title/intro screen.
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(PillActiveBg.copy(alpha = 0.94f))
+                            .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                            .tapFlash { UiSounds.play(UiSounds.Cue.TOGGLE); onDismiss() }
+                            .padding(start = 8.dp, end = 14.dp, top = 8.dp, bottom = 8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = null,
+                                tint = BronzeLight,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "Back",
+                                color = BronzeLight, fontSize = 15.sp, fontFamily = MwDisplay,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
                     Text(
-                        "◀ Back",
-                        color = BronzeLight, fontSize = 15.sp, fontFamily = MwDisplay,
-                        fontWeight = FontWeight.Bold
+                        // Same name as the entry button and the in-game title bar.
+                        "DS Settings",
+                        color = BronzeLight, fontSize = 16.sp, fontFamily = MwDisplay,
+                        fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)
                     )
                 }
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    "Options",
-                    color = BronzeLight, fontSize = 16.sp, fontFamily = MwDisplay,
-                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)
-                )
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
             }
-            Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-            OptionsSettingsList()
+            OptionsSettingsList(nav)
         }
     }
 }
@@ -18926,43 +19101,82 @@ private fun OptionsPopup(onDismiss: () -> Unit) {
  *  is loaded), to orient first-time users and nudge them toward a starting preset. */
 @Composable
 private fun OptionsWelcomeBlock() {
-    Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         Text(
             "Under sun and sky, outlander. We greet you warmly.",
             color = BronzeLight,
             fontSize = 26.sp,
             fontFamily = MwDisplay,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            lineHeight = 32.sp
         )
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
+        // Short centred lead under the greeting: what this screen IS, in one sentence. The
+        // paragraph it replaces also carried three separate instructions, which is what made it
+        // read as a wall of text — those are now the notes below, one idea each.
         Text(
-            "An app designed for use with the AYN Thor. The bottom screen shows Morrowind's menus (inventory, magic, " +
-                "map, journal and stats) with touch. Tap Options below to set your layout. The options can also be accessed by pausing the game",
+            "A companion screen for Morrowind on the AYN Thor. Inventory, magic, map, journal " +
+                "and stats live down here.",
             color = Bone,
-            fontSize = 18.sp,
+            fontSize = 16.sp,
             fontFamily = MwBody,
-            lineHeight = 25.sp
+            lineHeight = 22.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(0.92f)
         )
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "New here? Options are set to Native by default but with touch screen enabled instead of mouse controls.\n" +
-                    "Tip: Try tapping and long tapping everything in the bottom screen UI.\n" +
-            "Want your old UI (health, minimap) back? See the Top Screen section.\n",
-            color = BoneDim,
-            fontSize = 17.sp,
-            fontFamily = MwBody,
-            lineHeight = 24.sp
-        )
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "This app is a work in progress, some features are missing or greyed out.",
-            color = BoneDim,
-            fontSize = 17.sp,
-            fontFamily = MwBody,
-            lineHeight = 24.sp
-        )
+        Spacer(Modifier.height(18.dp))
+        WelcomeTip()
         Spacer(Modifier.height(14.dp))
         Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+    }
+}
+
+/**
+ * The one piece of orientation on the welcome screen that a player cannot get from the settings list
+ * itself: that the bottom screen answers to taps and long-presses everywhere.
+ *
+ * Set as a QUOTE, not a control. It was briefly a bronze-filled, bordered note — the menu's own
+ * "active pill / button" treatment — which made it the most prominent thing on the screen and,
+ * worse, made it look tappable on a screen whose whole message is "tap things". Dimmed, centred and
+ * italic reads as an aside: noticeable because it is the only italic on the page, but visibly not
+ * a button.
+ *
+ * The two notes that sat beside it (Setup, Top screen) are gone — both merely pointed at settings
+ * pages that the DS Settings button below leads to anyway.
+ */
+@Composable
+private fun WelcomeTip() {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            "TIP",
+            color = BronzeLight.copy(alpha = 0.7f),
+            fontSize = 11.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 2.sp
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            // Says IN GAME on purpose. Worded as "tap and long-press everything down here" it read
+            // as an instruction about THIS screen, where long-press does nothing at all — the
+            // gesture belongs to the companion's own screens once a game is loaded.
+            "Once you're in game, try tapping and long-pressing things on the bottom screen. " +
+                "Almost everything does something.",
+            color = BoneDim,
+            fontSize = 16.sp,
+            fontFamily = MwBody,
+            fontStyle = FontStyle.Italic,
+            lineHeight = 22.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(0.88f)
+        )
     }
 }
 
@@ -18987,11 +19201,12 @@ private fun QuickSetRow() {
         Text("Presets", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
             // Names EVERY side effect. The old subtitle mentioned only the hint bar, so All DS
-            // silently overwriting the player's own layout choices was invisible here. (All DS no
-            // longer touches the Item List Style — keep this in step if a side effect is added.)
-            "Sets every row in Game Menus at once. All DS also splits Conversation across both " +
-                "screens and hides equipped items from the inventory list. Both presets change " +
-                "the controller hint bar.",
+            // silently overwriting the player's own layout choices was invisible here. Keep it in
+            // step if setAllGameUi gains another. (It writes nothing that lives in Developer
+            // Tools — see setAllGameUi.)
+            "Sets every row in Game Menus at once. All DS also moves Conversation off Top onto " +
+                "the DS layout and hides equipped items from the inventory list. Both presets " +
+                "change the controller hint bar.",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -19134,7 +19349,7 @@ private fun GameMenuRow(
 @Composable
 private fun UnavailableMenuRow(label: String) {
     Text(
-        "$label — not yet available",
+        "$label: not yet available",
         color = BoneDim.copy(alpha = 0.7f),
         fontSize = 12.sp,
         fontFamily = MwBody,
@@ -19142,7 +19357,18 @@ private fun UnavailableMenuRow(label: String) {
     )
 }
 
-/** Conversation: all three screens are built, so no pill is pending. */
+/**
+ * Conversation: `[Native] [DS] [Top]`.
+ *
+ * "DS" is the SPLIT layout (topics and history on the top screen, controls on the bottom) — renamed
+ * from "Split" on Aug 21 2026 so every menu's companion option is spelled the same way, and the row
+ * reads as the Native-or-DS choice it actually is. The old "Bottom" option (everything on the
+ * companion panel) was removed at the same time; [ConversationLocation.BOTTOM] and the code that
+ * renders it are kept, and a stored BOTTOM is migrated to SPLIT on load (see UiPreferences).
+ *
+ * Top survives as a third pill because it is a genuinely different arrangement rather than a
+ * degraded one — the whole conversation over the game, with the companion left on the HUD.
+ */
 @Composable
 private fun ConversationMenuRow() {
     val context = LocalContext.current
@@ -19151,10 +19377,7 @@ private fun ConversationMenuRow() {
         label = "Conversation",
         gameUiKey = "game_ui_conversation",
         screens = listOf(
-            MenuScreenOption("Bottom", loc == ConversationLocation.BOTTOM) {
-                UiPreferences.setConversationLocation(context, ConversationLocation.BOTTOM)
-            },
-            MenuScreenOption("Split", loc == ConversationLocation.SPLIT) {
+            MenuScreenOption("DS", loc == ConversationLocation.SPLIT) {
                 UiPreferences.setConversationLocation(context, ConversationLocation.SPLIT)
             },
             MenuScreenOption("Top", loc == ConversationLocation.TOP) {
@@ -19165,19 +19388,27 @@ private fun ConversationMenuRow() {
 }
 
 /**
- * The shared shape for the service menus, all of which store a [ScreenLocation].
+ * The shared shape for the service menus, all of which store a [ScreenLocation]: `[Native] [DS]`.
  *
- * [showSplit] = an icon grid on the top screen with controls on the bottom (built for looting and
- * bartering only). [showTop] = offer a Top pill at all; it is always greyed/pending where offered,
- * and is omitted entirely for the menus where a top-screen version would be meaningless.
+ * **Every service is a two-option row as of Aug 21 2026** — who draws it, and nothing else. What
+ * changed and why:
+ *  - **The greyed "Top" pill is gone from all six.** It had been pending since it was introduced
+ *    with no top-screen build in progress, so on six rows it was advertising a direction rather than
+ *    offering a choice.
+ *  - **The companion pill is labelled "DS", not the screen it happens to use.** Looting and
+ *    bartering pass [dsLocation] = SPLIT (grid on top, controls on the bottom); the other four pass
+ *    BOTTOM (a centred card). That difference is a property of how each overlay is BUILT, not a
+ *    setting, and naming it on the pill invited the reading that the other value was available.
+ *
+ * [dsLocation] is still written to the element's own `layout_*` pref exactly as before, so nothing
+ * stored changed and re-adding a pill later is a one-line change.
  */
 @Composable
 private fun ServiceMenuRow(
     label: String,
     gameUiKey: String,
     loc: ScreenLocation,
-    showSplit: Boolean,
-    showTop: Boolean = true,
+    dsLocation: ScreenLocation,
     subtitle: String? = null,
     onSelect: (ScreenLocation) -> Unit,
 ) {
@@ -19185,15 +19416,9 @@ private fun ServiceMenuRow(
         label = label,
         gameUiKey = gameUiKey,
         subtitle = subtitle,
-        screens = buildList {
-            add(MenuScreenOption("Bottom", loc == ScreenLocation.BOTTOM) { onSelect(ScreenLocation.BOTTOM) })
-            if (showSplit) {
-                add(MenuScreenOption("Split", loc == ScreenLocation.SPLIT) { onSelect(ScreenLocation.SPLIT) })
-            }
-            if (showTop) {
-                add(MenuScreenOption("Top", loc == ScreenLocation.TOP, available = false) {})
-            }
-        }
+        screens = listOf(
+            MenuScreenOption("DS", loc == dsLocation) { onSelect(dsLocation) }
+        )
     )
 }
 
@@ -19201,7 +19426,7 @@ private fun ServiceMenuRow(
 private fun LootingMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.lootingLocationFlow().collectAsState()
-    ServiceMenuRow("Looting", "game_ui_looting", loc, showSplit = true) {
+    ServiceMenuRow("Looting", "game_ui_looting", loc, dsLocation = ScreenLocation.SPLIT) {
         UiPreferences.setLootingLocation(context, it)
     }
 }
@@ -19210,13 +19435,20 @@ private fun LootingMenuRow() {
 private fun BarteringMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.barterLocationFlow().collectAsState()
-    ServiceMenuRow("Bartering", "game_ui_bartering", loc, showSplit = true) {
+    ServiceMenuRow("Bartering", "game_ui_bartering", loc, dsLocation = ScreenLocation.SPLIT) {
         UiPreferences.setBarterLocation(context, it)
     }
 }
 
-/** Persuasion is the one service whose Top IS built, so neither pill is pending. It stores its own
- *  [PersuasionLocation] rather than a [ScreenLocation], hence not going through [ServiceMenuRow]. */
+/**
+ * Persuasion: `[Native] [DS]`. It stores its own [PersuasionLocation] rather than a
+ * [ScreenLocation], hence not going through [ServiceMenuRow].
+ *
+ * **The Top pill is commented out, not deleted** (Aug 21 2026) — the top-screen persuasion panel is
+ * built and still renders; only the option to choose it is withdrawn, so restoring it is
+ * uncommenting four lines. A stored TOP is migrated to BOTTOM on load (see UiPreferences) so nobody
+ * is left on a screen choice this row can no longer express.
+ */
 @Composable
 private fun PersuasionMenuRow() {
     val context = LocalContext.current
@@ -19226,12 +19458,13 @@ private fun PersuasionMenuRow() {
         gameUiKey = "game_ui_persuasion",
         subtitle = "Which screen the persuasion popup opens on",
         screens = listOf(
-            MenuScreenOption("Bottom", loc == PersuasionLocation.BOTTOM) {
+            MenuScreenOption("DS", loc == PersuasionLocation.BOTTOM) {
                 UiPreferences.setPersuasionLocation(context, PersuasionLocation.BOTTOM)
             },
-            MenuScreenOption("Top", loc == PersuasionLocation.TOP) {
-                UiPreferences.setPersuasionLocation(context, PersuasionLocation.TOP)
-            },
+            // Withdrawn from the menu Aug 21 2026; PersuasionLocation.TOP still renders.
+            // MenuScreenOption("Top", loc == PersuasionLocation.TOP) {
+            //     UiPreferences.setPersuasionLocation(context, PersuasionLocation.TOP)
+            // },
         )
     )
 }
@@ -19240,7 +19473,7 @@ private fun PersuasionMenuRow() {
 private fun RepairMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.repairLocationFlow().collectAsState()
-    ServiceMenuRow("Repair", "game_ui_repair", loc, showSplit = false) {
+    ServiceMenuRow("Repair", "game_ui_repair", loc, dsLocation = ScreenLocation.BOTTOM) {
         UiPreferences.setRepairLocation(context, it)
     }
 }
@@ -19249,7 +19482,7 @@ private fun RepairMenuRow() {
 private fun TravelMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.travelLocationFlow().collectAsState()
-    ServiceMenuRow("Travel", "game_ui_travel", loc, showSplit = false) {
+    ServiceMenuRow("Travel", "game_ui_travel", loc, dsLocation = ScreenLocation.BOTTOM) {
         UiPreferences.setTravelLocation(context, it)
     }
 }
@@ -19258,7 +19491,10 @@ private fun TravelMenuRow() {
 private fun SpellBuyingMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.spellBuyingLocationFlow().collectAsState()
-    ServiceMenuRow("Spell buying", "game_ui_spellbuying", loc, showSplit = false) {
+    ServiceMenuRow(
+        "Spell buying", "game_ui_spellbuying", loc,
+        dsLocation = ScreenLocation.BOTTOM
+    ) {
         UiPreferences.setSpellBuyingLocation(context, it)
     }
 }
@@ -19267,25 +19503,23 @@ private fun SpellBuyingMenuRow() {
 private fun TrainingMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.trainingLocationFlow().collectAsState()
-    ServiceMenuRow("Training", "game_ui_training", loc, showSplit = false) {
+    ServiceMenuRow("Training", "game_ui_training", loc, dsLocation = ScreenLocation.BOTTOM) {
         UiPreferences.setTrainingLocation(context, it)
     }
 }
 
 /**
- * Rest / Wait and Crime alerts get NO Top pill at all — not even a greyed one.
- *
- * Their overlays are hardcoded to the bottom screen and do not read `layout_restwait` /
- * `layout_crime`, so the Top pill they used to show was not "pending" in the sense the others are:
- * it was a control that silently did nothing. Since neither has a top-screen variant on the way,
- * the honest row is `[Native] [Bottom]`. The prefs are still written (Bottom is the only value
- * either can hold), so wiring a real top-screen version later is just re-adding a pill.
+ * Rest / Wait and Crime alerts. Their overlays are hardcoded to the bottom screen and do not read
+ * `layout_restwait` / `layout_crime` at all, so these two were already down to one screen pill
+ * before every other service was cut back — the only change here is that it is now labelled "DS"
+ * like the rest. The prefs are still written (BOTTOM is the only value either can hold), so wiring a
+ * real top-screen version later is just re-adding a pill.
  */
 @Composable
 private fun RestwaitMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.restwaitLocationFlow().collectAsState()
-    ServiceMenuRow("Rest / Wait", "game_ui_restwait", loc, showSplit = false, showTop = false) {
+    ServiceMenuRow("Rest / Wait", "game_ui_restwait", loc, dsLocation = ScreenLocation.BOTTOM) {
         UiPreferences.setRestwaitLocation(context, it)
     }
 }
@@ -19295,65 +19529,24 @@ private fun CrimeMenuRow() {
     val context = LocalContext.current
     val loc by UiPreferences.crimeLocationFlow().collectAsState()
     ServiceMenuRow(
-        "Crime alerts", "game_ui_crime", loc, showSplit = false, showTop = false,
+        "Crime alerts", "game_ui_crime", loc, dsLocation = ScreenLocation.BOTTOM,
         subtitle = "The \"crime reported\" alert"
     ) { UiPreferences.setCrimeLocation(context, it) }
 }
 
-/**
- * The "Item list style" row: a [Classic][Shelf] selector controlling how the two-panel item screens
- * (looting/pickpocket, barter) render their item lists. One switch, all those contexts. Default
- * Classic. The underlying pref key (`inventory_layout`) is unchanged, so no migration is involved.
- *
- * Lives in GAME MENUS directly beneath Looting and Bartering — it is a property of those two menus,
- * not of screen layout, and sitting next to them is what makes its dimmed state self-explanatory.
- *
- * The dim condition is scoped to **Looting or Bartering** being DS. It used to be "not every element
- * is Native", which meant an unrelated menu (Travel, say) being DS kept this row live even though
- * nothing it governs would render.
- */
-@Composable
-private fun InventoryLayoutRow() {
-    val context = LocalContext.current
-    val layout by UiPreferences.inventoryLayoutFlow().collectAsState()
-    val lootingMode by UiPreferences.gameUiModeFlow("game_ui_looting").collectAsState()
-    val barterMode by UiPreferences.gameUiModeFlow("game_ui_bartering").collectAsState()
-    val enabled = lootingMode == GameUiMode.DS || barterMode == GameUiMode.DS
+// The "Item list style" row ([Classic][Shelf]) — REMOVED Aug 21 2026, per an explicit decision that
+// Classic is the only supported behaviour and there is to be no toggle for it at all. This is a
+// harder removal than the ones merely withdrawn from the menu (Persuasion's Top pill, the Equipped
+// Bar row): the pref is no longer loaded and no longer writable, so InventoryLayout is pinned to
+// CLASSIC for everyone including anyone who had chosen Shelf. See UiPreferences.inventoryLayoutFlow.
+// The `shelfMode` branches in the looting and barter overlays are left standing but unreachable —
+// deleting them is a much larger change and is not what was asked for here.
 
-    Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f).padding(vertical = 9.dp)) {
-        // "Item list style", NOT "Inventory Layout"/"Looting & Barter Layout" — the old names
-        // collided with the Bottom Screen section's "Inventory Tab Style" row (which governs the
-        // companion's own Inventory tab). This one governs only the two-panel screens above it.
-        Text("Item list style", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Text(
-            // When dimmed, the subtitle IS the explanation — a greyed row with a generic
-            // description tells you nothing about how to un-grey it.
-            if (enabled) "How items are listed while looting, pickpocketing and bartering."
-            else "Enabled when Looting or Bartering is set to a DS screen.",
-            color = BoneDim, fontSize = 10.sp, fontFamily = MwBody,
-            modifier = Modifier.padding(top = 1.dp)
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Classic",
-                active = layout == InventoryLayout.CLASSIC,
-                enabled = true
-            ) { if (enabled) UiPreferences.setInventoryLayout(context, InventoryLayout.CLASSIC) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Shelf",
-                active = layout == InventoryLayout.SHELF,
-                enabled = true
-            ) { if (enabled) UiPreferences.setInventoryLayout(context, InventoryLayout.SHELF) }
-        }
-    }
-}
-
-// Layout of the single-panel Inventory tab (List / Cards). Distinct from InventoryLayoutRow
-// (Classic/Shelf, for looting/bartering) — a different part of the UI — and lives in the
-// "Bottom Screen" section.
+// Layout of the single-panel Inventory tab (List / Cards). Moved to DEVELOPER TOOLS Aug 21 2026:
+// Cards is the supported layout and the default, and List is kept only for anyone still using it —
+// so it is an advanced hold-over rather than a live choice, and it is not being removed the way the
+// Shelf item-list style was. (It used to sit in "Bottom Screen" alongside a second Classic/Shelf
+// row it was constantly confused with; that row is gone entirely now.)
 @Composable
 private fun InventoryTabStyleRow() {
     val context = LocalContext.current
@@ -19361,6 +19554,14 @@ private fun InventoryTabStyleRow() {
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Inventory Tab Style", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            // Says outright which one to leave it on. The row is in Developer Tools precisely
+            // because it is no longer a live choice, and a two-pill row with no text reads as one.
+            "Best left on Cards. List is the original row layout, kept for anyone still using " +
+                "it, and is no longer being worked on.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody, lineHeight = 14.sp
+        )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
@@ -19379,6 +19580,11 @@ private fun InventoryTabStyleRow() {
     }
 }
 
+// The "Equipped Bar" row (Show / Hide) — WITHDRAWN from the settings list Aug 21 2026. The pref and
+// everything that reads it are untouched, so the bar keeps behaving exactly as it does today (its
+// default is Hide); only the control is gone, and restoring it is uncommenting this block and adding
+// one line back to the Bottom Display Settings page.
+/*
 // Whether the pinned "Equipped (N)" bar at the bottom of the Inventory tab is shown or hidden.
 // Hiding it frees space for an extra row of items (worn items then show inline). "Bottom Screen".
 @Composable
@@ -19405,6 +19611,7 @@ private fun EquippedBarRow() {
         }
     }
 }
+*/
 
 // Whether worn items are also listed inline in the Inventory "All" view (independent of the bar).
 // When Hidden, equipped items are reached only via the Equipped tab (top) or the bar (if shown).
@@ -19645,17 +19852,23 @@ private fun AdaptiveDimOverlay() {
 }
 
 // Game font — render the companion and the DS overlays in the game's own typeface instead of the
-// Android system serif/monospace. Lives in "Bottom Screen" (below Adaptive Dimming) because it
-// is an appearance setting for the companion, not a layout one — it restyles every text site on
-// both screens at once rather than moving anything between them.
+// Android system serif/monospace. Moved to DEVELOPER TOOLS Aug 21 2026 (it led "Bottom Screen"
+// before that) — it defaults ON and is part of how the app is meant to look, so it belongs with the
+// other correct-by-default settings rather than on a page of live choices. It is an appearance
+// setting for the companion, not a layout one — it restyles every text site on both screens at once
+// rather than moving anything between them.
 //
 // The face is MysticCards (OpenMW's SIL-OFL Magic Cards replacement, already in the APK) — see
 // GameFont.kt for why Morrowind's own bitmap font cannot be used here. The subtitle says
 // "game's font" rather than naming it: to a player it IS the game's font, and "MysticCards" would
 // mean nothing on a settings page.
 //
-// Deliberately does NOT restyle this options menu — it is hosted in its own window with no font
-// provider, so this switch stays legible in a known typeface and can always be turned back off.
+// As of Aug 21 2026 it restyles THIS MENU too. It used to be the one exclusion (the menu is its own
+// window and simply had no font provider), so that the switch controlling the font could never be
+// rendered in a font the player could not read. In practice the setting ships ON, so all that
+// exclusion achieved was making the settings and title screens the only part of the app that did
+// not look like the app. The safety it was after is intact anyway: this row is plain text on a
+// plain pill, and turning it off restyles the menu back on the next frame.
 @Composable
 private fun GameFontRow() {
     val context = LocalContext.current
@@ -19665,7 +19878,7 @@ private fun GameFontRow() {
         Text("Game Font", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Spacer(Modifier.height(2.dp))
         Text(
-            "Use the game's font for the companion screens and DS overlays. This menu is unchanged.",
+            "Use the game's font everywhere the companion draws, including this menu. Off is no longer supported so best left on.",
             color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
         )
         Spacer(Modifier.height(6.dp))
@@ -19686,46 +19899,16 @@ private fun GameFontRow() {
     }
 }
 
-// Effect timers — whether a timed active effect shows how long it has left, beside its source and
-// magnitude. Reaches all three places effects are listed (HUD effects dropdown, Stats page list,
-// effect detail popup) because they all render from the same ActiveEffect. Permanent effects
-// (abilities, diseases, constant-effect worn enchantments) never show a timer either way — the
-// exporter sends no remaining time for them at all — so this row only governs the timed ones.
-// Default On, unlike OpenMW's own default-off `show effect duration`; see UiPreferences.
-// "Bottom Screen" section: both places this is drawn are bottom-screen surfaces.
-@Composable
-private fun EffectTimersRow() {
-    val context = LocalContext.current
-    val enabled by UiPreferences.effectTimersFlow().collectAsState()
-
-    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text("Effect Timers", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Spacer(Modifier.height(2.dp))
-        Text(
-            "Show how long each timed effect has left. Permanent effects never show one.",
-            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "On",
-                active = enabled,
-                enabled = true
-            ) { UiPreferences.setEffectTimers(context, true) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Off",
-                active = !enabled,
-                enabled = true
-            ) { UiPreferences.setEffectTimers(context, false) }
-        }
-    }
-}
+// Effect Timers ([On][Off]) — REMOVED Aug 21 2026. Timed effects always show their remaining
+// duration now; there is no setting. Permanent effects still never show one, but that was never
+// this switch's doing — the exporter omits the value for them entirely, so it is a property of the
+// data. See UiPreferences.effectTimersFlow, which is now a constant `true`.
 
 // Journal page turn — whether the chronological journal turns pages as a spine-hinged 3D leaf or
 // simply slides the next spread in. Purely a transition: the two-column spread, the swipe gesture
-// and the day grouping are identical either way. Default On. "Bottom Screen" section.
+// and the day grouping are identical either way. Default On. Moved to DEVELOPER TOOLS Aug 21 2026:
+// Off is no longer an actively supported look, but (unlike the Shelf item-list style) it is kept
+// rather than removed, so it sits with the other advanced hold-overs.
 @Composable
 private fun JournalPageTurnRow() {
     val context = LocalContext.current
@@ -19735,7 +19918,7 @@ private fun JournalPageTurnRow() {
         Text("Journal Page Turn", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Spacer(Modifier.height(2.dp))
         Text(
-            "Swipe the journal with a folding page instead of a plain slide.",
+            "Swipe the journal with a folding page instead of a plain slide. Off is no longer supported for updates, so best left on.",
             color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
         )
         Spacer(Modifier.height(6.dp))
@@ -19778,6 +19961,60 @@ private fun JournalPageTurnRow() {
 // opacity slider and already sits over a dark scene. Shown only while the feature is on: off, they
 // control nothing, and a live-looking slider that does nothing reads as broken. Off remains a true
 // master switch — both mappings zero on it before either slider is consulted.
+/**
+ * The warning that heads both tuned-slider groups (Screen Dimming, Game Brightness).
+ *
+ * Both sets of numbers were arrived at by measurement against the engine's own ambient signal on
+ * this panel, not by taste — the dimming ends are anchored to the engine's interior-brightness floor
+ * and to measured night-exterior luminance, and the brightness floors ship at exact vanilla. So the
+ * honest framing is "these are already right; change them if you want something different, and here
+ * is the way back", which is what this line plus [ScopedResetButton] provide.
+ */
+@Composable
+private fun TunedValuesWarning(text: String) {
+    Text(
+        text,
+        color = ResetWarnRed.copy(alpha = 0.85f),
+        fontSize = 10.sp,
+        fontFamily = MwBody,
+        lineHeight = 13.sp,
+        modifier = Modifier.padding(top = 6.dp)
+    )
+}
+
+/**
+ * A small "Reset" button that restores ONE group of settings, sitting inside that group's row.
+ *
+ * Deliberately NOT the [ResetSettingsRow] treatment: that one is full width, shouty, and
+ * arm-then-confirm because it discards every setting in the app. These undo one small, freely
+ * reversible experiment, so a confirmation step would be friction with nothing to protect — the
+ * worst case is losing a few slider positions the button itself would restore.
+ *
+ * Right-aligned and half width so it cannot be mistaken for one of the option pills above it.
+ */
+@Composable
+private fun ScopedResetButton(label: String, onReset: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(SlotBg)
+                .border(1.dp, BronzeDark, RoundedCornerShape(4.dp))
+                .tapFlash { UiSounds.play(UiSounds.Cue.ACTION); onReset() }
+                .padding(horizontal = 14.dp, vertical = 7.dp)
+        ) {
+            Text(
+                label,
+                color = BronzeLight,
+                fontSize = 11.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+    }
+}
+
 @Composable
 private fun AdaptiveDimmingRow() {
     val context = LocalContext.current
@@ -19838,7 +20075,15 @@ private fun AdaptiveDimmingRow() {
                 value = nightMaxBrightness,
                 range = ADAPTIVE_DIM_NIGHT_MAX_RANGE
             ) { UiPreferences.setAdaptiveDimNightMaxBrightness(context, it) }
+            TunedValuesWarning(
+                "These three were tuned by measurement against the game's own light levels on " +
+                    "this screen, and are already correct for most players. Change them at your " +
+                    "own risk. Reset puts all three back."
+            )
         }
+        // Outside the `if (enabled)` block on purpose: the switch itself is one of the four things
+        // this resets, so the way back has to stay reachable after turning the feature off.
+        ScopedResetButton("Reset dimming") { UiPreferences.resetScreenDimming(context) }
     }
 }
 
@@ -19888,7 +20133,7 @@ private fun FavSlotCountRow(isGear: Boolean) {
         )
         Spacer(Modifier.height(2.dp))
         Text(
-            if (count == 0) "Hidden — the group is removed from the HUD, freeing the space."
+            if (count == 0) "Hidden. The group is removed from the HUD, freeing the space."
             else "Shown bottom-${if (isGear) "right" else "left"} on the HUD. " +
                 "Lowering this hides extra favourites rather than clearing them.",
             color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
@@ -19935,6 +20180,12 @@ private fun GameBrightnessRow() {
             value = interior,
             range = INTERIOR_BRIGHTNESS_RANGE
         ) { UiPreferences.setInteriorBrightness(context, it) }
+        TunedValuesWarning(
+            "Both ship at exactly what Morrowind itself renders, and raising either changes the " +
+                "look of the game world. Change them at your own risk. Reset puts both back to " +
+                "vanilla."
+        )
+        ScopedResetButton("Reset brightness") { UiPreferences.resetGameBrightness(context) }
     }
 }
 
@@ -20104,7 +20355,10 @@ private fun TopPanelOpacityRow() {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "Top screen panel opacity",
+                // Renamed from "Top screen panel opacity" Aug 21 2026. It lives on the Top Display
+                // Settings page under the "DS overlays on the top screen" label, so "top screen" was
+                // saying twice what the page already says, and "panel" is internal vocabulary.
+                "DS UI Opacity",
                 color = Bone, fontSize = 14.sp, fontFamily = MwBody,
                 modifier = Modifier.weight(1f)
             )
@@ -20259,7 +20513,7 @@ private fun OptionsSubLabel(text: String) {
 @Composable
 private fun InputPairNote() {
     Text(
-        "Either or both can be on, but at least one always stays on — turning the last one off " +
+        "Either or both can be on, but at least one always stays on: turning the last one off " +
             "switches the other back on, so the top screen is never left with no pointer input.",
         color = BoneDim.copy(alpha = 0.8f),
         fontSize = 10.sp,
@@ -20269,10 +20523,10 @@ private fun InputPairNote() {
     )
 }
 
-/** A second way into the DS Controls reference, from the CONTROLS section. Worth the duplication
- *  with the pinned button at the top of the list: sections are collapsible, so with CONTROLS open
- *  the pinned button is usually scrolled off — and the Game cursor row immediately above repeats a
- *  caveat that page explains in full. Same title/description/button shape as [OpenConsoleRow]. */
+/** The way into the DS UI controls reference, and since Aug 21 2026 the ONLY one — the duplicate
+ *  pinned button on the top level is gone. Leads the CONTROLS page rather than closing it: it is the
+ *  one entry there that teaches instead of configuring, so it is what someone opening "Controls"
+ *  cold is most likely to want. Same title/description/button shape as [OpenConsoleRow]. */
 @Composable
 private fun ControlsReferenceRow(onOpen: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
@@ -20291,12 +20545,12 @@ private fun ControlsReferenceRow(onOpen: () -> Unit) {
                 .clip(RoundedCornerShape(4.dp))
                 .background(PillActiveBg.copy(alpha = 0.94f))
                 .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-                .clickable { onOpen() }
+                .tapFlash { UiSounds.play(UiSounds.Cue.TOGGLE); onOpen() }
                 .padding(vertical = 9.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
-                "Open DS Controls",
+                "View DS UI Controls",
                 color = BronzeLight,
                 fontSize = 14.sp,
                 fontFamily = MwDisplay,
@@ -20315,7 +20569,7 @@ private fun ControlsReferenceRow(onOpen: () -> Unit) {
 @Composable
 private fun DeveloperToolsBlurb() {
     Text(
-        "Tools for development and testing. These act as cheats and run through the same " +
+        "Tools for development and testing. Some of these act as cheats and run through the same " +
             "process as console commands, so they can change your game in ways normal play " +
             "cannot. Best left alone unless you know you need them.",
         color = BoneDim,
@@ -20378,7 +20632,9 @@ private fun ResetSettingsRow() {
                 .clip(RoundedCornerShape(4.dp))
                 .background(PillActiveBg.copy(alpha = 0.94f))
                 .border(1.dp, accent, RoundedCornerShape(4.dp))
-                .clickable {
+                // Flashes in the warning red once armed, so the second (destructive) tap is
+                // acknowledged in the same colour the row has already turned.
+                .tapFlash(flashColor = accent) {
                     if (armed) {
                         UiSounds.play(UiSounds.Cue.ACTION)
                         UiPreferences.resetToDefaults(context)
@@ -20453,8 +20709,8 @@ private fun OpenConsoleRow() {
                 .background(PillActiveBg.copy(alpha = 0.94f))
                 .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
                 // The one Developer Tools button that is not a DevActionButton, so it needs the
-                // cue wired by hand to match its neighbours.
-                .clickable { UiSounds.play(UiSounds.Cue.ACTION); openNativeConsole() }
+                // cue and the flash wired by hand to match its neighbours.
+                .tapFlash { UiSounds.play(UiSounds.Cue.ACTION); openNativeConsole() }
                 .padding(vertical = 9.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -20702,8 +20958,9 @@ private fun DevActionButton(
                 .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
                 // Cue.ACTION — the heaviest of the four, and the reason this feature exists: a
                 // cheat button changes state somewhere off-screen, so without a sound there is no
-                // evidence at all that the tap landed.
-                .clickable { UiSounds.play(UiSounds.Cue.ACTION); onClick() }
+                // evidence at all that the tap landed. [tapFlash] gives the same tap a visible
+                // acknowledgement, which matters most here for exactly the same reason.
+                .tapFlash { UiSounds.play(UiSounds.Cue.ACTION); onClick() }
                 .padding(vertical = 9.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -20835,42 +21092,35 @@ private fun GameCursorRow() {
     }
 }
 
-@Composable
-private fun OptionsSectionHeader(title: String, dimmed: Boolean = false) {
-    Column(Modifier.alpha(if (dimmed) 0.4f else 1f).padding(top = 20.dp, bottom = 4.dp)) {
-        Text(
-            title.uppercase(),
-            color = BronzeLight,
-            fontSize = 22.sp,
-            fontFamily = MwDisplay,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.5.sp,
-            modifier = Modifier.padding(bottom = 6.dp)
-        )
-        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
-    }
-}
+// OptionsSectionHeader — the flat in-place section heading. Removed Aug 21 2026 along with the
+// collapsible sections it was the basis for; sub-pages carry [OptionsSubPageHeader] instead.
 
 /** Toggle for the Alpha3 launcher overlay (the gear + arrow cluster on the top screen).
  *  [On][Off] pill selector (default Off). On = shown; Off hides the whole cluster including the
  *  arrow's expanded quick-action row (one composable). Purely Kotlin-side; writes on every tap.
  *
- *  Labelled "Launcher touch overlay", not "Alpha3 overlay": "Alpha3" names a DIFFERENT app, which
- *  means nothing to an OpenMW-DS player. Filed under CONTROLS rather than TOP SCREEN because it is a
- *  cluster of touch buttons rather than a HUD readout — the subtitle names where it sits so it stays
- *  findable from "what is that thing in the corner of my top screen". */
+ *  **Named "Alpha3 Overlay" again, and moved to Developer Tools (Aug 21 2026).** It had been
+ *  relabelled "Launcher touch overlay" on the reasoning that "Alpha3" names a different app and
+ *  means nothing to an OpenMW-DS player — true, but the conclusion has been reversed: this control
+ *  is inherited from that app, is not part of the DS design, and is kept only for anyone still
+ *  relying on it. Calling it by its real name and filing it with the other legacy/advanced entries
+ *  is more honest than a neutral label on a main page, and the subtitle now says outright that it is
+ *  legacy. It still describes where the cluster sits, so it stays findable from "what is that thing
+ *  in the corner of my top screen". */
 @Composable
 private fun Alpha3OverlayRow() {
     val context = LocalContext.current
     val shown by UiPreferences.alpha3OverlayFlow().collectAsState()
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text("Launcher touch overlay", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text("Alpha3 Overlay", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "The gear + arrow button cluster in the top corner of the top screen",
+            "Legacy. The gear + arrow button cluster in the top corner of the top screen, " +
+                "inherited from the Alpha3 launcher. Not part of the DS interface; off by default.",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
+            lineHeight = 13.sp,
             modifier = Modifier.padding(top = 1.dp)
         )
         Spacer(Modifier.height(6.dp))
@@ -20997,21 +21247,38 @@ private fun OptionPill(
             .border(1.dp, border, RoundedCornerShape(4.dp))
             // EVERY options pill in the menu is one of these — the Game Menus mode selectors, the
             // On/Off rows, and the Developer Tools toggles — so this single hook is the whole
-            // "changing a setting makes a sound" requirement. A disabled pill stays silent along
+            // "changing a setting makes a sound" requirement, and (since Aug 21 2026) the whole
+            // "changing a setting flashes" one too. A disabled pill stays silent and unlit along
             // with being inert, which is the correct signal.
-            .then(if (enabled) Modifier.clickable {
-                UiSounds.play(UiSounds.Cue.TOGGLE); onClick()
-            } else Modifier)
+            //
+            // [tapFlash] rather than a bare clickable: the built-in press indication is both too
+            // brief to see on a quick tap and too dark to see on this palette — see the block
+            // comment on tapFlash for the measured reason.
+            .tapFlash(enabled = enabled) { UiSounds.play(UiSounds.Cue.TOGGLE); onClick() }
             .padding(vertical = 8.dp, horizontal = 6.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            if (active) "$label ●" else label,
-            color = fg,
-            fontSize = 12.sp,
-            fontFamily = MwDisplay,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1
-        )
+        // The selected marker is a DRAWN dot, not a "●" glyph: MysticCards has no U+25CF, and every
+        // pill in the menu is now set in it. A Box also gives a rounder, better-aligned dot than the
+        // glyph did, and it cannot be thrown off by a font's own baseline.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                color = fg,
+                fontSize = 12.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+            if (active) {
+                Spacer(Modifier.width(5.dp))
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(fg)
+                )
+            }
+        }
     }
 }

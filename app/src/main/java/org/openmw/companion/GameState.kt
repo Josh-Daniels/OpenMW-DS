@@ -1085,7 +1085,7 @@ data class GameState(
     val health: Dynamic = Dynamic(0f, 0f),
     val magicka: Dynamic = Dynamic(0f, 0f),
     val fatigue: Dynamic = Dynamic(0f, 0f),
-    val cell: String = "—",
+    val cell: String = "-",
     val pos: Vec3 = Vec3(0f, 0f, 0f),
     /** True when the player is in an exterior cell. */
     val cellIsExterior: Boolean = false,

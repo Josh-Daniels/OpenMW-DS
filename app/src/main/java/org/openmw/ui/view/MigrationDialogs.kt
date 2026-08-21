@@ -49,7 +49,7 @@ private fun launchCopySaves(scope: kotlinx.coroutines.CoroutineScope, context: a
         } else {
             buildString {
                 append("${result.filesCopied} saves copied")
-                if (result.filesSkippedNewer > 0) append(", ${result.filesSkippedNewer} skipped — already up to date")
+                if (result.filesSkippedNewer > 0) append(", ${result.filesSkippedNewer} skipped, already up to date")
                 if (result.collisionsRenamed > 0) append(" (${result.collisionsRenamed} kept separate)")
             }
         }
@@ -321,7 +321,7 @@ fun AlphaMigrationButtons(
         // need (e.g. a second character never migrated).
         if (AlphaMigration.hasExistingSaves()) {
             Text(
-                text = "You already have OpenMW-DS saves — you likely don't need to transfer " +
+                text = "You already have OpenMW-DS saves, so you likely don't need to transfer " +
                     "from Alpha3, but the option is here if you need it.",
                 color = Color(0xFFBCAF96),
                 fontSize = 12.sp,
@@ -359,7 +359,7 @@ fun AlphaMigrationButtons(
         MigrationAlert(
             title = "Copy settings from Alpha3",
             message = "Replace your current settings with Alpha3's? This isn't " +
-                "recommended — it brings back Alpha3's old defaults.",
+                "recommended: it brings back Alpha3's old defaults.",
             confirmLabel = "Copy",
             dismissLabel = "Cancel",
             onConfirm = {

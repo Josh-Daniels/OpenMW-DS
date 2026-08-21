@@ -1717,8 +1717,10 @@ class EngineActivity : SDLActivity() {
                     // CompanionScreen's composition, so the companion's own adaptive-dim layer
                     // cannot reach it — without this the options menu stayed at full brightness
                     // while the screen around it dimmed. Deliberately NOT wrapped in
-                    // ProvideTopPanelOpacity: that is the top-screen environment (and would also
-                    // pull in the game font, which this menu is deliberately excluded from).
+                    // ProvideTopPanelOpacity: that is the TOP-screen environment, and this panel is
+                    // on the bottom one. (It used to be excluded from the game font as well; since
+                    // Aug 21 2026 OptionsMenuOverlay provides that for itself, so the only thing
+                    // being avoided here is the top-screen opacity local.)
                     AdaptiveDimmedWindow { OptionsMenuOverlay() }
                 }
             }

@@ -25,7 +25,7 @@ if (keystorePropertiesFile.exists()) {
 // render time, and the GitHub release TAG carries one (`v0.8.0`), so anything comparing the two
 // must strip it. Bump this one line per release.
 // ---------------------------------------------------------------------------------------------
-val releaseVersion = "0.9.0"
+val releaseVersion = "1.0.0"
 
 // Derive the OS-facing versionCode from `releaseVersion` rather than hand-maintaining a second
 // number. It used to be a hardcoded `2` that never moved, which meant the package manager had no

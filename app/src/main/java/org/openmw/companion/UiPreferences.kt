@@ -266,6 +266,18 @@ val ADAPTIVE_DIM_NIGHT_MAX_RANGE = 0.60f..1.00f
 const val ADAPTIVE_DIM_NIGHT_MAX_DEFAULT = 0.70f
 
 /**
+ * Whether screen dimming is on at all, as a named constant rather than a bare `true`.
+ *
+ * Hoisted Aug 21 2026 because the Screen Dimming row gained its OWN scoped reset button
+ * ([UiPreferences.resetScreenDimming]) alongside the whole-file [UiPreferences.resetToDefaults].
+ * A scoped reset has to restate the defaults it restores — there is no "clear these four keys and
+ * re-run the loader" shortcut — so the only way to keep it from drifting from startup is for both
+ * to read the same constants. The three slider defaults were already constants; this was the one
+ * loose literal.
+ */
+const val ADAPTIVE_DIMMING_DEFAULT = true
+
+/**
  * TOP-screen adaptive dimming. ONE set of sliders drives BOTH screens — the player sets the
  * dimming range once, in the ranges above — and the top screen re-projects those same positions
  * through the constants here before they become an alpha. There is no second stored setting and no
@@ -558,7 +570,7 @@ object UiPreferences {
     // brighter than the top screen once the player is somewhere dark. Driven by the native
     // ambient-luminance signal (GameStateRepository.ambientLuminance); purely a translucent black
     // overlay — it never touches the device's real screen brightness. Default true (on).
-    private val adaptiveDimmingFlow = MutableStateFlow(true)
+    private val adaptiveDimmingFlow = MutableStateFlow(ADAPTIVE_DIMMING_DEFAULT)
 
     // How dark the companion is allowed to get in the DARKEST scene, as screen brightness
     // (1f = undimmed). Default 0.25f reproduces exactly the behaviour before these sliders existed,
@@ -724,6 +736,50 @@ object UiPreferences {
         loadInto(p, context)
     }
 
+    /**
+     * Restore ONLY the four Screen Dimming settings (the switch plus its three range sliders) — the
+     * scoped reset button on that row.
+     *
+     * Deliberately narrow: it clears exactly its own keys and reassigns exactly its own flows, so
+     * pressing it can never disturb Game Brightness, a layout, or anything else. That is the whole
+     * point of a scoped reset — [resetToDefaults] already exists for the everything case, and a
+     * player who has spent time on their layout must be able to undo a dimming experiment without
+     * gambling the rest.
+     *
+     * Unlike [resetToDefaults] this DOES name its defaults, because there is no "clear these keys
+     * and re-run the loader" shortcut for a subset. The drift that would otherwise create is closed
+     * by reading the same `*_DEFAULT` constants [loadInto] reads — including
+     * [ADAPTIVE_DIMMING_DEFAULT], which was hoisted out of a bare `true` for exactly this reason.
+     */
+    fun resetScreenDimming(context: Context) {
+        adaptiveDimmingFlow.value = ADAPTIVE_DIMMING_DEFAULT
+        adaptiveDimMinBrightnessFlow.value = ADAPTIVE_DIM_MIN_DEFAULT
+        adaptiveDimMaxBrightnessFlow.value = ADAPTIVE_DIM_MAX_DEFAULT
+        adaptiveDimNightMaxBrightnessFlow.value = ADAPTIVE_DIM_NIGHT_MAX_DEFAULT
+        editor(context)
+            .remove(ADAPTIVE_DIMMING)
+            .remove(ADAPTIVE_DIM_MIN_BRIGHTNESS)
+            .remove(ADAPTIVE_DIM_MAX_BRIGHTNESS)
+            .remove(ADAPTIVE_DIM_NIGHT_MAX_BRIGHTNESS)
+            .apply()
+    }
+
+    /**
+     * Restore ONLY the two Game Brightness sliders — the scoped reset button on that row. Same
+     * reasoning as [resetScreenDimming]; see its KDoc.
+     *
+     * The interior slider goes through [setInteriorBrightness] rather than being assigned directly,
+     * because that value is a PASS-THROUGH to an OpenMW engine setting: the engine keeps its own
+     * copy in settings.cfg and rewrites it, so restoring our default has to actually re-push, not
+     * just change what we would push next launch. The night lift needs no equivalent — it is
+     * re-pushed to Lua from the flow by EngineActivity's collector.
+     */
+    fun resetGameBrightness(context: Context) {
+        nightBrightnessFlow.value = NIGHT_BRIGHTNESS_DEFAULT
+        editor(context).remove(NIGHT_BRIGHTNESS).apply()
+        setInteriorBrightness(context, INTERIOR_BRIGHTNESS_DEFAULT)
+    }
+
     private fun loadInto(p: SharedPreferences, context: Context) {
         GAME_UI_ELEMENTS.forEach { el ->
             if (el.pending) {
@@ -755,12 +811,26 @@ object UiPreferences {
             touchInputFlow.value = true
             p.edit().putBoolean(TOUCH_INPUT, true).apply()
         }
+        // BOTTOM was removed from the Conversation row on Aug 21 2026 (the offered options are
+        // Native / DS(=SPLIT) / Top), so a stored BOTTOM is rejected here and falls back to the
+        // SPLIT default — the same treatment a stale SPLIT gets on the Bottom/Top-only services
+        // below. Without this a player who had picked Bottom would be stuck on a layout with no
+        // pill lit and no way to change it. ConversationLocation.BOTTOM and everything that reads
+        // it are deliberately KEPT (see CompanionScreen's conversation host) — only the option is
+        // gone, not the code path.
         p.getString(CONVERSATION_LOCATION, null)
             ?.let { runCatching { ConversationLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != ConversationLocation.BOTTOM }
             ?.let { conversationLocationFlow.value = it }
-        p.getString(INVENTORY_LAYOUT, null)
-            ?.let { runCatching { InventoryLayout.valueOf(it) }.getOrNull() }
-            ?.let { inventoryLayoutFlow.value = it }
+        // Item list style (Classic / Shelf) — REMOVED as an option Aug 21 2026. Classic is now the
+        // only behaviour, so no stored value is loaded and the flow keeps its CLASSIC constructor
+        // value forever. The SHELF enum constant and every `shelfMode` branch that reads it are
+        // left in place (they are large, and deleting them is a separate change), simply never
+        // reached. Deliberately NOT a rejecting `takeIf` like the rows above: there is no second
+        // legal value here, so reading the key at all would only be a way to get one back.
+        // p.getString(INVENTORY_LAYOUT, null)
+        //     ?.let { runCatching { InventoryLayout.valueOf(it) }.getOrNull() }
+        //     ?.let { inventoryLayoutFlow.value = it }
         // Spells tab density load — removed (compact-only):
         // p.getString(SPELLS_LIST_STYLE, null)
         //     ?.let { runCatching { SpellsListStyle.valueOf(it) }.getOrNull() }
@@ -770,7 +840,7 @@ object UiPreferences {
             ?.let { inventoryTabStyleFlow.value = it }
         hideEquippedBarFlow.value = p.getBoolean(HIDE_EQUIPPED_BAR, true)
         showEquippedInListFlow.value = p.getBoolean(SHOW_EQUIPPED_IN_LIST, false)
-        adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, true)
+        adaptiveDimmingFlow.value = p.getBoolean(ADAPTIVE_DIMMING, ADAPTIVE_DIMMING_DEFAULT)
         // Clamped on read as well as on write (same reasoning as topPanelOpacity below): a stored
         // value from a corrupt prefs file, or from a build whose ranges differed, must never be able
         // to produce a darker overlay than the legibility floor allows.
@@ -784,7 +854,11 @@ object UiPreferences {
             p.getFloat(ADAPTIVE_DIM_NIGHT_MAX_BRIGHTNESS, ADAPTIVE_DIM_NIGHT_MAX_DEFAULT)
                 .coerceIn(ADAPTIVE_DIM_NIGHT_MAX_RANGE)
         journalPageTurnFlow.value = p.getBoolean(JOURNAL_PAGE_TURN, true)
-        effectTimersFlow.value = p.getBoolean(EFFECT_TIMERS, true)
+        // Effect timers — REMOVED as an option Aug 21 2026; timed effects always show their
+        // countdown. Not loaded, so the flow keeps its `true` constructor value. (Permanent effects
+        // still never show one: the exporter omits the value for them entirely, which is a property
+        // of the data, not of this setting.)
+        // effectTimersFlow.value = p.getBoolean(EFFECT_TIMERS, true)
         uiSoundsFlow.value = p.getBoolean(UI_SOUNDS, true)
         uiSoundVolumeFlow.value = p.getFloat(UI_SOUND_VOLUME, UI_SOUND_VOLUME_DEFAULT)
             .coerceIn(UI_SOUND_VOLUME_RANGE)
@@ -799,11 +873,17 @@ object UiPreferences {
             p.getInt(FAV_MAGIC_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
+        // Looting / bartering offer exactly [Native][DS] as of Aug 21 2026, where DS *is* the
+        // split layout — so SPLIT is now the only value either can legitimately hold. Anything else
+        // (a stored BOTTOM from before the change, or a TOP that was never buildable) is rejected
+        // and falls back to the SPLIT default, so the row can never render with nothing lit.
         p.getString(LOOTING_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it == ScreenLocation.SPLIT }
             ?.let { lootingLocationFlow.value = it }
         p.getString(BARTER_LOCATION, null)
             ?.let { runCatching { ScreenLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it == ScreenLocation.SPLIT }
             ?.let { barterLocationFlow.value = it }
         // Only BOTTOM / TOP are valid for these two (no Split). Reject a stale SPLIT from the earlier
         // build so it falls back to the BOTTOM default.
@@ -837,8 +917,13 @@ object UiPreferences {
         p.getString(TARGET_HEALTH_LOCATION, null)
             ?.let { runCatching { TargetHealthLocation.valueOf(it) }.getOrNull() }
             ?.let { targetHealthLocationFlow.value = it }
+        // Persuasion's Top option was hidden from the menu on Aug 21 2026 (the row is now
+        // [Native][DS], DS = BOTTOM). PersuasionLocation.TOP and its top-screen panel are KEPT —
+        // only the pill is gone — but a stored TOP is rejected here so nobody is left on a screen
+        // choice the menu can no longer express or undo.
         p.getString(PERSUASION_LOCATION, null)
             ?.let { runCatching { PersuasionLocation.valueOf(it) }.getOrNull() }
+            ?.takeIf { it != PersuasionLocation.TOP }
             ?.let { persuasionLocationFlow.value = it }
         playerCombatFlow.value = p.getBoolean(PLAYER_COMBAT, true)
         HUD_ELEMENTS.forEach { el ->
@@ -873,11 +958,10 @@ object UiPreferences {
      *  layouts — Repair/Travel/Spell buying/Training/Persuasion — are left at their own settings)
      *  and turns "Show equipped in list" OFF.
      *  The Input section (Touch input / Game cursor) is deliberately NOT touched by either preset —
-     *  it's the player's own choice and survives a quick-set. The Item List Style (Classic/Shelf) is
-     *  on that same side of the line as of Aug 2026: All DS used to force SHELF, which silently
-     *  overwrote a deliberate Classic choice AND made Shelf the effective default even though the
-     *  stored default is CLASSIC. All other Native HUD toggles are left untouched too; individual
-     *  rows can still be overridden afterwards. */
+     *  it's the player's own choice and survives a quick-set. The same line applies to everything
+     *  that moved to Developer Tools (see the body). The Item List Style that All DS used to force
+     *  to SHELF is gone outright as of Aug 21 2026 — Classic is the only behaviour. All other Native
+     *  HUD toggles are left untouched too; individual rows can still be overridden afterwards. */
     fun setAllGameUi(context: Context, mode: GameUiMode) {
         // Snapshot the current layout first if it's a Custom mix, so [Custom] can restore it even if
         // it wasn't captured by an earlier individual change. (No-op if the snapshot already matches.)
@@ -889,9 +973,15 @@ object UiPreferences {
         // All DS also splits the DS conversation across both screens (Conversation layout -> SPLIT,
         // changed from TOP on Aug 20 2026) and hides worn items from the inventory list — with the
         // Game Menus all on DS, the equipment row is already on screen and the duplicate inline
-        // entries are noise. It does NOT touch the Item List Style — see the KDoc; Classic is the
-        // default and a player who picked Shelf keeps it. All Native changes nothing beyond the
-        // elements.
+        // entries are noise. The Item List Style it used to force no longer exists at all (Classic
+        // is now the only behaviour). All Native changes nothing beyond the elements.
+        //
+        // Nothing here writes the settings that moved to Developer Tools on Aug 21 2026 — DS target
+        // health bar, Player status in combat, Game font, Inventory tab style, Journal page turn.
+        // Each already DEFAULTS to the value the presets are meant to land on (TOP / on / on /
+        // Cards / on), so a fresh install and either preset all agree without a write; forcing them
+        // would only take a deliberate choice away, which is the mistake the Item List Style
+        // override made and the reason it was removed.
         if (mode == GameUiMode.DS) {
             setConversationLocation(context, ConversationLocation.SPLIT)
             setShowEquippedInList(context, false)
@@ -1011,11 +1101,13 @@ object UiPreferences {
     /** Item-list layout (CLASSIC grid / SHELF) for looting + barter — one shared switch. */
     fun inventoryLayoutFlow(): StateFlow<InventoryLayout> = inventoryLayoutFlow.asStateFlow()
 
-    /** Set the inventory layout and persist. */
-    fun setInventoryLayout(context: Context, layout: InventoryLayout) {
-        inventoryLayoutFlow.value = layout
-        editor(context).putString(INVENTORY_LAYOUT, layout.name).apply()
-    }
+    // Item list style setter — REMOVED with the option (Aug 21 2026). [inventoryLayoutFlow] is now
+    // a constant CLASSIC; nothing may write it. Kept commented so the pref key's history is visible
+    // if the Shelf layout is ever revived.
+    // fun setInventoryLayout(context: Context, layout: InventoryLayout) {
+    //     inventoryLayoutFlow.value = layout
+    //     editor(context).putString(INVENTORY_LAYOUT, layout.name).apply()
+    // }
 
     // Spells tab density accessor + setter — removed (compact-only). Kept commented for reference.
     // fun spellsListStyleFlow(): StateFlow<SpellsListStyle> = spellsListStyleFlow.asStateFlow()
@@ -1181,11 +1273,11 @@ object UiPreferences {
      *  do, independently of this. */
     fun effectTimersFlow(): StateFlow<Boolean> = effectTimersFlow.asStateFlow()
 
-    /** Set whether active-effect timers are shown and persist. */
-    fun setEffectTimers(context: Context, enabled: Boolean) {
-        effectTimersFlow.value = enabled
-        editor(context).putBoolean(EFFECT_TIMERS, enabled).apply()
-    }
+    // Effect timers setter — REMOVED with the option (Aug 21 2026); timers are always on.
+    // fun setEffectTimers(context: Context, enabled: Boolean) {
+    //     effectTimersFlow.value = enabled
+    //     editor(context).putBoolean(EFFECT_TIMERS, enabled).apply()
+    // }
 
     /** Whether the companion + DS overlays use the game's typeface (MysticCards) instead of the
      *  Android system serif/monospace. Deliberately NOT read by the options menu, which stays on
