@@ -109,6 +109,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Constraints
@@ -172,6 +173,7 @@ import org.openmw.ui.theme.loadGameFont
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -263,6 +265,25 @@ private object JournalQuestNavState {
         val q = questId
         questId = null
         return q
+    }
+
+    /**
+     * Open the QUESTS list with nothing selected — the empty tracked-quest slot's tap, which has no
+     * quest to jump to. A separate flag rather than a sentinel id: [questId] is fed straight into
+     * `selectedQuestId`, so any magic value would have to be filtered out at that end too.
+     *
+     * A COUNTER, for the reason [NavEvent] carries a seq: two taps in a row must register as two
+     * requests, and a Boolean would swallow the second.
+     */
+    var listRequest by mutableStateOf(0)
+        private set
+    private var listConsumed = 0
+    fun requestList() { listRequest++ }
+    /** True at most once per [requestList] call. */
+    fun consumeList(): Boolean {
+        if (listRequest == listConsumed) return false
+        listConsumed = listRequest
+        return true
     }
 }
 
@@ -481,6 +502,11 @@ private fun Modifier.splitDialoguePanel(): Modifier {
 // (Active Spell) so the two panels line up. Content is vertically centered.
 private val TOP_BOX_HEIGHT = 54.dp
 
+/** Gap between the HUD's top box and the map panel below it — MapPanel's Column uses this as its
+ *  `Arrangement.spacedBy`. Named because the effects dropdown adds it back to place itself flush
+ *  with the map's top border; if the spacing changes, both move together. */
+private val TOP_BOX_TO_MAP_GAP = 6.dp
+
 private val ICON_CACHE_DIR by lazy {
     File("${Constants.USER_FILE_STORAGE}/companion_icons").also { it.mkdirs() }
 }
@@ -650,6 +676,53 @@ private fun HorizontalGridScrollbar(state: LazyGridState, modifier: Modifier = M
     }
 }
 
+/** A vertical proportional scrollbar for a [LazyColumn], shown ONLY when the content is taller
+ *  than the viewport. Track = muted bronze, thumb = bright bronze; thumb length/position come from
+ *  the visible/total ITEM counts, the same approximation [HorizontalGridScrollbar] makes.
+ *
+ *  DELIBERATELY WIDER AND BRIGHTER than that one (5dp vs 3dp, full-strength [BronzeLight] thumb).
+ *  A thin drawn scrollbar for vertical content was tried and REJECTED in Aug 2026 — see
+ *  [ScrollMoreHint], whose doc records that 3dp of bronze "was too easy to miss" on the 3.92"
+ *  bottom screen. This is not a re-litigation of that: the chevron answers "is there more?", which
+ *  is all a short list needs, while a long browse list (the enchanting Magic Effects list can run
+ *  to dozens of rows) also needs "how far in am I, and how much is there" — which a chevron cannot
+ *  express at any size. The two are complementary and both are used there.
+ *
+ *  Meant to sit BESIDE the list as its sibling in a Row, given a fillMaxHeight modifier. */
+@Composable
+private fun VerticalListScrollbar(state: LazyListState, modifier: Modifier = Modifier) {
+    val metrics by remember(state) {
+        derivedStateOf {
+            val info = state.layoutInfo
+            val total = info.totalItemsCount
+            val visible = info.visibleItemsInfo.size
+            if (total <= 0 || visible >= total) null
+            else {
+                // Clamped so the thumb never shrinks to an invisible sliver on a very long list.
+                val thumb = (visible.toFloat() / total).coerceIn(0.10f, 1f)
+                val start = (state.firstVisibleItemIndex.toFloat() / total).coerceIn(0f, 1f - thumb)
+                start to thumb
+            }
+        }
+    }
+    val m = metrics ?: return
+    val (start, thumb) = m
+    BoxWithConstraints(modifier.width(SCROLLBAR_WIDTH)) {
+        val h = maxHeight
+        Box(
+            Modifier.fillMaxHeight().width(SCROLLBAR_WIDTH).align(Alignment.Center)
+                .clip(RoundedCornerShape(3.dp)).background(BronzeDark.copy(alpha = 0.45f))
+        )
+        Box(
+            Modifier.align(Alignment.TopCenter)
+                .offset(y = h * start).height(h * thumb).width(SCROLLBAR_WIDTH)
+                .clip(RoundedCornerShape(3.dp)).background(BronzeLight)
+        )
+    }
+}
+
+private val SCROLLBAR_WIDTH = 5.dp
+
 /** "There is more list below/above" hint for a plain `verticalScroll` [ScrollState] — a centred
  *  chevron strip meant to sit BELOW the scrolling content as its sibling, in the same Column.
  *
@@ -662,6 +735,30 @@ private fun HorizontalGridScrollbar(state: LazyGridState, modifier: Modifier = M
  *  doesn't resize the menu under the player's finger. */
 @Composable
 private fun ScrollMoreHint(state: ScrollState, modifier: Modifier = Modifier) {
+    val scrollable by remember(state) {
+        derivedStateOf { state.canScrollForward || state.canScrollBackward }
+    }
+    if (!scrollable) return
+    val more = state.canScrollForward
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(SCROLL_HINT_HEIGHT)
+            .background(SlotBg.copy(alpha = 0.6f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            if (more) "▾" else "▴",
+            color = BronzeLight, fontSize = 11.sp,
+            fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+/** [ScrollMoreHint] for a [LazyColumn]. Same strip, same rules — `canScrollForward` /
+ *  `canScrollBackward` exist on both state types, so only the parameter differs. */
+@Composable
+private fun ScrollMoreHint(state: LazyListState, modifier: Modifier = Modifier) {
     val scrollable by remember(state) {
         derivedStateOf { state.canScrollForward || state.canScrollBackward }
     }
@@ -859,12 +956,17 @@ private fun rememberPopupDimAlpha(): Float {
 private fun CompanionDropdownMenu(
     expanded: Boolean,
     onDismissRequest: () -> Unit,
+    // Shift relative to the anchor, passed straight to DropdownMenu. Note M3's position provider
+    // SUBTRACTS x in its flipped (right-aligned) branch, so a horizontal offset does not mean the
+    // same thing in both branches — prefer moving the anchor over nudging this.
+    offset: DpOffset = DpOffset(0.dp, 0.dp),
     content: @Composable ColumnScope.() -> Unit
 ) {
     val dim = rememberPopupDimAlpha()
     DropdownMenu(
         expanded = expanded,
         onDismissRequest = onDismissRequest,
+        offset = offset,
         modifier = Modifier.dimTint(dim),
         properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
         containerColor = dimColor(StonePanel, dim),
@@ -1126,6 +1228,11 @@ private fun CompanionScreenContent() {
     LaunchedEffect(pendingQuestNav) {
         if (pendingQuestNav != null) tab = Tab.JOURNAL
     }
+    // Same trip, but for the empty tracked-quest slot: the QUESTS list itself, nothing selected.
+    val pendingQuestList = JournalQuestNavState.listRequest
+    LaunchedEffect(pendingQuestList) {
+        if (pendingQuestList > 0) tab = Tab.JOURNAL
+    }
 
     Box(
         modifier = Modifier
@@ -1145,7 +1252,7 @@ private fun CompanionScreenContent() {
         when (tab) {
             Tab.INVENTORY -> InventoryPanel(state)
             Tab.MAGIC -> MagicPanel(state)
-            Tab.HUD -> MapPanel(state, splashVisible = splashVisible)
+            Tab.HUD -> MapPanel(state, splashVisible = splashVisible, onSelectTab = { tab = it })
             Tab.STATS -> StatsPanel(state, onSelectStat = { selectedStat = it })
             Tab.JOURNAL -> JournalPanel()
         }
@@ -1248,6 +1355,11 @@ private fun CompanionScreenContent() {
         // Crime-reported toast — top of the whole z-stack so it's visible even over the looting /
         // barter panels (the native message renders behind them, bottom-center of the top screen).
         CrimeToast()
+
+        // UI hints, in the same card. Hosted at the ROOT beside the crime toast, not inside the HUD
+        // panel that raises them: a hint fires AS the tab switches away from the HUD, so anything
+        // scoped to that panel would be torn down in the same frame and never seen.
+        HintToast()
 
         // The turning journal leaf. Hosted HERE rather than inside JournalPanel because it has to
         // paint over the BOTTOM tab bar as well as the journal's own sub-tab bar — and BottomTabBar
@@ -2239,7 +2351,17 @@ private fun DialogueRightColumn(
                 GameStateRepository.travelSession.value != null ||
                 GameStateRepository.sleepSession.value != null ||
                 GameStateRepository.trainingSession.value != null ||
-                GameStateRepository.spellBuyingSession.value != null
+                GameStateRepository.spellBuyingSession.value != null ||
+                // Enchanting and Alchemy REPLACE a native window rather than layering a popup, so
+                // they were easy to miss here — but Enchanting is a DIALOGUE SERVICE, so the
+                // conversation stays composed underneath it and this collector kept running while
+                // the DS enchanting screen was up: the D-pad moved the hidden topic list and A fired
+                // CMPDLG:topic: behind the overlay (Aug 21 2026). Alchemy is only reachable from an
+                // apparatus in the inventory, never from dialogue, so it is safe today — it is
+                // listed anyway so the rule is "every DS service yields", not "the ones that
+                // happened to bite".
+                GameStateRepository.enchantSession.value != null ||
+                GameStateRepository.alchemySession.value != null
             ) return@collect
             val items = itemsState.value
             if (items.isEmpty()) return@collect
@@ -2604,6 +2726,14 @@ private fun rememberListNavFocus(
     onCancel: (() -> Unit)? = null,
     // R3 (NavEvent.Info) on the focused row — e.g. open the item/spell info popup. Null = ignore R3.
     onInfo: ((Int) -> Unit)? = null,
+    // Y (NavEvent.Action2) — a second discrete action alongside [onAction1] (X). Null = ignore.
+    onAction2: (() -> Unit)? = null,
+    // L1 / R1 (NavEvent.L1 / NavEvent.R1) — discrete shortcuts that do NOT depend on focus, so
+    // unlike [onConfirm]/[onInfo] they take no index. The loot/barter grids use these two for
+    // per-column category cycling and have their own helpers; here they are free for whatever the
+    // screen's two shoulder actions are (enchanting: open the item / soul picker). Null = ignore.
+    onL1: (() -> Unit)? = null,
+    onR1: (() -> Unit)? = null,
     // Called with the new focus index whenever D-pad moves focus. Called SYNCHRONOUSLY in the nav
     // collector (before recomposition) so an open info popup can follow to the newly focused row and
     // its anchor gets re-reported during the ensuing layout pass — mirrors the barter grid's follow.
@@ -2619,6 +2749,9 @@ private fun rememberListNavFocus(
     val action1State = rememberUpdatedState(onAction1)
     val cancelState = rememberUpdatedState(onCancel)
     val infoState = rememberUpdatedState(onInfo)
+    val action2State = rememberUpdatedState(onAction2)
+    val l1State = rememberUpdatedState(onL1)
+    val r1State = rememberUpdatedState(onR1)
     val focusChangedState = rememberUpdatedState(onFocusChanged)
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
@@ -2638,6 +2771,9 @@ private fun rememberListNavFocus(
                 ev is NavEvent.Action1 -> action1State.value?.invoke()
                 ev is NavEvent.Cancel -> cancelState.value?.invoke()
                 ev is NavEvent.Info -> if (n > 0) infoState.value?.invoke(index)
+                ev is NavEvent.Action2 -> action2State.value?.invoke()
+                ev is NavEvent.L1 -> l1State.value?.invoke()
+                ev is NavEvent.R1 -> r1State.value?.invoke()
                 else -> Unit
             }
             // Focus moved → let the caller follow (e.g. an open info popup) before recomposition.
@@ -3099,6 +3235,11 @@ private enum class PopupEdge { LEFT, RIGHT, TOP, BOTTOM }
  * rows arrive asynchronously via COMPANION_INFO (GameStateRepository.itemInfo). `anchor` is the
  * triggering row's bounds in root coords, refreshed by that row's onGloballyPositioned.
  */
+/** What kind of record the info popup is pointed at, i.e. which `CMP:info <kind>:<id>` request
+ *  resolves it. Replaced an `isSpell: Boolean` when EFFECT arrived (Aug 21 2026) — a second boolean
+ *  would have made two mutually exclusive flags that can both be set. */
+enum class InfoKind { ITEM, SPELL, EFFECT }
+
 object ItemInfoPopupState {
     var targetId by mutableStateOf<String?>(null)
     var name by mutableStateOf("")
@@ -3121,8 +3262,8 @@ object ItemInfoPopupState {
     // ordering note there. Capped so it can't grow across a long session.
     private val anchorCache = HashMap<String, Rect>()
 
-    fun open(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false,
-             focusLinked: Boolean = false) {
+    fun open(id: String, name: String, ench: ItemEnchant?, kind: InfoKind = InfoKind.ITEM,
+             onTop: Boolean = false, focusLinked: Boolean = false) {
         if (id.isBlank()) return
         targetId = id
         this.name = name
@@ -3131,21 +3272,27 @@ object ItemInfoPopupState {
         onTopScreen = onTop
         this.focusLinked = focusLinked
         GameStateRepository.dismissItemInfo()      // clear stale rows so the previous item's don't flash
-        if (isSpell) CompanionActions.requestSpellInfo(id) else CompanionActions.requestItemInfo(id)
+        when (kind) {
+            InfoKind.SPELL -> CompanionActions.requestSpellInfo(id)
+            InfoKind.EFFECT -> CompanionActions.requestEffectInfo(id)
+            InfoKind.ITEM -> CompanionActions.requestItemInfo(id)
+        }
     }
 
     /** R3 / D-pad Info on the SAME item toggles the popup; a different item re-targets. Always
      *  focus-linked — the only callers are the nav collectors (the focus cursor drives it). */
-    fun toggle(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
-        if (targetId == id) close() else open(id, name, ench, isSpell, onTop, focusLinked = true)
+    fun toggle(id: String, name: String, ench: ItemEnchant?, kind: InfoKind = InfoKind.ITEM,
+               onTop: Boolean = false) {
+        if (targetId == id) close() else open(id, name, ench, kind, onTop, focusLinked = true)
     }
 
     /** Focus moved while open → follow to the newly focused item/spell (don't dismiss). Called BOTH
      *  synchronously from the nav collectors (D-pad moves) AND reactively (FollowFocusedInfoPopup)
      *  when focus changes for a non-nav reason; either way the popup stays focus-linked. */
-    fun follow(id: String, name: String, ench: ItemEnchant?, isSpell: Boolean = false, onTop: Boolean = false) {
+    fun follow(id: String, name: String, ench: ItemEnchant?, kind: InfoKind = InfoKind.ITEM,
+               onTop: Boolean = false) {
         if (!isOpen || id == targetId) return
-        open(id, name, ench, isSpell = isSpell, onTop = onTop, focusLinked = true)
+        open(id, name, ench, kind = kind, onTop = onTop, focusLinked = true)
         // ORDERING (Bug: info popup went blank after taking the inspected item). open() resets the
         // anchor and waits for the new row's onGloballyPositioned. That is fine for the D-pad path
         // (the nav collector retargets BEFORE the frame's layout pass, so the report lands) and for
@@ -3211,6 +3358,100 @@ private fun FollowFocusedInfoPopup(focused: InfoTarget?, onTop: Boolean) {
 }
 
 /**
+ * The toast SHELL — the card the crime alert has always drawn, extracted so the UI hints can reuse
+ * it verbatim (Aug 21 2026) instead of a second look-alike. Position and z-order are part of what is
+ * shared: vertically centred with the HUD's top box, above every overlay.
+ *
+ * [icon] is optional and the hints pass none. Not decoration: "⚠" is one of the 16 glyphs MysticCards
+ * has no coverage for (see the Game Font notes), so it rides on an Android font fallback. That is a
+ * risk already taken for the crime alert, where the warning mark earns it; a neutral hint has nothing
+ * to gain from repeating it.
+ */
+@Composable
+private fun HudToastCard(
+    text: String,
+    accent: Color,
+    icon: String? = null,
+    // Defaults reproduce the crime alert exactly: bone text in a 1dp accent border. The hints
+    // override both to shout — see HintToast.
+    textColor: Color = BoneBright,
+    borderWidth: Dp = 1.dp,
+    onDismiss: () -> Unit
+) {
+    Box(Modifier.fillMaxSize().zIndex(30f), contentAlignment = Alignment.TopCenter) {
+        Box(
+            Modifier.fillMaxWidth().padding(top = 12.dp).height(TOP_BOX_HEIGHT),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth(0.9f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xF2140D08))
+                    .border(borderWidth, accent, RoundedCornerShape(4.dp))
+                    .clickable { onDismiss() }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (icon != null) {
+                    Text(icon, color = accent, fontSize = 16.sp, modifier = Modifier.padding(end = 8.dp))
+                }
+                Text(
+                    text,
+                    color = textColor, fontSize = 13.sp, fontFamily = MwBody, fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A transient UI HINT, drawn in the same card as the crime alert (see [HudToastCard]) but raised
+ * locally rather than by a native signal — so it is NOT gated on any Game UI element, and a hint
+ * shows whether or not Crime alerts are routed to the DS screen.
+ *
+ * The seq is what makes a repeat re-fire: tapping the same empty slot twice must show the hint twice,
+ * and a bare String state would dedupe the second one away. Exactly why GameStateRepository stamps
+ * crimeMessage with a sequence number.
+ */
+private object HintToastState {
+    var message by mutableStateOf<Pair<String, Long>?>(null)
+        private set
+    private var seq = 0L
+    fun show(text: String) { message = text to seq++ }
+    fun clear() { message = null }
+}
+
+@Composable
+private fun HintToast() {
+    val current = HintToastState.message ?: return
+    LaunchedEffect(current.second) {
+        delay(HINT_TOAST_MS)
+        HintToastState.clear()
+    }
+    // Red text AND a 2dp red border. The bronze-on-bone version read as ordinary chrome and was
+    // being missed — which is fatal for a hint whose whole job is to be noticed in the moment the
+    // tab changes under the player. 2dp is the app's existing "this one matters" border weight
+    // (the D-pad focus rings, the selected chips), so it shouts without inventing a new language.
+    HudToastCard(
+        text = current.first,
+        accent = HintToastRed,
+        textColor = HintToastRed,
+        borderWidth = 2.dp
+    ) { HintToastState.clear() }
+}
+
+/** Accent for the UI hints. The same red the crime alert borders with and the reset warning uses
+ *  (#C75C5C) — named separately rather than borrowing one of those constants because this is a
+ *  third, unrelated caller, and a future retune of either should not silently drag the hints along.
+ *  Note this deliberately gives a HINT alert colouring; that is the point — it has to be seen. */
+private val HintToastRed = Color(0xFFC75C5C)
+
+/** Hint dwell time. Longer than the crime alert's 4.2s: a hint is instructional rather than a
+ *  notification, so it has to survive being read after the tab it just switched to has drawn. */
+private const val HINT_TOAST_MS = 5000L
+
+/**
  * Top-of-stack "crime reported" toast, driven by GameStateRepository.crimeMessage (the native
  * COMPANION_CRIME_MSG signal). Rendered above every other overlay (zIndex 30f) so it stays visible
  * during looting/barter, where the native transient message is hidden behind the panel windows.
@@ -3229,30 +3470,9 @@ private fun CrimeToast() {
         delay(4200)
         GameStateRepository.clearCrimeMessage()
     }
-    // Vertically centered with the HUD's top box (top = 12dp, height TOP_BOX_HEIGHT — the vitals bar
-    // band), horizontally centered, above every overlay (zIndex 30f).
-    Box(Modifier.fillMaxSize().zIndex(30f), contentAlignment = Alignment.TopCenter) {
-        Box(
-            Modifier.fillMaxWidth().padding(top = 12.dp).height(TOP_BOX_HEIGHT),
-            contentAlignment = Alignment.Center
-        ) {
-            Row(
-                Modifier
-                    .fillMaxWidth(0.9f)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xF2140D08))
-                    .border(1.dp, Color(0xFFC75C5C), RoundedCornerShape(4.dp))
-                    .clickable { GameStateRepository.clearCrimeMessage() }
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("⚠", color = Color(0xFFC75C5C), fontSize = 16.sp, modifier = Modifier.padding(end = 8.dp))
-                Text(
-                    current.first,
-                    color = BoneBright, fontSize = 13.sp, fontFamily = MwBody, fontWeight = FontWeight.Bold
-                )
-            }
-        }
+    // Look, position and z-order unchanged — they now live in HudToastCard, which the UI hints share.
+    HudToastCard(text = current.first, accent = Color(0xFFC75C5C), icon = "⚠") {
+        GameStateRepository.clearCrimeMessage()
     }
 }
 
@@ -3375,6 +3595,16 @@ private fun ItemInfoPopupCard(info: ItemInfo?, enchant: ItemEnchant?, edge: Popu
                 if (info.effects.isNotEmpty()) {
                     InfoSectionHeader("EFFECTS")
                     info.effects.forEach { eff -> InfoEffectRow(eff.text, eff.harmful, null) }
+                }
+                // Free-text paragraph, magic effects only. Below the rows, which is where vanilla's
+                // MagicEffectToolTip puts the description relative to its "School:" line. Wrapping
+                // prose, so it gets MwBody and a line height rather than the rows' MwData.
+                if (info.description.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        info.description,
+                        color = Bone, fontSize = 11.sp, fontFamily = MwBody, lineHeight = 15.sp
+                    )
                 }
             }
 
@@ -7395,10 +7625,43 @@ private object MapDsUiState {
         if (v == MapView.GLOBAL) worldOffset = value else localOffset = value
     }
 
-    /** The marker whose label is showing (a MapPlace, a DoorMarker or a MapNote) and its text. One
-     *  pair across both surfaces, so only one label is ever up. */
+    /** The marker whose label is showing (a MapPlace, a DoorMarker or a MapNote), its text, and the
+     *  MAP it was tapped on. One triple across both surfaces, so only one label is ever up.
+     *
+     *  [selectedView] is what keeps the label on ONE screen (Aug 21 2026 — it used to appear on both
+     *  at once). Deliberately the VIEW and not the screen: the label describes a marker that belongs
+     *  to a particular map, so if the maps are swapped while it is up it should travel with its own
+     *  map rather than sit over the other one. In practice a swap clears it — see [swapMaps] — but
+     *  keying on the view is what makes that a choice rather than the only thing that works.
+     *
+     *  Always mutate through [select] / [clearSelection]: the marker, its text and its view have to
+     *  move together, and the render gate reads all three. */
     var selectedMarker by mutableStateOf<Any?>(null)
+        private set
     var selectedLabel by mutableStateOf("")
+        private set
+    var selectedView by mutableStateOf<MapView?>(null)
+        private set
+
+    fun select(marker: Any, label: String, view: MapView) {
+        selectedMarker = marker
+        selectedLabel = label
+        selectedView = view
+    }
+
+    fun clearSelection() {
+        selectedMarker = null
+        selectedLabel = ""
+        selectedView = null
+    }
+
+    /** Swap the maps between the screens, dismissing any open marker label. The label is dropped
+     *  rather than carried because its surface changes underneath it mid-animation, and a name
+     *  card that jumps screens reads as a glitch; it is one tap to bring back. */
+    fun swapMaps() {
+        clearSelection()
+        swapped = !swapped
+    }
 
     /** Note composer. [pendingWorld] is where a long-press landed; index >= 0 means editing an
      *  existing note instead of creating one. */
@@ -7413,7 +7676,7 @@ private object MapDsUiState {
         worldScale = MAP_GLOBAL_FIT; worldOffset = Offset.Zero
         localScale = 620f; localOffset = Offset.Zero
         worldInit = false; localInit = false
-        selectedMarker = null; selectedLabel = ""
+        clearSelection()
         noteEditorOpen = false; noteEditIndex = -1; noteDraft = ""; keyboardOpen = false
     }
 }
@@ -7481,7 +7744,16 @@ private fun MapSurface(
     // Door markers the player has actually discovered. Computed once per data change rather than
     // inside the Canvas: it samples a bitmap per marker, and both the draw and the hit test need
     // the same answer — deriving it twice would let a tap find a marker that is not drawn.
-    val visibleDoors = remember(doorMarkers, fog, s, frame) {
+    //
+    // **`isWorld` IS A KEY, and leaving it out was a bug (Aug 21 2026).** The lambda READS it, so a
+    // surface that swapped between the two maps kept whatever it computed under its PREVIOUS view:
+    // the top surface starts out showing the world map, caches `emptyList()`, and then took the
+    // local map on a swap still holding that empty list — no door markers drawn, and none tappable
+    // either, since the hit test shares this list. It presented as "local map icons are missing on
+    // the top screen"; it was really "the surface whose view changed", and only looked
+    // top-specific because the default layout puts the world map there. The sibling `myNotes` above
+    // already keys on `isWorld` for exactly this reason.
+    val visibleDoors = remember(doorMarkers, fog, s, frame, isWorld) {
         if (isWorld) emptyList()
         else doorMarkers.filter { mapPositionExplored(it.worldX, it.worldY, s, frame, fog) }
     }
@@ -7614,16 +7886,16 @@ private fun MapSurface(
 
                             when {
                                 found != null && found.first != MapDsUiState.selectedMarker -> {
-                                    MapDsUiState.selectedMarker = found.first
-                                    MapDsUiState.selectedLabel = found.third.ifBlank { "(empty note)" }
+                                    // `view` is this surface's map, so the label shows only here.
+                                    MapDsUiState.select(
+                                        found.first, found.third.ifBlank { "(empty note)" }, view)
                                 }
                                 // A label is up: this tap DISMISSES it and is consumed — it must not
                                 // also close the map. A second tap then closes. Same rule the HUD
                                 // minimap uses for its door-marker bubble, and it is what stops a
                                 // dismiss from being read as "close".
                                 MapDsUiState.selectedMarker != null -> {
-                                    MapDsUiState.selectedMarker = null
-                                    MapDsUiState.selectedLabel = ""
+                                    MapDsUiState.clearSelection()
                                 }
                                 // Empty tap on the bottom surface: close the DS map. Routed through
                                 // the same toggle the minimap tap uses, so the native mode pops via
@@ -7632,10 +7904,7 @@ private fun MapSurface(
                                     UiSounds.play(UiSounds.Cue.TOGGLE)
                                     CompanionActions.openWorldMap()
                                 }
-                                else -> {
-                                    MapDsUiState.selectedMarker = null
-                                    MapDsUiState.selectedLabel = ""
-                                }
+                                else -> MapDsUiState.clearSelection()
                             }
                         }
                     )
@@ -7750,12 +8019,15 @@ private fun MapSurface(
             }
 
             // Tapped marker's label. Auto-dismissed like the minimap's door-marker bubble.
-            MapDsUiState.selectedMarker?.let { marker ->
+            //
+            // Only on the surface whose map was actually tapped: the state is shared by both
+            // surfaces, so without this gate one tap raised the same card on BOTH screens. The
+            // auto-dismiss timer sits inside the gate on purpose — exactly one surface owns the
+            // selection, so exactly one timer runs it out.
+            MapDsUiState.selectedMarker?.takeIf { MapDsUiState.selectedView == view }?.let { marker ->
                 LaunchedEffect(marker) {
                     delay(MAP_PLACE_LABEL_MS)
-                    if (MapDsUiState.selectedMarker == marker) {
-                        MapDsUiState.selectedMarker = null; MapDsUiState.selectedLabel = ""
-                    }
+                    if (MapDsUiState.selectedMarker == marker) MapDsUiState.clearSelection()
                 }
                 val isNote = marker is MapNote
                 Row(
@@ -7779,12 +8051,12 @@ private fun MapSurface(
                             MapDsUiState.noteDraft = n.note
                             MapDsUiState.noteEditorOpen = true
                             MapDsUiState.keyboardOpen = true
-                            MapDsUiState.selectedMarker = null
+                            MapDsUiState.clearSelection()
                         }
                         Spacer(Modifier.width(6.dp))
                         MapLabelAction("Delete", BarterRed) {
                             CompanionActions.mapDeleteNote(n.index)
-                            MapDsUiState.selectedMarker = null
+                            MapDsUiState.clearSelection()
                         }
                     }
                 }
@@ -7885,7 +8157,7 @@ private fun MapDsControls() {
             )
             Spacer(Modifier.height(8.dp))
             MapDsActionBar(
-                onSwap = { MapDsUiState.swapped = !MapDsUiState.swapped },
+                onSwap = { MapDsUiState.swapMaps() },
                 onCentre = {
                     // CENTRE recentres BOTH maps on the player, because both are on screen at once
                     // and "where am I" is the question either one is being asked. On the local map
@@ -8092,6 +8364,116 @@ private fun EnchantingOverlay(session: EnchantSession) {
         else session.available.filter { it.name.lowercase().contains(needle) }
     }
 
+    // ---- Controller navigation --------------------------------------------------------------
+    // Native already swallows the controller in GUI mode while this screen is up (enchantNav is in
+    // EngineActivity's setCompanionNavActive combine) and re-emits it as COMPANION_NAV_*; nothing
+    // consumed those events until now. The bottom screen never receives Android input — see the
+    // controller-nav design note in CLAUDE_ENGINE.md.
+    //
+    // ONE lambda per action, shared by the touch and controller paths, so the two can never diverge
+    // (the alchemy convention). The slot actions keep the tap semantics exactly: a FILLED slot
+    // CLEARS, an empty one opens the picker — so L1/R1 are "the item/soul slot button", not "open
+    // the picker unconditionally", which would silently do nothing on a filled slot.
+    val itemSlotAction: () -> Unit = {
+        UiSounds.play(UiSounds.Cue.TOGGLE)
+        if (session.item.present) CompanionActions.enchantClearItem()
+        else EnchantUiState.picker = "item"
+    }
+    val soulSlotAction: () -> Unit = {
+        UiSounds.play(UiSounds.Cue.TOGGLE)
+        if (session.soul.present) CompanionActions.enchantClearSoul()
+        else EnchantUiState.picker = "soul"
+    }
+    val addEffect: (EnchantAvailEffect) -> Unit = { avail ->
+        UiSounds.play(UiSounds.Cue.TOGGLE)
+        CompanionActions.enchantAddEffect(avail.id)
+    }
+    val castTypeAction: () -> Unit = {
+        // Gated exactly as the button is: the engine answers whether this item has anything to
+        // cycle to, and a locked item (scroll/ammo, or a bow without a big enough soul) must read
+        // as inert on the controller too, not silently do nothing different from the button.
+        if (session.castCycle) {
+            UiSounds.play(UiSounds.Cue.TOGGLE)
+            CompanionActions.enchantCastTypeNext()
+        }
+    }
+    val buyAction: () -> Unit = {
+        UiSounds.play(UiSounds.Cue.ACTION)
+        CompanionActions.enchantBuy()
+    }
+
+    // Any popup open = that popup owns input. The main loop yields (enabled = false) and B is
+    // re-routed: registering the cancelable-modal bridge flips the native atomic so B arrives as
+    // NAV_CANCEL instead of falling through to exitCurrentGuiMode, which would pop the whole
+    // enchanting mode out from under an open picker. Persuasion popup is the template.
+    val popupOpen = EnchantUiState.picker != null || EnchantUiState.argPick != null ||
+        EnchantUiState.editing || searching || EnchantUiState.nameComposer
+    DisposableEffect(popupOpen) {
+        if (popupOpen) {
+            ModalNav.count++
+            CompanionActions.setModalCancelOpen(true)
+        }
+        onDispose {
+            if (popupOpen) {
+                ModalNav.count--
+                if (ModalNav.count == 0) CompanionActions.setModalCancelOpen(false)
+            }
+        }
+    }
+
+    // B while a popup is up closes the TOPMOST one. Its own collector, because the main list loop
+    // is disabled exactly when this is needed. Order mirrors the render order below (later = drawn
+    // on top): the two keyboards, then the editor, then the arg picker, then the item/soul picker.
+    val popupOpenState = rememberUpdatedState(popupOpen)
+    val searchingState = rememberUpdatedState(searching)
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (ev !is NavEvent.Cancel || !popupOpenState.value) return@collect
+            when {
+                searchingState.value -> searching = false
+                EnchantUiState.nameComposer -> EnchantUiState.nameComposer = false
+                EnchantUiState.editing -> {
+                    // Through the ENGINE, never by just closing the popup: cancel erases a
+                    // newly-added effect and restores an edited one, and only the native handler
+                    // knows which of the two this was.
+                    CompanionActions.enchantEffectCancel()
+                    EnchantUiState.closeEditor()
+                }
+                EnchantUiState.argPick != null -> EnchantUiState.argPick = null
+                EnchantUiState.picker != null -> EnchantUiState.picker = null
+            }
+        }
+    }
+
+    val listState = rememberLazyListState()
+    val focusIndex = rememberListNavFocus(
+        itemCount = visible.size,
+        enabled = !popupOpen,
+        onConfirm = { i -> visible.getOrNull(i)?.let(addEffect) },
+        onAction1 = buyAction,          // X
+        onAction2 = castTypeAction,     // Y
+        onL1 = itemSlotAction,
+        onR1 = soulSlotAction,
+        // R3 → toggle the info popup for the focused effect. EFFECT, not item/spell: the id is a
+        // MagicEffect RefId and only companion.lua's `effect:` branch can resolve it.
+        onInfo = { i ->
+            visible.getOrNull(i)?.let { ItemInfoPopupState.toggle(it.id, it.name, null, kind = InfoKind.EFFECT) }
+        },
+        // Follow the focus SYNCHRONOUSLY (before recomposition) so the newly focused row re-reports
+        // its anchor during the ensuing layout pass — same reason as the spell-buying list.
+        onFocusChanged = { i ->
+            if (ItemInfoPopupState.isOpen) {
+                visible.getOrNull(i)?.let { ItemInfoPopupState.follow(it.id, it.name, null, kind = InfoKind.EFFECT) }
+            }
+        },
+    )
+    LaunchedEffect(focusIndex) {
+        if (focusIndex in visible.indices) listState.animateScrollToItem(focusIndex)
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -8134,22 +8516,16 @@ private fun EnchantingOverlay(session: EnchantSession) {
                     slot = session.item,
                     detail = if (session.item.present) "${session.maxPoints} pts" else "",
                     modifier = Modifier.weight(1f),
-                    onTap = {
-                        UiSounds.play(UiSounds.Cue.TOGGLE)
-                        if (session.item.present) CompanionActions.enchantClearItem()
-                        else EnchantUiState.picker = "item"
-                    }
+                    hint = "L1",
+                    onTap = itemSlotAction
                 )
                 EnchantSlotBox(
                     label = "SOUL",
                     slot = session.soul,
                     detail = if (session.soul.present) "${session.soul.charge}" else "",
                     modifier = Modifier.weight(1f),
-                    onTap = {
-                        UiSounds.play(UiSounds.Cue.TOGGLE)
-                        if (session.soul.present) CompanionActions.enchantClearSoul()
-                        else EnchantUiState.picker = "soul"
-                    }
+                    hint = "R1",
+                    onTap = soulSlotAction
                 )
             }
 
@@ -8186,28 +8562,48 @@ private fun EnchantingOverlay(session: EnchantSession) {
             // deduplicated and name-sorted by the engine. A row whose effect has NO legal range under
             // the current cast style is greyed: vanilla ignores that tap silently (its own unresolved
             // TODO), so no message is invented here — the row simply reads as unavailable.
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-                if (visible.isEmpty()) {
+            // A LazyColumn, NOT a verticalScroll Column: D-pad focus has to drag the viewport with
+            // it, and only a LazyListState can be scrolled to an index. The persuasion popup was
+            // fixed for exactly this on Aug 20 2026 ("focus walked off the bottom edge invisibly").
+            // The hoisted state also feeds the scrollbar.
+            if (visible.isEmpty()) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
                     Text(
                         if (session.available.isEmpty()) "No known enchantable effects"
                         else "No effects match",
                         color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
                         modifier = Modifier.padding(vertical = 12.dp)
                     )
-                } else visible.forEach { avail ->
-                    val usable = session.ranges(avail.flags).isNotEmpty()
-                    val room = session.effects.size < session.effectCap
-                    EnchantEffectRow(
-                        icon = avail.icon,
-                        title = avail.name,
-                        subtitle = if (!usable) "Not available for this enchantment" else null,
-                        enabled = usable && room,
-                        onTap = {
-                            UiSounds.play(UiSounds.Cue.TOGGLE)
-                            CompanionActions.enchantAddEffect(avail.id)
-                        }
-                    )
                 }
+            } else {
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    // Unkeyed, deliberately — see the crash note on the item picker. These ids ARE
+                    // unique today (startEditing dedupes knownEffects, and the stale-tail bug that
+                    // could double them was fixed the same day), but keying would make a Compose
+                    // crash the failure mode if that engine invariant ever slipped, and there is
+                    // nothing to gain: the list only ever changes by FILTERING, never reordering.
+                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        itemsIndexed(visible) { i, avail ->
+                            val usable = session.ranges(avail.flags).isNotEmpty()
+                            val room = session.effects.size < session.effectCap
+                            EnchantEffectRow(
+                                icon = avail.icon,
+                                title = avail.name,
+                                subtitle = if (!usable) "Not available for this enchantment" else null,
+                                enabled = usable && room,
+                                focused = i == focusIndex,
+                                infoId = avail.id,
+                                onTap = { addEffect(avail) }
+                            )
+                        }
+                    }
+                    // Position + length, which the chevron below cannot express on a list this long.
+                    Spacer(Modifier.width(4.dp))
+                    VerticalListScrollbar(listState, Modifier.fillMaxHeight())
+                }
+                // Kept alongside the bar: the chevron answers "is there more?" at a glance, and it
+                // is what survives being glanced at on a 3.92" screen.
+                ScrollMoreHint(listState)
             }
 
             Spacer(Modifier.height(6.dp))
@@ -8223,24 +8619,25 @@ private fun EnchantingOverlay(session: EnchantSession) {
                 EnchantActionButton(
                     label = session.castLabel.ifBlank { "Cast Once" },
                     color = if (session.castCycle) BronzeLight else BoneDim,
-                    enabled = session.castCycle
-                ) {
-                    UiSounds.play(UiSounds.Cue.TOGGLE)
-                    CompanionActions.enchantCastTypeNext()
-                }
+                    enabled = session.castCycle,
+                    hint = "Y",
+                    onTap = castTypeAction
+                )
                 Spacer(Modifier.weight(1f))
                 // ALWAYS enabled, exactly as in vanilla: pressing Buy with something missing is how
                 // the validation message is produced, and there is no native "validate without
                 // committing" call to grey it out with.
                 EnchantActionButton(
                     label = if (session.self) "Create" else "Buy",
-                    color = BronzeLight
-                ) {
-                    UiSounds.play(UiSounds.Cue.ACTION)
-                    CompanionActions.enchantBuy()
-                }
+                    color = BronzeLight,
+                    hint = "X",
+                    onTap = buyAction
+                )
                 Spacer(Modifier.width(8.dp))
-                EnchantActionButton(label = "Cancel", color = Bone) {
+                // B, not a NAV binding: B is deliberately never intercepted at the top level, so it
+                // reaches native exitCurrentGuiMode -> EnchantingDialog::exit(), which emits the
+                // close signal and pops the mode. The hint documents the button that already works.
+                EnchantActionButton(label = "Cancel", color = Bone, hint = "B") {
                     UiSounds.play(UiSounds.Cue.TOGGLE)
                     CompanionActions.enchantCancel()
                 }
@@ -8348,6 +8745,9 @@ private fun EnchantSlotBox(
     slot: EnchantSlotItem,
     detail: String,
     modifier: Modifier = Modifier,
+    // Controller binding, drawn beside the ITEM/SOUL caption. Same inline-hint convention as
+    // EnchantActionButton — these two slots are the screen's L1/R1 shortcuts.
+    hint: String? = null,
     onTap: () -> Unit
 ) {
     val icon = rememberItemIcon(slot.icon)
@@ -8365,11 +8765,17 @@ private fun EnchantSlotBox(
             Spacer(Modifier.width(9.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(
-                label,
-                color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold, letterSpacing = 1.sp
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    label,
+                    color = BronzeLight, fontSize = 11.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+                )
+                if (hint != null) {
+                    Spacer(Modifier.width(5.dp))
+                    Text("[$hint]", color = BoneDim, fontSize = 10.sp, fontFamily = MwData)
+                }
+            }
             Text(
                 if (slot.present) slot.name else "Tap to select",
                 color = if (slot.present) BoneBright else BoneDim,
@@ -8383,21 +8789,55 @@ private fun EnchantSlotBox(
     }
 }
 
-/** One row of the browse list, or of the current-effects list. */
+/** One row of the browse list, or of the current-effects list.
+ *
+ *  [infoId] is the effect's serialized RefId. Non-null turns the row into an info target: it reports
+ *  its bounds so the floating info popup can anchor to it, and a LONG PRESS opens that popup — the
+ *  touch equivalent of R3, exactly as every item/spell row in the app already works. The
+ *  current-effects list on the top screen passes null (its tap is Edit, and a long press there has
+ *  no meaning). */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun EnchantEffectRow(
     icon: String,
     title: String,
     subtitle: String?,
     enabled: Boolean,
+    focused: Boolean = false,
+    infoId: String? = null,
     onTap: () -> Unit
 ) {
     val bmp = rememberItemIcon(icon)
-    Column {
+    Column(
+        modifier = if (infoId == null) Modifier
+        else Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(infoId, it.boundsInRoot()) }
+    ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .then(if (enabled) Modifier.clickable { onTap() } else Modifier)
+                // Focus ring matches SpellForSaleRow's (12% fill + a 2dp bright border), so the
+                // D-pad cursor reads the same on every DS list.
+                .then(
+                    if (focused) Modifier.background(BronzeLight.copy(alpha = 0.12f))
+                        .border(2.dp, BronzeLight)
+                    else Modifier
+                )
+                .then(
+                    when {
+                        enabled && infoId != null -> Modifier.combinedClickable(
+                            onClick = onTap,
+                            onLongClick = { ItemInfoPopupState.open(infoId, title, null, kind = InfoKind.EFFECT) }
+                        )
+                        enabled -> Modifier.clickable { onTap() }
+                        // A greyed row still reports info: vanilla ignores the TAP silently, but
+                        // "why can I not use this?" is exactly when the description is wanted.
+                        infoId != null -> Modifier.combinedClickable(
+                            onClick = {},
+                            onLongClick = { ItemInfoPopupState.open(infoId, title, null, kind = InfoKind.EFFECT) }
+                        )
+                        else -> Modifier
+                    }
+                )
                 .padding(vertical = 11.dp, horizontal = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -8421,29 +8861,55 @@ private fun EnchantEffectRow(
     }
 }
 
-/** Shared action button for the enchanting screen. */
+/** Shared action button for the enchanting screen.
+ *
+ *  [hint] draws the controller binding inline as "[X]", the convention every other DS overlay uses
+ *  (LootButton, BarterButton, the quantity selector's MAX). DS screens carry their own hints rather
+ *  than relying on the native ControllerButtonsOverlay: that bar reads the ACTIVE window's
+ *  mControllerButtons, and in DS mode this window is hidden, so it shows whatever is underneath. */
 @Composable
 private fun EnchantActionButton(
     label: String,
     color: Color,
     enabled: Boolean = true,
+    hint: String? = null,
+    // D-pad focus (the effect editor's action row). Same 2dp bright ring as every other DS list.
+    focused: Boolean = false,
     onTap: () -> Unit
 ) {
     Box(
         Modifier
             .height(ENCHANT_CONTROL_HEIGHT)
             .clip(RoundedCornerShape(3.dp))
-            .background(SlotBg)
-            .border(1.dp, if (enabled) BronzeDark else Color(0xFF2A2118), RoundedCornerShape(3.dp))
+            .background(if (focused) BronzeLight.copy(alpha = 0.12f) else SlotBg)
+            .border(
+                if (focused) 2.dp else 1.dp,
+                when {
+                    focused -> BronzeLight
+                    enabled -> BronzeDark
+                    else -> Color(0xFF2A2118)
+                },
+                RoundedCornerShape(3.dp)
+            )
             .then(if (enabled) Modifier.clickable { onTap() } else Modifier)
             .padding(horizontal = 18.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            label,
-            color = if (enabled) color else BoneMuted,
-            fontSize = 16.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold, maxLines = 1
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                color = if (enabled) color else BoneMuted,
+                fontSize = 16.sp, fontFamily = MwDisplay, fontWeight = FontWeight.Bold, maxLines = 1
+            )
+            if (hint != null) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "[$hint]",
+                    color = if (enabled) BoneDim else BoneDim.copy(alpha = 0.5f),
+                    fontSize = 11.sp, fontFamily = MwData
+                )
+            }
+        }
     }
 }
 
@@ -8534,26 +9000,62 @@ private fun EnchantPickerPopup(
     onPick: (String) -> Unit,
     onCancel: () -> Unit
 ) {
+    // One lambda for both input paths, as everywhere else on this screen.
+    val pick: (EnchantPickOption) -> Unit = { opt ->
+        UiSounds.play(UiSounds.Cue.TOGGLE); onPick(opt.id)
+    }
+    // L1/R1 raise this popup, so it has to be drivable by controller or those shortcuts dead-end.
+    // B is NOT handled here — the parent overlay's popup-cancel collector owns it for all five
+    // popups, so binding it again would close two things at once.
+    val listState = rememberLazyListState()
+    val focusIndex = rememberListNavFocus(
+        itemCount = options.size,
+        onConfirm = { i -> options.getOrNull(i)?.let(pick) }
+    )
+    LaunchedEffect(focusIndex) {
+        if (focusIndex in options.indices) listState.animateScrollToItem(focusIndex)
+    }
     EnchantPopupFrame(title) {
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-            if (options.isEmpty()) {
+        if (options.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
                 Text(empty, color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
                     modifier = Modifier.padding(vertical = 12.dp))
-            } else options.forEach { opt ->
-                EnchantEffectRow(
-                    icon = opt.icon,
-                    title = if (opt.count > 1) "${opt.name} (${opt.count})" else opt.name,
-                    // Soul gems show the trapped soul and its value — the number that becomes the
-                    // enchantment's Charge. Items show the capacity they would give.
-                    subtitle = if (soul) "${opt.soul} — ${opt.charge}" else "${opt.maxPoints} enchantment points",
-                    enabled = true,
-                    onTap = { UiSounds.play(UiSounds.Cue.TOGGLE); onPick(opt.id) }
-                )
             }
+        } else {
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                // NO `key = { … o.id }` — CRASH (Aug 21 2026). `id` is the item's RECORD RefId and
+                // the engine emits one row per container-store STACK, so two rows can legitimately
+                // share it: enchantable items are weapons/armour/clothing, which do NOT stack when
+                // their condition differs, so two iron daggers at different durability are two rows
+                // with the same id. LazyColumn wraps each item in a SaveableStateProvider keyed on
+                // that value and throws once both duplicates are composed at the same time — which
+                // is why it took a big inventory and ~15 rows of scrolling to reach, and never fired
+                // on a short list. Index keys (the default) are correct here anyway: this list does
+                // not reorder while it is open (the sim is paused and the popup closes on pick) and
+                // the rows hold no state worth preserving, so a key buys nothing and can only hurt.
+                LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    itemsIndexed(options) { i, opt ->
+                        EnchantEffectRow(
+                            icon = opt.icon,
+                            title = if (opt.count > 1) "${opt.name} (${opt.count})" else opt.name,
+                            // Soul gems show the trapped soul and its value — the number that becomes
+                            // the enchantment's Charge. Items show the capacity they would give.
+                            subtitle = if (soul) "${opt.soul} — ${opt.charge}"
+                            else "${opt.maxPoints} enchantment points",
+                            enabled = true,
+                            focused = i == focusIndex,
+                            onTap = { pick(opt) }
+                        )
+                    }
+                }
+                Spacer(Modifier.width(4.dp))
+                VerticalListScrollbar(listState, Modifier.fillMaxHeight())
+            }
+            ScrollMoreHint(listState)
         }
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            EnchantActionButton(label = "Cancel", color = Bone) {
+            EnchantActionButton(label = "Cancel", color = Bone, hint = "B") {
                 UiSounds.play(UiSounds.Cue.TOGGLE); onCancel()
             }
         }
@@ -8575,26 +9077,56 @@ private fun EnchantArgPickerPopup(
         if (pick.isSkill) state.character.skills.map { it.id to it.name }
         else state.character.attributes.map { it.id to it.name }
     }
+    val choose: (String) -> Unit = { id -> UiSounds.play(UiSounds.Cue.TOGGLE); onPick(id) }
+    // The skill list is 27 rows on a stock install (and mods can add more), so this one genuinely
+    // needs the scroll-to-focus that only a LazyListState can give. B is left to the parent
+    // overlay's popup-cancel collector, as with the other popups.
+    val listState = rememberLazyListState()
+    val focusIndex = rememberListNavFocus(
+        itemCount = rows.size,
+        onConfirm = { i -> rows.getOrNull(i)?.let { choose(it.first) } }
+    )
+    LaunchedEffect(focusIndex) {
+        if (focusIndex in rows.indices) listState.animateScrollToItem(focusIndex)
+    }
     EnchantPopupFrame(if (pick.isSkill) "SELECT SKILL" else "SELECT ATTRIBUTE") {
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-            if (rows.isEmpty()) {
+        if (rows.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
                 Text("Unavailable", color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
                     modifier = Modifier.padding(vertical = 12.dp))
-            } else rows.forEach { (id, name) ->
-                EnchantEffectRow(
-                    icon = "", title = name, subtitle = null, enabled = true,
-                    onTap = { UiSounds.play(UiSounds.Cue.TOGGLE); onPick(id) }
-                )
             }
+        } else {
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                // Unkeyed for the same reason as the other two. These skill/attribute ids are
+                // genuinely unique (they come from the record stores), but the list is static while
+                // the popup is open, so the key would be pure risk for no benefit.
+                LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    itemsIndexed(rows) { i, (id, name) ->
+                        EnchantEffectRow(
+                            icon = "", title = name, subtitle = null, enabled = true,
+                            focused = i == focusIndex,
+                            onTap = { choose(id) }
+                        )
+                    }
+                }
+                Spacer(Modifier.width(4.dp))
+                VerticalListScrollbar(listState, Modifier.fillMaxHeight())
+            }
+            ScrollMoreHint(listState)
         }
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            EnchantActionButton(label = "Cancel", color = Bone) {
+            EnchantActionButton(label = "Cancel", color = Bone, hint = "B") {
                 UiSounds.play(UiSounds.Cue.TOGGLE); onCancel()
             }
         }
     }
 }
+
+/** The editor's D-pad focus stops, in screen order. Built fresh on every recomposition from the
+ *  SAME visibility tests that decide what is drawn (see the popup's KDoc — two of them move under
+ *  the player), so the focus list can never offer a row that is not on screen. */
+private enum class EnchantEditRow { RANGE, MAG_MIN, MAG_MAX, DURATION, AREA, DELETE, OK, CANCEL }
 
 /**
  * Popup 3 — the effect editor: the Range button plus whichever of the Magnitude / Duration / Area
@@ -8629,27 +9161,201 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
         }
     }
 
+    // ---- Shared actions -----------------------------------------------------------------------
+    // One lambda per action, used by BOTH the touch controls below and the D-pad collector, so the
+    // two paths cannot drift (the same rule the browse list follows).
+    val setRange: (Int) -> Unit = { r ->
+        UiSounds.play(UiSounds.Cue.TICK)
+        EnchantUiState.editRange = r
+        // onRangeButtonClicked zeroes the area slider whenever it lands on Self.
+        if (r == EnchantRange.SELF) EnchantUiState.editArea = 0
+        enchantPushEdit()
+    }
+    val setMagMin: (Int) -> Unit = { v ->
+        EnchantUiState.editMagMin = v
+        // The ONE coupling vanilla has: max is forced up to meet min.
+        if (EnchantUiState.editMagMax < v) EnchantUiState.editMagMax = v
+        enchantPushEdit()
+    }
+    val setMagMax: (Int) -> Unit = { v ->
+        EnchantUiState.editMagMax = v.coerceAtLeast(EnchantUiState.editMagMin)
+        enchantPushEdit()
+    }
+    val setDuration: (Int) -> Unit = { v -> EnchantUiState.editDuration = v; enchantPushEdit() }
+    val setArea: (Int) -> Unit = { v -> EnchantUiState.editArea = v; enchantPushEdit() }
+    val deleteAction: () -> Unit = {
+        UiSounds.play(UiSounds.Cue.TOGGLE)
+        CompanionActions.enchantDeleteEffect(EnchantUiState.editIndex)
+        EnchantUiState.closeEditor()
+    }
+    val okAction: () -> Unit = {
+        UiSounds.play(UiSounds.Cue.ACTION)
+        CompanionActions.enchantEffectOk()
+        EnchantUiState.closeEditor()
+    }
+    val cancelAction: () -> Unit = {
+        UiSounds.play(UiSounds.Cue.TOGGLE)
+        CompanionActions.enchantEffectCancel()
+        EnchantUiState.closeEditor()
+    }
+
+    // ---- Controller navigation ----------------------------------------------------------------
+    // Mirrors EditEffectDialog::onControllerButtonEvent (spellcreationdialog.cpp) rather than
+    // inventing a mapping: Up/Down walk the controls, Left/Right cycle the range or step the focused
+    // slider by 1, L1/R1 jump that slider to its min/max, A activates the focused control, X is an
+    // always-available OK and B cancels.
+    //
+    // A on a SLIDER row is deliberately INERT — vanilla has no branch for it either, and X is the
+    // commit that always works regardless of where focus is sitting, so nothing is unreachable.
+    // B is not handled here: the parent overlay's popup-cancel collector already owns it (and routes
+    // through the engine, which is what decides between erasing a new effect and restoring an
+    // edited one).
+    val rows = buildList {
+        if (ranges.isNotEmpty()) add(EnchantEditRow.RANGE)
+        if (showMag) { add(EnchantEditRow.MAG_MIN); add(EnchantEditRow.MAG_MAX) }
+        if (showDur) add(EnchantEditRow.DURATION)
+        if (showArea) add(EnchantEditRow.AREA)
+        if (!EnchantUiState.editIsNew) add(EnchantEditRow.DELETE)
+        add(EnchantEditRow.OK)
+        add(EnchantEditRow.CANCEL)
+    }
+    var focus by remember { mutableStateOf(0) }
+    LaunchedEffect(rows) { focus = focus.coerceIn(0, rows.lastIndex) }
+    val focusedRow = rows.getOrNull(focus)
+
+    // Scroll offset of each focusable row WITHIN the scrolling column, reported from layout. A plain
+    // mutable map, never snapshot state: it is written during the layout pass for every visible row,
+    // so a snapshot map would invalidate this popup every frame (the same reasoning as
+    // ItemInfoPopupState's anchor cache).
+    val rowOffsets = remember { HashMap<EnchantEditRow, Int>() }
+    val scrollState = rememberScrollState()
+
+    val rowsState = rememberUpdatedState(rows)
+    val rangesState = rememberUpdatedState(ranges)
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            val list = rowsState.value
+            if (list.isEmpty()) return@collect
+            val cur = list.getOrNull(focus.coerceIn(0, list.lastIndex)) ?: return@collect
+            val legal = rangesState.value
+            // Step the focused slider by [d], or jump it to an end when [toEnd] is set.
+            fun step(d: Int, toEnd: Boolean = false) {
+                when (cur) {
+                    EnchantEditRow.RANGE -> if (legal.size > 1) {
+                        val i = legal.indexOf(EnchantUiState.editRange).coerceAtLeast(0)
+                        setRange(legal[(i + d + legal.size) % legal.size])
+                    }
+                    EnchantEditRow.MAG_MIN -> {
+                        val lo = EnchantBounds.MAG_MIN
+                        val hi = EnchantBounds.MAG_MAX
+                        setMagMin(
+                            if (toEnd) (if (d < 0) lo else hi)
+                            else (EnchantUiState.editMagMin + d).coerceIn(lo, hi)
+                        )
+                    }
+                    EnchantEditRow.MAG_MAX -> {
+                        // Its floor is the CURRENT min, exactly as the touch slider's `min` is.
+                        val lo = EnchantUiState.editMagMin
+                        val hi = EnchantBounds.MAG_MAX
+                        setMagMax(
+                            if (toEnd) (if (d < 0) lo else hi)
+                            else (EnchantUiState.editMagMax + d).coerceIn(lo, hi)
+                        )
+                    }
+                    EnchantEditRow.DURATION -> {
+                        val lo = EnchantBounds.DURATION_MIN
+                        val hi = EnchantBounds.DURATION_MAX
+                        setDuration(
+                            if (toEnd) (if (d < 0) lo else hi)
+                            else (EnchantUiState.editDuration + d).coerceIn(lo, hi)
+                        )
+                    }
+                    EnchantEditRow.AREA -> {
+                        val lo = EnchantBounds.AREA_MIN
+                        val hi = EnchantBounds.AREA_MAX
+                        setArea(
+                            if (toEnd) (if (d < 0) lo else hi)
+                            else (EnchantUiState.editArea + d).coerceIn(lo, hi)
+                        )
+                    }
+                    // The action buttons sit on one visual row, so Left/Right walks BETWEEN them
+                    // (vanilla does the same) instead of adjusting anything.
+                    EnchantEditRow.DELETE, EnchantEditRow.OK, EnchantEditRow.CANCEL ->
+                        if (!toEnd) focus = (focus + d).coerceIn(0, list.lastIndex)
+                }
+            }
+            when (ev) {
+                is NavEvent.Down -> focus = (focus + 1) % list.size
+                is NavEvent.Up -> focus = (focus - 1 + list.size) % list.size
+                is NavEvent.Right -> step(1)
+                is NavEvent.Left -> step(-1)
+                is NavEvent.R1 -> step(1, toEnd = true)
+                is NavEvent.L1 -> step(-1, toEnd = true)
+                // Left stick, the app-wide "nudge a slider" axis (barter gold, rest hours).
+                is NavEvent.SliderRight -> step(1)
+                is NavEvent.SliderLeft -> step(-1)
+                is NavEvent.Confirm -> when (cur) {
+                    EnchantEditRow.RANGE -> step(1)   // A on the range button cycles it, as in vanilla
+                    EnchantEditRow.DELETE -> deleteAction()
+                    EnchantEditRow.OK -> okAction()
+                    EnchantEditRow.CANCEL -> cancelAction()
+                    else -> Unit                       // inert on a slider — see the note above
+                }
+                is NavEvent.Action1 -> okAction()       // X = OK, vanilla's explicit shortcut
+                else -> Unit
+            }
+        }
+    }
+
+    // Keep the focused row in view. The value rows live in a plain scrolling Column (they are
+    // heterogeneous and few, so a LazyColumn would buy nothing), which cannot scroll to an index —
+    // hence the measured offsets above. The action buttons are OUTSIDE that column and always
+    // visible, so they have no offset and are skipped.
+    LaunchedEffect(focusedRow) {
+        rowOffsets[focusedRow]?.let { y ->
+            scrollState.animateScrollTo((y - EDITOR_FOCUS_SCROLL_MARGIN).coerceAtLeast(0))
+        }
+    }
+
     EnchantPopupFrame(effect.text.ifBlank { "EFFECT" }.uppercase()) {
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState)) {
+
+            // Reports a row's offset within this scrolling column so the D-pad can bring it into
+            // view. positionInParent() is the UNSCROLLED layout position, which is exactly what
+            // animateScrollTo takes — the scroll modifier translates the column as a whole.
+            fun Modifier.reportRow(row: EnchantEditRow) = this.onGloballyPositioned {
+                rowOffsets[row] = it.positionInParent().y.toInt()
+            }
 
             // --- Range ------------------------------------------------------------------------------
             // Only the legal options are drawn. An effect with a single legal range shows that one
             // as an inert label rather than a button that cannot change anything.
-            Text("Range", color = BronzeLight, fontSize = 14.sp, fontFamily = MwDisplay)
-            Spacer(Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ranges.forEach { r ->
-                    EnchantChip(
-                        label = EnchantRange.label(r),
-                        active = r == EnchantUiState.editRange,
-                        onTap = {
-                            UiSounds.play(UiSounds.Cue.TICK)
-                            EnchantUiState.editRange = r
-                            // onRangeButtonClicked zeroes the area slider whenever it lands on Self.
-                            if (r == EnchantRange.SELF) EnchantUiState.editArea = 0
-                            enchantPushEdit()
-                        }
-                    )
+            Column(Modifier.fillMaxWidth().reportRow(EnchantEditRow.RANGE)) {
+                Text("Range", color = BronzeLight, fontSize = 14.sp, fontFamily = MwDisplay)
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        // The focus ring goes around the GROUP, not one chip: Left/Right moves the
+                        // selection, so the focused chip is always the active one and a second
+                        // highlight on it would say nothing.
+                        .then(
+                            if (focusedRow == EnchantEditRow.RANGE)
+                                Modifier.border(2.dp, BronzeLight, RoundedCornerShape(3.dp)).padding(3.dp)
+                            else Modifier
+                        ),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ranges.forEach { r ->
+                        EnchantChip(
+                            label = EnchantRange.label(r),
+                            active = r == EnchantUiState.editRange,
+                            onTap = { setRange(r) }
+                        )
+                    }
                 }
             }
 
@@ -8658,22 +9364,20 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
                 EnchantSliderRow(
                     label = "Magnitude (min)",
                     value = EnchantUiState.editMagMin,
-                    min = EnchantBounds.MAG_MIN, max = EnchantBounds.MAG_MAX
-                ) { v ->
-                    EnchantUiState.editMagMin = v
-                    // The ONE coupling vanilla has: max is forced up to meet min.
-                    if (EnchantUiState.editMagMax < v) EnchantUiState.editMagMax = v
-                    enchantPushEdit()
-                }
+                    min = EnchantBounds.MAG_MIN, max = EnchantBounds.MAG_MAX,
+                    focused = focusedRow == EnchantEditRow.MAG_MIN,
+                    modifier = Modifier.reportRow(EnchantEditRow.MAG_MIN),
+                    onChange = setMagMin
+                )
                 Spacer(Modifier.height(6.dp))
                 EnchantSliderRow(
                     label = "Magnitude (max)",
                     value = EnchantUiState.editMagMax,
-                    min = EnchantUiState.editMagMin, max = EnchantBounds.MAG_MAX
-                ) { v ->
-                    EnchantUiState.editMagMax = v.coerceAtLeast(EnchantUiState.editMagMin)
-                    enchantPushEdit()
-                }
+                    min = EnchantUiState.editMagMin, max = EnchantBounds.MAG_MAX,
+                    focused = focusedRow == EnchantEditRow.MAG_MAX,
+                    modifier = Modifier.reportRow(EnchantEditRow.MAG_MAX),
+                    onChange = setMagMax
+                )
             }
 
             if (showDur) {
@@ -8681,11 +9385,11 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
                 EnchantSliderRow(
                     label = "Duration (s)",
                     value = EnchantUiState.editDuration,
-                    min = EnchantBounds.DURATION_MIN, max = EnchantBounds.DURATION_MAX
-                ) { v ->
-                    EnchantUiState.editDuration = v
-                    enchantPushEdit()
-                }
+                    min = EnchantBounds.DURATION_MIN, max = EnchantBounds.DURATION_MAX,
+                    focused = focusedRow == EnchantEditRow.DURATION,
+                    modifier = Modifier.reportRow(EnchantEditRow.DURATION),
+                    onChange = setDuration
+                )
             }
 
             if (showArea) {
@@ -8693,11 +9397,11 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
                 EnchantSliderRow(
                     label = "Area (ft)",
                     value = EnchantUiState.editArea,
-                    min = EnchantBounds.AREA_MIN, max = EnchantBounds.AREA_MAX
-                ) { v ->
-                    EnchantUiState.editArea = v
-                    enchantPushEdit()
-                }
+                    min = EnchantBounds.AREA_MIN, max = EnchantBounds.AREA_MAX,
+                    focused = focusedRow == EnchantEditRow.AREA,
+                    modifier = Modifier.reportRow(EnchantEditRow.AREA),
+                    onChange = setArea
+                )
             }
 
             Spacer(Modifier.height(10.dp))
@@ -8715,24 +9419,24 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
             // Delete is offered only for an EXISTING effect, matching vanilla (mDeleteButton is
             // hidden by newEffect and shown by editEffect).
             if (!EnchantUiState.editIsNew) {
-                EnchantActionButton(label = "Delete", color = BarterRed) {
-                    UiSounds.play(UiSounds.Cue.TOGGLE)
-                    CompanionActions.enchantDeleteEffect(EnchantUiState.editIndex)
-                    EnchantUiState.closeEditor()
-                }
+                EnchantActionButton(
+                    label = "Delete", color = BarterRed,
+                    focused = focusedRow == EnchantEditRow.DELETE,
+                    onTap = deleteAction
+                )
             }
             Spacer(Modifier.weight(1f))
-            EnchantActionButton(label = "OK", color = BronzeLight) {
-                UiSounds.play(UiSounds.Cue.ACTION)
-                CompanionActions.enchantEffectOk()
-                EnchantUiState.closeEditor()
-            }
+            EnchantActionButton(
+                label = "OK", color = BronzeLight, hint = "X",
+                focused = focusedRow == EnchantEditRow.OK,
+                onTap = okAction
+            )
             Spacer(Modifier.width(8.dp))
-            EnchantActionButton(label = "Cancel", color = Bone) {
-                UiSounds.play(UiSounds.Cue.TOGGLE)
-                CompanionActions.enchantEffectCancel()
-                EnchantUiState.closeEditor()
-            }
+            EnchantActionButton(
+                label = "Cancel", color = Bone, hint = "B",
+                focused = focusedRow == EnchantEditRow.CANCEL,
+                onTap = cancelAction
+            )
         }
     }
 }
@@ -8745,8 +9449,21 @@ private fun EnchantSliderRow(
     value: Int,
     min: Int,
     max: Int,
+    modifier: Modifier = Modifier,
+    // D-pad focus. Left/Right (and L1/R1 for the ends) act on the focused row — see the editor's
+    // nav collector. Drawn as the same 2dp ring the browse list and the action buttons use.
+    focused: Boolean = false,
     onChange: (Int) -> Unit
 ) {
+    // ONE column so the label/value line and the stepper line highlight and scroll as a single row.
+    Column(
+        modifier
+            .fillMaxWidth()
+            .then(
+                if (focused) Modifier.border(2.dp, BronzeLight, RoundedCornerShape(3.dp)).padding(3.dp)
+                else Modifier
+            )
+    ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = BronzeLight, fontSize = 14.sp, fontFamily = MwDisplay,
             modifier = Modifier.width(140.dp))
@@ -8783,7 +9500,12 @@ private fun EnchantSliderRow(
         Spacer(Modifier.width(8.dp))
         EnchantStepButton("+", enabled = value < max) { onChange((value + 1).coerceAtMost(max)) }
     }
+    }
 }
+
+/** Padding kept above the D-pad-focused editor row when scrolling it into view, so the focused row
+ *  never sits flush against the top edge with its label clipped. */
+private const val EDITOR_FOCUS_SCROLL_MARGIN = 24
 
 /**
  * TOP-screen enchanting half: the name field, the stat column and the live effects readout.
@@ -9506,7 +10228,7 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
                 // R3 → toggle the info popup for the focused spell (same idea as barter items).
                 onInfo = { i ->
                     session.spells.getOrNull(i)?.let { sp ->
-                        ItemInfoPopupState.toggle(sp.id, sp.spellName, null, isSpell = true)
+                        ItemInfoPopupState.toggle(sp.id, sp.spellName, null, kind = InfoKind.SPELL)
                     }
                 },
                 // D-pad focus moved → if the info popup is open, follow to the newly focused spell.
@@ -9515,7 +10237,7 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
                 onFocusChanged = { i ->
                     if (ItemInfoPopupState.isOpen) {
                         session.spells.getOrNull(i)?.let { sp ->
-                            ItemInfoPopupState.follow(sp.id, sp.spellName, null, isSpell = true)
+                            ItemInfoPopupState.follow(sp.id, sp.spellName, null, kind = InfoKind.SPELL)
                         }
                     }
                 },
@@ -9537,7 +10259,7 @@ private fun SpellBuyingOverlay(session: SpellBuyingSession) {
                             nameFontSize = rowFontSize,
                             focused = i == focusIndex,
                             onBuy = { if (!spell.known) CompanionActions.buySpell(spell.index) },
-                            onInfo = { ItemInfoPopupState.open(spell.id, spell.spellName, null, isSpell = true) }
+                            onInfo = { ItemInfoPopupState.open(spell.id, spell.spellName, null, kind = InfoKind.SPELL) }
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark.copy(alpha = 0.4f)))
                     }
@@ -11453,8 +12175,12 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
     val effectTimersFlow = remember { UiPreferences.effectTimersFlow() }
     val showEffectTimer by effectTimersFlow.collectAsState()
 
+    // The bar, wrapped so the effects dropdown can anchor to the BAR's own bottom-right corner
+    // instead of to the little "Effects" button — see the anchor box at the end of this Box.
+    Box(modifier) {
     Row(
-        modifier = modifier
+        modifier = Modifier
+            .fillMaxSize()
             .clip(RoundedCornerShape(3.dp))
             .background(FloatStone)
             .border(2.dp, Bronze, RoundedCornerShape(3.dp))
@@ -11473,90 +12199,105 @@ private fun TopStatBar(state: GameState, modifier: Modifier = Modifier) {
                     .height(28.dp)
                     .background(BronzeDark)
             )
-            Box {
+            Column(
+                modifier = Modifier.clickable {
+                    effectsExpanded = !effectsExpanded
+                    if (effectsExpanded) DropdownState.open() else DropdownState.closeAll()
+                },
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Effects",
+                    color = BronzeLight, fontSize = 12.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+                EffectsSummary(state.activeEffects)
+            }
+        }
+    }
+
+    // Effects dropdown, anchored to a ZERO-SIZE box at the bar's bottom-right corner rather than to
+    // the Effects button, so it lands flush with the minimap panel below: the bar and the map box
+    // are both fillMaxWidth() in the same Column, so their left/right borders share an x — which
+    // makes this anchor's x the map's RIGHT border — and the only thing between them is that
+    // Column's 6dp spacing, which the y offset adds back to reach the map's TOP border.
+    //
+    // Anchoring rather than nudging is what makes it exact: M3's position provider tries
+    // anchor.left first, sees a menu that wide would overflow the window, and falls back to
+    // aligning the menu's RIGHT edge with anchor.right — the corner itself. No measurement, no
+    // tuned pixel offset that a font or padding change would silently invalidate.
+    if (hasEffects) {
+        Box(Modifier.align(Alignment.BottomEnd)) {
+            CompanionDropdownMenu(
+                expanded = effectsExpanded,
+                onDismissRequest = { effectsExpanded = false; DropdownState.closeAll() },
+                offset = DpOffset(0.dp, TOP_BOX_TO_MAP_GAP)
+            ) {
+                // Cap at ~7 rows then scroll, so a heavily-buffed character can't grow the
+                // dropdown to the full screen height. Same heightIn(max) + verticalScroll
+                // pattern as InventoryEquippedSection / ItemInfoPopupCard. (M3's own
+                // DropdownMenuContent also scrolls, but only at the window bound — it has no
+                // row-count cap, and with the content bounded here it has nothing left to do.)
+                val effectsScroll = rememberScrollState()
                 Column(
-                    modifier = Modifier.clickable {
-                        effectsExpanded = !effectsExpanded
-                        if (effectsExpanded) DropdownState.open() else DropdownState.closeAll()
-                    },
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    Modifier
+                        .heightIn(max = EFFECTS_DROPDOWN_MAX_HEIGHT)
+                        .verticalScroll(effectsScroll)
                 ) {
-                    Text(
-                        "Effects",
-                        color = BronzeLight, fontSize = 12.sp,
-                        fontFamily = MwDisplay, fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    EffectsSummary(state.activeEffects)
-                }
-                CompanionDropdownMenu(
-                    expanded = effectsExpanded,
-                    onDismissRequest = { effectsExpanded = false; DropdownState.closeAll() }
-                ) {
-                    // Cap at ~7 rows then scroll, so a heavily-buffed character can't grow the
-                    // dropdown to the full screen height. Same heightIn(max) + verticalScroll
-                    // pattern as InventoryEquippedSection / ItemInfoPopupCard. (M3's own
-                    // DropdownMenuContent also scrolls, but only at the window bound — it has no
-                    // row-count cap, and with the content bounded here it has nothing left to do.)
-                    val effectsScroll = rememberScrollState()
-                    Column(
-                        Modifier
-                            .heightIn(max = EFFECTS_DROPDOWN_MAX_HEIGHT)
-                            .verticalScroll(effectsScroll)
+                state.activeEffects.forEach { effect ->
+                    val effectIcon = rememberItemIcon(effect.icon)
+                    Row(
+                        modifier = Modifier
+                            .widthIn(min = 170.dp)
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                    state.activeEffects.forEach { effect ->
-                        val effectIcon = rememberItemIcon(effect.icon)
-                        Row(
+                        // Compact 20dp icon box (same placeholder styling as
+                        // inventory/spell rows, sized down for the dropdown).
+                        Box(
                             modifier = Modifier
-                                .widthIn(min = 170.dp)
-                                .padding(horizontal = 12.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .size(20.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(SlotBg)
+                                .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
                         ) {
-                            // Compact 20dp icon box (same placeholder styling as
-                            // inventory/spell rows, sized down for the dropdown).
-                            Box(
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .clip(RoundedCornerShape(2.dp))
-                                    .background(SlotBg)
-                                    .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
-                            ) {
-                                if (effectIcon != null) {
-                                    Image(
-                                        bitmap = effectIcon,
-                                        contentDescription = null,
-                                        contentScale = ContentScale.Fit,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                }
+                            if (effectIcon != null) {
+                                Image(
+                                    bitmap = effectIcon,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize()
+                                )
                             }
-                            Spacer(Modifier.width(6.dp))
-                            EffectDot(effect.harmful, 8.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Column(Modifier.weight(1f)) {
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        EffectDot(effect.harmful, 8.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                effect.name,
+                                color = Bone, fontSize = 12.sp,
+                                fontFamily = MwBody,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                            val subtitle = effectSubtitle(effect, showEffectTimer)
+                            if (subtitle.isNotEmpty()) {
                                 Text(
-                                    effect.name,
-                                    color = Bone, fontSize = 12.sp,
-                                    fontFamily = MwBody,
+                                    subtitle,
+                                    color = BoneDim, fontSize = 10.sp,
+                                    fontFamily = MwData,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis
                                 )
-                                val subtitle = effectSubtitle(effect, showEffectTimer)
-                                if (subtitle.isNotEmpty()) {
-                                    Text(
-                                        subtitle,
-                                        color = BoneDim, fontSize = 10.sp,
-                                        fontFamily = MwData,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis
-                                    )
-                                }
                             }
                         }
                     }
-                    }
-                    ScrollMoreHint(effectsScroll)
                 }
+                }
+                ScrollMoreHint(effectsScroll)
             }
         }
+    }
     }
 }
 
@@ -11667,7 +12408,13 @@ private fun CompactStat(
 /* ---- Map: local-map texture from the engine + player direction arrow ---- */
 
 @Composable
-private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
+private fun MapPanel(
+    state: GameState,
+    splashVisible: Boolean = false,
+    // Switch the bottom tab bar. Owned by CompanionScreenContent; the HUD needs it so an empty
+    // favourite slot can take the player to the list the favourite is added from.
+    onSelectTab: (Tab) -> Unit = {}
+) {
     val exteriorMaps by GameStateRepository.exteriorMapBitmaps.collectAsState()
     val interiorMaps by GameStateRepository.interiorMapBitmaps.collectAsState()
 
@@ -11776,7 +12523,7 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         modifier = Modifier
             .fillMaxSize()
             .padding(top = 12.dp, bottom = BOTTOM_BAR_SPACE.dp, start = 12.dp, end = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(TOP_BOX_TO_MAP_GAP)
     ) {
         TopStatBar(state, Modifier.fillMaxWidth().height(TOP_BOX_HEIGHT))
         Box(
@@ -12134,6 +12881,10 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     // would have left the bottom slot without its downward tap extension at any
                     // count above 2 (and given it to a middle slot).
                     hitPadBottom = if (idx == favGearSlots - 1) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    onEmptyTap = {
+                        onSelectTab(Tab.INVENTORY)
+                        HintToastState.show(FAV_GEAR_HINT)
+                    },
                     menuItems = { s, dismiss ->
                         val item = state.inventory.find { it.id == s.id }
                         val readable = item?.category == "book" || item?.category == "scroll"
@@ -12236,6 +12987,10 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
                     // C: extend the tap target outward only — top slot (idx 0) up, LAST slot down.
                     hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
                     hitPadBottom = if (idx == favMagicSlots - 1) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    onEmptyTap = {
+                        onSelectTab(Tab.MAGIC)
+                        HintToastState.show(FAV_SPELL_HINT)
+                    },
                     menuItems = { s, dismiss ->
                         val colors = MenuDefaults.itemColors(textColor = Bone)
                         DropdownMenuItem(
@@ -12280,6 +13035,11 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
         // they ever overlap.
         val questPrefs by QuestPrefsRepository.state.collectAsState()
         val followedId = questPrefs.followed
+        if (!targetOverlayShowing && followedId == null) {
+            // Still yields to the combat target, exactly as the followed label does — a transient
+            // fight matters more than an empty slot.
+            EmptyTrackedQuestLabel(modifier = Modifier.align(Alignment.TopCenter))
+        }
         if (!targetOverlayShowing && followedId != null) {
             // Resolved against the MERGED journal so following "Manual Entries" shows its real
             // name. The raw list never contains the reserved id, so this would otherwise fall
@@ -12311,6 +13071,20 @@ private fun MapPanel(state: GameState, splashVisible: Boolean = false) {
  * look at first — not this constant.
  */
 private val FOLLOWED_QUEST_MAX_WIDTH = 400.dp
+
+/**
+ * Hint copy for the three empty-state taps. Deliberately says "long-press an item" rather than
+ * spelling out navigate-then-long-press: the tap has ALREADY done the navigating by the time the
+ * hint is read, so describing that step would narrate what just happened instead of the one thing
+ * left to do.
+ */
+private const val FAV_GEAR_HINT = "Long-press an item here to make it a favourite"
+private const val FAV_SPELL_HINT = "Long-press a spell here to make it a favourite"
+private const val TRACKED_QUEST_HINT = "Long-press a quest here to track it"
+
+/** Heading over the HUD's tracked-quest slot, shared by the followed and empty states so the two
+ *  can never disagree. Was "QUEST"; renamed Aug 21 2026, styling untouched. */
+private const val TRACKED_QUEST_HEADING = "TRACKED QUEST"
 
 /**
  * The followed quest's name, top-centre on the HUD map. Tap jumps to its journal page; long-press
@@ -12360,7 +13134,7 @@ private fun FollowedQuestLabel(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    "QUEST",
+                    TRACKED_QUEST_HEADING,
                     color = BoneDim, fontSize = 9.sp,
                     fontFamily = MwDisplay, letterSpacing = 1.5.sp
                 )
@@ -12381,6 +13155,48 @@ private fun FollowedQuestLabel(
                 questId = questId, title = title, hidden = hidden, followed = true,
                 expanded = menuOpen,
                 onDismiss = { menuOpen = false; DropdownState.closeAll() }
+            )
+        }
+    }
+}
+
+/**
+ * The tracked-quest slot with nothing tracked. Same heading, same slot, same swallow-margin
+ * treatment as [FollowedQuestLabel] — dimmed, and with a placeholder line in place of the title so
+ * the area reads as an EMPTY SLOT rather than as blank map. That is the same idiom the empty
+ * favourite slots use (label + dim boxes), which is what makes both discoverable at all.
+ *
+ * A tap opens the quest list and explains how to track one. There is no long-press: tracking is the
+ * quest row's own long-press over in the journal, exactly as before.
+ */
+@Composable
+private fun EmptyTrackedQuestLabel(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .pointerInput(Unit) { detectTapGestures {} }
+            .padding(FAV_GROUP_MARGIN)
+    ) {
+        Column(
+            modifier = Modifier
+                .clickable {
+                    JournalQuestNavState.requestList()
+                    HintToastState.show(TRACKED_QUEST_HINT)
+                }
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                TRACKED_QUEST_HEADING,
+                // Dimmer than the followed label's heading by the same ratio the empty favourite
+                // slots use (0.4f), so "nothing here" reads at a glance.
+                color = BoneDim.copy(alpha = 0.4f), fontSize = 9.sp,
+                fontFamily = MwDisplay, letterSpacing = 1.5.sp
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "None",
+                color = BoneMuted.copy(alpha = 0.5f), fontSize = 13.sp, fontFamily = MwBody,
+                fontWeight = FontWeight.SemiBold
             )
         }
     }
@@ -12827,6 +13643,11 @@ private fun FavSlotView(
     hitPadTop: Dp = 0.dp,
     hitPadBottom: Dp = 0.dp,
     menuItems: (@Composable ColumnScope.(slot: FavSlot, dismiss: () -> Unit) -> Unit)? = null,
+    // Tap on an EMPTY slot. Until Aug 21 2026 an empty slot was not clickable at all, so the tap
+    // fell through to whatever was behind it and the slot read as broken. It now takes the player
+    // to the tab the favourite comes from and explains how to add one. Null keeps the old
+    // do-nothing behaviour for any caller that has no sensible destination.
+    onEmptyTap: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val isEmpty = slot == null
@@ -12856,8 +13677,11 @@ private fun FavSlotView(
         Box(
             modifier = Modifier
                 .combinedClickable(
-                    enabled = !isEmpty,
-                    onClick = { onClick() },
+                    // An empty slot is clickable ONLY when it has somewhere to send the player.
+                    enabled = !isEmpty || onEmptyTap != null,
+                    onClick = { if (isEmpty) onEmptyTap?.invoke() else onClick() },
+                    // Long-press is unchanged and stays FILLED-only: the add-to-favourites flow is
+                    // the item's own long-press over in the Inventory/Spells list, not this slot's.
                     onLongClick = {
                         if (menuItems != null && slot != null) {
                             menuSlot = slot; menuOpen = true; DropdownState.open()
@@ -14430,7 +15254,7 @@ private fun MagicPanel(state: GameState) {
                                 effect = spell.effect,
                                 school = spell.school,
                                 cost = spell.cost,
-                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
+                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, kind = InfoKind.SPELL) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -14454,7 +15278,7 @@ private fun MagicPanel(state: GameState) {
                                 // sections would look up null anyway — but not passing it there
                                 // keeps that intent explicit rather than incidental.
                                 chance = spellChances[spell.id],
-                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, isSpell = true) },
+                                onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, kind = InfoKind.SPELL) },
                                 iconBitmap = rememberItemIcon(spell.icon)
                             ) { CompanionActions.selectSpell(spell.id) }
                         }
@@ -14785,6 +15609,15 @@ private fun JournalPanel() {
         JournalQuestNavState.consume()?.let { qid ->
             selectedJournalTab = JournalTab.Quests
             selectedQuestId = qid
+        }
+    }
+    // The empty tracked-quest slot: the LIST, with no quest opened — that is the point, the player
+    // is here to pick one.
+    val pendingQuestList = JournalQuestNavState.listRequest
+    LaunchedEffect(pendingQuestList) {
+        if (JournalQuestNavState.consumeList()) {
+            selectedJournalTab = JournalTab.Quests
+            selectedQuestId = null
         }
     }
 

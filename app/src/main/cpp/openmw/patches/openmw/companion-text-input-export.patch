@@ -1,3 +1,20 @@
+--- a/apps/openmw/mwgui/windowmanagerimp.hpp
++++ b/apps/openmw/mwgui/windowmanagerimp.hpp
+@@ -147,6 +147,14 @@
+ 
+         /// Warning: do not use MyGUI::InputManager::setKeyFocusWidget directly. Instead use this.
+         void setKeyFocusWidget(MyGUI::Widget* widget) override;
++
++#ifdef __ANDROID__
++        /// COMPANION: drop key focus from `widget` so that it STAYS dropped -- setKeyFocusWidget
++        /// (nullptr) alone is undone on the next frame by KeyboardNavigation. See the definition,
++        /// and companionSetFocusedText for the only caller. Needs mKeyboardNavigation, which is
++        /// why it is a member here rather than part of the free bridge function.
++        void companionReleaseTextFocus(MyGUI::Widget* widget);
++#endif
+ 
+         void setNewGame(bool newgame) override;
+ 
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
 @@ -9,6 +9,8 @@
@@ -9,10 +26,38 @@
  #include <MyGUI_FactoryManager.h>
  #include <MyGUI_InputManager.h>
  #include <MyGUI_LanguageManager.h>
-@@ -1872,6 +1874,81 @@
+@@ -2067,7 +2069,135 @@
+     {
+         MyGUI::InputManager::getInstance().setKeyFocusWidget(widget);
          onKeyFocusChanged(widget);
-     }
- 
++    }
++
++#ifdef __ANDROID__
++    // COMPANION: give up key focus for good. A bare setKeyFocusWidget(nullptr) does NOT stick:
++    // KeyboardNavigation::onFrame carries a "workaround incorrect key focus resets (fix in MyGUI
++    // TBD)" that puts focus BACK on its remembered mCurrentFocus whenever the live focus is not
++    // focusable (nullptr qualifies) and the remembered one still is -- so the field re-grabs focus
++    // one frame later, and the bottom-screen keyboard, which follows focus, flashes away and
++    // returns. THAT is the real reason a released field "is re-grabbed by the modal on the very
++    // next frame" (an earlier note here blamed modality; the workaround is generic and applies to
++    // every window, modal or not). Making the navigation forget the widget first is what turns the
++    // release into a lasting one. _unlinkWidget is the same call MyGUI makes when a widget is
++    // destroyed; on a LIVE widget it only clears the two remembered pointers (mCurrentFocus and
++    // any saved per-GUI-mode focus), which is exactly the intent, and a later click can still focus
++    // the field again -- that is how the player reopens the keyboard.
++    //
++    // Deliberately NOT MyGUI::WidgetManager::unlinkFromUnlinkers(), which would broadcast the same
++    // "this widget is going away" to MyGUI's own four unlinkers as well -- InputManager would drop
++    // it from the MODAL ROOT stack and Gui would clear its eventFrameStart subscriptions, neither
++    // of which is true or wanted for a widget that is still alive.
++    void WindowManager::companionReleaseTextFocus(MyGUI::Widget* widget)
++    {
++        if (mKeyboardNavigation && widget)
++            mKeyboardNavigation->_unlinkWidget(widget);
++        setKeyFocusWidget(nullptr);
++    }
++#endif
++
 +#ifdef __ANDROID__
 +    // COMPANION: the MyGUI EditBox that currently holds key focus (name / class /
 +    // save-name entry), captured in onKeyFocusChanged below. companionSetFocusedText()
@@ -22,16 +67,10 @@
 +    // COMPANION: called from drainCompanionCommands (androidmain.cpp) on the engine main
 +    // thread when the bottom-screen input panel CONFIRMS (OK / Done / keyboard dismissed).
 +    // Fills the focused EditBox's caption (more reliable than replaying SDL text events), then
-+    // ACCEPTS the dialog by injecting Return into it — exactly as a physical Enter would —
-+    // firing eventEditSelectAccept -> onOkClicked -> eventDone so the modal closes and character
-+    // creation advances. We deliberately do NOT clear key focus: OpenMW's text dialogs are modal
-+    // and re-grab a cleared field on the very next frame (confirmed by a COMPANION_TEXT_INPUT_OPEN
-+    // arriving 1ms after every CLOSED), so the only way the field actually goes away is to close
-+    // its dialog. Closing changes key focus -> onKeyFocusChanged(nullptr) ->
-+    // COMPANION_TEXT_INPUT_CLOSED, which dismisses the panel and resets gCompanionTextInput. This
-+    // is the same injectKeyPress(Return) actionmanager.cpp uses to trigger OK in GUI mode. MyGUI
-+    // is single-threaded, so this MUST run on the engine thread. extern "C" so the symbol is
-+    // reachable from androidmain.cpp without a header (C linkage ignores the enclosing namespace).
++    // then closes the keyboard — by ACCEPTING the dialog, or by merely dropping key focus. Which
++    // of the two is right depends entirely on what the surrounding window does with Return; see the
++    // gate below. MyGUI is single-threaded, so this MUST run on the engine thread. extern "C" so the
++    // symbol is reachable from androidmain.cpp without a header (C linkage ignores the namespace).
 +    extern "C" void companionSetFocusedText(const char* utf8)
 +    {
 +        if (!gCompanionTextInput || !utf8)
@@ -69,11 +108,44 @@
 +            return;
 +        }
 +
-+        MWBase::Environment::get().getWindowManager()->injectKeyPress(MyGUI::KeyCode::Return, 0, false);
++        auto winMgr = MWBase::Environment::get().getWindowManager(); // Misc::NotNullPtr, not a raw ptr
++
++        // COMPANION: Return may only ACCEPT when the surrounding window exists to collect this one
++        // string — a WindowModal text dialog (character name, class name, save name) or the console.
++        // There, accepting is also the only USEFUL outcome: the dialog is waiting on that string and
++        // has nothing else to do, and for character creation the accept is what advances the flow.
++        // Every WindowModal registers itself with MyGUI's modal stack in WindowModal::onOpen
++        // (addWidgetModal), so isModalAny() IS that question.
++        //
++        // Everywhere else the field is one control inside a larger window whose Return is wired to
++        // that window's PRIMARY ACTION: EnchantingDialog, SpellCreationDialog and AlchemyWindow all
++        // bind eventEditSelectAccept -> onAccept -> onBuy/onCreateButtonClicked, so injecting Return
++        // there BOUGHT the enchantment, BOUGHT the spell or BREWED the potion the instant the player
++        // finished typing a name. On a touch keyboard Enter means "commit this text", not "confirm
++        // the purchase" — the window has its own Buy/Create button for that — so those get the
++        // caption and a released key focus, nothing else. Safe because each of them focuses its name
++        // box exactly once in onOpen() and each reads getCaption() at action time, so the typed name
++        // is already committed. Releasing focus is also what dismisses the panel — the release runs
++        // onKeyFocusChanged(nullptr) -> COMPANION_TEXT_INPUT_CLOSED. It has to go through
++        // companionReleaseTextFocus, NOT a bare setKeyFocusWidget(nullptr), or KeyboardNavigation
++        // hands focus straight back and the keyboard returns a frame later. Tapping the field again
++        // re-focuses it and brings the keyboard back, which is how the name is edited a second time.
++        if (!MyGUI::InputManager::getInstance().isModalAny() && !winMgr->isConsoleMode())
++        {
++            // Via the concrete class: the release needs mKeyboardNavigation (see
++            // companionReleaseTextFocus), which the MWBase interface does not expose and should not.
++            // MWGui::WindowManager is the only implementation of that interface, so the downcast is
++            // total.
++            MWBase::WindowManager* baseWinMgr = winMgr;
++            static_cast<WindowManager*>(baseWinMgr)->companionReleaseTextFocus(field);
++            return;
++        }
++
++        winMgr->injectKeyPress(MyGUI::KeyCode::Return, 0, false);
 +        // RELEASE IT. injectKeyPress leaves MyGUI holding the key (InputManager::mHoldKey) and
 +        // re-raising it every frame; on a single-line field that repeat is invisible, but the key
 +        // stays held and would keep firing at whatever gains key focus next.
-+        MWBase::Environment::get().getWindowManager()->injectKeyRelease(MyGUI::KeyCode::Return);
++        winMgr->injectKeyRelease(MyGUI::KeyCode::Return);
 +    }
 +    // COMPANION: called when the bottom-screen input panel CANCELS (Cancel button / tap-away):
 +    // discard the edit by injecting Escape, which routes through exitCurrentGuiMode and closes/
@@ -85,13 +157,12 @@
 +            return;
 +        MWBase::Environment::get().getWindowManager()->injectKeyPress(MyGUI::KeyCode::Escape, 0, false);
 +        MWBase::Environment::get().getWindowManager()->injectKeyRelease(MyGUI::KeyCode::Escape);
-+    }
+     }
 +#endif
-+
+ 
      void WindowManager::onKeyFocusChanged(MyGUI::Widget* widget)
      {
-         bool capturesInput = false;
-@@ -1884,6 +1961,38 @@
+@@ -2081,6 +2211,38 @@
                  capturesInput = widget->castType<MyGUI::EditBox>(false);
          }
  
@@ -130,4 +201,3 @@
          // The SDL_IsTextInputActive() check helps to avoid duplicate calls in SDL2.
          // This may no longer be required when switching to SDL3 where the function
          // has also been renamed to SDL_TextInputActive() and returns bool instead
-

@@ -138,7 +138,11 @@ data class ItemInfo(
      *  enchantment types that never drain (Cast Once, Constant Effect), exactly as vanilla. A
      *  snapshot taken when the popup was opened; it does not track live. */
     val charge: Int = 0,
-    val maxCharge: Int = 0
+    val maxCharge: Int = 0,
+    /** Free-text description, rendered as a paragraph under the rows. Only MAGIC EFFECTS carry one
+     *  (vanilla's MagicEffectToolTip is icon + name + "School: X" + description); every other kind
+     *  sends "" and the popup shows nothing extra. */
+    val description: String = ""
 )
 
 /** Current combat/crosshair target, shown as a name + health bar on the HUD. */

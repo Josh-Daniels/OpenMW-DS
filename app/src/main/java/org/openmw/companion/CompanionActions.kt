@@ -43,6 +43,10 @@ object CompanionActions {
 
     fun requestSpellInfo(spellId: String) = runCommand("CMP:info spell:$spellId")
 
+    /** A MAGIC EFFECT record (the enchanting browse list's R3 / long-press). Its reply carries the
+     *  effect's description in COMPANION_INFO's `desc`, which no other kind uses. */
+    fun requestEffectInfo(effectId: String) = runCommand("CMP:info effect:$effectId")
+
     // Looting / pickpocketing transfers (Lua handles CMP:container_* and dispatches
     // moveInto via companion_global.lua). sid = per-stack instance id; count is
     // delimited with | because ids contain spaces (same convention as dropItem).

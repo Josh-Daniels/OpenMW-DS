@@ -2132,6 +2132,33 @@ local function addRow(rows, k, v)
     end
 end
 
+-- Display name of a MagicEffect's school, resolved the way VANILLA does it.
+--
+-- ToolTips::createMagicEffectToolTip prints
+--   Skill.find(effect->mData.mSchool)->mSchool->mName
+-- i.e. the effect's school field is a SKILL id, and the string shown is that skill's MAGIC SCHOOL
+-- name -- not the skill id and not the skill's own name. The Lua shape mirrors that exactly:
+-- core.stats.Skill.records[<skill id>].school is a MagicSchoolData with a .name.
+--
+-- The spell branch of exportInfo used to print capitalize(<skill id>) instead, which reads close
+-- enough for the vanilla five ("Destruction") to have gone unnoticed, but is the raw id and would
+-- diverge outright for a modded school. Both callers now share this (fixed Aug 21 2026).
+-- Returns "" when the effect has no school or anything in the chain is missing.
+local function schoolName(mrec)
+    if not mrec then return "" end
+    local skillId = mrec.school
+    if not skillId or skillId == "" then return "" end
+    local ok, resolved = pcall(function()
+        local srec = core.stats.Skill.records[skillId]
+        local sch = srec and srec.school
+        return sch and sch.name or nil
+    end)
+    if ok and resolved and resolved ~= "" then return resolved end
+    -- Fallback to the old behaviour rather than showing nothing, so a binding change degrades to
+    -- a slightly-wrong label instead of a blank row.
+    return capitalize(tostring(skillId))
+end
+
 local function exportInfo(arg)
     local kind, id = string.match(arg, "^(%a+):(.+)$")
     if not kind or not id then
@@ -2140,6 +2167,9 @@ local function exportInfo(arg)
     end
 
     local name, rows, effects = "", {}, {}
+    -- Free-text description. MAGIC EFFECTS only -- every other kind leaves it "" and the popup
+    -- draws no paragraph.
+    local desc = ""
     -- Enchantment charge for the popup's charge bar, mirroring vanilla's "Charges" bar. Emitted
     -- ONLY for the two enchantment types that actually drain (Cast When Strikes / Cast When Used);
     -- vanilla draws no bar for Cast Once or Constant Effect either. Carried on this ON-DEMAND reply
@@ -2158,12 +2188,22 @@ local function exportInfo(arg)
             local e1 = rec.effects and rec.effects[1]
             if e1 then
                 local mrec = core.magic.effects.records[e1.id]
-                if mrec and mrec.school and mrec.school ~= "" then
-                    addRow(rows, "School", capitalize(tostring(mrec.school)))
-                end
+                if mrec then addRow(rows, "School", schoolName(mrec)) end
             end
         end)
         appendEffectList(rec.effects, effects, true)
+
+    elseif kind == "effect" then
+        -- A MAGIC EFFECT record, for the enchanting browse list's R3 / long-press. Mirrors vanilla's
+        -- ToolTips::createMagicEffectToolTip, which shows exactly: icon, name, "School: <school>"
+        -- and the description. Deliberately NOT the base cost -- vanilla does not show it, and this
+        -- popup is held to the same parity rule as the item rows (see FULL VANILLA ROW PARITY).
+        local rec = core.magic.effects.records[id]
+        if not rec then emit("COMPANION_DEBUG: info - effect not found: " .. id); return end
+        name = (rec.name and rec.name ~= "" and rec.name) or id
+        local sch = schoolName(rec)
+        if sch ~= "" then addRow(rows, "School", sch) end
+        desc = rec.description or ""
 
     elseif kind == "item" then
         local item = nil
@@ -2311,8 +2351,10 @@ local function exportInfo(arg)
         return
     end
 
-    emit(string.format('COMPANION_INFO:{"name":"%s","rows":[%s],"effects":[%s],"charge":%d,"maxCharge":%d}',
-        jsonEscape(name), table.concat(rows, ','), table.concat(effects, ','), infoCharge, infoMaxCharge))
+    emit(string.format(
+        'COMPANION_INFO:{"name":"%s","rows":[%s],"effects":[%s],"charge":%d,"maxCharge":%d,"desc":"%s"}',
+        jsonEscape(name), table.concat(rows, ','), table.concat(effects, ','), infoCharge, infoMaxCharge,
+        jsonEscape(desc)))
 end
 
 -- =============================== Developer Tools ===============================

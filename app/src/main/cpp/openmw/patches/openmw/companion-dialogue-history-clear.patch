@@ -1,0 +1,93 @@
+--- a/apps/openmw/mwgui/dialogue.hpp
++++ b/apps/openmw/mwgui/dialogue.hpp
+@@ -170,6 +170,10 @@
+         void companionGoodbye();
+         void companionSelectChoice(int id);
+         void companionPersuade(int type);
++        // Companion: THE definition of "this conversation has really ended" — emit
++        // COMPANION_DIALOGUE_CLOSED and reset the history. Every end path funnels through it,
++        // because the clear used to live only in onClose(), which a HIDDEN window never gets.
++        void companionDialogueEnded();
+ 
+         void onClose() override;
+ 
+--- a/apps/openmw/mwgui/dialogue.cpp
++++ b/apps/openmw/mwgui/dialogue.cpp
+@@ -430,7 +430,7 @@
+             // fires normally on the visible->hidden transition. companionGoodbye()'s hidden
+             // path returns before calling exit(), so there is no double-emit.
+             if (!isVisible())
+-                Log(Debug::Info) << "COMPANION_DIALOGUE_CLOSED";
++                companionDialogueEnded();
+             return true;
+         }
+     }
+@@ -493,9 +493,9 @@
+                 MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
+                 // onClose() won't fire here: the window is already hidden, so the mode-pop's
+                 // setVisible(false) is a no-op and skips the visible->hidden transition that
+-                // normally emits COMPANION_DIALOGUE_CLOSED. Emit it explicitly, or the
+-                // companion overlay never clears its topic/service/history state.
+-                Log(Debug::Info) << "COMPANION_DIALOGUE_CLOSED";
++                // normally ends the conversation. Do it explicitly, or the companion overlay never
++                // clears its topic/service/history state AND mHistoryContents keeps growing.
++                companionDialogueEnded();
+             }
+             return;
+         }
+@@ -689,15 +689,34 @@
+         mDeleteLater.clear();
+     }
+ 
+-    void DialogueWindow::onClose()
++    // COMPANION: the conversation has really ended. ONE definition, called from every end path.
++    //
++    // WHY THIS EXISTS (bug, Aug 21 2026 — "old text from a previous DS conversation appears in the
++    // Vanilla history pane, sometimes another NPC's"). The history reset lived ONLY in onClose(),
++    // which is driven by WindowBase::setVisible()'s visible->hidden edge. With Conversation routed
++    // to the DS screen this window is force-hidden, so the real mode-pop produced no such edge and
++    // onClose() never ran: mHistoryContents was never cleared and simply ACCUMULATED across every
++    // DS conversation for the whole session. Switching to Vanilla then rendered the entire backlog
++    // — which is also why the same NPC's greeting appeared "repeated", one copy per past visit.
++    //
++    // The COMPANION_DIALOGUE_CLOSED signal had already been given explicit emits on the hidden
++    // paths (exit(), companionGoodbye()) for exactly this reason; the history clear was left behind
++    // in onClose(). Pairing the two here is what stops them drifting apart again.
++    void DialogueWindow::companionDialogueEnded()
+     {
+-        if (MWBase::Environment::get().getWindowManager()->containsMode(GM_Dialogue))
+-            return;
+-        // Companion: dialogue has fully ended (not just a service window pushed on top),
+-        // tell the bottom screen to clear its topic + service lists.
++        // Tell the bottom screen to clear its topic + service + history state.
+         Log(Debug::Info) << "COMPANION_DIALOGUE_CLOSED";
+         // Reset history
+         mHistoryContents.clear();
++    }
++
++    void DialogueWindow::onClose()
++    {
++        // A service window pushed ON TOP (barter/repair/…) also hides this one; that is not the
++        // conversation ending, so nothing is reset until GM_Dialogue itself is gone.
++        if (MWBase::Environment::get().getWindowManager()->containsMode(GM_Dialogue))
++            return;
++        companionDialogueEnded();
+     }
+ 
+     bool DialogueWindow::setKeywords(const std::list<std::string>& keyWords)
+@@ -1104,7 +1123,15 @@
+ 
+     void DialogueWindow::onReferenceUnavailable()
+     {
++        // COMPANION: the third hidden-window end path, found while fixing the history leak. The NPC
++        // becoming unavailable (dies, or its cell unloads) ends the conversation just as surely as
++        // Goodbye does, and while the window is DS-hidden the mode-pop below fires no onClose().
++        // Guarded exactly as onClose() is, so a service window still up over dialogue is not
++        // mistaken for the end.
++        const bool companionWasHidden = !isVisible();
+         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Dialogue);
++        if (companionWasHidden && !MWBase::Environment::get().getWindowManager()->containsMode(GM_Dialogue))
++            companionDialogueEnded();
+     }
+ 
+     void DialogueWindow::onFrame(float dt)

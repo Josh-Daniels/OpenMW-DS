@@ -436,7 +436,9 @@ object LogParser {
         } ?: emptyList()
         ItemInfo(
             o.optString("name", ""), rows, effects,
-            charge = o.optInt("charge", 0), maxCharge = o.optInt("maxCharge", 0)
+            charge = o.optInt("charge", 0), maxCharge = o.optInt("maxCharge", 0),
+            // Absent on every kind but "effect" — optString's "" default IS the "no paragraph" case.
+            description = o.optString("desc", "")
         )
     } catch (e: Exception) {
         null

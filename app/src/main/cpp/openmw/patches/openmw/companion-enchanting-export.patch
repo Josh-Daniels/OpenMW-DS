@@ -863,8 +863,8 @@ Kotlin side: LogParser prefixes -> EnchantSession in GameStateRepository -> Ench
 +        // --- Browse list: the effects the player can enchant with ---------------------------------
 +        // mButtonMapping is EffectEditorBase::startEditing's snapshot -- the union of every effect
 +        // appearing in any ST_Spell the player knows, filtered to AllowEnchanting, deduplicated by
-+        // record and sorted by display name. It is built ONCE at window open and never rebuilt,
-+        // which the DS side inherits for free by reading it here.
++        // record and sorted by display name. It is rebuilt on every open by startEditing, which
++        // CLEARS the map first -- see that clear; without it this loop reports a stale tail as rows.
 +        //
 +        // The RAW flag word is exported, not precomputed booleans: which range options and which
 +        // sliders are legal also depends on the LIVE cast style (Constant force-allows Self and
@@ -1459,7 +1459,23 @@ Kotlin side: LogParser prefixes -> EnchantSession in GameStateRepository -> Ench
      }
  
      void EditEffectDialog::editEffect(ESM::ENAMstruct effect)
-@@ -924,6 +938,14 @@
+@@ -828,6 +842,15 @@
+         std::sort(knownEffects.begin(), knownEffects.end(), sortMagicEffects);
+ 
+         mAvailableEffectsList->clear();
++        // COMPANION: mButtonMapping is a std::map keyed by list index and is only ever ASSIGNED to,
++        // index by index, in the loop below -- so without this clear a shorter snapshot leaves the
++        // TAIL of a longer previous one behind (the dialog lives for the whole session and is
++        // re-startEditing()'d on every open, including after a load). Vanilla never notices: it
++        // reaches the map only through a button widget, and those are rebuilt from knownEffects. The
++        // DS enchanting screen exports the map WHOLE, so those stale entries showed up as phantom
++        // browse rows -- duplicates of current effects plus effects the player no longer knows, any
++        // of which companionEffectAdd would have happily enchanted with.
++        mButtonMapping.clear();
+ 
+         int i = 0;
+         for (const auto effect : knownEffects)
+@@ -924,6 +947,14 @@
          if (!allowSelf && !allowTouch && !allowTarget)
              return; // TODO: Show an error message popup?
  
@@ -1474,7 +1490,7 @@ Kotlin side: LogParser prefixes -> EnchantSession in GameStateRepository -> Ench
          if (effect->mData.mFlags & ESM::MagicEffect::TargetSkill)
          {
              mSelectSkillDialog = std::make_unique<SelectSkillDialog>();
-@@ -1035,10 +1057,23 @@
+@@ -1035,10 +1066,23 @@
  
          mSelectedEffect = id;
  
