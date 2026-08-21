@@ -273,6 +273,19 @@ extern "C" void companionEnchantEffectCancel();
 extern "C" void companionEnchantCastTypeNext();
 extern "C" void companionEnchantBuy();
 extern "C" void companionEnchantCancel();
+// Spellmaking (companion-enchanting-export.patch, spellcreationdialog.cpp). The effect-editing half
+// routes at the SAME EffectEditorBase methods enchanting uses -- there is no second implementation
+// of the editor, only a second window pointer to drive it through.
+extern "C" void companionSpellmakingSetName(const char* text);
+extern "C" void companionSpellmakingBuy();
+extern "C" void companionSpellmakingCancel();
+extern "C" void companionSpellmakingEffectAdd(const char* effectId);
+extern "C" void companionSpellmakingEffectArg(const char* effectId, const char* argId, bool isSkill);
+extern "C" void companionSpellmakingEffectEdit(int index);
+extern "C" void companionSpellmakingEffectSet(int index, int range, int magMin, int magMax, int duration, int area);
+extern "C" void companionSpellmakingEffectDelete(int index);
+extern "C" void companionSpellmakingEffectOk();
+extern "C" void companionSpellmakingEffectCancel();
 // Bottom-screen merchant repair (merchantrepair.cpp). Items addressed by ordinal index.
 extern "C" void companionRepairItem(int index);
 extern "C" void companionRepairAll();
@@ -720,6 +733,83 @@ void drainCompanionCommands()
         else if (cmd.rfind("CMP:enchant_cancel", 0) == 0)
         {
             companionEnchantCancel();
+        }
+        // Spellmaking (CMP:spellmaking_*) is driven natively for the same reason enchanting is: the
+        // magicka-cost accumulation (whose Target x1.5 scales the RUNNING total, so cost depends on
+        // effect ORDER), calcSpellBaseSuccessChance, the barter-adjusted price and the four Buy
+        // validations all live in SpellCreationDialog, and the effect editor lives in the shared
+        // EffectEditorBase. None of it is reachable from Lua and none of it is reimplemented.
+        //
+        // _buy routes at the REAL onBuyButtonClicked rather than validating here, because two of
+        // those checks read the WIDGET CAPTIONS (cost == "0", parseInt(price) > gold) -- a DS-side
+        // gate would be testing different numbers from the one that actually refuses.
+        //
+        // ORDERING NOTE: same rule as the enchanting block above -- longer prefixes first. The two
+        // _c forms (_cancel vs nothing else) and _effect_cancel vs _cancel are the cases that matter.
+        else if (cmd.rfind("CMP:spellmaking_name:", 0) == 0)
+        {
+            // Raw tail — a spell name may contain spaces and ':'.
+            std::string text = cmd.substr(sizeof("CMP:spellmaking_name:") - 1);
+            companionSpellmakingSetName(text.c_str());
+        }
+        else if (cmd.rfind("CMP:spellmaking_effect_add:", 0) == 0)
+        {
+            companionSpellmakingEffectAdd(cmd.c_str() + (sizeof("CMP:spellmaking_effect_add:") - 1));
+        }
+        else if (cmd.rfind("CMP:spellmaking_effect_skill:", 0) == 0
+            || cmd.rfind("CMP:spellmaking_effect_attribute:", 0) == 0)
+        {
+            // "<effectId>|<skillId or attributeId>". Both ids can contain spaces, so split on the
+            // first '|' only — the effect id never contains one.
+            const bool isSkill = cmd.rfind("CMP:spellmaking_effect_skill:", 0) == 0;
+            const std::size_t head = isSkill ? sizeof("CMP:spellmaking_effect_skill:") - 1
+                                             : sizeof("CMP:spellmaking_effect_attribute:") - 1;
+            std::string arg = cmd.substr(head);
+            const std::size_t bar = arg.find('|');
+            if (bar != std::string::npos)
+                companionSpellmakingEffectArg(arg.substr(0, bar).c_str(), arg.substr(bar + 1).c_str(), isSkill);
+        }
+        else if (cmd.rfind("CMP:spellmaking_effect_edit:", 0) == 0)
+        {
+            companionSpellmakingEffectEdit(std::atoi(cmd.c_str() + (sizeof("CMP:spellmaking_effect_edit:") - 1)));
+        }
+        else if (cmd.rfind("CMP:spellmaking_effect_set:", 0) == 0)
+        {
+            // "<index>|<range>|<magMin>|<magMax>|<duration>|<area>" — six plain integers.
+            std::string arg = cmd.substr(sizeof("CMP:spellmaking_effect_set:") - 1);
+            int v[6] = { -1, 0, 1, 1, 1, 0 };
+            std::size_t pos = 0;
+            int n = 0;
+            while (n < 6)
+            {
+                const std::size_t bar = arg.find('|', pos);
+                v[n++] = std::atoi(arg.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos).c_str());
+                if (bar == std::string::npos)
+                    break;
+                pos = bar + 1;
+            }
+            if (n == 6)
+                companionSpellmakingEffectSet(v[0], v[1], v[2], v[3], v[4], v[5]);
+        }
+        else if (cmd.rfind("CMP:spellmaking_effect_delete:", 0) == 0)
+        {
+            companionSpellmakingEffectDelete(std::atoi(cmd.c_str() + (sizeof("CMP:spellmaking_effect_delete:") - 1)));
+        }
+        else if (cmd.rfind("CMP:spellmaking_effect_ok", 0) == 0)
+        {
+            companionSpellmakingEffectOk();
+        }
+        else if (cmd.rfind("CMP:spellmaking_effect_cancel", 0) == 0)
+        {
+            companionSpellmakingEffectCancel();
+        }
+        else if (cmd.rfind("CMP:spellmaking_buy", 0) == 0)
+        {
+            companionSpellmakingBuy();
+        }
+        else if (cmd.rfind("CMP:spellmaking_cancel", 0) == 0)
+        {
+            companionSpellmakingCancel();
         }
         // DS map. map_mount is the MOUNT-SCOPED suppression flag (see g_companionMapMounted):
         // Kotlin sets it when the overlay mounts and clears it when it unmounts, and

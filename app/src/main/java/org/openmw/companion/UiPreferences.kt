@@ -132,7 +132,7 @@ val GAME_UI_ELEMENTS: List<GameUiElement> = listOf(
     // the conversation step-aside).
     GameUiElement("game_ui_spellbuying", "Spell buying"),
     GameUiElement("game_ui_training", "Training"),
-    GameUiElement("game_ui_spellmaking", "Spellmaking", pending = true),
+    GameUiElement("game_ui_spellmaking", "Spellmaking"),
     // Enchanting is non-pending as of Aug 20 2026: EnchantingOverlay (bottom) + EnchantingTopOverlay
     // (top) exist, and DS suppresses the native GM_Enchanting window via the already-wired
     // companionDsEnchanting() gate. The native EnchantingDialog still owns the whole mechanic — the

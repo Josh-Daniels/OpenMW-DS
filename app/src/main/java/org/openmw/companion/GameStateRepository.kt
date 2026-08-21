@@ -478,8 +478,8 @@ object GameStateRepository {
     private var enchantHeader: EnchantSession? = null
     private var enchantItemSlot: EnchantSlotItem? = null
     private var enchantSoulSlot: EnchantSlotItem? = null
-    private var enchantAvailBuffer: MutableList<EnchantAvailEffect>? = null
-    private var enchantEffectBuffer: MutableList<EnchantEffect>? = null
+    private var enchantAvailBuffer: MutableList<EffectAvail>? = null
+    private var enchantEffectBuffer: MutableList<EffectEntry>? = null
     private var enchantItemOptBuffer: MutableList<EnchantPickOption>? = null
     private var enchantSoulOptBuffer: MutableList<EnchantPickOption>? = null
 
@@ -602,14 +602,14 @@ object GameStateRepository {
     // One-shot popup requests from the engine, both seq'd for the same reason as the message above:
     // adding the same Fortify Skill twice must raise the selector twice.
     private var enchantArgPickSeq = 0L
-    private val _enchantArgPick = MutableStateFlow<Pair<EnchantArgPick, Long>?>(null)
-    val enchantArgPick: StateFlow<Pair<EnchantArgPick, Long>?> = _enchantArgPick.asStateFlow()
+    private val _enchantArgPick = MutableStateFlow<Pair<EffectArgPick, Long>?>(null)
+    val enchantArgPick: StateFlow<Pair<EffectArgPick, Long>?> = _enchantArgPick.asStateFlow()
 
     fun clearEnchantArgPick() { _enchantArgPick.value = null }
 
     private var enchantEditSeq = 0L
-    private val _enchantEdit = MutableStateFlow<Pair<EnchantEditRequest, Long>?>(null)
-    val enchantEdit: StateFlow<Pair<EnchantEditRequest, Long>?> = _enchantEdit.asStateFlow()
+    private val _enchantEdit = MutableStateFlow<Pair<EffectEditRequest, Long>?>(null)
+    val enchantEdit: StateFlow<Pair<EffectEditRequest, Long>?> = _enchantEdit.asStateFlow()
 
     fun clearEnchantEdit() { _enchantEdit.value = null }
 
@@ -648,6 +648,38 @@ object GameStateRepository {
     val trainingWindowOpen: StateFlow<Boolean> = _trainingWindowOpen.asStateFlow()
     private val _spellmakingWindowOpen = MutableStateFlow(false)
     val spellmakingWindowOpen: StateFlow<Boolean> = _spellmakingWindowOpen.asStateFlow()
+    // ---- DS Spellmaking -----------------------------------------------------------------------
+    // Its own flows rather than sharing enchanting's: the two windows are mutually exclusive (both
+    // are GUI modes pushed over dialogue), so sharing would work, but a stale value leaking from one
+    // screen into the other is exactly the class of bug that costs an afternoon. The EFFECT-EDITOR
+    // state IS shared, on the Compose side, because that genuinely is one editor.
+    private val _spellmakingSession = MutableStateFlow<SpellmakingSession?>(null)
+    val spellmakingSession: StateFlow<SpellmakingSession?> = _spellmakingSession.asStateFlow()
+    private var spellmakingHeader: SpellmakingSession? = null
+    private var spellmakingAvailBuffer: MutableList<EffectAvail>? = null
+    private var spellmakingEffectBuffer: MutableList<EffectEntry>? = null
+
+    private var spellmakingMsgSeq = 0L
+    private val _spellmakingMessage = MutableStateFlow<Pair<String, Long>?>(null)
+    val spellmakingMessage: StateFlow<Pair<String, Long>?> = _spellmakingMessage.asStateFlow()
+    fun clearSpellmakingMessage() { _spellmakingMessage.value = null }
+
+    private var spellmakingArgPickSeq = 0L
+    private val _spellmakingArgPick = MutableStateFlow<Pair<EffectArgPick, Long>?>(null)
+    val spellmakingArgPick: StateFlow<Pair<EffectArgPick, Long>?> = _spellmakingArgPick.asStateFlow()
+    fun clearSpellmakingArgPick() { _spellmakingArgPick.value = null }
+
+    private var spellmakingEditSeq = 0L
+    private val _spellmakingEdit = MutableStateFlow<Pair<EffectEditRequest, Long>?>(null)
+    val spellmakingEdit: StateFlow<Pair<EffectEditRequest, Long>?> = _spellmakingEdit.asStateFlow()
+    fun clearSpellmakingEdit() { _spellmakingEdit.value = null }
+
+    private fun resetSpellmakingBuffers() {
+        spellmakingHeader = null
+        spellmakingAvailBuffer = null
+        spellmakingEffectBuffer = null
+    }
+
     private val _enchantingWindowOpen = MutableStateFlow(false)
     val enchantingWindowOpen: StateFlow<Boolean> = _enchantingWindowOpen.asStateFlow()
     // Native persuasion modal open (Vanilla-persuasion mode). Same shape; consumed by
@@ -1147,13 +1179,13 @@ object GameStateRepository {
             trimmed.contains(LogParser.P_ENCH_EFFECT) -> {
                 enchantEffectBuffer?.let { buf ->
                     val idx = trimmed.indexOf(LogParser.P_ENCH_EFFECT) + LogParser.P_ENCH_EFFECT.length
-                    LogParser.parseEnchantEffect(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                    LogParser.parseEffectEntry(trimmed.substring(idx).trim())?.let { buf.add(it) }
                 }
             }
             trimmed.contains(LogParser.P_ENCH_AVAIL) -> {
                 enchantAvailBuffer?.let { buf ->
                     val idx = trimmed.indexOf(LogParser.P_ENCH_AVAIL) + LogParser.P_ENCH_AVAIL.length
-                    LogParser.parseEnchantAvail(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                    LogParser.parseEffectAvail(trimmed.substring(idx).trim())?.let { buf.add(it) }
                 }
             }
             trimmed.contains(LogParser.P_ENCH_ITEMOPT) -> {
@@ -1206,13 +1238,13 @@ object GameStateRepository {
             }
             trimmed.contains(LogParser.P_ENCH_ARGPICK) -> {
                 val idx = trimmed.indexOf(LogParser.P_ENCH_ARGPICK) + LogParser.P_ENCH_ARGPICK.length
-                LogParser.parseEnchantArgPick(trimmed.substring(idx).trim())?.let {
+                LogParser.parseEffectArgPick(trimmed.substring(idx).trim())?.let {
                     _enchantArgPick.value = it to enchantArgPickSeq++
                 }
             }
             trimmed.contains(LogParser.P_ENCH_EDIT) -> {
                 val idx = trimmed.indexOf(LogParser.P_ENCH_EDIT) + LogParser.P_ENCH_EDIT.length
-                LogParser.parseEnchantEdit(trimmed.substring(idx).trim())?.let {
+                LogParser.parseEffectEdit(trimmed.substring(idx).trim())?.let {
                     _enchantEdit.value = it to enchantEditSeq++
                 }
             }
@@ -1236,6 +1268,72 @@ object GameStateRepository {
                 // Mount the overlay immediately on an EMPTY session; the first batch follows in the
                 // same frame (setPtr emits OPEN, then startEditing -> updateLabels emits the batch).
                 if (_enchantSession.value == null) _enchantSession.value = EnchantSession()
+            }
+            // DS Spellmaking. Same ordering rule as the enchanting block above: per-record lines
+            // first, then the brackets, then the one-shot requests, and OPEN last (shortest prefix,
+            // contains()-based dispatch).
+            trimmed.contains(LogParser.P_SPELL_EFFECT) -> {
+                spellmakingEffectBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_SPELL_EFFECT) + LogParser.P_SPELL_EFFECT.length
+                    LogParser.parseEffectEntry(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_SPELL_AVAIL) -> {
+                spellmakingAvailBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_SPELL_AVAIL) + LogParser.P_SPELL_AVAIL.length
+                    LogParser.parseEffectAvail(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_SPELL_STATE_START) -> {
+                val idx = trimmed.indexOf(LogParser.P_SPELL_STATE_START) + LogParser.P_SPELL_STATE_START.length
+                spellmakingHeader = LogParser.parseSpellmakingStart(trimmed.substring(idx).trim())
+                spellmakingAvailBuffer = mutableListOf()
+                spellmakingEffectBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_SPELL_STATE_END) -> {
+                val header = spellmakingHeader
+                if (header != null) {
+                    _spellmakingSession.value = header.copy(
+                        // The browse list keeps EMISSION order, which is the engine's own
+                        // sort-by-display-name from startEditing.
+                        available = (spellmakingAvailBuffer ?: mutableListOf()).toList(),
+                        // Effects keep emission order too, and here that matters TWICE: the index in
+                        // each row is the handle every command uses, AND the order decides the
+                        // magicka cost (the Target x1.5 scales the running total). Never re-sort.
+                        effects = (spellmakingEffectBuffer ?: mutableListOf()).toList()
+                    )
+                }
+                resetSpellmakingBuffers()
+            }
+            trimmed.contains(LogParser.P_SPELL_ARGPICK) -> {
+                val idx = trimmed.indexOf(LogParser.P_SPELL_ARGPICK) + LogParser.P_SPELL_ARGPICK.length
+                LogParser.parseEffectArgPick(trimmed.substring(idx).trim())?.let {
+                    _spellmakingArgPick.value = it to spellmakingArgPickSeq++
+                }
+            }
+            trimmed.contains(LogParser.P_SPELL_EDIT) -> {
+                val idx = trimmed.indexOf(LogParser.P_SPELL_EDIT) + LogParser.P_SPELL_EDIT.length
+                LogParser.parseEffectEdit(trimmed.substring(idx).trim())?.let {
+                    _spellmakingEdit.value = it to spellmakingEditSeq++
+                }
+            }
+            trimmed.contains(LogParser.P_SPELL_MSG) -> {
+                val idx = trimmed.indexOf(LogParser.P_SPELL_MSG) + LogParser.P_SPELL_MSG.length
+                val text = trimmed.substring(idx).trim()
+                if (text.isNotEmpty()) _spellmakingMessage.value = text to spellmakingMsgSeq++
+            }
+            trimmed.contains(LogParser.P_SPELL_CLOSED) -> {
+                // Also the Vanilla-mode signal: the conversation overlay steps aside while this
+                // dialogue-service window is up, and this is the only place that line is handled.
+                _spellmakingWindowOpen.value = false
+                _spellmakingSession.value = null
+                _spellmakingMessage.value = null
+                _spellmakingArgPick.value = null
+                _spellmakingEdit.value = null
+                resetSpellmakingBuffers()
+            }
+            trimmed.contains(LogParser.P_SPELL_OPEN) -> {
+                _spellmakingWindowOpen.value = true
             }
             trimmed.contains(LogParser.P_ALCHEMY_OPEN) -> {
                 // Mount the overlay immediately on an EMPTY session. The first batch follows in the
@@ -1577,8 +1675,10 @@ object GameStateRepository {
                 trainingSkillBuffer = mutableListOf()
                 _trainingWindowOpen.value = true
             }
-            trimmed.contains(LogParser.P_SPELLMAKING_CLOSED) -> { _spellmakingWindowOpen.value = false }
-            trimmed.contains(LogParser.P_SPELLMAKING_OPEN) -> { _spellmakingWindowOpen.value = true }
+            // COMPANION_SPELLMAKING_OPEN / _CLOSED are handled with the rest of the DS spellmaking
+            // batch further up this chain (that branch also flips _spellmakingWindowOpen, the
+            // Vanilla-mode conversation step-aside flag) — a duplicate pair here would be dead code,
+            // since `when` takes the first match.
             // COMPANION_ENCHANTING_OPEN / _CLOSED are handled with the rest of the DS enchanting
             // batch further up this chain (that branch also flips _enchantingWindowOpen, the
             // Vanilla-mode conversation step-aside flag) — a duplicate pair here would be dead code,

@@ -157,6 +157,19 @@ object LogParser {
     // Enchanting is DS — that box renders bottom-centre of the TOP screen, behind the DS panels.
     const val P_ENCH_MSG = "COMPANION_ENCHANTING_MSG:"
 
+    // DS Spellmaking. Same shapes as the enchanting family above and, for AVAIL / EFFECT / ARGPICK /
+    // EDIT, the same PAYLOADS — those four are emitted by the shared EffectEditorBase with only the
+    // prefix differing, so they reuse the parsers rather than getting copies.
+    const val P_SPELL_OPEN = "COMPANION_SPELLMAKING_OPEN"
+    const val P_SPELL_STATE_START = "COMPANION_SPELLMAKING_STATE_START:"
+    const val P_SPELL_AVAIL = "COMPANION_SPELLMAKING_AVAIL:"
+    const val P_SPELL_EFFECT = "COMPANION_SPELLMAKING_EFFECT:"
+    const val P_SPELL_STATE_END = "COMPANION_SPELLMAKING_STATE_END"
+    const val P_SPELL_ARGPICK = "COMPANION_SPELLMAKING_ARGPICK:"
+    const val P_SPELL_EDIT = "COMPANION_SPELLMAKING_EDIT:"
+    const val P_SPELL_MSG = "COMPANION_SPELLMAKING_MSG:"
+    const val P_SPELL_CLOSED = "COMPANION_SPELLMAKING_CLOSED"
+
     // DS Map. The two big binary layers (global base / overlay) and fog do NOT come through here —
     // they are megabytes and ride their own JNI byte-array deliveries. These prefixes carry only the
     // small text state, pushed WHOLE once per DS-map mount (the sim is paused while it is up, so
@@ -284,6 +297,8 @@ object LogParser {
     const val P_NAV_R2 = "COMPANION_NAV_R2:"
     const val P_NAV_SLIDER_LEFT = "COMPANION_NAV_SLIDER_LEFT:"
     const val P_NAV_SLIDER_RIGHT = "COMPANION_NAV_SLIDER_RIGHT:"
+    const val P_NAV_SLIDER_UP = "COMPANION_NAV_SLIDER_UP:"       // left stick up (coarse slider step)
+    const val P_NAV_SLIDER_DOWN = "COMPANION_NAV_SLIDER_DOWN:"   // left stick down (coarse slider step)
     const val P_NAV_SCROLL_UP = "COMPANION_NAV_SCROLL_UP:"       // right stick up (vertical lists)
     const val P_NAV_SCROLL_DOWN = "COMPANION_NAV_SCROLL_DOWN:"   // right stick down (vertical lists)
     const val P_NAV_SCROLL_LEFT = "COMPANION_NAV_SCROLL_LEFT:"   // right stick left (horizontal grids)
@@ -307,6 +322,11 @@ object LogParser {
         line.contains(P_NAV_SORT) -> { seq -> NavEvent.Sort(seq) }
         line.contains(P_NAV_SLIDER_LEFT) -> { seq -> NavEvent.SliderLeft(seq) }
         line.contains(P_NAV_SLIDER_RIGHT) -> { seq -> NavEvent.SliderRight(seq) }
+        // Must stay ABOVE the bare P_NAV_UP / P_NAV_DOWN tests below: these are `contains` matches,
+        // and while "COMPANION_NAV_SLIDER_UP:" does not contain "COMPANION_NAV_UP:" today, keeping
+        // the more specific prefixes first is what makes that safe to stop thinking about.
+        line.contains(P_NAV_SLIDER_UP) -> { seq -> NavEvent.SliderUp(seq) }
+        line.contains(P_NAV_SLIDER_DOWN) -> { seq -> NavEvent.SliderDown(seq) }
         line.contains(P_NAV_LEFT) -> { seq -> NavEvent.Left(seq) }
         line.contains(P_NAV_RIGHT) -> { seq -> NavEvent.Right(seq) }
         line.contains(P_NAV_UP) -> { seq -> NavEvent.Up(seq) }
@@ -374,7 +394,8 @@ object LogParser {
         maxCharge = o.optInt("maxCharge", 0),
         effect = o.optString("effect", ""),
         school = o.optString("school", ""),
-        cost = o.optInt("cost", 0)
+        cost = o.optInt("cost", 0),
+        effectCount = o.optInt("effectCount", 0)
     )
 
     private fun after(line: String, prefix: String): String {
@@ -877,6 +898,23 @@ object LogParser {
         )
     } catch (_: Exception) { null }
 
+    /** Header of a COMPANION_SPELLMAKING_STATE_START payload. Null if malformed, which leaves the
+     *  buffered batch uncommitted (the previous session state stays on screen rather than blanking). */
+    fun parseSpellmakingStart(json: String): SpellmakingSession? = try {
+        val o = JSONObject(json)
+        SpellmakingSession(
+            name = o.optString("name", ""),
+            spellmaker = o.optString("spellmaker", ""),
+            costLabel = o.optString("costLabel", ""),
+            chanceLabel = o.optString("chanceLabel", ""),
+            cost = o.optInt("cost", 0),
+            chance = o.optInt("chance", 0),
+            price = o.optInt("price", 0),
+            gold = o.optInt("gold", 0),
+            effectCap = o.optInt("effectCap", 8)
+        )
+    } catch (_: Exception) { null }
+
     /** COMPANION_ENCHANTING_ITEMSLOT / _SOULSLOT. An empty slot parses to `present = false`. */
     fun parseEnchantSlot(json: String): EnchantSlotItem? = try {
         val o = JSONObject(json)
@@ -892,10 +930,10 @@ object LogParser {
     } catch (_: Exception) { null }
 
     /** One COMPANION_ENCHANTING_AVAIL row (a known, enchantable magic effect). */
-    fun parseEnchantAvail(json: String): EnchantAvailEffect? = try {
+    fun parseEffectAvail(json: String): EffectAvail? = try {
         val o = JSONObject(json)
         val id = o.optString("id", "")
-        if (id.isBlank()) null else EnchantAvailEffect(
+        if (id.isBlank()) null else EffectAvail(
             id = id,
             name = o.optString("name", ""),
             icon = o.optString("icon", ""),
@@ -904,14 +942,14 @@ object LogParser {
     } catch (_: Exception) { null }
 
     /** One COMPANION_ENCHANTING_EFFECT row (an effect on the enchantment being built). */
-    fun parseEnchantEffect(json: String): EnchantEffect? = try {
+    fun parseEffectEntry(json: String): EffectEntry? = try {
         val o = JSONObject(json)
-        EnchantEffect(
+        EffectEntry(
             index = o.optInt("index", 0),
             id = o.optString("id", ""),
             skill = o.optString("skill", ""),
             attribute = o.optString("attribute", ""),
-            range = o.optInt("range", EnchantRange.SELF),
+            range = o.optInt("range", EffectRange.SELF),
             magMin = o.optInt("magMin", 1),
             magMax = o.optInt("magMax", 1),
             duration = o.optInt("duration", 1),
@@ -938,16 +976,16 @@ object LogParser {
     } catch (_: Exception) { null }
 
     /** COMPANION_ENCHANTING_ARGPICK — open the Skill or Attribute selector for this effect. */
-    fun parseEnchantArgPick(json: String): EnchantArgPick? = try {
+    fun parseEffectArgPick(json: String): EffectArgPick? = try {
         val o = JSONObject(json)
         val effect = o.optString("effect", "")
-        if (effect.isBlank()) null else EnchantArgPick(o.optString("kind", "skill"), effect)
+        if (effect.isBlank()) null else EffectArgPick(o.optString("kind", "skill"), effect)
     } catch (_: Exception) { null }
 
     /** COMPANION_ENCHANTING_EDIT — open the effect editor on this index. */
-    fun parseEnchantEdit(json: String): EnchantEditRequest? = try {
+    fun parseEffectEdit(json: String): EffectEditRequest? = try {
         val o = JSONObject(json)
-        EnchantEditRequest(o.optInt("index", -1), o.optBoolean("new", false))
+        EffectEditRequest(o.optInt("index", -1), o.optBoolean("new", false))
             .takeIf { it.index >= 0 }
     } catch (_: Exception) { null }
 

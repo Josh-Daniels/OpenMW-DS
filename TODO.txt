@@ -1,7 +1,6 @@
 TODO bugs & updates:
 
 Updates to reach 1.0.0:
-- Set up DS screen for spellmaking
 - Edit the readme.md heavily
 - Make trailer.
 - Make how to video.

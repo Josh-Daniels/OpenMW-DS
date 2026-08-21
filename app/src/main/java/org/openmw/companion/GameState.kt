@@ -67,7 +67,16 @@ data class SpellEntry(
     // scrolls/enchanted items leave them empty/0).
     val effect: String = "",
     val school: String = "",
-    val cost: Int = 0
+    val cost: Int = 0,
+    /**
+     * TOTAL number of effects on this spell/scroll/enchantment. [effect] describes the FIRST one
+     * only, so `effectCount - 1` is how many the row does not show — which is what the list renders
+     * as "+N more". The full list is the info popup's job (COMPANION_INFO), not this field's.
+     *
+     * 0 means "not reported" (an older exporter, or a record whose effects list could not be read)
+     * and renders identically to 1: no indicator. Never treat 0 as "no effects".
+     */
+    val effectCount: Int = 0
 )
 
 data class ActiveEffect(
@@ -689,8 +698,46 @@ object MagicEffectFlag {
     const val CAST_TARGET = 0x100
 }
 
+/*
+ * The range and slider-visibility rules of `EditEffectDialog`. FREE FUNCTIONS rather than methods on
+ * a session, because the editor is shared by BOTH effect-editing screens (`EffectEditorBase` backs
+ * `EnchantingDialog` and `SpellCreationDialog` alike) and neither of them owns these rules.
+ *
+ * `constant` is the live Constant-Effect state, which only enchanting can ever set — spellmaking
+ * passes false, permanently. Everything else comes from the effect record's raw flag word.
+ */
+
+/** `EditEffectDialog::onRangeButtonClicked`'s three availability expressions, verbatim. */
+fun effectAllowSelf(flags: Int, constant: Boolean): Boolean =
+    (flags and MagicEffectFlag.CAST_SELF) != 0 || constant
+
+fun effectAllowTouch(flags: Int, constant: Boolean): Boolean =
+    (flags and MagicEffectFlag.CAST_TOUCH) != 0 && !constant
+
+fun effectAllowTarget(flags: Int, constant: Boolean): Boolean =
+    (flags and MagicEffectFlag.CAST_TARGET) != 0 && !constant
+
+/** The legal ranges in Self -> Touch -> Target order. Empty means the effect is unusable under the
+ *  current cast style, which vanilla handles by silently ignoring the tap (its own unresolved
+ *  TODO) — so no error message is shown for it either. */
+fun effectRanges(flags: Int, constant: Boolean): List<Int> = buildList {
+    if (effectAllowSelf(flags, constant)) add(EffectRange.SELF)
+    if (effectAllowTouch(flags, constant)) add(EffectRange.TOUCH)
+    if (effectAllowTarget(flags, constant)) add(EffectRange.TARGET)
+}
+
+/** The three slider-visibility tests, independent of each other — `EditEffectDialog::updateBoxes`
+ *  verbatim. Area is keyed to the CURRENT range rather than to a flag of its own, so it appears and
+ *  disappears live as the player cycles range inside the editor. */
+fun effectShowMagnitude(flags: Int): Boolean = (flags and MagicEffectFlag.NO_MAGNITUDE) == 0
+
+fun effectShowDuration(flags: Int, constant: Boolean): Boolean =
+    (flags and MagicEffectFlag.NO_DURATION) == 0 && !constant
+
+fun effectShowArea(range: Int): Boolean = range != EffectRange.SELF
+
 /** `ESM::RangeType`. */
-object EnchantRange {
+object EffectRange {
     const val SELF = 0
     const val TOUCH = 1
     const val TARGET = 2
@@ -716,7 +763,7 @@ object EnchantCastType {
  *  runtime — not by skill, not by the soul gem, not by the effect's base cost — so these are plain
  *  constants on both sides of the bridge (the native `companionEffectSet` clamps to the same
  *  numbers, so a malformed command cannot write out of range either). */
-object EnchantBounds {
+object EffectBounds {
     const val MAG_MIN = 1
     const val MAG_MAX = 100
     const val DURATION_MIN = 1
@@ -743,7 +790,7 @@ data class EnchantSlotItem(
 /** One row of the Magic Effects browse list — the union of every effect appearing in any
  *  `ST_Spell`-type spell the player knows, filtered to `AllowEnchanting`, deduplicated by record and
  *  sorted by display name. Built ONCE at window open and never rebuilt, matching vanilla. */
-data class EnchantAvailEffect(
+data class EffectAvail(
     val id: String,
     val name: String,
     val icon: String,
@@ -755,12 +802,12 @@ data class EnchantAvailEffect(
  *  vector is mutated only by the player and GM_Enchanting pauses the sim. [text] is composed
  *  NATIVELY (a transcription of `MWSpellEffect::updateWidgets`) so it cannot drift from the wording
  *  vanilla shows. */
-data class EnchantEffect(
+data class EffectEntry(
     val index: Int,
     val id: String,
     val skill: String = "",
     val attribute: String = "",
-    val range: Int = EnchantRange.SELF,
+    val range: Int = EffectRange.SELF,
     val magMin: Int = 1,
     val magMax: Int = 1,
     val duration: Int = 1,
@@ -769,6 +816,55 @@ data class EnchantEffect(
     val icon: String = "",
     val text: String = ""
 )
+
+/**
+ * A live DS Spellmaking session (`COMPANION_SPELLMAKING_STATE_*`), from the native
+ * `MWGui::SpellCreationDialog`. Republished in full from the tail of `notifyEffectsChanged()` after
+ * every mutation, so nothing here is ever tracked on the Kotlin side.
+ *
+ * Shares [EffectAvail] / [EffectEntry] and the whole effect editor with enchanting — that half is
+ * `EffectEditorBase`, which backs both windows. What is NOT shared is everything on this class:
+ * spellmaking has no item, no soul gem, no cast type and no capacity ceiling.
+ */
+data class SpellmakingSession(
+    val name: String = "",
+    val spellmaker: String = "",
+    /**
+     * The two top-screen figures, under the labels VANILLA uses, resolved natively and carried here
+     * rather than hardcoded — [costLabel] is `sEnchantmentMenu4` ("Magicka Cost"), which is a
+     * DIFFERENT GMST from enchanting's `sEnchantmentMenu3` points row, and [chanceLabel] is
+     * `sSpellmakingMenu1`.
+     */
+    val costLabel: String = "",
+    val chanceLabel: String = "",
+    /**
+     * The spell's magicka cost, read from the native caption rather than recomputed. It is
+     * ORDER-DEPENDENT: `notifyEffectsChanged` accumulates
+     * `y += max(1, calcEffectCost(effect, PlayerSpell))` and then applies `y *= 1.5` for a Target
+     * effect to the **running total**, so the same two effects cost differently depending on which
+     * was added first. That is faithful vanilla behaviour, and it is why [effects] must never be
+     * sorted or reordered for display.
+     */
+    val cost: Int = 0,
+    /** Chance of successfully CASTING the finished spell later (`calcSpellBaseSuccessChance`,
+     *  capped at 100) — NOT a chance of the creation failing. Creation has no roll at all. */
+    val chance: Int = 0,
+    /** `max(1, cost * fSpellMakingValueMult)` through `getBarterOffer`. */
+    val price: Int = 0,
+    val gold: Int = 0,
+    val effectCap: Int = 8,
+    val available: List<EffectAvail> = emptyList(),
+    /** In native `mEffects` order. See [cost] — do not reorder. */
+    val effects: List<EffectEntry> = emptyList()
+) {
+    /** Spellmaking is never a constant effect (`setConstantEffect` is only ever called from
+     *  `EnchantingDialog`), so the shared editor's range and slider rules always take `false`. */
+    val constant: Boolean get() = false
+
+    /** Buy validation 4, mirrored for display only — pressing Buy is still what refuses, with
+     *  vanilla's own `sNotifyMessage18`. */
+    val cantAfford: Boolean get() = price > gold
+}
 
 /** One row of the item or soul picker. Both browse the PLAYER's own inventory, never the
  *  enchanter's, and are addressed by serialized RefId rather than by ordinal. */
@@ -789,7 +885,7 @@ data class EnchantPickOption(
  *  / SelectAttributeDialog at this point; the DS screen draws its own and answers with
  *  `CMP:enchant_effect_skill` / `_attribute`. NOTE there is deliberately no duplicate check on this
  *  path — vanilla has none, so the same skill may be added twice. */
-data class EnchantArgPick(val kind: String, val effectId: String) {
+data class EffectArgPick(val kind: String, val effectId: String) {
     val isSkill: Boolean get() = kind == "skill"
 }
 
@@ -797,7 +893,7 @@ data class EnchantArgPick(val kind: String, val effectId: String) {
  *  pushed onto `mEffects` — it is ALREADY on the enchantment and shows in the top-screen readout
  *  while the editor is open, exactly as vanilla's `eventEffectAdded` does it, and Cancel is what
  *  removes it again. `isNew = false` means an existing effect was tapped; Cancel restores it. */
-data class EnchantEditRequest(val index: Int, val isNew: Boolean)
+data class EffectEditRequest(val index: Int, val isNew: Boolean)
 
 /**
  * A live DS enchanting screen; null when GM_Enchanting is not open.
@@ -842,32 +938,20 @@ data class EnchantSession(
     val effectCap: Int = 8,
     val item: EnchantSlotItem = EnchantSlotItem(),
     val soul: EnchantSlotItem = EnchantSlotItem(),
-    val available: List<EnchantAvailEffect> = emptyList(),
-    val effects: List<EnchantEffect> = emptyList(),
+    val available: List<EffectAvail> = emptyList(),
+    val effects: List<EffectEntry> = emptyList(),
     val itemOptions: List<EnchantPickOption> = emptyList(),
     val soulOptions: List<EnchantPickOption> = emptyList()
 ) {
-    /** Range availability, recomputed from the raw flags against the LIVE cast style — the exact
-     *  expressions `EditEffectDialog::onRangeButtonClicked` uses. */
-    fun allowSelf(flags: Int): Boolean = (flags and MagicEffectFlag.CAST_SELF) != 0 || constant
-    fun allowTouch(flags: Int): Boolean = (flags and MagicEffectFlag.CAST_TOUCH) != 0 && !constant
-    fun allowTarget(flags: Int): Boolean = (flags and MagicEffectFlag.CAST_TARGET) != 0 && !constant
-
-    /** The legal ranges in Self -> Touch -> Target order. Empty means the effect is unusable under
-     *  the current cast style, which vanilla handles by silently ignoring the tap (its own
-     *  unresolved TODO) — so no error message is shown here either. */
-    fun ranges(flags: Int): List<Int> = buildList {
-        if (allowSelf(flags)) add(EnchantRange.SELF)
-        if (allowTouch(flags)) add(EnchantRange.TOUCH)
-        if (allowTarget(flags)) add(EnchantRange.TARGET)
-    }
-
-    /** The three slider-visibility tests, independent of each other — `EditEffectDialog::updateBoxes`
-     *  verbatim. Area is keyed to the CURRENT range rather than to a flag of its own, so it appears
-     *  and disappears live as the player cycles range inside the editor. */
-    fun showMagnitude(flags: Int): Boolean = (flags and MagicEffectFlag.NO_MAGNITUDE) == 0
-    fun showDuration(flags: Int): Boolean = (flags and MagicEffectFlag.NO_DURATION) == 0 && !constant
-    fun showArea(range: Int): Boolean = range != EnchantRange.SELF
+    // The range / slider rules belong to the shared editor, not to enchanting — see the free
+    // functions above. These forward so the enchanting call sites keep reading as they did.
+    fun allowSelf(flags: Int): Boolean = effectAllowSelf(flags, constant)
+    fun allowTouch(flags: Int): Boolean = effectAllowTouch(flags, constant)
+    fun allowTarget(flags: Int): Boolean = effectAllowTarget(flags, constant)
+    fun ranges(flags: Int): List<Int> = effectRanges(flags, constant)
+    fun showMagnitude(flags: Int): Boolean = effectShowMagnitude(flags)
+    fun showDuration(flags: Int): Boolean = effectShowDuration(flags, constant)
+    fun showArea(range: Int): Boolean = effectShowArea(range)
 
     /** Over capacity — the same comparison the Buy validation makes before rejecting with
      *  sNotifyMessage29. Shown as a warning colour; Buy is still pressable, because pressing it is
@@ -1052,7 +1136,8 @@ data class JournalEntry(
  * need to clear the flow between presses.
  *
  * Semantic mapping (see the controller scheme): Confirm = A, Action1 = X, R1/L2/R2 the shoulders/
- * triggers, SliderLeft/SliderRight the left-stick nudges. B is deliberately absent — it is handled
+ * triggers, SliderLeft/SliderRight the left-stick horizontal nudges and SliderUp/SliderDown its
+ * vertical (coarse) counterparts. B is deliberately absent — it is handled
  * by companion-b-button-choice-fix.patch, never intercepted here.
  */
 sealed class NavEvent {
@@ -1070,6 +1155,12 @@ sealed class NavEvent {
     data class R2(override val seq: Long) : NavEvent()
     data class SliderLeft(override val seq: Long) : NavEvent()
     data class SliderRight(override val seq: Long) : NavEvent()
+    /** Left stick UP/DOWN, the COARSE partner of [SliderLeft]/[SliderRight]. Barter moves the gold
+     *  amount by ten of these where left/right moves it by one. Its own signal rather than a
+     *  modifier on the horizontal pair so each consumer picks its own step size; no other DS overlay
+     *  reads it today, so it is inert everywhere else. */
+    data class SliderUp(override val seq: Long) : NavEvent()
+    data class SliderDown(override val seq: Long) : NavEvent()
     data class ScrollUp(override val seq: Long) : NavEvent()      // right stick up (vertical lists)
     data class ScrollDown(override val seq: Long) : NavEvent()    // right stick down (vertical lists)
     data class ScrollLeft(override val seq: Long) : NavEvent()    // right stick left (horizontal grids)

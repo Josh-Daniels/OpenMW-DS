@@ -39,7 +39,7 @@
  namespace MWInput
  {
      ControllerManager::ControllerManager(BindingsManager* bindingsManager, MouseManager* mouseManager,
-@@ -98,6 +116,130 @@
+@@ -98,6 +116,162 @@
  
      void ControllerManager::update(float dt)
      {
@@ -147,6 +147,38 @@
 +                sSliderAccum = interval; // re-arm in the deadzone
 +            }
 +
++            // COMPANION: left-stick Y is the COARSE partner of the left-stick X slider above — the
++            // barter gold amount moves in ±10 steps on up/down where left/right moves it by 1. It is
++            // its own signal (SLIDER_UP/SLIDER_DOWN) rather than a modifier on SLIDER_LEFT/RIGHT so
++            // the consumer decides the step size; nothing else in the DS overlays reads it today.
++            // Same held-stick problem, same per-frame poll (reuses threshold/interval), own
++            // accumulator. Negative (up) = coarse increase, positive (down) = coarse decrease.
++            //
++            // NOT added to the swallow-list in gamepadToGuiControl (which does swallow LEFTX /
++            // RIGHTX / RIGHTY under companionNavActive), so LEFTY keeps exactly the vanilla handling
++            // it already had: the raw axis reaches only the A_MoveForwardBackward channel, which is
++            // inert while a GUI mode is up, and the cursor block that would otherwise read it is
++            // already gated off under companionNavActive (see companion-gamecursor-stick-motion
++            // .patch, whose comment names LEFTY as the one un-swallowed axis). Leaving it alone also
++            // means this poll cannot introduce a stuck-movement-channel case of its own; the one
++            // that vanilla can still produce is already neutralised by the four-axis reset in
++            // companion-controller-input-fixes.patch (nav-active true->false AND GUI->gameplay).
++            const float ly = getAxisValue(SDL_CONTROLLER_AXIS_LEFTY);
++            static float sSliderVAccum = interval; // primed so the first deflection emits immediately
++            if (ly <= -threshold || ly >= threshold)
++            {
++                sSliderVAccum += dt;
++                if (sSliderVAccum >= interval)
++                {
++                    sSliderVAccum = 0.0f;
++                    Log(Debug::Info) << (ly < 0.0f ? "COMPANION_NAV_SLIDER_UP:" : "COMPANION_NAV_SLIDER_DOWN:");
++                }
++            }
++            else
++            {
++                sSliderVAccum = interval; // re-arm in the deadzone
++            }
++
 +            // COMPANION: right-stick X scrolls the SPLIT horizontal grids left/right (the vertical
 +            // right-stick Y poll above drives the BOTTOM vertical lists up/down). Same per-frame
 +            // poll + own accumulator. Negative (left) = scroll left, positive (right) = scroll right.
@@ -170,7 +202,7 @@
          if (mGuiCursorEnabled && !(mJoystickLastUsed && !mGamepadGuiCursorEnabled)
  #ifdef __ANDROID__
              // COMPANION: don't let the thumbstick move the GUI cursor while the "Game cursor" option
-@@ -273,6 +415,36 @@
+@@ -273,6 +447,36 @@
  
      bool ControllerManager::gamepadToGuiControl(const SDL_ControllerButtonEvent& arg)
      {
@@ -207,7 +239,7 @@
          MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();
  
          if (Settings::gui().mControllerMenus)
-@@ -383,6 +555,43 @@
+@@ -383,6 +587,43 @@
          };
  
          MWBase::WindowManager* winMgr = MWBase::Environment::get().getWindowManager();

@@ -277,6 +277,16 @@ local function firstEffectInfo(effects)
     return text, school
 end
 
+-- How many effects the spell/enchantment has in total. The row summary above describes effects[1]
+-- ONLY, so the UI needs this to say "+N more" for the rest; the info popup already lists them all.
+-- pcall-guarded like firstEffectInfo — a record with no effects list reports 0, which the UI reads
+-- as "nothing to indicate" (same as 1).
+local function effectCount(effects)
+    local n = 0
+    pcall(function() n = #(effects or {}) end)
+    return n
+end
+
 local function exportSpells()
     local parts = {}
 
@@ -299,9 +309,9 @@ local function exportSpells()
             local cost = 0
             pcall(function() cost = math.floor((rec.cost or 0) + 0.5) end)
             table.insert(parts, string.format(
-                '{"id":"%s","name":"%s","type":"%s","icon":"%s","effect":"%s","school":"%s","cost":%d}',
+                '{"id":"%s","name":"%s","type":"%s","icon":"%s","effect":"%s","school":"%s","cost":%d,"effectCount":%d}',
                 jsonEscape(spell.id), jsonEscape(nm), typeStr, jsonEscape(icon),
-                jsonEscape(effName), jsonEscape(school), cost))
+                jsonEscape(effName), jsonEscape(school), cost, effectCount(rec and rec.effects)))
         end
     end
 
@@ -310,14 +320,15 @@ local function exportSpells()
         if rec.isScroll and rec.enchant and rec.enchant ~= "" then
             -- Scrolls: effect only (no magicka cost / school — they're items, not learned spells).
             local effName = ""
+            local nEff = 0
             pcall(function()
                 local ench = core.magic.enchantments.records[rec.enchant]
-                if ench then effName = firstEffectInfo(ench.effects) end
+                if ench then effName = firstEffectInfo(ench.effects); nEff = effectCount(ench.effects) end
             end)
             table.insert(parts, string.format(
-                '{"id":"%s","name":"%s","type":"scroll","icon":"%s","effect":"%s"}',
+                '{"id":"%s","name":"%s","type":"scroll","icon":"%s","effect":"%s","effectCount":%d}',
                 jsonEscape(item.recordId), jsonEscape(itemName(item)),
-                jsonEscape(rec.icon or ""), jsonEscape(effName)))
+                jsonEscape(rec.icon or ""), jsonEscape(effName), nEff))
         end
     end
 
@@ -345,10 +356,11 @@ local function exportSpells()
                 -- Enchanted items: effect + charge (already exported); no cost/school.
                 local effName = firstEffectInfo(ench.effects)
                 table.insert(parts, string.format(
-                    '{"id":"%s","name":"%s","type":"scroll","icon":"%s","isItem":true,"charge":%d,"maxCharge":%d,"effect":"%s"}',
+                    '{"id":"%s","name":"%s","type":"scroll","icon":"%s","isItem":true,"charge":%d,"maxCharge":%d,"effect":"%s","effectCount":%d}',
                     jsonEscape(item.recordId), jsonEscape(itemName(item)),
                     jsonEscape(icon),
-                    math.floor(charge + 0.5), math.floor(maxCharge + 0.5), jsonEscape(effName)))
+                    math.floor(charge + 0.5), math.floor(maxCharge + 0.5), jsonEscape(effName),
+                    effectCount(ench.effects)))
             end
         end
     end

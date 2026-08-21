@@ -21,6 +21,7 @@ import org.openmw.companion.ConversationLocation
 import org.openmw.companion.GameUiMode
 import org.openmw.companion.AlchemyTopOverlay
 import org.openmw.companion.EnchantingTopOverlay
+import org.openmw.companion.SpellmakingTopOverlay
 import org.openmw.companion.MapDsTopOverlay
 import org.openmw.companion.LevelUpTopOverlay
 import org.openmw.companion.LootingTopOverlay
@@ -179,6 +180,7 @@ class EngineActivity : SDLActivity() {
     private var levelUpTopView: View? = null
     private var alchemyTopView: View? = null
     private var enchantingTopView: View? = null
+    private var spellmakingTopView: View? = null
     private var mapDsTopView: View? = null
 
     // INTERACTIVE looting grids on the TOP screen (this activity's own window / Display 0), shown
@@ -1187,11 +1189,19 @@ class EngineActivity : SDLActivity() {
                 GameStateRepository.enchantSession,
                 UiPreferences.gameUiModeFlow("game_ui_enchanting"),
             ) { session, mode -> session != null && mode == GameUiMode.DS }
+            // Spellmaking is the same case as enchanting, for the same reason: a dialogue SERVICE,
+            // always entered from a conversation, with a bottom-anchored top panel that lands in
+            // exactly the space the conversation history box occupies.
+            val spellmakingTopActive = combine(
+                GameStateRepository.spellmakingSession,
+                UiPreferences.gameUiModeFlow("game_ui_spellmaking"),
+            ) { session, mode -> session != null && mode == GameUiMode.DS }
 
             combine(
-                wantConversationTop, anyServiceVanillaUp, barterTopActive, enchantTopActive
-            ) { show, serviceUp, barterTop, enchantTop ->
-                show && !serviceUp && !barterTop && !enchantTop
+                wantConversationTop, anyServiceVanillaUp, barterTopActive, enchantTopActive,
+                spellmakingTopActive
+            ) { show, serviceUp, barterTop, enchantTop, spellmakingTop ->
+                show && !serviceUp && !barterTop && !enchantTop && !spellmakingTop
             }.distinctUntilChanged().collect { show ->
                 if (show) showConversationTopOverlay() else hideConversationTopOverlay()
             }
@@ -1284,6 +1294,18 @@ class EngineActivity : SDLActivity() {
             ) { session, mode -> session != null && mode == GameUiMode.DS }
                 .distinctUntilChanged()
                 .collect { show -> if (show) showEnchantingTopOverlay() else hideEnchantingTopOverlay() }
+        }
+
+        // TOP-screen DS spellmaking half. Same shape as the enchanting one above: the session flow
+        // is cleared from every close path (Cancel / onClose / exit / onReferenceUnavailable / the
+        // successful Buy), so it cannot be left stranded.
+        lifecycleScope.launch {
+            combine(
+                GameStateRepository.spellmakingSession,
+                UiPreferences.gameUiModeFlow("game_ui_spellmaking"),
+            ) { session, mode -> session != null && mode == GameUiMode.DS }
+                .distinctUntilChanged()
+                .collect { show -> if (show) showSpellmakingTopOverlay() else hideSpellmakingTopOverlay() }
         }
 
         // TOP-screen DS map. Shown while the in-game map view is open AND the Map element is DS.
@@ -1387,6 +1409,9 @@ class EngineActivity : SDLActivity() {
             // hidden in DS mode, so leaving the controller on it would drive a window nobody can
             // see (and B would pop the mode out from under the DS screen).
             val enchantNav = sessionNav(GameStateRepository.enchantSession, "game_ui_enchanting")
+            // Spellmaking shares the effect editor with enchanting, so it needs the same gate for
+            // the same reason: the native window is hidden in DS mode.
+            val spellmakingNav = sessionNav(GameStateRepository.spellmakingSession, "game_ui_spellmaking")
             // The DS map replaces a window that is normally controller-navigable, so the same gate
             // applies: while it is up the controller must be re-emitted as COMPANION_NAV_* rather
             // than driving the hidden native map.
@@ -1398,7 +1423,7 @@ class EngineActivity : SDLActivity() {
             combine(
                 listOf(
                     dialogueNav, lootingNav, barterNav, travelNav, repairNav, restWaitNav,
-                    trainingNav, spellBuyingNav, alchemyNav, enchantNav, mapNav
+                    trainingNav, spellBuyingNav, alchemyNav, enchantNav, spellmakingNav, mapNav
                 )
             ) { arr ->
                 arr.any { it }
@@ -1606,6 +1631,19 @@ class EngineActivity : SDLActivity() {
         val overlay = enchantingTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         enchantingTopView = null
+    }
+
+    // INTERACTIVE for the same reason as the enchanting one: the name field and the effect rows are
+    // a real control surface, so they answer to a TAP.
+    private fun showSpellmakingTopOverlay() = showInteractiveTopScreenOverlay(
+        alreadyShown = { spellmakingTopView != null },
+        onAdded = { spellmakingTopView = it },
+    ) { ProvideTopPanelOpacity { SpellmakingTopOverlay() } }
+
+    private fun hideSpellmakingTopOverlay() {
+        val overlay = spellmakingTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        spellmakingTopView = null
     }
 
     private fun showMapDsTopOverlay() = showInteractiveTopScreenOverlay(

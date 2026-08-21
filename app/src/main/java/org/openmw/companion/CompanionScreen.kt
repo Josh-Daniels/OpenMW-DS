@@ -1579,6 +1579,18 @@ private fun CompanionScreenContent() {
             }
         }
 
+        // Spellmaking overlay. Driven by COMPANION_SPELLMAKING_* (native SpellCreationDialog), the
+        // sibling of the enchanting screen above: same shared effect editor, same zIndex, same
+        // top/bottom split. The two can never be up at once — both are GUI modes pushed over
+        // dialogue — so they do not need to coordinate.
+        val spellmakingDs by UiPreferences.gameUiModeFlow("game_ui_spellmaking").collectAsState()
+        val spellmakingSession by GameStateRepository.spellmakingSession.collectAsState()
+        if (spellmakingDs == GameUiMode.DS) {
+            spellmakingSession?.let { session ->
+                SpellmakingOverlay(session = session)
+            }
+        }
+
         // Spell-buying overlay. Driven by COMPANION_SPELLBUYING_* (native SpellBuyingWindow). Shown
         // whenever a session exists AND Spell buying is DS. The engine re-exports the list after each
         // purchase (bought spell flips to known=1, keeping its slot). zIndex 17f (repair tier).
@@ -2372,6 +2384,7 @@ private fun DialogueRightColumn(
                 // listed anyway so the rule is "every DS service yields", not "the ones that
                 // happened to bite".
                 GameStateRepository.enchantSession.value != null ||
+                GameStateRepository.spellmakingSession.value != null ||
                 GameStateRepository.alchemySession.value != null
             ) return@collect
             val items = itemsState.value
@@ -3989,7 +4002,8 @@ private fun playerNavRows(shelves: List<ShelfRowData>, equipped: List<ShelfItem>
  *  - L2/R2 switch side; Confirm taps the focused item (loot transfer / barter toggle), or toggles the
  *    equipped section when on its header; Info = the item info popup.
  *  - [onAction1] = X (looting: Take All / barter: Offer), [onAction2] = Y (looting: Dispose),
- *    [onSlider] = left-stick step ±1 (barter gold), half-rate like [rememberBarterNavFocus].
+ *    [onSlider] = left-stick step (barter gold): ±1 on the horizontal axis, ±[BARTER_GOLD_COARSE_STEP]
+ *    on the vertical one, both half-rate like [rememberBarterNavFocus].
  * [playerRows]/[containerRows] already reflect the current equipped-expanded state, so a Confirm on
  * the equipped header flips it via [setEquippedExpanded] and the rows recompute next frame.
  */
@@ -4025,6 +4039,7 @@ private fun rememberShelfNavFocus(
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (matches barter)
+        var coarseTick = 0 // ditto for the vertical (±10) axis; own counter, as in barter
         GameStateRepository.navEvent.collect { ev ->
             if (ev == null || ev.seq <= lastSeq) return@collect
             lastSeq = ev.seq
@@ -4056,6 +4071,10 @@ private fun rememberShelfNavFocus(
                 is NavEvent.Action2 -> action2.value()
                 is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) slider.value(-1)
                 is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) slider.value(1)
+                is NavEvent.SliderUp ->
+                    if (coarseTick++ % 2 == 0) slider.value(BARTER_GOLD_COARSE_STEP)
+                is NavEvent.SliderDown ->
+                    if (coarseTick++ % 2 == 0) slider.value(-BARTER_GOLD_COARSE_STEP)
                 is NavEvent.Info -> curRows().getOrNull(row)?.items?.getOrNull(item)?.let {
                     ItemInfoPopupState.toggle(it.id, it.name, it.enchant, onTop = infoOnTop)
                 }
@@ -8272,36 +8291,74 @@ private object EnchantUiState {
     /** Browse-list filter. Purely presentational. */
     var filter by mutableStateOf("")
 
-    /** The effect editor, when open. Mirrors the native EditEffectDialog's working copy: the values
-     *  are pushed to the engine live (CMP:enchant_effect_set) so the top-screen readout and the
-     *  Enchantment/Cast Cost numbers track the sliders, and OK / Cancel are what commit or revert. */
-    var editIndex by mutableStateOf(-1)
-    var editIsNew by mutableStateOf(false)
-    var editRange by mutableStateOf(EnchantRange.SELF)
-    var editMagMin by mutableStateOf(1)
-    var editMagMax by mutableStateOf(1)
-    var editDuration by mutableStateOf(1)
-    var editArea by mutableStateOf(0)
-
     /** Non-null while the Skill / Attribute selector is up — the third popup type, raised by the
      *  engine (COMPANION_ENCHANTING_ARGPICK) when the tapped effect targets one. */
-    var argPick by mutableStateOf<EnchantArgPick?>(null)
-
-    val editing: Boolean get() = editIndex >= 0
-
-    fun closeEditor() {
-        editIndex = -1
-        editIsNew = false
-    }
+    var argPick by mutableStateOf<EffectArgPick?>(null)
 
     fun reset() {
         picker = null
         nameComposer = false
         filter = ""
         argPick = null
-        closeEditor()
+        EffectEditorState.close()
     }
 }
+
+/**
+ * The effect editor's working copy, SHARED by every screen that opens it — enchanting today,
+ * spellmaking next. It lives outside those screens' own UI state for the same reason
+ * `EffectEditorBase` owns the editor natively: `EditEffectDialog`, its slider bounds and its
+ * add-then-remove-on-cancel semantics belong to the editor, not to whatever window raised it.
+ *
+ * Mirrors the native working copy: the values are pushed to the engine live (via
+ * [EffectEditorActions.push]) so the top-screen readout and the cost figures track the sliders, and
+ * OK / Cancel are what commit or revert. Only ONE editor can be open at a time (both owning modes
+ * pause the sim and neither can raise the other), so a single object is enough.
+ */
+private object EffectEditorState {
+    var index by mutableStateOf(-1)
+    var isNew by mutableStateOf(false)
+    var range by mutableStateOf(EffectRange.SELF)
+    var magMin by mutableStateOf(1)
+    var magMax by mutableStateOf(1)
+    var duration by mutableStateOf(1)
+    var area by mutableStateOf(0)
+
+    val editing: Boolean get() = index >= 0
+
+    /** Seed from the effect as the ENGINE actually stored it — for a new effect that is after the
+     *  native opening-range override, so the popup opens on the range the engine chose. */
+    fun open(index: Int, isNew: Boolean, range: Int, magMin: Int, magMax: Int, duration: Int, area: Int) {
+        this.index = index
+        this.isNew = isNew
+        this.range = range
+        this.magMin = magMin
+        this.magMax = magMax
+        this.duration = duration
+        this.area = area
+    }
+
+    fun close() {
+        index = -1
+        isNew = false
+    }
+}
+
+/**
+ * The commands the shared effect editor drives. One bundle per owning screen, so the popup itself
+ * knows nothing about which `CMP:` family it is talking to.
+ *
+ * [push] sends the live working copy as one `*_effect_set`; the engine clamps and range-repairs it
+ * and republishes, so this is fire-and-forget. [delete] / [ok] / [cancel] map to the engine's own
+ * handlers — in particular [cancel] must route natively, because deciding between erasing a NEW
+ * effect and restoring an EDITED one is `EditEffectDialog::exit()`'s two halves.
+ */
+private class EffectEditorActions(
+    val push: () -> Unit,
+    val delete: (Int) -> Unit,
+    val ok: () -> Unit,
+    val cancel: () -> Unit
+)
 
 /** How long the enchanting result/validation banner stays up. Matched to alchemy's. */
 private const val ENCHANT_MSG_MS = 4200L
@@ -8309,17 +8366,23 @@ private const val ENCHANT_MSG_MS = 4200L
 /** Push the editor's working values at the engine. Called on every slider tick and range change, so
  *  the live readout, the Enchantment X/Y figure and the Cast Cost all move with the sliders — the
  *  native editor behaves the same way (each handler fires eventEffectModified immediately). */
-private fun enchantPushEdit() {
-    if (!EnchantUiState.editing) return
-    CompanionActions.enchantSetEffect(
-        EnchantUiState.editIndex,
-        EnchantUiState.editRange,
-        EnchantUiState.editMagMin,
-        EnchantUiState.editMagMax,
-        EnchantUiState.editDuration,
-        EnchantUiState.editArea
-    )
-}
+/** Enchanting's binding of the shared editor to its own CMP: family. Spellmaking gets a sibling
+ *  bundle; the popup itself knows about neither. */
+private val EnchantEditorActions = EffectEditorActions(
+    push = {
+        if (EffectEditorState.editing) CompanionActions.enchantSetEffect(
+            EffectEditorState.index,
+            EffectEditorState.range,
+            EffectEditorState.magMin,
+            EffectEditorState.magMax,
+            EffectEditorState.duration,
+            EffectEditorState.area
+        )
+    },
+    delete = { index -> CompanionActions.enchantDeleteEffect(index) },
+    ok = { CompanionActions.enchantEffectOk() },
+    cancel = { CompanionActions.enchantEffectCancel() }
+)
 
 /**
  * BOTTOM-screen enchanting: the item and soul slots, the Magic Effects browse list, the cast-type
@@ -8360,13 +8423,15 @@ private fun EnchantingOverlay(session: EnchantSession) {
             // that is after companionFirstRange has overridden the range, so the popup opens on the
             // first LEGAL range rather than on vanilla's cascade result.
             val eff = GameStateRepository.enchantSession.value?.effects?.getOrNull(req.index)
-            EnchantUiState.editIndex = req.index
-            EnchantUiState.editIsNew = req.isNew
-            EnchantUiState.editRange = eff?.range ?: EnchantRange.SELF
-            EnchantUiState.editMagMin = eff?.magMin ?: 1
-            EnchantUiState.editMagMax = eff?.magMax ?: 1
-            EnchantUiState.editDuration = eff?.duration ?: 1
-            EnchantUiState.editArea = eff?.area ?: 0
+            EffectEditorState.open(
+                index = req.index,
+                isNew = req.isNew,
+                range = eff?.range ?: EffectRange.SELF,
+                magMin = eff?.magMin ?: 1,
+                magMax = eff?.magMax ?: 1,
+                duration = eff?.duration ?: 1,
+                area = eff?.area ?: 0
+            )
             EnchantUiState.argPick = null
             GameStateRepository.clearEnchantEdit()
         }
@@ -8398,7 +8463,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
         if (session.soul.present) CompanionActions.enchantClearSoul()
         else EnchantUiState.picker = "soul"
     }
-    val addEffect: (EnchantAvailEffect) -> Unit = { avail ->
+    val addEffect: (EffectAvail) -> Unit = { avail ->
         UiSounds.play(UiSounds.Cue.TOGGLE)
         CompanionActions.enchantAddEffect(avail.id)
     }
@@ -8421,7 +8486,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
     // NAV_CANCEL instead of falling through to exitCurrentGuiMode, which would pop the whole
     // enchanting mode out from under an open picker. Persuasion popup is the template.
     val popupOpen = EnchantUiState.picker != null || EnchantUiState.argPick != null ||
-        EnchantUiState.editing || searching || EnchantUiState.nameComposer
+        EffectEditorState.editing || searching || EnchantUiState.nameComposer
     DisposableEffect(popupOpen) {
         if (popupOpen) {
             ModalNav.count++
@@ -8449,12 +8514,12 @@ private fun EnchantingOverlay(session: EnchantSession) {
             when {
                 searchingState.value -> searching = false
                 EnchantUiState.nameComposer -> EnchantUiState.nameComposer = false
-                EnchantUiState.editing -> {
+                EffectEditorState.editing -> {
                     // Through the ENGINE, never by just closing the popup: cancel erases a
                     // newly-added effect and restores an edited one, and only the native handler
                     // knows which of the two this was.
                     CompanionActions.enchantEffectCancel()
-                    EnchantUiState.closeEditor()
+                    EffectEditorState.close()
                 }
                 EnchantUiState.argPick != null -> EnchantUiState.argPick = null
                 EnchantUiState.picker != null -> EnchantUiState.picker = null
@@ -8565,7 +8630,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
                 }
                 if (EnchantUiState.filter.isNotBlank()) {
                     Spacer(Modifier.width(6.dp))
-                    EnchantChip(label = "Clear", active = false, onTap = { EnchantUiState.filter = "" })
+                    EffectChip(label = "Clear", active = false, onTap = { EnchantUiState.filter = "" })
                 }
             }
 
@@ -8600,7 +8665,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
                         itemsIndexed(visible) { i, avail ->
                             val usable = session.ranges(avail.flags).isNotEmpty()
                             val room = session.effects.size < session.effectCap
-                            EnchantEffectRow(
+                            EffectPickRow(
                                 icon = avail.icon,
                                 title = avail.name,
                                 subtitle = if (!usable) "Not available for this enchantment" else null,
@@ -8630,7 +8695,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
                 // ammo/thrown are locked to a single type, and bows only gain a second option with a
                 // soul of at least iSoulAmountForConstantEffect. That answer is exported, never
                 // re-derived here.
-                EnchantActionButton(
+                EffectActionButton(
                     label = session.castLabel.ifBlank { "Cast Once" },
                     color = if (session.castCycle) BronzeLight else BoneDim,
                     enabled = session.castCycle,
@@ -8641,7 +8706,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
                 // ALWAYS enabled, exactly as in vanilla: pressing Buy with something missing is how
                 // the validation message is produced, and there is no native "validate without
                 // committing" call to grey it out with.
-                EnchantActionButton(
+                EffectActionButton(
                     label = if (session.self) "Create" else "Buy",
                     color = BronzeLight,
                     hint = "X",
@@ -8651,7 +8716,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
                 // B, not a NAV binding: B is deliberately never intercepted at the top level, so it
                 // reaches native exitCurrentGuiMode -> EnchantingDialog::exit(), which emits the
                 // close signal and pops the mode. The hint documents the button that already works.
-                EnchantActionButton(label = "Cancel", color = Bone, hint = "B") {
+                EffectActionButton(label = "Cancel", color = Bone, hint = "B") {
                     UiSounds.play(UiSounds.Cue.TOGGLE)
                     CompanionActions.enchantCancel()
                 }
@@ -8702,7 +8767,7 @@ private fun EnchantingOverlay(session: EnchantSession) {
 
         // --- Popup 2: skill / attribute selector -------------------------------------------------------
         EnchantUiState.argPick?.let { pick ->
-            EnchantArgPickerPopup(
+            EffectArgPickerPopup(
                 pick = pick,
                 onPick = { argId ->
                     if (pick.isSkill) CompanionActions.enchantEffectSkill(pick.effectId, argId)
@@ -8714,14 +8779,27 @@ private fun EnchantingOverlay(session: EnchantSession) {
         }
 
         // --- Popup 3: effect editor --------------------------------------------------------------------
-        if (EnchantUiState.editing) {
-            val effect = session.effects.getOrNull(EnchantUiState.editIndex)
+        if (EffectEditorState.editing) {
+            val effect = session.effects.getOrNull(EffectEditorState.index)
             if (effect == null) {
                 // The effect vanished under us (a Cancel raced a republish). Close rather than draw
                 // an editor pointed at nothing.
-                EnchantUiState.closeEditor()
+                EffectEditorState.close()
             } else {
-                EnchantEffectEditorPopup(session = session, effect = effect)
+                EffectEditorPopup(
+                    title = effect.text.ifBlank { "EFFECT" }.uppercase(),
+                    flags = effect.flags,
+                    constant = session.constant,
+                    actions = EnchantEditorActions
+                ) {
+                    // The live cost of the whole enchantment, so the player can see the capacity
+                    // fill up while dragging. Over capacity is coloured, not blocked — Buy refuses.
+                    Text(
+                        "Enchantment ${session.points} / ${session.maxPoints}",
+                        color = if (session.overCapacity) BarterRed else BoneDim,
+                        fontSize = 15.sp, fontFamily = MwData
+                    )
+                }
             }
         }
 
@@ -8760,7 +8838,7 @@ private fun EnchantSlotBox(
     detail: String,
     modifier: Modifier = Modifier,
     // Controller binding, drawn beside the ITEM/SOUL caption. Same inline-hint convention as
-    // EnchantActionButton — these two slots are the screen's L1/R1 shortcuts.
+    // EffectActionButton — these two slots are the screen's L1/R1 shortcuts.
     hint: String? = null,
     onTap: () -> Unit
 ) {
@@ -8812,7 +8890,7 @@ private fun EnchantSlotBox(
  *  no meaning). */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun EnchantEffectRow(
+private fun EffectPickRow(
     icon: String,
     title: String,
     subtitle: String?,
@@ -8882,7 +8960,7 @@ private fun EnchantEffectRow(
  *  than relying on the native ControllerButtonsOverlay: that bar reads the ACTIVE window's
  *  mControllerButtons, and in DS mode this window is hidden, so it shows whatever is underneath. */
 @Composable
-private fun EnchantActionButton(
+private fun EffectActionButton(
     label: String,
     color: Color,
     enabled: Boolean = true,
@@ -8930,7 +9008,7 @@ private fun EnchantActionButton(
 /** Chip for the enchanting screen — the range selector and the filter's Clear. Same shape as
  *  [AlchemyChip], sized for this screen. */
 @Composable
-private fun EnchantChip(label: String, active: Boolean, onTap: () -> Unit) {
+private fun EffectChip(label: String, active: Boolean, onTap: () -> Unit) {
     Box(
         Modifier
             .clip(RoundedCornerShape(3.dp))
@@ -8950,7 +9028,7 @@ private fun EnchantChip(label: String, active: Boolean, onTap: () -> Unit) {
 /** Square +/- stepper for the effect editor's sliders, at the enchanting screen's own control
  *  height rather than alchemy's smaller one. */
 @Composable
-private fun EnchantStepButton(label: String, enabled: Boolean = true, onTap: () -> Unit) {
+private fun EffectStepButton(label: String, enabled: Boolean = true, onTap: () -> Unit) {
     Box(
         Modifier
             .size(ENCHANT_CONTROL_HEIGHT)
@@ -8972,7 +9050,7 @@ private fun EnchantStepButton(label: String, enabled: Boolean = true, onTap: () 
  *  (that crashes on the Presentation display — see ItemInfoOverlay). The scrim swallows taps: none
  *  of vanilla's equivalents dismiss on an outside click either. */
 @Composable
-private fun EnchantPopupFrame(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun EffectPopupFrame(title: String, content: @Composable ColumnScope.() -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
@@ -9029,7 +9107,7 @@ private fun EnchantPickerPopup(
     LaunchedEffect(focusIndex) {
         if (focusIndex in options.indices) listState.animateScrollToItem(focusIndex)
     }
-    EnchantPopupFrame(title) {
+    EffectPopupFrame(title) {
         if (options.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 Text(empty, color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
@@ -9049,7 +9127,7 @@ private fun EnchantPickerPopup(
                 // the rows hold no state worth preserving, so a key buys nothing and can only hurt.
                 LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxHeight()) {
                     itemsIndexed(options) { i, opt ->
-                        EnchantEffectRow(
+                        EffectPickRow(
                             icon = opt.icon,
                             title = if (opt.count > 1) "${opt.name} (${opt.count})" else opt.name,
                             // Soul gems show the trapped soul and its value — the number that becomes
@@ -9069,7 +9147,7 @@ private fun EnchantPickerPopup(
         }
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            EnchantActionButton(label = "Cancel", color = Bone, hint = "B") {
+            EffectActionButton(label = "Cancel", color = Bone, hint = "B") {
                 UiSounds.play(UiSounds.Cue.TOGGLE); onCancel()
             }
         }
@@ -9081,8 +9159,8 @@ private fun EnchantPickerPopup(
  *  skills or attributes flows through. Deliberately offers EVERY entry with no duplicate filtering:
  *  vanilla has no such check on this path, so the same skill may be picked twice. */
 @Composable
-private fun EnchantArgPickerPopup(
-    pick: EnchantArgPick,
+private fun EffectArgPickerPopup(
+    pick: EffectArgPick,
     onPick: (String) -> Unit,
     onCancel: () -> Unit
 ) {
@@ -9103,7 +9181,7 @@ private fun EnchantArgPickerPopup(
     LaunchedEffect(focusIndex) {
         if (focusIndex in rows.indices) listState.animateScrollToItem(focusIndex)
     }
-    EnchantPopupFrame(if (pick.isSkill) "SELECT SKILL" else "SELECT ATTRIBUTE") {
+    EffectPopupFrame(if (pick.isSkill) "SELECT SKILL" else "SELECT ATTRIBUTE") {
         if (rows.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 Text("Unavailable", color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
@@ -9116,7 +9194,7 @@ private fun EnchantArgPickerPopup(
                 // the popup is open, so the key would be pure risk for no benefit.
                 LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxHeight()) {
                     itemsIndexed(rows) { i, (id, name) ->
-                        EnchantEffectRow(
+                        EffectPickRow(
                             icon = "", title = name, subtitle = null, enabled = true,
                             focused = i == focusIndex,
                             onTap = { choose(id) }
@@ -9130,7 +9208,7 @@ private fun EnchantArgPickerPopup(
         }
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            EnchantActionButton(label = "Cancel", color = Bone, hint = "B") {
+            EffectActionButton(label = "Cancel", color = Bone, hint = "B") {
                 UiSounds.play(UiSounds.Cue.TOGGLE); onCancel()
             }
         }
@@ -9140,7 +9218,7 @@ private fun EnchantArgPickerPopup(
 /** The editor's D-pad focus stops, in screen order. Built fresh on every recomposition from the
  *  SAME visibility tests that decide what is drawn (see the popup's KDoc — two of them move under
  *  the player), so the focus list can never offer a row that is not on screen. */
-private enum class EnchantEditRow { RANGE, MAG_MIN, MAG_MAX, DURATION, AREA, DELETE, OK, CANCEL }
+private enum class EffectEditRow { RANGE, MAG_MIN, MAG_MAX, DURATION, AREA, DELETE, OK, CANCEL }
 
 /**
  * Popup 3 — the effect editor: the Range button plus whichever of the Magnitude / Duration / Area
@@ -9158,20 +9236,27 @@ private enum class EnchantEditRow { RANGE, MAG_MIN, MAG_MAX, DURATION, AREA, DEL
  * `EditEffectDialog::exit()`'s two halves and is executed NATIVELY.
  */
 @Composable
-private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEffect) {
-    val flags = effect.flags
-    val ranges = session.ranges(flags)
-    val showMag = session.showMagnitude(flags)
-    val showDur = session.showDuration(flags)
-    val showArea = session.showArea(EnchantUiState.editRange)
+private fun EffectEditorPopup(
+    title: String,
+    flags: Int,
+    constant: Boolean,
+    actions: EffectEditorActions,
+    /** Drawn under the sliders. Enchanting shows the capacity fill; spellmaking, which has no
+     *  capacity ceiling, shows its magicka cost. Nothing else about the popup differs. */
+    footer: @Composable () -> Unit
+) {
+    val ranges = effectRanges(flags, constant)
+    val showMag = effectShowMagnitude(flags)
+    val showDur = effectShowDuration(flags, constant)
+    val showArea = effectShowArea(EffectEditorState.range)
 
     // The cast type can change while the editor is open (it cannot be reached from here, but a
     // republish can arrive), so keep the working range legal.
-    LaunchedEffect(flags, session.constant, EnchantUiState.editRange) {
-        if (ranges.isNotEmpty() && EnchantUiState.editRange !in ranges) {
-            EnchantUiState.editRange = ranges.first()
-            EnchantUiState.editArea = 0
-            enchantPushEdit()
+    LaunchedEffect(flags, constant, EffectEditorState.range) {
+        if (ranges.isNotEmpty() && EffectEditorState.range !in ranges) {
+            EffectEditorState.range = ranges.first()
+            EffectEditorState.area = 0
+            actions.push()
         }
     }
 
@@ -9180,37 +9265,37 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
     // two paths cannot drift (the same rule the browse list follows).
     val setRange: (Int) -> Unit = { r ->
         UiSounds.play(UiSounds.Cue.TICK)
-        EnchantUiState.editRange = r
+        EffectEditorState.range = r
         // onRangeButtonClicked zeroes the area slider whenever it lands on Self.
-        if (r == EnchantRange.SELF) EnchantUiState.editArea = 0
-        enchantPushEdit()
+        if (r == EffectRange.SELF) EffectEditorState.area = 0
+        actions.push()
     }
     val setMagMin: (Int) -> Unit = { v ->
-        EnchantUiState.editMagMin = v
+        EffectEditorState.magMin = v
         // The ONE coupling vanilla has: max is forced up to meet min.
-        if (EnchantUiState.editMagMax < v) EnchantUiState.editMagMax = v
-        enchantPushEdit()
+        if (EffectEditorState.magMax < v) EffectEditorState.magMax = v
+        actions.push()
     }
     val setMagMax: (Int) -> Unit = { v ->
-        EnchantUiState.editMagMax = v.coerceAtLeast(EnchantUiState.editMagMin)
-        enchantPushEdit()
+        EffectEditorState.magMax = v.coerceAtLeast(EffectEditorState.magMin)
+        actions.push()
     }
-    val setDuration: (Int) -> Unit = { v -> EnchantUiState.editDuration = v; enchantPushEdit() }
-    val setArea: (Int) -> Unit = { v -> EnchantUiState.editArea = v; enchantPushEdit() }
+    val setDuration: (Int) -> Unit = { v -> EffectEditorState.duration = v; actions.push() }
+    val setArea: (Int) -> Unit = { v -> EffectEditorState.area = v; actions.push() }
     val deleteAction: () -> Unit = {
         UiSounds.play(UiSounds.Cue.TOGGLE)
-        CompanionActions.enchantDeleteEffect(EnchantUiState.editIndex)
-        EnchantUiState.closeEditor()
+        actions.delete(EffectEditorState.index)
+        EffectEditorState.close()
     }
     val okAction: () -> Unit = {
         UiSounds.play(UiSounds.Cue.ACTION)
-        CompanionActions.enchantEffectOk()
-        EnchantUiState.closeEditor()
+        actions.ok()
+        EffectEditorState.close()
     }
     val cancelAction: () -> Unit = {
         UiSounds.play(UiSounds.Cue.TOGGLE)
-        CompanionActions.enchantEffectCancel()
-        EnchantUiState.closeEditor()
+        actions.cancel()
+        EffectEditorState.close()
     }
 
     // ---- Controller navigation ----------------------------------------------------------------
@@ -9225,13 +9310,13 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
     // through the engine, which is what decides between erasing a new effect and restoring an
     // edited one).
     val rows = buildList {
-        if (ranges.isNotEmpty()) add(EnchantEditRow.RANGE)
-        if (showMag) { add(EnchantEditRow.MAG_MIN); add(EnchantEditRow.MAG_MAX) }
-        if (showDur) add(EnchantEditRow.DURATION)
-        if (showArea) add(EnchantEditRow.AREA)
-        if (!EnchantUiState.editIsNew) add(EnchantEditRow.DELETE)
-        add(EnchantEditRow.OK)
-        add(EnchantEditRow.CANCEL)
+        if (ranges.isNotEmpty()) add(EffectEditRow.RANGE)
+        if (showMag) { add(EffectEditRow.MAG_MIN); add(EffectEditRow.MAG_MAX) }
+        if (showDur) add(EffectEditRow.DURATION)
+        if (showArea) add(EffectEditRow.AREA)
+        if (!EffectEditorState.isNew) add(EffectEditRow.DELETE)
+        add(EffectEditRow.OK)
+        add(EffectEditRow.CANCEL)
     }
     var focus by remember { mutableStateOf(0) }
     LaunchedEffect(rows) { focus = focus.coerceIn(0, rows.lastIndex) }
@@ -9241,7 +9326,7 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
     // mutable map, never snapshot state: it is written during the layout pass for every visible row,
     // so a snapshot map would invalidate this popup every frame (the same reasoning as
     // ItemInfoPopupState's anchor cache).
-    val rowOffsets = remember { HashMap<EnchantEditRow, Int>() }
+    val rowOffsets = remember { HashMap<EffectEditRow, Int>() }
     val scrollState = rememberScrollState()
 
     val rowsState = rememberUpdatedState(rows)
@@ -9258,46 +9343,46 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
             // Step the focused slider by [d], or jump it to an end when [toEnd] is set.
             fun step(d: Int, toEnd: Boolean = false) {
                 when (cur) {
-                    EnchantEditRow.RANGE -> if (legal.size > 1) {
-                        val i = legal.indexOf(EnchantUiState.editRange).coerceAtLeast(0)
+                    EffectEditRow.RANGE -> if (legal.size > 1) {
+                        val i = legal.indexOf(EffectEditorState.range).coerceAtLeast(0)
                         setRange(legal[(i + d + legal.size) % legal.size])
                     }
-                    EnchantEditRow.MAG_MIN -> {
-                        val lo = EnchantBounds.MAG_MIN
-                        val hi = EnchantBounds.MAG_MAX
+                    EffectEditRow.MAG_MIN -> {
+                        val lo = EffectBounds.MAG_MIN
+                        val hi = EffectBounds.MAG_MAX
                         setMagMin(
                             if (toEnd) (if (d < 0) lo else hi)
-                            else (EnchantUiState.editMagMin + d).coerceIn(lo, hi)
+                            else (EffectEditorState.magMin + d).coerceIn(lo, hi)
                         )
                     }
-                    EnchantEditRow.MAG_MAX -> {
+                    EffectEditRow.MAG_MAX -> {
                         // Its floor is the CURRENT min, exactly as the touch slider's `min` is.
-                        val lo = EnchantUiState.editMagMin
-                        val hi = EnchantBounds.MAG_MAX
+                        val lo = EffectEditorState.magMin
+                        val hi = EffectBounds.MAG_MAX
                         setMagMax(
                             if (toEnd) (if (d < 0) lo else hi)
-                            else (EnchantUiState.editMagMax + d).coerceIn(lo, hi)
+                            else (EffectEditorState.magMax + d).coerceIn(lo, hi)
                         )
                     }
-                    EnchantEditRow.DURATION -> {
-                        val lo = EnchantBounds.DURATION_MIN
-                        val hi = EnchantBounds.DURATION_MAX
+                    EffectEditRow.DURATION -> {
+                        val lo = EffectBounds.DURATION_MIN
+                        val hi = EffectBounds.DURATION_MAX
                         setDuration(
                             if (toEnd) (if (d < 0) lo else hi)
-                            else (EnchantUiState.editDuration + d).coerceIn(lo, hi)
+                            else (EffectEditorState.duration + d).coerceIn(lo, hi)
                         )
                     }
-                    EnchantEditRow.AREA -> {
-                        val lo = EnchantBounds.AREA_MIN
-                        val hi = EnchantBounds.AREA_MAX
+                    EffectEditRow.AREA -> {
+                        val lo = EffectBounds.AREA_MIN
+                        val hi = EffectBounds.AREA_MAX
                         setArea(
                             if (toEnd) (if (d < 0) lo else hi)
-                            else (EnchantUiState.editArea + d).coerceIn(lo, hi)
+                            else (EffectEditorState.area + d).coerceIn(lo, hi)
                         )
                     }
                     // The action buttons sit on one visual row, so Left/Right walks BETWEEN them
                     // (vanilla does the same) instead of adjusting anything.
-                    EnchantEditRow.DELETE, EnchantEditRow.OK, EnchantEditRow.CANCEL ->
+                    EffectEditRow.DELETE, EffectEditRow.OK, EffectEditRow.CANCEL ->
                         if (!toEnd) focus = (focus + d).coerceIn(0, list.lastIndex)
                 }
             }
@@ -9312,10 +9397,10 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
                 is NavEvent.SliderRight -> step(1)
                 is NavEvent.SliderLeft -> step(-1)
                 is NavEvent.Confirm -> when (cur) {
-                    EnchantEditRow.RANGE -> step(1)   // A on the range button cycles it, as in vanilla
-                    EnchantEditRow.DELETE -> deleteAction()
-                    EnchantEditRow.OK -> okAction()
-                    EnchantEditRow.CANCEL -> cancelAction()
+                    EffectEditRow.RANGE -> step(1)   // A on the range button cycles it, as in vanilla
+                    EffectEditRow.DELETE -> deleteAction()
+                    EffectEditRow.OK -> okAction()
+                    EffectEditRow.CANCEL -> cancelAction()
                     else -> Unit                       // inert on a slider — see the note above
                 }
                 is NavEvent.Action1 -> okAction()       // X = OK, vanilla's explicit shortcut
@@ -9334,20 +9419,20 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
         }
     }
 
-    EnchantPopupFrame(effect.text.ifBlank { "EFFECT" }.uppercase()) {
+    EffectPopupFrame(title) {
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState)) {
 
             // Reports a row's offset within this scrolling column so the D-pad can bring it into
             // view. positionInParent() is the UNSCROLLED layout position, which is exactly what
             // animateScrollTo takes — the scroll modifier translates the column as a whole.
-            fun Modifier.reportRow(row: EnchantEditRow) = this.onGloballyPositioned {
+            fun Modifier.reportRow(row: EffectEditRow) = this.onGloballyPositioned {
                 rowOffsets[row] = it.positionInParent().y.toInt()
             }
 
             // --- Range ------------------------------------------------------------------------------
             // Only the legal options are drawn. An effect with a single legal range shows that one
             // as an inert label rather than a button that cannot change anything.
-            Column(Modifier.fillMaxWidth().reportRow(EnchantEditRow.RANGE)) {
+            Column(Modifier.fillMaxWidth().reportRow(EffectEditRow.RANGE)) {
                 Text("Range", color = BronzeLight, fontSize = 14.sp, fontFamily = MwDisplay)
                 Spacer(Modifier.height(6.dp))
                 Row(
@@ -9357,16 +9442,16 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
                         // selection, so the focused chip is always the active one and a second
                         // highlight on it would say nothing.
                         .then(
-                            if (focusedRow == EnchantEditRow.RANGE)
+                            if (focusedRow == EffectEditRow.RANGE)
                                 Modifier.border(2.dp, BronzeLight, RoundedCornerShape(3.dp)).padding(3.dp)
                             else Modifier
                         ),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     ranges.forEach { r ->
-                        EnchantChip(
-                            label = EnchantRange.label(r),
-                            active = r == EnchantUiState.editRange,
+                        EffectChip(
+                            label = EffectRange.label(r),
+                            active = r == EffectEditorState.range,
                             onTap = { setRange(r) }
                         )
                     }
@@ -9375,80 +9460,74 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
 
             if (showMag) {
                 Spacer(Modifier.height(10.dp))
-                EnchantSliderRow(
+                EffectSliderRow(
                     label = "Magnitude (min)",
-                    value = EnchantUiState.editMagMin,
-                    min = EnchantBounds.MAG_MIN, max = EnchantBounds.MAG_MAX,
-                    focused = focusedRow == EnchantEditRow.MAG_MIN,
-                    modifier = Modifier.reportRow(EnchantEditRow.MAG_MIN),
+                    value = EffectEditorState.magMin,
+                    min = EffectBounds.MAG_MIN, max = EffectBounds.MAG_MAX,
+                    focused = focusedRow == EffectEditRow.MAG_MIN,
+                    modifier = Modifier.reportRow(EffectEditRow.MAG_MIN),
                     onChange = setMagMin
                 )
                 Spacer(Modifier.height(6.dp))
-                EnchantSliderRow(
+                EffectSliderRow(
                     label = "Magnitude (max)",
-                    value = EnchantUiState.editMagMax,
-                    min = EnchantUiState.editMagMin, max = EnchantBounds.MAG_MAX,
-                    focused = focusedRow == EnchantEditRow.MAG_MAX,
-                    modifier = Modifier.reportRow(EnchantEditRow.MAG_MAX),
+                    value = EffectEditorState.magMax,
+                    min = EffectEditorState.magMin, max = EffectBounds.MAG_MAX,
+                    focused = focusedRow == EffectEditRow.MAG_MAX,
+                    modifier = Modifier.reportRow(EffectEditRow.MAG_MAX),
                     onChange = setMagMax
                 )
             }
 
             if (showDur) {
                 Spacer(Modifier.height(10.dp))
-                EnchantSliderRow(
+                EffectSliderRow(
                     label = "Duration (s)",
-                    value = EnchantUiState.editDuration,
-                    min = EnchantBounds.DURATION_MIN, max = EnchantBounds.DURATION_MAX,
-                    focused = focusedRow == EnchantEditRow.DURATION,
-                    modifier = Modifier.reportRow(EnchantEditRow.DURATION),
+                    value = EffectEditorState.duration,
+                    min = EffectBounds.DURATION_MIN, max = EffectBounds.DURATION_MAX,
+                    focused = focusedRow == EffectEditRow.DURATION,
+                    modifier = Modifier.reportRow(EffectEditRow.DURATION),
                     onChange = setDuration
                 )
             }
 
             if (showArea) {
                 Spacer(Modifier.height(10.dp))
-                EnchantSliderRow(
+                EffectSliderRow(
                     label = "Area (ft)",
-                    value = EnchantUiState.editArea,
-                    min = EnchantBounds.AREA_MIN, max = EnchantBounds.AREA_MAX,
-                    focused = focusedRow == EnchantEditRow.AREA,
-                    modifier = Modifier.reportRow(EnchantEditRow.AREA),
+                    value = EffectEditorState.area,
+                    min = EffectBounds.AREA_MIN, max = EffectBounds.AREA_MAX,
+                    focused = focusedRow == EffectEditRow.AREA,
+                    modifier = Modifier.reportRow(EffectEditRow.AREA),
                     onChange = setArea
                 )
             }
 
             Spacer(Modifier.height(10.dp))
-            // The live cost of the whole enchantment, so the player can see the capacity fill up
-            // while dragging. Over capacity is coloured, not blocked — Buy is what refuses.
-            Text(
-                "Enchantment ${session.points} / ${session.maxPoints}",
-                color = if (session.overCapacity) BarterRed else BoneDim,
-                fontSize = 15.sp, fontFamily = MwData
-            )
+            footer()
         }
 
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             // Delete is offered only for an EXISTING effect, matching vanilla (mDeleteButton is
             // hidden by newEffect and shown by editEffect).
-            if (!EnchantUiState.editIsNew) {
-                EnchantActionButton(
+            if (!EffectEditorState.isNew) {
+                EffectActionButton(
                     label = "Delete", color = BarterRed,
-                    focused = focusedRow == EnchantEditRow.DELETE,
+                    focused = focusedRow == EffectEditRow.DELETE,
                     onTap = deleteAction
                 )
             }
             Spacer(Modifier.weight(1f))
-            EnchantActionButton(
+            EffectActionButton(
                 label = "OK", color = BronzeLight, hint = "X",
-                focused = focusedRow == EnchantEditRow.OK,
+                focused = focusedRow == EffectEditRow.OK,
                 onTap = okAction
             )
             Spacer(Modifier.width(8.dp))
-            EnchantActionButton(
+            EffectActionButton(
                 label = "Cancel", color = Bone, hint = "B",
-                focused = focusedRow == EnchantEditRow.CANCEL,
+                focused = focusedRow == EffectEditRow.CANCEL,
                 onTap = cancelAction
             )
         }
@@ -9456,9 +9535,9 @@ private fun EnchantEffectEditorPopup(session: EnchantSession, effect: EnchantEff
 }
 
 /** One editor slider: a label, the value, and −/+ steppers either side of a drag track. The bounds
- *  are the FIXED layout constants ([EnchantBounds]) — never adjusted by skill, soul or base cost. */
+ *  are the FIXED layout constants ([EffectBounds]) — never adjusted by skill, soul or base cost. */
 @Composable
-private fun EnchantSliderRow(
+private fun EffectSliderRow(
     label: String,
     value: Int,
     min: Int,
@@ -9488,7 +9567,7 @@ private fun EnchantSliderRow(
     }
     Spacer(Modifier.height(3.dp))
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        EnchantStepButton("−", enabled = value > min) { onChange((value - 1).coerceAtLeast(min)) }
+        EffectStepButton("−", enabled = value > min) { onChange((value - 1).coerceAtLeast(min)) }
         Spacer(Modifier.width(8.dp))
         // A one-point range would make Slider divide by zero working out the thumb fraction. That is
         // reachable: dragging Magnitude(min) to its 100 ceiling forces Magnitude(max)'s own minimum
@@ -9512,7 +9591,7 @@ private fun EnchantSliderRow(
             modifier = Modifier.weight(1f)
         )
         Spacer(Modifier.width(8.dp))
-        EnchantStepButton("+", enabled = value < max) { onChange((value + 1).coerceAtMost(max)) }
+        EffectStepButton("+", enabled = value < max) { onChange((value + 1).coerceAtMost(max)) }
     }
     }
 }
@@ -9650,6 +9729,516 @@ private fun EnchantStatRow(label: String, value: String, valueColor: Color) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = BoneDim, fontSize = 14.sp, fontFamily = MwBody, modifier = Modifier.weight(1f))
         Text(value, color = valueColor, fontSize = 16.sp, fontFamily = MwData, fontWeight = FontWeight.Bold)
+    }
+}
+
+/* ---- DS Spellmaking ---- */
+
+/** Bottom-screen spellmaking UI state. The effect EDITOR's working copy is not here — that is
+ *  [EffectEditorState], shared with enchanting, because it is one editor natively too. */
+private object SpellmakingUiState {
+    /** True while the BOTTOM screen's name keyboard is up (raised by a tap on the TOP screen's name
+     *  field). The keyboard has to live on the bottom panel — it is touch-only by design. */
+    var nameComposer by mutableStateOf(false)
+    /** Browse-list filter. Purely presentational. */
+    var filter by mutableStateOf("")
+    /** Non-null while the Skill / Attribute selector is up, raised by the engine
+     *  (COMPANION_SPELLMAKING_ARGPICK) when the tapped effect targets one. */
+    var argPick by mutableStateOf<EffectArgPick?>(null)
+
+    fun reset() {
+        nameComposer = false
+        filter = ""
+        argPick = null
+        EffectEditorState.close()
+    }
+}
+
+/** Spellmaking's binding of the shared effect editor to its own CMP: family. The sibling of
+ *  [EnchantEditorActions] — and the only thing that differs between the two screens' editors. */
+private val SpellmakingEditorActions = EffectEditorActions(
+    push = {
+        if (EffectEditorState.editing) CompanionActions.spellmakingSetEffect(
+            EffectEditorState.index,
+            EffectEditorState.range,
+            EffectEditorState.magMin,
+            EffectEditorState.magMax,
+            EffectEditorState.duration,
+            EffectEditorState.area
+        )
+    },
+    delete = { index -> CompanionActions.spellmakingDeleteEffect(index) },
+    ok = { CompanionActions.spellmakingEffectOk() },
+    cancel = { CompanionActions.spellmakingEffectCancel() }
+)
+
+/**
+ * BOTTOM-screen spellmaking: the Magic Effects browse list, Gold/Price/Buy/Cancel, and both popup
+ * types (effect editor, skill or attribute selector).
+ *
+ * TOUCH ONLY, by design — the companion panel is `FLAG_NOT_FOCUSABLE`, so no D-pad input reaches it.
+ *
+ * PRESENTATION ONLY. Every tap sends a `CMP:spellmaking_*` command to the native
+ * SpellCreationDialog and the screen is redrawn from the batch that comes back, so the
+ * order-dependent magicka cost, the cast chance, the barter-adjusted price and the four Buy
+ * validations are all still the engine's. Unlike enchanting there is no success roll at all:
+ * creation always succeeds once validation passes.
+ *
+ * Simpler than the enchanting screen by exactly the things spellmaking does not have: no item slot,
+ * no soul gem, no cast type and no capacity ceiling.
+ */
+@Composable
+private fun SpellmakingOverlay(session: SpellmakingSession) {
+    DisposableEffect(Unit) {
+        SpellmakingUiState.reset()
+        onDispose { SpellmakingUiState.reset() }
+    }
+
+    var searching by remember { mutableStateOf(false) }
+    val message by GameStateRepository.spellmakingMessage.collectAsState()
+    val argPick by GameStateRepository.spellmakingArgPick.collectAsState()
+    val editReq by GameStateRepository.spellmakingEdit.collectAsState()
+
+    // The engine drives both popups: tapping a browse row sends _effect_add, and the ENGINE decides
+    // whether that means "pick a skill first" or "open the editor". Keyed on the sequence number so
+    // adding the same effect twice raises the popup twice.
+    LaunchedEffect(argPick?.second) {
+        argPick?.let { (pick, _) ->
+            SpellmakingUiState.argPick = pick
+            GameStateRepository.clearSpellmakingArgPick()
+        }
+    }
+    LaunchedEffect(editReq?.second) {
+        editReq?.let { (req, _) ->
+            // Seed from the effect as the engine actually stored it — for a NEW effect that is after
+            // companionInitialRange has overridden the range, so the popup opens on the range the
+            // engine chose rather than on vanilla's raw cascade result.
+            val eff = GameStateRepository.spellmakingSession.value?.effects?.getOrNull(req.index)
+            EffectEditorState.open(
+                index = req.index,
+                isNew = req.isNew,
+                range = eff?.range ?: EffectRange.SELF,
+                magMin = eff?.magMin ?: 1,
+                magMax = eff?.magMax ?: 1,
+                duration = eff?.duration ?: 1,
+                area = eff?.area ?: 0
+            )
+            SpellmakingUiState.argPick = null
+            GameStateRepository.clearSpellmakingEdit()
+        }
+    }
+
+    val visible = remember(session.available, SpellmakingUiState.filter) {
+        val needle = SpellmakingUiState.filter.trim().lowercase()
+        if (needle.isEmpty()) session.available
+        else session.available.filter { it.name.lowercase().contains(needle) }
+    }
+
+    // ONE lambda per action, shared by the touch and controller paths, so the two can never diverge.
+    val addEffect: (EffectAvail) -> Unit = { avail ->
+        UiSounds.play(UiSounds.Cue.TOGGLE)
+        CompanionActions.spellmakingAddEffect(avail.id)
+    }
+    val buyAction: () -> Unit = {
+        UiSounds.play(UiSounds.Cue.ACTION)
+        CompanionActions.spellmakingBuy()
+    }
+
+    // Any popup open = that popup owns input. The main loop yields and B is re-routed: registering
+    // the cancelable-modal bridge flips the native atomic so B arrives as NAV_CANCEL instead of
+    // falling through to exitCurrentGuiMode, which would pop the whole spellmaking mode out from
+    // under an open popup.
+    val popupOpen = SpellmakingUiState.argPick != null || EffectEditorState.editing ||
+        searching || SpellmakingUiState.nameComposer
+    DisposableEffect(popupOpen) {
+        if (popupOpen) {
+            ModalNav.count++
+            CompanionActions.setModalCancelOpen(true)
+        }
+        onDispose {
+            if (popupOpen) {
+                ModalNav.count--
+                if (ModalNav.count == 0) CompanionActions.setModalCancelOpen(false)
+            }
+        }
+    }
+
+    // B while a popup is up closes the TOPMOST one. Its own collector, because the main list loop is
+    // disabled exactly when this is needed. Order mirrors the render order below.
+    val popupOpenState = rememberUpdatedState(popupOpen)
+    val searchingState = rememberUpdatedState(searching)
+    LaunchedEffect(Unit) {
+        var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
+        GameStateRepository.navEvent.collect { ev ->
+            if (ev == null || ev.seq <= lastSeq) return@collect
+            lastSeq = ev.seq
+            if (ev !is NavEvent.Cancel || !popupOpenState.value) return@collect
+            when {
+                searchingState.value -> searching = false
+                SpellmakingUiState.nameComposer -> SpellmakingUiState.nameComposer = false
+                EffectEditorState.editing -> {
+                    // Through the ENGINE, never by just closing the popup: cancel erases a
+                    // newly-added effect and restores an edited one, and only the native handler
+                    // knows which of the two this was.
+                    CompanionActions.spellmakingEffectCancel()
+                    EffectEditorState.close()
+                }
+                SpellmakingUiState.argPick != null -> SpellmakingUiState.argPick = null
+            }
+        }
+    }
+
+    val listState = rememberLazyListState()
+    val focusIndex = rememberListNavFocus(
+        itemCount = visible.size,
+        enabled = !popupOpen,
+        onConfirm = { i -> visible.getOrNull(i)?.let(addEffect) },
+        onAction1 = buyAction,          // X
+        // R3 → toggle the info popup for the focused effect. EFFECT, not item/spell: the id is a
+        // MagicEffect RefId and only companion.lua's `effect:` branch can resolve it.
+        onInfo = { i ->
+            visible.getOrNull(i)?.let { ItemInfoPopupState.toggle(it.id, it.name, null, kind = InfoKind.EFFECT) }
+        },
+        onFocusChanged = { i ->
+            if (ItemInfoPopupState.isOpen) {
+                visible.getOrNull(i)?.let { ItemInfoPopupState.follow(it.id, it.name, null, kind = InfoKind.EFFECT) }
+            }
+        },
+    )
+    LaunchedEffect(focusIndex) {
+        if (focusIndex in visible.indices) listState.animateScrollToItem(focusIndex)
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .zIndex(18f)
+            // Swallow stray taps: this fully replaces a native window and there is no
+            // tap-outside-to-dismiss (Cancel is an explicit button, as in vanilla).
+            .pointerInput(Unit) { detectTapGestures { } }
+            .background(StoneDark)
+    ) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 6.dp)) {
+
+            // --- Header ---------------------------------------------------------------------------
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "SPELLMAKING",
+                    color = BronzeLight, fontSize = 18.sp, fontFamily = MwDisplay,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Gold: ${session.gold}",
+                    color = BronzeLight, fontSize = 15.sp, fontFamily = MwData
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Bronze))
+            Spacer(Modifier.height(6.dp))
+
+            // --- Filter ------------------------------------------------------------------------------
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+                        .clickable { searching = true }
+                        .padding(horizontal = 11.dp, vertical = 12.dp)
+                ) {
+                    Text(
+                        SpellmakingUiState.filter.ifBlank { "Search magic effects…" },
+                        color = if (SpellmakingUiState.filter.isBlank()) BoneDim else BoneBright,
+                        fontSize = 15.sp, fontFamily = MwBody, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (SpellmakingUiState.filter.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    EffectChip(label = "Clear", active = false, onTap = { SpellmakingUiState.filter = "" })
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            // --- Magic Effects browse list -------------------------------------------------------------
+            // The union of every effect in any ST_Spell the player knows, filtered to
+            // AllowSpellmaking (NOT AllowEnchanting — that one-line difference is made natively, in
+            // the shared startEditing, on mType), deduplicated and name-sorted by the engine. A row
+            // whose effect has NO legal range is greyed: vanilla ignores that tap silently (its own
+            // unresolved TODO), so no message is invented here.
+            if (visible.isEmpty()) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    Text(
+                        if (session.available.isEmpty()) "No known spellmaking effects"
+                        else "No effects match",
+                        color = BoneDim, fontSize = 15.sp, fontFamily = MwBody,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                }
+            } else {
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    // Unkeyed, deliberately — same reasoning as the enchanting browse list: the ids
+                    // ARE unique (startEditing dedupes), but keying would make a Compose crash the
+                    // failure mode if that engine invariant ever slipped, and the list only ever
+                    // changes by FILTERING, never reordering.
+                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        itemsIndexed(visible) { i, avail ->
+                            // constant is always false for spellmaking, so this is just the record's
+                            // own CastSelf/Touch/Target flags.
+                            val usable = effectRanges(avail.flags, session.constant).isNotEmpty()
+                            val room = session.effects.size < session.effectCap
+                            EffectPickRow(
+                                icon = avail.icon,
+                                title = avail.name,
+                                subtitle = if (!usable) "Not available for spellmaking" else null,
+                                enabled = usable && room,
+                                focused = i == focusIndex,
+                                infoId = avail.id,
+                                onTap = { addEffect(avail) }
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    VerticalListScrollbar(listState, Modifier.fillMaxHeight())
+                }
+                ScrollMoreHint(listState)
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+            Spacer(Modifier.height(6.dp))
+
+            // --- Price + Buy / Cancel ---------------------------------------------------------------
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Price: ${session.price}",
+                    color = if (session.cantAfford) BarterRed else BronzeLight,
+                    fontSize = 15.sp, fontFamily = MwData
+                )
+                Spacer(Modifier.weight(1f))
+                // ALWAYS enabled, exactly as in vanilla: pressing Buy with something missing is how
+                // the validation message is produced, and there is no native "validate without
+                // committing" call to grey it out with.
+                EffectActionButton(
+                    label = "Buy",
+                    color = BronzeLight,
+                    hint = "X",
+                    onTap = buyAction
+                )
+                Spacer(Modifier.width(8.dp))
+                // B, not a NAV binding: B is deliberately never intercepted at the top level, so it
+                // reaches native exitCurrentGuiMode -> SpellCreationDialog::exit(), which emits the
+                // close signal and pops the mode. The hint documents the button that already works.
+                EffectActionButton(label = "Cancel", color = Bone, hint = "B") {
+                    UiSounds.play(UiSounds.Cue.TOGGLE)
+                    CompanionActions.spellmakingCancel()
+                }
+            }
+        }
+
+        // --- Validation / result banner --------------------------------------------------------------
+        message?.let { (text, seq) ->
+            LaunchedEffect(seq) {
+                delay(ENCHANT_MSG_MS)
+                GameStateRepository.clearSpellmakingMessage()
+            }
+            Box(
+                Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 34.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text,
+                    color = BoneBright, fontSize = 13.sp, fontFamily = MwDisplay,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xF2201A12))
+                        .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
+                )
+            }
+        }
+
+        // --- Popup 1: skill / attribute selector -------------------------------------------------------
+        SpellmakingUiState.argPick?.let { pick ->
+            EffectArgPickerPopup(
+                pick = pick,
+                onPick = { argId ->
+                    if (pick.isSkill) CompanionActions.spellmakingEffectSkill(pick.effectId, argId)
+                    else CompanionActions.spellmakingEffectAttribute(pick.effectId, argId)
+                    SpellmakingUiState.argPick = null
+                },
+                onCancel = { SpellmakingUiState.argPick = null }
+            )
+        }
+
+        // --- Popup 2: effect editor --------------------------------------------------------------------
+        if (EffectEditorState.editing) {
+            val effect = session.effects.getOrNull(EffectEditorState.index)
+            if (effect == null) {
+                // The effect vanished under us (a Cancel raced a republish). Close rather than draw
+                // an editor pointed at nothing.
+                EffectEditorState.close()
+            } else {
+                EffectEditorPopup(
+                    title = effect.text.ifBlank { "EFFECT" }.uppercase(),
+                    flags = effect.flags,
+                    constant = session.constant,
+                    actions = SpellmakingEditorActions
+                ) {
+                    // Where enchanting shows its capacity fill, spellmaking shows the live magicka
+                    // cost — there is no ceiling to fill, so there is no "/ max" half and no
+                    // over-capacity colour.
+                    Text(
+                        "${session.costLabel.ifBlank { "Magicka Cost" }} ${session.cost}",
+                        color = BoneDim, fontSize = 15.sp, fontFamily = MwData
+                    )
+                }
+            }
+        }
+
+        // --- Search entry --------------------------------------------------------------------------
+        if (searching) {
+            TextInputOverlay(
+                initialText = SpellmakingUiState.filter,
+                title = "SEARCH MAGIC EFFECTS",
+                onConfirm = { SpellmakingUiState.filter = it; searching = false },
+                onCancel = { searching = false }
+            )
+        }
+
+        // --- Spell name entry ------------------------------------------------------------------------
+        // Raised from the TOP screen's name field, because the keyboard is touch-only and touch only
+        // reaches the bottom panel. `!searching` keeps the two keyboards mutually exclusive.
+        if (SpellmakingUiState.nameComposer && !searching) {
+            TextInputOverlay(
+                initialText = session.name,
+                title = "SPELL NAME",
+                onConfirm = {
+                    CompanionActions.spellmakingSetName(it)
+                    SpellmakingUiState.nameComposer = false
+                },
+                onCancel = { SpellmakingUiState.nameComposer = false }
+            )
+        }
+    }
+}
+
+/**
+ * TOP-screen spellmaking half: the name field, Magicka Cost / Spell Chance, and the live effects
+ * readout.
+ *
+ * Hosted by [org.openmw.EngineActivity] in an INTERACTIVE panel window while a spellmaking session
+ * is live AND Spellmaking is DS — interactive because the name field and the effect rows answer to a
+ * tap (the name field raises the bottom screen's keyboard; an effect row opens the editor there).
+ *
+ * The readout shows the effects as they are RIGHT NOW, including one that is only half-configured:
+ * a newly-added effect is on the spell from the moment the editor opens (vanilla's
+ * eventEffectAdded), and Cancel is what takes it back off.
+ */
+@Composable
+fun SpellmakingTopOverlay() {
+    val session by GameStateRepository.spellmakingSession.collectAsState()
+    val s = session ?: return
+
+    // Sized identically to the enchanting and alchemy top panels so the DS service screens read as
+    // one family.
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+        Row(
+            Modifier
+                .padding(bottom = ALCHEMY_TOP_PANEL_INSET)
+                .fillMaxWidth(ALCHEMY_TOP_PANEL_WIDTH)
+                .height(IntrinsicSize.Min)
+                .heightIn(min = ENCHANT_TOP_PANEL_MIN_HEIGHT)
+                .mwPanel()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            // --- Left: name + stats ------------------------------------------------------------------
+            Column(Modifier.weight(0.44f)) {
+                Text(
+                    "SPELL", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SlotBg)
+                        .border(1.dp, BronzeDark, RoundedCornerShape(3.dp))
+                        .clickable { SpellmakingUiState.nameComposer = true }
+                        .padding(horizontal = 10.dp, vertical = 11.dp)
+                ) {
+                    Text(
+                        s.name.ifBlank { "Tap to name" },
+                        color = if (s.name.isBlank()) BoneDim else BoneBright,
+                        fontSize = 16.sp, fontFamily = MwBody, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+
+                // Both labels come from the ENGINE's own GMSTs, resolved in companionEmitState —
+                // sEnchantmentMenu4 ("Magicka Cost") and sSpellmakingMenu1. The fallbacks are only
+                // for a malformed batch; vanilla's wording is what normally shows.
+                EnchantStatRow(s.costLabel.ifBlank { "Magicka Cost" }, "${s.cost}", BoneBright)
+                EnchantStatRow(s.chanceLabel.ifBlank { "Spell Chance" }, "${s.chance}%", BoneBright)
+                EnchantStatRow("Price", "${s.price}", if (s.cantAfford) BarterRed else BronzeLight)
+            }
+
+            Box(Modifier.width(1.dp).fillMaxHeight().background(BronzeDark))
+
+            // --- Right: live effects readout -----------------------------------------------------------
+            Column(Modifier.weight(0.56f)) {
+                Text(
+                    "EFFECTS ${s.effects.size}/${s.effectCap}", color = BronzeLight, fontSize = 13.sp,
+                    fontFamily = MwDisplay, fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                if (s.effects.isEmpty()) {
+                    Text(
+                        "None", color = BoneDim, fontSize = 14.sp, fontFamily = MwBody,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                } else {
+                    // ENGINE ORDER, never sorted. It is the handle every command uses AND — unlike
+                    // enchanting — it changes the magicka cost: notifyEffectsChanged's Target x1.5
+                    // multiplies the running total, so [Self, Target] and [Target, Self] cost
+                    // differently. Reordering this list for display would misreport the real spell.
+                    Column(Modifier.heightIn(max = ENCHANT_TOP_EFFECTS_MAX).verticalScroll(rememberScrollState())) {
+                        s.effects.forEach { eff ->
+                            val bmp = rememberItemIcon(eff.icon)
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { CompanionActions.spellmakingEditEffect(eff.index) }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (bmp != null) {
+                                    Image(bitmap = bmp, contentDescription = null,
+                                        modifier = Modifier.size(22.dp))
+                                    Spacer(Modifier.width(7.dp))
+                                }
+                                Text(
+                                    // Composed natively from MWSpellEffect's own formatting, so this
+                                    // reads exactly as the vanilla list does.
+                                    eff.text,
+                                    color = Bone, fontSize = 13.sp, fontFamily = MwBody,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -10711,6 +11300,16 @@ private fun barterVisible(
  */
 private val BARTER_SORTS = listOf(InvSort.DEFAULT, InvSort.WEIGHT, InvSort.PRICE)
 
+/**
+ * Coarse gold step for the barter trade amount: left stick UP/DOWN moves the offer by this much,
+ * where left/right moves it by 1. Deliberately the same 10 the `[−10]`/`[+10]` tap buttons on the
+ * SPLIT stepper row use, so the two ways of making a big adjustment agree.
+ *
+ * Both collectors below apply it at HALF the native ~16 Hz poll rate (the same halving the fine
+ * step uses), i.e. ~80g/sec while the stick is held.
+ */
+private const val BARTER_GOLD_COARSE_STEP = 10
+
 /** Current controller focus in the barter overlay: which [side] (0 = player/left,
  *  1 = vendor/right) and which [index] into that side's visible list. */
 private data class BarterFocus(val side: Int, val index: Int)
@@ -10723,7 +11322,8 @@ private data class BarterFocus(val side: Int, val index: Int)
  *    across columns, both wrapping; list: Up/Down wrap ±1, Left/Right switch side to its first item).
  *  - L2 / R2 switch to the player / vendor side, focus → that side's FIRST item.
  *  - A toggles the focused item (select/deselect) via [onToggle] (stacks > 1 prompt first).
- *  - X = [onOffer] (Make offer); left stick left/right = [onSlider](-1 / +1) (gold offset). In SPLIT
+ *  - X = [onOffer] (Make offer); left stick left/right = [onSlider](-1 / +1) (gold offset), and
+ *    left stick up/down the same thing in coarse [BARTER_GOLD_COARSE_STEP] steps. In SPLIT
  *    these two are no-ops here — the bottom controls window owns the slider + Offer button (its own
  *    collector), because the gold offset state lives there; passing no-ops avoids a top/bottom desync.
  * Focus starts on the VENDOR side's first item when barter opens; clears when the overlay leaves
@@ -10761,6 +11361,8 @@ private fun rememberBarterNavFocus(
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (~8g/sec held)
+        var coarseTick = 0 // ditto for the vertical (±10) axis; its own counter so the two axes
+                           // can't halve each other by sharing a parity.
         GameStateRepository.navEvent.collect { ev ->
             if (ev == null || ev.seq <= lastSeq) return@collect
             lastSeq = ev.seq
@@ -10805,6 +11407,13 @@ private fun rememberBarterNavFocus(
                 is NavEvent.Sort -> { sortState.value(side); index = 0 }
                 is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) sliderState.value(-1)
                 is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) sliderState.value(1)
+                // Left stick UP/DOWN = the same gold adjustment in ±10 steps. onSlider takes the
+                // signed step (its caller multiplies by the 1g fine step), so passing ±10 reuses the
+                // exact same clamping and buy/sell direction inversion as the fine axis.
+                is NavEvent.SliderUp ->
+                    if (coarseTick++ % 2 == 0) sliderState.value(BARTER_GOLD_COARSE_STEP)
+                is NavEvent.SliderDown ->
+                    if (coarseTick++ % 2 == 0) sliderState.value(-BARTER_GOLD_COARSE_STEP)
                 else -> Unit // Scroll* handled elsewhere
             }
             // While the info popup is open, D-pad focus moves follow to the newly focused item.
@@ -11158,7 +11767,8 @@ private fun BarterControlsOnly(session: BarterSession) {
     // Controller: in SPLIT mode the grid nav + A + L2/R2 live on the TOP grids (BarterTopOverlay);
     // this bottom window owns the gold slider (left stick) + X (Offer) because the gold-offset state
     // lives here. A small dedicated collector — no focus/grid on the bottom, disjoint event set from
-    // the top collector (Action1/SliderLeft/SliderRight only), so the two never double-handle.
+    // the top collector (Action1 + the four Slider* events only), so the two never double-handle
+    // (the top overlay passes a no-op onSlider for exactly this reason).
     // Flat 1g per left-stick tick. At the ~60ms native slider-poll cadence (~16 ticks/sec) that's
     // ~16g/sec when held — precise for fine adjustment, still reaches large values by holding. Tune
     // here (or add an accelerating hold) if needed.
@@ -11185,6 +11795,8 @@ private fun BarterControlsOnly(session: BarterSession) {
     LaunchedEffect(Unit) {
         var lastSeq = GameStateRepository.navEvent.value?.seq ?: -1L
         var sliderTick = 0 // apply the gold step every OTHER slider tick → ~half rate (~8g/sec held)
+        var coarseTick = 0 // ditto for the vertical (±10) axis; its own counter so the two axes
+                           // can't halve each other by sharing a parity.
         GameStateRepository.navEvent.collect { ev ->
             if (ev == null || ev.seq <= lastSeq) return@collect
             lastSeq = ev.seq
@@ -11192,20 +11804,25 @@ private fun BarterControlsOnly(session: BarterSession) {
             val (balance, enabled, step) = ctlSnapshot.value
             val (sliderLo, sliderHi) = navBounds.value
             val receiving = navReceivingState.value
+            // dir = +1 moves the slider visually RIGHTWARD (toward max cost/gold), -1 toward 0.
+            // Selling: right = +gold. Buying (balance negative, magnitude = cost): invert, so right =
+            // more negative (pay more). Clamped to the touch slider's range; no-op at a bound.
+            fun nudge(dir: Int, size: Int) {
+                val next = (balance + (if (receiving) dir else -dir) * size)
+                    .coerceIn(sliderLo, sliderHi)
+                if (next != balance) setBalanceState.value(next)
+            }
             when (ev) {
                 is NavEvent.Action1 -> if (enabled) CompanionActions.barterOffer()
-                // Physical stick right always moves the slider visually rightward (toward max cost/
-                // gold), left toward 0, matching the touch slider. Selling: right=+gold, left=-gold.
-                // Buying (balance negative, magnitude=cost): invert — right=more negative (pay more),
-                // left=less negative (pay less). Clamped; no-op at a bound.
-                is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) {
-                    val next = (balance + (if (receiving) -step else step)).coerceIn(sliderLo, sliderHi)
-                    if (next != balance) setBalanceState.value(next)
-                }
-                is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) {
-                    val next = (balance + (if (receiving) step else -step)).coerceIn(sliderLo, sliderHi)
-                    if (next != balance) setBalanceState.value(next)
-                }
+                is NavEvent.SliderLeft -> if (sliderTick++ % 2 == 0) nudge(-1, step)
+                is NavEvent.SliderRight -> if (sliderTick++ % 2 == 0) nudge(1, step)
+                // Left stick UP/DOWN = the same adjustment in coarse ±10 steps, matching the
+                // [−10]/[+10] tap buttons beside the slider. Up = rightward = "more", so it agrees
+                // with the horizontal axis rather than inventing a second spatial convention.
+                is NavEvent.SliderUp ->
+                    if (coarseTick++ % 2 == 0) nudge(1, BARTER_GOLD_COARSE_STEP)
+                is NavEvent.SliderDown ->
+                    if (coarseTick++ % 2 == 0) nudge(-1, BARTER_GOLD_COARSE_STEP)
                 else -> Unit
             }
         }
@@ -15266,6 +15883,7 @@ private fun MagicPanel(state: GameState) {
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
                                 effect = spell.effect,
+                                effectCount = spell.effectCount,
                                 school = spell.school,
                                 cost = spell.cost,
                                 onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, kind = InfoKind.SPELL) },
@@ -15285,6 +15903,7 @@ private fun MagicPanel(state: GameState) {
                                 title = spell.displayName(),
                                 selected = spell.id == sel,
                                 effect = spell.effect,
+                                effectCount = spell.effectCount,
                                 school = spell.school,
                                 cost = spell.cost,
                                 // Only this section passes a chance. The map is keyed by spell id
@@ -15309,6 +15928,7 @@ private fun MagicPanel(state: GameState) {
                                 title = spell.displayName(),
                                 selected = false,
                                 effect = spell.effect,
+                                effectCount = spell.effectCount,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -15330,6 +15950,7 @@ private fun MagicPanel(state: GameState) {
                                 charge = spell.charge,
                                 maxCharge = spell.maxCharge,
                                 effect = spell.effect,
+                                effectCount = spell.effectCount,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -15353,6 +15974,9 @@ private fun SpellRow(
     charge: Int = 0,
     maxCharge: Int = 0,
     effect: String = "",
+    // TOTAL effects on the spell/scroll/enchantment. [effect] is the FIRST one only, so anything
+    // above 1 is drawn as a "+N MORE" line under the effect text. 0 = not reported, same as 1.
+    effectCount: Int = 0,
     school: String = "",
     cost: Int = 0,
     // Success chance as a whole percent, or null for "no chance column". Null is the norm for
@@ -15481,6 +16105,23 @@ private fun SpellRow(
                                 textAlign = TextAlign.Center, lineHeight = 11.sp,
                                 maxLines = 2, overflow = TextOverflow.Ellipsis
                             )
+                            // "+N MORE" sits AFTER the effect, on its OWN line rather than appended
+                            // to the value above. Appending inline would put it inside a 2-line
+                            // ellipsised box, so on exactly the spells this exists for — a long
+                            // first-effect description like "Detect Animal 200pts for 60s (self)",
+                            // which already fills both lines — it would be the part that gets cut.
+                            // A separate line cannot be truncated away. It costs height only on
+                            // multi-effect rows, so it is kept deliberately small (8sp with a 9sp
+                            // line height, the heading's size) to spend as little of this
+                            // density-tuned list as possible.
+                            val extraEffects = (effectCount - 1).coerceAtLeast(0)
+                            if (extraEffects > 0) {
+                                Text(
+                                    "+$extraEffects MORE",
+                                    color = BoneMuted, fontSize = 8.sp, fontFamily = MwBody,
+                                    letterSpacing = 0.5.sp, lineHeight = 9.sp, maxLines = 1
+                                )
+                            }
                         }
                     }
                 }

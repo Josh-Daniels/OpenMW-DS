@@ -246,6 +246,27 @@ object CompanionActions {
 
     fun enchantCancel() = runCommand("CMP:enchant_cancel")
 
+    // --- DS Spellmaking -------------------------------------------------------------------------
+    // The effect-editing half mirrors enchanting's because it drives the SAME native code: both
+    // families land on EffectEditorBase, which owns mEffects, the 8-effect cap and the
+    // add-then-remove-on-cancel semantics. Only the window pointer differs.
+    fun spellmakingSetName(text: String) = runCommand("CMP:spellmaking_name:$text")
+    fun spellmakingAddEffect(effectId: String) = runCommand("CMP:spellmaking_effect_add:$effectId")
+    fun spellmakingEffectSkill(effectId: String, skillId: String) =
+        runCommand("CMP:spellmaking_effect_skill:$effectId|$skillId")
+    fun spellmakingEffectAttribute(effectId: String, attributeId: String) =
+        runCommand("CMP:spellmaking_effect_attribute:$effectId|$attributeId")
+    fun spellmakingEditEffect(index: Int) = runCommand("CMP:spellmaking_effect_edit:$index")
+    fun spellmakingSetEffect(index: Int, range: Int, magMin: Int, magMax: Int, duration: Int, area: Int) =
+        runCommand("CMP:spellmaking_effect_set:$index|$range|$magMin|$magMax|$duration|$area")
+    fun spellmakingDeleteEffect(index: Int) = runCommand("CMP:spellmaking_effect_delete:$index")
+    fun spellmakingEffectOk() = runCommand("CMP:spellmaking_effect_ok")
+    fun spellmakingEffectCancel() = runCommand("CMP:spellmaking_effect_cancel")
+    /** Routes at the REAL onBuyButtonClicked — two of its four validations read the native widget
+     *  CAPTIONS, so a DS-side gate would be testing different numbers from the one that refuses. */
+    fun spellmakingBuy() = runCommand("CMP:spellmaking_buy")
+    fun spellmakingCancel() = runCommand("CMP:spellmaking_cancel")
+
     // --- DS Map ---------------------------------------------------------------------------------
     /** Mount/unmount the DS map. This is the MOUNT-SCOPED suppression flag the native side reads in
      *  updateVisible(): true hides the native map window, false restores it. Deliberately not a
