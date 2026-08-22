@@ -10,6 +10,7 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import org.openmw.companion.AdaptiveDimmedWindow
+import org.openmw.companion.DAY_FLOOR_WEATHERS
 import org.openmw.companion.BarterTopOverlay
 import org.openmw.companion.CombatTargetTopOverlay
 import org.openmw.companion.CompanionScreen
@@ -1095,6 +1096,23 @@ class EngineActivity : SDLActivity() {
             ) { v, _ -> v }.collect { v ->
                 runCatching { sendCompanionCommand("CMP:night_brightness %.4f".format(v)) }
                     .onFailure { Log.e(TAG, "night_brightness push failed", it) }
+            }
+        }
+
+        // Per-weather DAY ambient floors. Same two triggers and the same reasoning as the night
+        // lift above — the value lives in a Lua local, so a LOAD wipes it and settingsRequest is
+        // what re-asserts it. One collector per weather: the set is small and fixed, and combining
+        // them would re-push every weather whenever any one changed.
+        DAY_FLOOR_WEATHERS.forEach { w ->
+            lifecycleScope.launch {
+                combine(
+                    UiPreferences.dayBrightnessFlow(w.weather),
+                    GameStateRepository.settingsRequest
+                ) { v, _ -> v }.collect { v ->
+                    runCatching {
+                        sendCompanionCommand("CMP:day_brightness %s|%.4f".format(w.weather, v))
+                    }.onFailure { Log.e(TAG, "day_brightness push failed for ${w.weather}", it) }
+                }
             }
         }
 

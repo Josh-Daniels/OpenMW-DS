@@ -233,9 +233,19 @@ val HUD_ELEMENTS: List<UiElement> = listOf(
 val ADAPTIVE_DIM_MIN_RANGE = 0f..0.50f
 /** Brightest the companion stays in the brightest scene. 1f = untouched. */
 val ADAPTIVE_DIM_MAX_RANGE = 0.60f..1.00f
-/** 0.30 as of Aug 20 2026, one step darker than the 0.25 that reproduced the pre-slider ramp end
- *  (a hardcoded 0.75 overlay opacity; 0.30 gives 0.70). */
-const val ADAPTIVE_DIM_MIN_DEFAULT = 0.30f
+/** 0.50 as of Aug 22 2026 (0.25 -> 0.30 -> 0.40 -> 0.50, every step play-tested on the real panel).
+ *  0.25 was the value that reproduced the pre-slider ramp end exactly (a hardcoded 0.75 overlay
+ *  opacity). Note this is BRIGHTNESS, so a HIGHER number is a LIGHTER darkest-scene: 0.50 maps to a
+ *  0.50 overlay opacity at the ramp's dark end, where 0.30 mapped to 0.70.
+ *
+ *  **This is the TOP of [ADAPTIVE_DIM_MIN_RANGE], so the slider now only travels DOWNWARDS from its
+ *  default** — a player can make the darkest scenes darker but not lighter. That is intended (every
+ *  retune has moved the same way), and it is the reason the range's floor was opened to 0f: the
+ *  useful travel is all below the default, and there is a full 50 points of it. If a later retune
+ *  ever wants headroom ABOVE this, the range has to move too — do not just raise the constant, it
+ *  would be silently clamped back by [UiPreferences.setAdaptiveDimMinBrightness] and by the
+ *  `coerceIn` on load. */
+const val ADAPTIVE_DIM_MIN_DEFAULT = 0.50f
 /** Bright scenes are left completely clear — the pre-slider behaviour, and the top of
  *  [ADAPTIVE_DIM_MAX_RANGE]. Briefly 0.60 earlier on Aug 20 2026, which applied a 40% baseline dim
  *  even at midday; that turned out to be what made bright days look dark on the bottom screen, so
@@ -269,11 +279,14 @@ const val ADAPTIVE_DIM_MAX_DEFAULT = 1.00f
  * The default is the value that play-tested best on this panel (day 100% / night 60%).
  */
 val ADAPTIVE_DIM_NIGHT_MAX_RANGE = 0.60f..1.00f
-/** 0.70 — measured, not round: 100% is right for daylight and 70% for outdoor night, which is the
- *  whole reason this setting exists rather than one shared ceiling. Shipped at 0.60 for one day
- *  (Aug 20 2026) and settled at 0.70 after play-testing the finished feature; the 0.60 figure came
- *  from a pre-implementation estimate, this one from the real ramp on the real panel. */
-const val ADAPTIVE_DIM_NIGHT_MAX_DEFAULT = 0.70f
+/** 0.75 — measured, not round: 100% is right for daylight and 75% for outdoor night, which is the
+ *  whole reason this setting exists rather than one shared ceiling. 0.60 -> 0.70 (Aug 20 2026) ->
+ *  0.75 (Aug 22 2026); only the 0.60 was ever a pre-implementation estimate, the rest come from the
+ *  real ramp on the real panel. Still well inside [ADAPTIVE_DIM_NIGHT_MAX_RANGE], and still below
+ *  [ADAPTIVE_DIM_MAX_DEFAULT], so night remains the darker of the two ceilings and the
+ *  `min(dayMax, nightMax)` blend in `rememberDimMaxBrightness` is not doing any work at the
+ *  defaults. */
+const val ADAPTIVE_DIM_NIGHT_MAX_DEFAULT = 0.75f
 
 /**
  * Whether screen dimming is on at all, as a named constant rather than a bare `true`.
@@ -380,11 +393,40 @@ const val UI_SOUND_VOLUME_DEFAULT = 0.5f
  * section speak one language and their numbers are directly comparable.
  *
  * Measured across the ten vanilla weathers, night ambient luminance spans 0.126 (Blight) to 0.213
- * (Snow). The 0.20 ceiling therefore roughly doubles the darkest nights at most — enough to be
- * clearly useful without washing the scene out. 0 is exact vanilla, so the bottom of the slider is
- * a true off.
+ * (Snow). 0 is exact vanilla, so the bottom of the slider is a true off.
+ *
+ * **CEILING NOW 1.00 (0.20 -> 0.40 -> 1.00, all Aug 22 2026).** There is no engine cap on this at
+ * all — it is our own additive lift, and `applyNightAmbientFloor` clamps each channel to 1.0 on
+ * write, so any value is safe to allow. Rather than keep re-widening in steps, the slider is simply
+ * open to its full possible range: it exists for MANUAL EXPLORATION, and every tier of
+ * [GameBrightnessPreset] stops at the reasoned recommendation (0.30) regardless of how far this
+ * goes. Everything below is the measurement pass over the REAL `Weather_*_Ambient_*_Color` values
+ * from the device's own openmw.cfg, and is what the recommendation rests on — the numbers did not
+ * change when the ceiling did:
+ *  - **0.415 is the hard wall.** The lift is additive in luminance, so a weather crosses when the
+ *    lift exceeds `dayLum - nightLum`. Clear (0.415) and Cloudy (0.415) are the last two to go, so
+ *    past that point EVERY weather's night ambient out-brightens its own day. Indefensible.
+ *  - **Crossover alone is not the limit, and is already happening.** 6 of 10 weathers cross at the
+ *    OLD 0.20 ceiling and it looks fine in play. Blight (0.006) and Ashstorm (0.050) cross at
+ *    essentially any lift because their DAY ambient is unusually dark (0.233 / 0.212, below several
+ *    weathers' night) — Bethesda's table, not something the lift breaks.
+ *  - **The real cost is ground-vs-sky.** `Sky_Night_Color` / `Fog_Night_Color` are NOT lifted
+ *    (Clear = 0.039 for both), so the landscape brightens while the sky and the distance stay
+ *    black: Clear ground/sky goes 3.5x (vanilla) -> 8.7x (0.20) -> 11.3x (0.30) -> 13.9x (0.40),
+ *    against 1.37x in daylight. It also means the lift CANNOT brighten the distance at all, since
+ *    distant terrain blends toward the unlifted night fog — visibility gains saturate in the near
+ *    field while the mismatch keeps growing. That, not crossover, is why 0.30 is the recommendation.
+ *  - **Hue preservation STOPS being true above ~0.56, which is new territory the old ceilings never
+ *    reached.** The lift scales the colour by `(lum + lift) / lum` and then clamps each channel to
+ *    1.0, so once the largest channel saturates the remaining ones keep climbing and the colour
+ *    washes toward white. First to clip is Cloudy at **0.563**; all ten have clipped by **0.741**;
+ *    by 1.00 every weather's night ambient is essentially pure white at luminance ~1.0, i.e. the
+ *    night sky's own colour is gone entirely. Expected at these values, not a defect — but it is
+ *    why the top third of this slider is exploration rather than a supported look.
+ * The Screen Dimming night ceiling gives NO mitigation here and never did: `nightWeightForHour`
+ * takes only the hour, so it is independent of this value in both directions.
  */
-val NIGHT_BRIGHTNESS_RANGE = 0f..0.20f
+val NIGHT_BRIGHTNESS_RANGE = 0f..1.00f
 
 /** **0 = EXACT VANILLA, and that is the point of the value rather than a fallback.** `applyNight
  *  AmbientFloor` recomputes from each weather's own `Weather_*_Ambient_Night_Color` fallback every
@@ -408,8 +450,130 @@ const val NIGHT_BRIGHTNESS_DEFAULT = 0f
 /**
  * Range for OpenMW's own `Shaders/minimum interior brightness`. This is a pass-through to the
  * engine setting, NOT a companion invention, so the value stored here is the literal engine value.
+ *
+ * **CEILING NOW 1.00 (0.35 -> 0.55 -> 1.00, all Aug 22 2026), which is EXACTLY the engine's own
+ * legal maximum** — `makeClampSanitizerFloat(0, 1)` in `components/settings/categories/shaders.hpp`.
+ * So this slider now spans the full range the setting can hold and can no longer produce a value
+ * the engine would sanitize. Every bound here was always ours rather than the engine's; the slider
+ * is for MANUAL EXPLORATION and [GameBrightnessPreset.BLINDING] stops at the reasoned 0.50. What
+ * the measurement pass found, unchanged by the wider ceiling:
+ *  - **This is a CLAMP-TO-FLOOR, not a lift** (`renderingmanager.cpp` `configureAmbient`): only
+ *    cells below the floor are touched, and they are scaled to land on EXACTLY it. So raising it
+ *    does not brighten interiors relative to each other, it FLATTENS them onto one value. It is
+ *    precisely the floor design that was rejected for night because it erases variety.
+ *  - **The flattening cost is already fully paid at the OLD ceiling.** Parsing the real `AMBI`
+ *    records from Morrowind + Tribunal + Bloodmoon (594 interiors), the brightest authored interior
+ *    in the base game is **0.2988**; at a floor of 0.30, **99.7%** of all interiors collapse to the
+ *    same value (33.5% at vanilla 0.08, 73.1% at 0.20, 82.0% at 0.25). Going above 0.30 therefore
+ *    costs no ADDITIONAL variety — which is why this ceiling could be raised so freely.
+ *  - **0.5522 is the natural hard stop**: Clear's DAY ambient. Past it an interior is literally
+ *    brighter than standing outside at noon. Hence 0.55.
+ *  - Two smaller costs that do grow: channel clipping when a saturated dark mood is scaled past 1.0
+ *    (0 cells at 0.35, 2 at 0.40, 4 at 0.50, 5 at 0.60 — it hue-shifts those toward white), and
+ *    light-source redundancy, since `clamp lighting = true` clamps the lighting term to (1,1,1) so
+ *    a floor of f permanently spends f of the range before any torch or spell contributes.
+ * DEPENDENCY: the floor only applies while `classic falloff` is false (engine default, and we do
+ * not ship it) — `needsAdjusting = isInterior && !mClassicFalloff`. If that ever changes, this
+ * slider silently stops doing anything.
  */
-val INTERIOR_BRIGHTNESS_RANGE = 0f..0.35f
+val INTERIOR_BRIGHTNESS_RANGE = 0f..1.00f
+
+/**
+ * One weather that gets its own DAY ambient floor slider.
+ *
+ * **[weather] must be the weather's engine NAME**, because that is the string both sides key on:
+ * `Weather::Weather` stores `mName`, the fallback parameter is `Weather_<name>_Ambient_Day_Color`,
+ * and `companion.lua` matches `tostring(weather.name)` against it. Get it wrong and the slider is
+ * silently inert — nothing throws, the weather simply never matches.
+ */
+data class DayFloorWeather(
+    val weather: String,
+    val label: String,
+    val key: String,
+    /** That weather's VANILLA day ambient luminance, shown in the slider's blurb. Not used in any
+     *  arithmetic — the floor is compared against the live record — but a floor below this value is
+     *  a no-op, so showing it is what makes the slider possible to aim. */
+    val vanilla: Float,
+    /**
+     * Whether this weather is one of the two SEVERE ones — the only weathers whose DAY ambient is
+     * darker than another weather's NIGHT ambient (Ashstorm 0.212, Blight 0.233, against a night
+     * range of 0.127..0.238).
+     *
+     * **It selects WHICH of a tier's two day floors applies**, not whether the tier writes this
+     * weather at all — every weather is written as of Aug 22 2026. The two groups exist because one
+     * shared floor cannot serve both: a value high enough to rescue an ashstorm would be far past
+     * vanilla for a clear day, and a value safe for a clear day would barely move an ashstorm. See
+     * [GameBrightnessPreset.dayFloorSevere] / [GameBrightnessPreset.dayFloorOther].
+     */
+    val severe: Boolean = false,
+)
+
+/**
+ * Which weathers get a day floor slider, and why only these two.
+ *
+ * Chosen from the real `Weather_*_Ambient_Day_Color` values on the device (Rec.709, the same
+ * formula the engine and `COMPANION_AMBIENT` use). The full table, brightest first:
+ * Cloudy 0.566, Clear 0.552, Rain 0.428, Foggy 0.416, Overcast / Snow / Blizzard 0.377,
+ * Thunderstorm 0.353, **Blight 0.233, Ashstorm 0.212**.
+ *
+ * **The break is not arbitrary — Ashstorm and Blight are the only two weathers whose DAY ambient is
+ * darker than another weather's NIGHT ambient** (night spans 0.127..0.238; Ashstorm is darker than
+ * five of them, Blight than two). They are also separated from the next weather up by 0.12, by far
+ * the largest gap in the lower half of the table. That is the difference between "a dim day" and
+ * "a day darker than night", and it is the whole justification for touching daytime at all.
+ *
+ * **Thunderstorm and Overcast/Snow/Blizzard were CONSIDERED AND DELIBERATELY LEFT OUT.** They sit
+ * 0.024..0.047 below `DIM_LUMINANCE_BRIGHT` (0.40), are darker than NO weather's night, and produce
+ * only a 3.7%..7.4% companion dim at midday. They are the bottom of the normal daytime band rather
+ * than outside it, and giving them sliders would invite flattening the weather variety that makes
+ * a storm read as a storm. Adding one later is a single entry here plus its key — nothing in
+ * `companion.lua` knows which weathers are in this list.
+ */
+val DAY_FLOOR_WEATHERS = listOf(
+    // DARKEST FIRST, not alphabetical: the ordering is the recommendation. Anything worth lifting is
+    // at the top, and the list reads as a ranking of which weathers are actually a problem.
+    DayFloorWeather("Ashstorm", "Ashstorm", "day_brightness_ashstorm", 0.212f, severe = true),
+    DayFloorWeather("Blight", "Blight", "day_brightness_blight", 0.233f, severe = true),
+    DayFloorWeather("Thunderstorm", "Thunderstorm", "day_brightness_thunderstorm", 0.353f),
+    DayFloorWeather("Overcast", "Overcast", "day_brightness_overcast", 0.377f),
+    DayFloorWeather("Snow", "Snow", "day_brightness_snow", 0.377f),
+    DayFloorWeather("Blizzard", "Blizzard", "day_brightness_blizzard", 0.377f),
+    DayFloorWeather("Foggy", "Foggy", "day_brightness_foggy", 0.416f),
+    DayFloorWeather("Rain", "Rain", "day_brightness_rain", 0.428f),
+    DayFloorWeather("Clear", "Clear", "day_brightness_clear", 0.552f),
+    DayFloorWeather("Cloudy", "Cloudy", "day_brightness_cloudy", 0.566f),
+)
+
+/**
+ * Range for a per-weather DAY ambient floor. Open to 0..1 like the other two brightness sliders.
+ *
+ * **This value is a TARGET LUMINANCE, not a lift** — the opposite semantics to
+ * [NIGHT_BRIGHTNESS_RANGE], and the difference is deliberate. Night ambient spans only 0.127..0.238
+ * across the ten weathers, so a floor there would clamp nearly all of them to one value and erase
+ * night weather variety; day spans 0.212..0.566 and the entire goal is to raise TWO outliers while
+ * leaving the other eight untouched, which is exactly what a floor does and a lift does not. A floor
+ * also cannot overshoot: a weather already at or above it is skipped entirely.
+ *
+ * Useful reference points when picking a value: Thunderstorm 0.353 and Overcast 0.377 are the next
+ * weathers up; 0.40 is `DIM_LUMINANCE_BRIGHT`, above which the companion stops dimming itself at
+ * all; and 0.552 / 0.566 are Clear and Cloudy, so a floor past those makes an ashstorm brighter
+ * than a clear noon.
+ */
+val DAY_BRIGHTNESS_RANGE = 0f..1.00f
+
+/** **0 = OFF, exact vanilla, and this default is load-bearing rather than cautious.** Every other
+ *  brightness control in the app was deliberately built not to touch daytime; this is the first one
+ *  that can, so it ships doing nothing and the player opts in per weather. `applyDayAmbientFloor`
+ *  recomputes from each weather's immutable `fallback=` colour every time, so 0 writes vanilla back
+ *  bit-identically.
+ *
+ *  **The Game Brightness PRESETS DO set these, as of Aug 22 2026** (Normal 0, Bright 0.30,
+ *  Blinding 0.65) — reversing the deliberate choice made when this shipped hours earlier. The
+ *  objection then was that a tier must not quietly brighten daytime; it does not, and the row's
+ *  footer stays literally true, because these floors reach ONLY Ashstorm and Blight and a NORMAL
+ *  bright day (Clear, Cloudy, Rain, Foggy) is untouched at every tier. The footer was worded
+ *  "a normal bright day" for exactly this reason — do not drop that word. */
+const val DAY_BRIGHTNESS_DEFAULT = 0f
 
 /** OpenMW's shipped default for `Shaders/minimum interior brightness` (files/settings-default.cfg).
  *  Keep in step with the engine if it ever changes upstream.
@@ -435,6 +599,156 @@ const val MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT = 0.08f
  *  live pass-through, not a no-op: the engine persists its own copy to `settings.cfg`, so we keep
  *  pushing it at startup to re-assert vanilla over whatever is stored there. */
 const val INTERIOR_BRIGHTNESS_DEFAULT = MINIMUM_INTERIOR_BRIGHTNESS_DEFAULT
+
+/**
+ * The three quick-select tiers behind the options menu's Game Brightness switch — a shortcut that
+ * sets the exterior-night lift and the interior floor together.
+ *
+ * **It is a shortcut, NOT a fourth setting.** Nothing stores "which tier is selected"; the active
+ * tier is DERIVED from the two live slider values by [of]. That is deliberate and matches the Game
+ * UI presets row, which derives All DS / Custom / All Native from the live element modes rather
+ * than remembering a button press — so hand-editing a slider afterwards simply stops matching a
+ * tier, and no stored flag can ever disagree with what the sliders actually say.
+ *
+ * **[NORMAL] is aliased to the two `*_DEFAULT` constants rather than repeating their numbers**, so
+ * "Normal means exactly what a fresh install ships and what Reset brightness restores" stays true
+ * by construction. Both currently resolve to exact vanilla (0% lift, the engine's own 0.08 floor).
+ *
+ * **SCOPE CHANGED Aug 22 2026: a tier now writes THREE values across TWO features.** Two are the
+ * game-world floors `GameBrightnessRow` draws; the third is Screen Dimming's "Brightest (at night)"
+ * ([ADAPTIVE_DIM_NIGHT_MAX_RANGE]), which lives in Developer Tools and dims the COMPANION'S OWN UI
+ * without touching rendering at all. These really are separate features and the KDoc here used to
+ * say so emphatically — the crossing is deliberate.
+ *
+ * WHY IT IS RIGHT ANYWAY: the tiers answer one question, "can I see this screen in sunlight", and at
+ * night that question has two independent answers to give. Raising the night lift brightens the GAME
+ * on the top screen; raising the night dim ceiling stops the COMPANION dimming itself on the bottom
+ * one. A tier that fixed only the first would leave the bottom screen dark at exactly the moment it
+ * was asked to fix. The two are also causally linked: the night lift raises reported ambient, which
+ * the dimming ramp reads, so moving one without the other makes the ramp's night behaviour depend on
+ * a setting the player did not think they were touching.
+ *
+ * A tier writes FIVE values as of Aug 22 2026: night lift, interior floor, the Screen Dimming night
+ * ceiling, and the DAY floor of each [DAY_FLOOR_WEATHERS] weather (currently two, sharing one value).
+ *
+ * CONSEQUENCES worth knowing:
+ *  - `resetGameBrightness` restores exactly [NORMAL]'s game-side values (night, interior and both
+ *    day floors), and `resetToDefaults` in Developer Tools clears the whole prefs file and reloads
+ *    every default — which is [NORMAL] on all five axes, night ceiling included. So both buttons
+ *    land on Normal and light its pill.
+ *  - `resetScreenDimming` is the exception: it restores only its own row, so it moves the night
+ *    ceiling back to 0.75 while the game-side values stay put. From a [BRIGHT] or [BLINDING] state
+ *    that leaves a mix and no pill lights — the derived-state design behaving correctly, not a bug.
+ *
+ * **Neither [BRIGHT] nor [BLINDING] does anything in daylight, and that is structural.** Both
+ * floors are floors on AMBIENT: the interior one is the engine's `minimum interior brightness`
+ * (`configureAmbient` is never called for an exterior cell), and the night one rewrites each
+ * weather's `ambientColor.night`, which `TimeOfDayInterpolator::getValue` cannot blend into the flat
+ * day window. So a bright day outdoors is untouched at every tier by design — see the Aug 22 2026
+ * investigation in `CLAUDE_HISTORY.md` for why that is the one case none of this reaches.
+ *
+ * **NO TIER REACHES THE SLIDERS' CEILINGS, and that is the design as of Aug 22 2026.** Both sliders
+ * are now open to their full 0..1 range so they can be pushed well past the point where things look
+ * right, on purpose, to find it by eye. The tiers stop at the REASONED recommendation instead — a
+ * preset is what you hand someone who does not want to think about it, so it must not be the value
+ * the investigation called indefensible, and it must not drift when a range moves. **Keep every
+ * tier a LITERAL**; the gap between the tiers and the ceilings is now very large and entirely
+ * deliberate.
+ */
+enum class GameBrightnessPreset(
+    val label: String,
+    val night: Float,
+    val interior: Float,
+    /** "Brightest (at night)" from Screen Dimming — see the class KDoc for why a GAME brightness
+     *  tier reaches across into a COMPANION setting. */
+    val dimNightMax: Float,
+    /**
+     * DAY ambient floor for the two SEVERE weathers ([DayFloorWeather.severe]: Ashstorm 0.212,
+     * Blight 0.233) — the ones whose day is darker than another weather's night.
+     */
+    val dayFloorSevere: Float,
+    /**
+     * DAY ambient floor for the other EIGHT weathers, including ordinary Clear and Cloudy days.
+     *
+     * **TWO groups rather than one shared value, because one number cannot serve both.** A floor
+     * high enough to rescue an ashstorm (0.212) is far past vanilla for a clear day (0.552), and a
+     * floor safe for a clear day barely moves an ashstorm. Splitting them lets each tier state a
+     * severe-weather target and a normal-weather target independently.
+     *
+     * Being a FLOOR keeps this honest at the low end: any value at or below a weather's own vanilla
+     * ambient is a no-op for it, so [BRIGHT]'s 0.40 lifts only Thunderstorm/Overcast/Snow/Blizzard
+     * and leaves Foggy, Rain, Clear and Cloudy exactly vanilla.
+     */
+    val dayFloorOther: Float,
+) {
+    /** Exact vanilla game brightness, and the stock night dim ceiling: what a fresh install ships.
+     *  All three are ALIASES of the `*_DEFAULT` constants rather than repeated numbers. */
+    NORMAL("Normal", NIGHT_BRIGHTNESS_DEFAULT, INTERIOR_BRIGHTNESS_DEFAULT,
+        ADAPTIVE_DIM_NIGHT_MAX_DEFAULT, DAY_BRIGHTNESS_DEFAULT, DAY_BRIGHTNESS_DEFAULT),
+
+    /** The middle tier. Retuned from play on Aug 22 2026 (was 0.20 / 0.25 with no dim change).
+     *  Interior 0.30 is now just past the 0.2988 point at which authored interior contrast is
+     *  entirely gone, so unlike the earlier value this tier no longer preserves any of it — the
+     *  brightness was judged worth more than the variety. */
+    BRIGHT("Bright", 0.40f, 0.30f, 0.90f, 0.30f, 0.40f),
+
+    /**
+     * The RECOMMENDED maximum from the Aug 22 2026 measurement pass — **deliberately NOT the
+     * sliders' ceilings**, which are the outer bounds for manual exploration only.
+     *
+     * **These are LITERALS on purpose. Do not re-link them to `RANGE.endInclusive`** — that is what
+     * they used to be, back when [BRIGHT] sat at the night ceiling and "as far as the sliders go"
+     * was the only distinct value a third tier could take. With the ranges widened, tracking the
+     * ends would silently push this tier to 0.40 / 0.55, i.e. past the reasoning, and every future
+     * range change would move it again without anyone deciding to.
+     *
+     * **RETUNED FROM PLAY on Aug 22 2026 (0.30 / 0.50 -> 0.85 / 0.65), and it now sits well past
+     * every threshold the measurement pass identified.** That is a deliberate, informed choice, not
+     * drift — the tier is named "Blinding" and exists for reading the screen in direct sunlight, so
+     * the thresholds are documented rather than enforced. Specifically, at night 0.85 it is past the
+     * 0.415 wall (every weather's night ambient now out-brightens its own day) and past the ~0.56
+     * hue-preservation limit (night ambient washes toward white; see [NIGHT_BRIGHTNESS_RANGE]), and
+     * at interior 0.65 it is past both 0.2988 (all interiors flattened to one value) and 0.5522
+     * (an interior is brighter than a clear noon exterior). None of those is a defect at this tier;
+     * they are the reason the MIDDLE tier exists.
+     *
+     * Screen Dimming's night ceiling goes to 1.0 here — the companion stops dimming itself at night
+     * altogether, which is the same intent applied to the other screen.
+     */
+    BLINDING("Blinding", 0.85f, 0.65f, 1.00f, 0.65f, 0.80f);
+
+    /** The day floor this tier applies to [w] — the whole of the two-group split, in one place so
+     *  the writer and the matcher cannot disagree about which group a weather is in. */
+    fun floorFor(w: DayFloorWeather): Float = if (w.severe) dayFloorSevere else dayFloorOther
+
+    companion object {
+        /** Float slop for matching stored values. A slider writes whatever position the finger
+         *  landed on, and the values round-trip through `putFloat`, so exact `==` would leave a
+         *  tier looking inactive after its own button set it. */
+        private const val EPSILON = 0.001f
+
+        /** Which tier the live slider values correspond to, or null for a hand-tuned mix. Null is a
+         *  normal state, not an error: no pill lights up, exactly as the presets row shows nothing
+         *  for a layout that is neither All DS nor All Native. */
+        fun of(
+            night: Float,
+            interior: Float,
+            dimNightMax: Float,
+            /** Current floor of every [DAY_FLOOR_WEATHERS] entry, **in that list's order** — all
+             *  ten, since a tier now writes all ten. Each is compared against the tier value for
+             *  its own group, so hand-tuning ANY weather un-lights the pill. */
+            dayFloors: List<Float>,
+        ): GameBrightnessPreset? =
+            entries.firstOrNull { p ->
+                kotlin.math.abs(p.night - night) < EPSILON &&
+                    kotlin.math.abs(p.interior - interior) < EPSILON &&
+                    kotlin.math.abs(p.dimNightMax - dimNightMax) < EPSILON &&
+                    DAY_FLOOR_WEATHERS.zip(dayFloors).all { (w, v) ->
+                        kotlin.math.abs(p.floorFor(w) - v) < EPSILON
+                    }
+            }
+    }
+}
 
 /** Most HUD favourite quick-slots a category can show. Also the number PERSISTED per category —
  *  lowering the visible count hides slots rather than deleting them, so this is the storage width
@@ -634,6 +948,11 @@ object UiPreferences {
     private val uiSoundVolumeFlow = MutableStateFlow(UI_SOUND_VOLUME_DEFAULT)
     private val nightBrightnessFlow = MutableStateFlow(NIGHT_BRIGHTNESS_DEFAULT)
     private val interiorBrightnessFlow = MutableStateFlow(INTERIOR_BRIGHTNESS_DEFAULT)
+    /** One flow per [DAY_FLOOR_WEATHERS] entry, keyed by WEATHER NAME (not the pref key) because
+     *  that is what both the UI and the Lua command need. Built from the same single list the UI
+     *  renders from, so a new weather cannot be half-wired. */
+    private val dayBrightnessFlows: Map<String, MutableStateFlow<Float>> =
+        DAY_FLOOR_WEATHERS.associate { it.weather to MutableStateFlow(DAY_BRIGHTNESS_DEFAULT) }
     private val favGearSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
     private val favMagicSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
 
@@ -788,6 +1107,13 @@ object UiPreferences {
         nightBrightnessFlow.value = NIGHT_BRIGHTNESS_DEFAULT
         editor(context).remove(NIGHT_BRIGHTNESS).apply()
         setInteriorBrightness(context, INTERIOR_BRIGHTNESS_DEFAULT)
+        // ALL TEN day floors, not just the preset ones: this button resets what the ROW SHOWS, and
+        // the row draws a slider per weather. (That is the one place the two lists deliberately
+        // differ from each other — the tiers write two, the reset clears ten.)
+        DAY_FLOOR_WEATHERS.forEach { w ->
+            dayBrightnessFlows.getValue(w.weather).value = DAY_BRIGHTNESS_DEFAULT
+            editor(context).remove(w.key).apply()
+        }
     }
 
     private fun loadInto(p: SharedPreferences, context: Context) {
@@ -877,6 +1203,10 @@ object UiPreferences {
         interiorBrightnessFlow.value =
             p.getFloat(INTERIOR_BRIGHTNESS, INTERIOR_BRIGHTNESS_DEFAULT)
                 .coerceIn(INTERIOR_BRIGHTNESS_RANGE)
+        DAY_FLOOR_WEATHERS.forEach { w ->
+            dayBrightnessFlows.getValue(w.weather).value =
+                p.getFloat(w.key, DAY_BRIGHTNESS_DEFAULT).coerceIn(DAY_BRIGHTNESS_RANGE)
+        }
         favGearSlotsFlow.value =
             p.getInt(FAV_GEAR_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
         favMagicSlotsFlow.value =
@@ -1242,6 +1572,44 @@ object UiPreferences {
         val v = value.coerceIn(INTERIOR_BRIGHTNESS_RANGE)
         interiorBrightnessFlow.value = v
         editor(context).putFloat(INTERIOR_BRIGHTNESS, v).apply()
+    }
+
+    /**
+     * The DAY ambient floor for one weather, keyed by its engine name (see [DayFloorWeather]).
+     * Throws for an unknown weather rather than returning a dead flow — that can only be a typo in
+     * [DAY_FLOOR_WEATHERS] or a caller inventing a name, and failing silently would present a
+     * slider that does nothing.
+     */
+    fun dayBrightnessFlow(weather: String): StateFlow<Float> =
+        dayBrightnessFlows.getValue(weather).asStateFlow()
+
+    /** Set one weather's DAY ambient floor and persist. Clamped to [DAY_BRIGHTNESS_RANGE]. */
+    fun setDayBrightness(context: Context, weather: String, value: Float) {
+        val v = value.coerceIn(DAY_BRIGHTNESS_RANGE)
+        dayBrightnessFlows.getValue(weather).value = v
+        val key = DAY_FLOOR_WEATHERS.first { it.weather == weather }.key
+        editor(context).putFloat(key, v).apply()
+    }
+
+    /**
+     * Set BOTH Game Brightness floors at once from a [GameBrightnessPreset].
+     *
+     * A convenience over the two sliders, not a third setting: it writes through the same
+     * [setNightBrightness] / [setInteriorBrightness] setters, so the clamping, the persistence and
+     * — critically — the interior value's push to the engine all happen exactly as they do when the
+     * sliders are dragged by hand. There is deliberately NO stored "which preset is selected" flag;
+     * see [GameBrightnessPreset.of].
+     */
+    fun setGameBrightnessPreset(context: Context, preset: GameBrightnessPreset) {
+        setNightBrightness(context, preset.night)
+        setInteriorBrightness(context, preset.interior)
+        // Reaches into a Screen Dimming setting on purpose — see GameBrightnessPreset's KDoc. Still
+        // the real setter, so its own clamp to ADAPTIVE_DIM_NIGHT_MAX_RANGE applies as usual.
+        setAdaptiveDimNightMaxBrightness(context, preset.dimNightMax)
+        // ALL TEN weathers, each taking its own group's floor (see floorFor). As of Aug 22 2026 a
+        // tier does touch ordinary daylight — Blinding lifts a clear day from 0.552 to 0.80 — so the
+        // row's footer no longer claims otherwise.
+        DAY_FLOOR_WEATHERS.forEach { setDayBrightness(context, it.weather, preset.floorFor(it)) }
     }
 
     /**

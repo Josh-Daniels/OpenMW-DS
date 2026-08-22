@@ -709,6 +709,22 @@ object LogParser {
         return EquippedAmmo(id = o.optString("id", ""), count = count)
     }
 
+    /**
+     * COMPANION_WEATHER payload. Null for `{}` (indoors / inactive cell) or anything malformed —
+     * both mean "no weather to show", which is a real state rather than an error.
+     */
+    fun parseWeather(json: String): WeatherInfo? = try {
+        val o = JSONObject(json)
+        val name = o.optString("name", "")
+        if (name.isEmpty()) null else WeatherInfo(
+            name = name,
+            next = o.optString("next", ""),
+            transition = o.optDouble("transition", 0.0).toFloat().coerceIn(0f, 1f),
+        )
+    } catch (e: Exception) {
+        null
+    }
+
     /** Header of a COMPANION_LEVELUP_START payload. Null if malformed. */
     fun parseLevelUpStart(json: String): LevelUpSession? = try {
         val o = JSONObject(json)

@@ -370,6 +370,11 @@ object CompanionActions {
      *  the only difference is which flag it requires (`AllowEnchanting` vs `AllowSpellmaking`), so a
      *  spell taught for one screen guarantees nothing about the other. The Lua side covers both. */
     fun devAddCraftSpells() = dev("craftspells")
+    /** Set the weather. Encoded in the ACTION name (`dev_weather_<name>`) so it rides the existing
+     *  no-arg `dev_` grammar. Lowercased here so the Lua side has one case to compare. NOTE this
+     *  starts vanilla's gradual ChangeWeather transition and does nothing indoors — see devDispatch. */
+    fun devSetWeather(weather: String) = dev("weather_" + weather.lowercase())
+
     fun devSetDay() = dev("day")
     fun devSetNight() = dev("night")
 

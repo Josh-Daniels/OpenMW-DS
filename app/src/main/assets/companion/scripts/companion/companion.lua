@@ -2865,7 +2865,44 @@ local function devMagicCraftSpellKit()
 end
 
 local function devDispatch(action)
-    if action == "gold" or action == "gold10k" then
+    if string.sub(action, 1, 8) == "weather_" then
+        -- Dev weather setter. Encoded in the ACTION NAME rather than as an argument so it stays
+        -- inside the existing no-arg `dev_` branch and the command grammar is untouched.
+        --
+        -- `core.weather.changeWeather` takes a REGION and the weather RECORD, so this resolves the
+        -- record by name (the same `weather.name` string the ambient floors key on) and passes the
+        -- player's current region. It is NOT global-script-only: unlike teleport/split, the binding
+        -- carries no context gate, so the player script may call it directly.
+        --
+        -- TWO THINGS IT CANNOT DO, both inherent to the engine rather than to this button:
+        --  * It does nothing in an INTERIOR -- there is no region, and `changeWeather` does an
+        --    ESMStore `.find()` on the region id which THROWS when it is empty. Hence the pcall.
+        --  * It does not snap. This is vanilla's `ChangeWeather`, which starts a TRANSITION:
+        --    `mTransitionFactor` decays by `elapsedRealSeconds * transitionDelta` of the TARGET
+        --    weather, so with the shipped deltas it takes ~29s real to reach Ashstorm, ~25s for
+        --    Blight and ~67s for Clear. That is why `exportWeather` exists -- without a progress
+        --    readout a half-minute of nothing looks like a dead button.
+        local want = string.sub(action, 9)
+        local ok = pcall(function()
+            local region = self.cell.region
+            if not region or tostring(region) == "" then
+                emit("COMPANION_DEBUG: dev weather needs an exterior cell (no region)")
+                return
+            end
+            for _, w in pairs(core.weather.records) do
+                if string.lower(tostring(w.name)) == string.lower(want) then
+                    core.weather.changeWeather(tostring(region), w)
+                    emit("COMPANION_DEBUG: dev weather -> " .. tostring(w.name)
+                        .. " in region " .. tostring(region))
+                    return
+                end
+            end
+            emit("COMPANION_DEBUG: dev weather: no record named " .. tostring(want))
+        end)
+        if not ok then emit("COMPANION_DEBUG: dev weather failed") end
+        return
+
+    elseif action == "gold" or action == "gold10k" then
         -- createObject lowercases ESM3 ids, so 'gold_001' is the canonical form of Gold_001.
         -- One branch for both amounts, mirroring the day/night pair below: the only difference is
         -- the count, so splitting them would duplicate the id comment and the give call.
@@ -3112,6 +3149,77 @@ local function setNightLift(value)
     applyNightAmbientFloor()
 end
 
+-- ===== Exterior DAY ambient floor (per weather) =====
+--
+-- Raises the DAY ambient of individual weathers that are genuinely too dark to play in, leaving
+-- every other weather bit-identical to vanilla. Keyed by weather NAME, so only the weathers the
+-- player has a slider for are ever touched.
+--
+-- WHY THIS IS A FLOOR AND THE NIGHT ONE IS A LIFT -- the opposite choice to `applyNightAmbientFloor`,
+-- on purpose. Night ambient spans only 0.126..0.213 across the ten weathers, so a floor there would
+-- clamp nearly all of them to one value and erase night weather variety; a lift moves them together.
+-- Day is the reverse case: the spread is 0.212 (Ashstorm) to 0.566 (Cloudy), and the whole point is
+-- to raise ONLY the two outliers without touching the eight normal ones. A lift applied per-weather
+-- would need the player to know each weather's starting value to pick a sensible amount; a floor is
+-- stated as the brightness you want that weather to reach, which is the question actually being
+-- asked. A floor also cannot overshoot: a weather already above it is left completely alone.
+--
+-- WHY IT REACHES VIVEC'S CANTONS, which nothing else does (verified in the engine, not assumed):
+-- `World::updateWeather` computes `isExterior = isCellExterior() || isCellQuasiExterior()`, and
+-- `WeatherManager::update` returns early ONLY when that is false. So a quasi-exterior runs the full
+-- `calculateWeatherResult` -> `mRendering.setAmbientColour(mResult.mAmbientColor)` path, i.e. its
+-- ambient comes from exactly the interpolator this rewrites. The engine's interior floor cannot help
+-- there because `configureAmbient` is gated on `!isExterior && !isQuasiExterior` and is never even
+-- called for a canton.
+--
+-- Same statelessness as the night lift, and for the same hard-won reason: the vanilla colour is
+-- re-read from the immutable `fallback=` parameter on every application rather than snapshotted,
+-- because a game LOAD destroys this script while WeatherManager SURVIVES. Snapshotting would
+-- re-snapshot an already-floored value as "original" and compound it on every load.
+local dayFloors = {}   -- weather name -> target luminance (absent or 0 = leave that weather alone)
+
+local function applyDayAmbientFloor()
+    local ok, err = pcall(function()
+        for _, weather in pairs(core.weather.records) do
+            local interp = weather.ambientColor
+            local name = tostring(weather.name)
+            local orig = fallbackColour("Weather_" .. name .. "_Ambient_Day_Color")
+            if interp and orig then
+                local floor = dayFloors[name] or 0
+                local lum = relLuminance(orig)
+                local target = orig
+                -- Strictly below only: a weather already at or above the floor is untouched, which
+                -- is what keeps Clear/Cloudy/Rain/Foggy exactly vanilla at any slider position.
+                if floor > 0 and lum < floor then
+                    if lum > 0.0001 then
+                        local k = floor / lum
+                        target = { r = orig.r * k, g = orig.g * k, b = orig.b * k, a = orig.a }
+                    else
+                        target = { r = floor, g = floor, b = floor, a = orig.a }
+                    end
+                end
+                interp.day = util.color.rgba(
+                    math.min(target.r, 1), math.min(target.g, 1), math.min(target.b, 1), target.a)
+            end
+        end
+    end)
+    if not ok then
+        emit("COMPANION_DEBUG: day ambient floor failed: " .. tostring(err))
+    end
+end
+
+-- `CMP:day_brightness <WeatherName>|<floor>`. One weather per command, so the set of weathers with
+-- sliders lives entirely on the Kotlin side and adding another needs no change here.
+local function setDayFloor(arg)
+    local name, value = string.match(tostring(arg), "^([^|]+)|(.+)$")
+    if not name then return end
+    local v = tonumber(value)
+    if v == nil then return end
+    if v < 0 then v = 0 elseif v > 1 then v = 1 end
+    dayFloors[name] = v
+    applyDayAmbientFloor()
+end
+
 -- ===== Exterior night weight =====
 --
 -- How much of the CURRENT exterior ambient colour is the weather's NIGHT value: 1 deep at night,
@@ -3218,6 +3326,47 @@ end
 -- actually moving, and nothing at all the rest of the time.
 local NIGHT_WEIGHT_QUANTUM = 0.05
 local lastNightWeightStr = nil
+
+-- ===== Current weather (Developer Tools readout) =====
+--
+-- Exists because `dev_weather_*` starts a TRANSITION rather than snapping (see devDispatch): with
+-- the shipped Transition_Delta values a change takes ~25-67 real seconds, so without a progress
+-- readout the button looks broken. `getCurrent` keeps reporting the OLD weather for that whole
+-- time -- it only flips when mTransitionFactor reaches 0 -- which is exactly the thing that needs
+-- explaining on screen.
+--
+-- Quantized to 0.05 and change-detected, the same treatment quantizeRemaining gives the effect
+-- timers and for the same reason: the raw factor moves every frame, and emitting it unquantized
+-- would put a 5 Hz line on the wire for a bar nothing reads that finely. Between transitions the
+-- string is constant, so this costs one comparison per slow tick.
+local lastWeatherStr = nil
+
+local function exportWeather()
+    local ok = pcall(function()
+        local cell = self.cell
+        if not cell then return end
+        local cur = core.weather.getCurrent(cell)
+        if not cur then
+            -- Interior, or an inactive cell: the binding returns nil rather than throwing. Emit an
+            -- empty payload so the UI can say "indoors" instead of showing a stale weather.
+            if lastWeatherStr ~= "{}" then
+                lastWeatherStr = "{}"
+                emit("COMPANION_WEATHER:{}")
+            end
+            return
+        end
+        local nxt = core.weather.getNext(cell)
+        local t = core.weather.getTransition(cell) or 0
+        t = math.floor(t * 20 + 0.5) / 20
+        local line = string.format('{"name":"%s","next":"%s","transition":%.2f}',
+            tostring(cur.name), nxt and tostring(nxt.name) or "", t)
+        if line ~= lastWeatherStr then
+            lastWeatherStr = line
+            emit("COMPANION_WEATHER:" .. line)
+        end
+    end)
+    if not ok then lastWeatherStr = nil end
+end
 
 local function exportNightWeight()
     -- WHICH AMBIENT PATH OWNS THIS CELL. This is the predicate worldimp.cpp:3305 uses to decide
@@ -3351,6 +3500,11 @@ local function dispatchCommand(command)
         -- Exterior night ambient lift (0 = off, exact vanilla). Pushed from the DS options slider; also
         -- re-sent on load, so this is the only place the value enters Lua.
         setNightLift(arg)
+        return
+    elseif action == "day_brightness" then
+        -- Per-weather DAY ambient floor, "<WeatherName>|<floor>" (0 = off, exact vanilla). Same
+        -- push-on-change-and-on-load path as night_brightness above.
+        setDayFloor(arg)
         return
     elseif action == "spell" then
         local spell = core.magic.spells.records[arg]
@@ -3708,6 +3862,7 @@ local function onUpdate(dt)
         exportPlayerStatus()
         exportDoorMarkers()
         exportNightWeight()
+        exportWeather()
         exportDevState()
     end
     journalTimer = journalTimer + dt

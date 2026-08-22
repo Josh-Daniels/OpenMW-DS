@@ -102,6 +102,17 @@ object GameStateRepository {
     private val _nightWeight = MutableStateFlow(0f)
     val nightWeight: StateFlow<Float> = _nightWeight.asStateFlow()
 
+    /**
+     * Current weather, for the Developer Tools weather buttons' readout. From COMPANION_WEATHER.
+     *
+     * Exists because `dev_weather_*` starts a TRANSITION rather than snapping — ~25-67 real seconds
+     * with the shipped `Transition_Delta` values — and `getCurrent` keeps naming the OLD weather for
+     * all of it. Without this the buttons look dead. **null means indoors or an inactive cell**, not
+     * "unknown": the Lua exporter sends an empty payload there deliberately, so the UI can say so.
+     */
+    private val _currentWeather = MutableStateFlow<WeatherInfo?>(null)
+    val currentWeather: StateFlow<WeatherInfo?> = _currentWeather.asStateFlow()
+
     // true while the in-game pause/options menu (GM_MainMenu) is open. Driven by
     // COMPANION_PAUSE_MENU_OPEN / _CLOSED lines from companion.lua. Gates the
     // bottom-screen options/display-settings overlay (EngineActivity).
@@ -1455,6 +1466,12 @@ object GameStateRepository {
             // well as Lua-side: this multiplies a ceiling, so a value outside 0..1 would push the
             // blend past either endpoint. A malformed line is ignored rather than read as 0, which
             // would silently drop back to the daytime ceiling in the middle of the night.
+            trimmed.contains("COMPANION_WEATHER:") -> {
+                _currentWeather.value = LogParser.parseWeather(
+                    trimmed.substringAfter("COMPANION_WEATHER:").trim()
+                )
+            }
+
             trimmed.contains("COMPANION_NIGHT_WEIGHT:") -> {
                 trimmed.substringAfter("COMPANION_NIGHT_WEIGHT:").trim().toFloatOrNull()
                     ?.let { _nightWeight.value = it.coerceIn(0f, 1f) }

@@ -7729,10 +7729,57 @@ private object MapDsUiState {
  */
 /** The map surface's own frame. Shared so the empty placeholder that holds the layout slot before
  *  the first export arrives is pixel-identical to the real surface -- the panel is already there,
- *  it just has no map in it yet, so nothing shifts when the data lands. */
+ *  it just has no map in it yet, so nothing shifts when the data lands.
+ *
+ *  **[adaptiveDimTint] lives HERE, on the map surface itself, not on the top overlay's container**
+ *  (Aug 22 2026). The DS map is the one feature whose content MOVES between the two screens — the
+ *  swap button hands each map to the other surface — so anchoring the dim to a fixed top-screen box
+ *  was anchoring it to a position rather than to the thing being drawn. On this modifier it travels
+ *  with whichever map is currently up top, and it is a no-op on the bottom surface (see
+ *  [rememberMapDimAlpha]: the bottom screen's full-screen [AdaptiveDimOverlay] scrim does that
+ *  screen, so the two can never double up).
+ *
+ *  ORDER IS LOAD-BEARING, and matches [mwPanel]: the tint comes FIRST so the frame's own fill and
+ *  bronze border are drawn INSIDE its layer and get tinted too. Put it after `background(...)` and
+ *  `SrcAtop` only ever sees the children, leaving the frame at full brightness around a dimmed map.
+ *
+ *  @Composable purely to read the dim; both call sites are already composable. */
+@Composable
 private fun Modifier.mapSurfaceFrame(): Modifier =
-    this.clip(RoundedCornerShape(3.dp)).background(Color(0xFF0B0906))
+    this.dimTint(rememberMapDimAlpha())
+        .clip(RoundedCornerShape(3.dp)).background(Color(0xFF0B0906))
         .border(2.dp, Bronze, RoundedCornerShape(3.dp))
+
+/**
+ * The dim a DS map surface applies to ITSELF — the BOTTOM screen's ramp, even on the top screen.
+ *
+ * **This is the one place a top-screen surface deliberately does NOT use [adaptiveDimTint], and the
+ * reason is that the DS map is not a panel** (Aug 22 2026). [TOP_DIM_ABSOLUTE_MAX_ALPHA] (0.42) was
+ * measured for a top-screen PANEL: something already thinned by the manual opacity slider, laid over
+ * a live game scene that is itself dark, where dimming past that point costs readability of text
+ * sitting on top of moving imagery. None of that describes this surface. The DS map overlay is
+ * OPAQUE and full-screen — the game view is completely hidden behind it — so it is functionally a
+ * second companion screen, and the constraint the cap exists to protect simply is not present.
+ *
+ * Keeping the panel cap here produced a visible MISMATCH between the two halves of one feature: in a
+ * pitch-dark interior the ramp asks for the same alpha on both surfaces, the bottom screen's scrim
+ * delivers it in full, and the top screen clamped to 0.42. Two views of the same map, side by side,
+ * at different brightnesses. Reading the bottom screen's alpha instead makes the two exactly equal
+ * at every scene and every slider position, because it is now literally the same number.
+ *
+ * **Returns 0f on the bottom surface, and that is not an optimisation.** There the map is inside
+ * `CompanionScreen`'s composition and already under the full-screen [AdaptiveDimOverlay] scrim;
+ * tinting as well would darken it TWICE (`1-(1-a)^2`). [LocalIsTopScreen] is the only reliable
+ * "which screen am I on" signal — [LocalTopScreenDim] reads 0f both on the bottom AND on the top
+ * with dimming switched off, so it cannot answer this.
+ *
+ * NOTE this deliberately leaves [TOP_DIM_ABSOLUTE_MAX_ALPHA] itself alone: every OTHER top-screen
+ * overlay is a real panel over the live game and still wants that cap. The change is which ceiling
+ * applies to one surface, not what the ceiling is.
+ */
+@Composable
+private fun rememberMapDimAlpha(): Float =
+    if (LocalIsTopScreen.current) rememberBottomScreenDimAlpha() else 0f
 
 @Composable
 private fun MapSurface(
@@ -8150,7 +8197,17 @@ private fun MapLabelAction(label: String, colour: Color = BronzeLight, onTap: ()
 fun MapDsTopOverlay() {
     // No `?: return` here either: MapSurface now draws its own empty frame, so the panel is painted
     // from the first frame and the game view never shows through the gap before the export lands.
-    Box(Modifier.fillMaxSize().background(StoneDark).adaptiveDimTint().padding(8.dp)) {
+    // The backdrop is dimmed by COLOUR, not by a second tint: the map surface inside it carries its
+    // own (see mapSurfaceFrame), and a tint here would NEST around it and darken the map twice —
+    // 1-(1-a)^2 instead of a. For an opaque colour, lerping toward black IS compositing black over
+    // it, so this lands on exactly the value a scrim would have produced. Same two-halves trick
+    // CompanionDropdownMenu uses for its container. It reads the SAME rememberMapDimAlpha() the
+    // surface does, so the frame and the map it frames can never disagree.
+    Box(
+        Modifier.fillMaxSize()
+            .background(dimColor(StoneDark, rememberMapDimAlpha()))
+            .padding(8.dp)
+    ) {
         MapSurface(MapDsUiState.topView, modifier = Modifier.fillMaxSize())
     }
 }
@@ -19483,6 +19540,7 @@ private fun OptionsCategoryListContent(onOpenPage: (OptionsPage) -> Unit) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)
     ) {
         item { QuickSetRow() }
+        item { GameBrightnessQuickSetRow() }
 
         item {
             OptionsCategoryButton(
@@ -19873,6 +19931,82 @@ private fun QuickSetRow() {
         // read correctly when it merely lights up) and the behaviour is spelled out here instead.
         Text(
             "Custom lights up when your menus are a mix. Tap it to bring back your last saved mix.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
+    }
+}
+
+/**
+ * The Game Brightness quick-select: [Normal] [Bright] [Blinding].
+ *
+ * A SHORTCUT to the two Game Brightness sliders on the Top Display page, sitting at the top level
+ * beside the menu presets for the same reason those do — it is one row, not a section, and it is
+ * something a new player wants before they want anything else. The sliders remain the fine control;
+ * this only sets both at once.
+ *
+ * **The active pill is DERIVED from the live slider values ([GameBrightnessPreset.of]), never
+ * stored.** That is the existing preset pattern in this menu, confirmed rather than assumed:
+ * [QuickSetRow] computes All DS / Custom / All Native from the current element modes each
+ * composition and keeps no record of which button was last pressed. So hand-adjusting either slider
+ * afterwards simply stops matching a tier and no pill lights up — the same way hand-tweaking one
+ * menu row drops that row out of All DS. There is no "Custom" pill here because there is nothing to
+ * restore: [QuickSetRow]'s Custom exists to bring back a whole hand-built layout, and two sliders
+ * are not worth a snapshot.
+ */
+@Composable
+private fun GameBrightnessQuickSetRow() {
+    val context = LocalContext.current
+    val night by UiPreferences.nightBrightnessFlow().collectAsState()
+    val interior by UiPreferences.interiorBrightnessFlow().collectAsState()
+    // Third axis since Aug 22 2026: a tier also sets Screen Dimming's night ceiling, so it has to be
+    // read here too or a pill would light while one of the three values it wrote had been changed.
+    val dimNightMax by UiPreferences.adaptiveDimNightMaxBrightnessFlow().collectAsState()
+    // Fifth axis since Aug 22 2026: a tier also sets every day-floor weather. Fixed-size list in a
+    // stable order, so collecting in a loop is safe.
+    // All ten, in DAY_FLOOR_WEATHERS order — a tier writes every weather now, so hand-tuning any
+    // one of them must un-light the pill. GameBrightnessPreset.of zips against the same list.
+    val dayFloors = DAY_FLOOR_WEATHERS.map {
+        UiPreferences.dayBrightnessFlow(it.weather).collectAsState().value
+    }
+    val active = GameBrightnessPreset.of(night, interior, dimNightMax, dayFloors)
+
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp)) {
+        Text("Game Brightness", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Brightens the entire game. Normal works for most conditions, try Bright or Blinding " +
+                "if you're playing outdoors. Sets the night, interior and bad-weather day " +
+                "brightness sliders together, and how much the companion screen dims at night.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            lineHeight = 13.sp,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            GameBrightnessPreset.entries.forEach { preset ->
+                OptionPill(
+                    Modifier.weight(1f),
+                    label = preset.label,
+                    active = active == preset,
+                    enabled = true
+                ) { UiPreferences.setGameBrightnessPreset(context, preset) }
+            }
+        }
+        Text(
+            // Says out loud what the tiers cannot do, because the subtitle above invites exactly
+            // the wrong expectation for the case people actually complain about. Daytime is
+            // structurally out of reach of both floors — see GameBrightnessPreset's KDoc.
+            // Was "a normal bright day looks the same at every tier" until Aug 22 2026, when the
+            // tiers took on the day floors for ALL weathers. That is no longer true and the text
+            // had to go rather than be quietly left standing.
+            "Bright and Blinding also lift bad-weather days, and Blinding brightens clear days " +
+                "too. Only Normal leaves daytime exactly as Morrowind renders it.",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
@@ -20821,6 +20955,26 @@ private fun GameBrightnessRow() {
             value = interior,
             range = INTERIOR_BRIGHTNESS_RANGE
         ) { UiPreferences.setInteriorBrightness(context, it) }
+        // Per-weather DAY floors — the ONLY controls in the app that touch daytime, which is why
+        // they ship at 0 and are per weather rather than one "daytime brightness". Listed darkest
+        // first, so the weathers actually worth lifting are at the top.
+        OptionsSubLabel("Day brightness by weather")
+        Text(
+            "Each weather's daytime light, lifted no further than the value you set. A weather " +
+                "already brighter than its slider is left alone, so these only ever raise the " +
+                "gloomy ones. Percentages are that weather's own vanilla brightness.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        DAY_FLOOR_WEATHERS.forEach { w ->
+            val floor by UiPreferences.dayBrightnessFlow(w.weather).collectAsState()
+            PercentSlider(
+                label = w.label,
+                blurb = "Vanilla ${(w.vanilla * 100).roundToInt()}%. 0% = unchanged; anything at " +
+                    "or below ${(w.vanilla * 100).roundToInt()}% does nothing.",
+                value = floor,
+                range = DAY_BRIGHTNESS_RANGE
+            ) { UiPreferences.setDayBrightness(context, w.weather, it) }
+        }
         TunedValuesWarning(
             "Both ship at exactly what Morrowind itself renders, and raising either changes the " +
                 "look of the game world. Change them at your own risk. Reset puts both back to " +
@@ -21555,6 +21709,69 @@ private fun DeveloperActionsPanel() {
             description = "Sets the in-game clock to 10 PM.",
             button = "Set Night Time"
         ) { CompanionActions.devSetNight() }
+        DevWeatherRow()
+    }
+}
+
+/**
+ * Developer Tools weather setter: one pill per weather, plus a live readout.
+ *
+ * **The readout is not decoration.** `core.weather.changeWeather` is vanilla's `ChangeWeather`,
+ * which starts a TRANSITION rather than snapping: `mTransitionFactor` decays by
+ * `elapsedRealSeconds * transitionDelta` of the TARGET weather, so with the shipped deltas a change
+ * takes roughly 29s real to reach Ashstorm, 25s for Blight and 67s for Clear — and `getCurrent`
+ * keeps naming the OLD weather for that whole time. Without something on screen saying "Clear ->
+ * Ashstorm", every button would look broken for half a minute.
+ *
+ * A pill grid rather than [DevActionButton]s because ten of those would be a screen and a half, and
+ * because these are a closed set of alternatives, which is what the pill row is the idiom for. The
+ * pills are ACTIONS, not a selection, so none is ever drawn active — the current weather is stated
+ * in the readout instead, where it can also show a transition.
+ *
+ * Ordered darkest-first to match the day-brightness sliders, so the two lists read the same way.
+ */
+@Composable
+private fun DevWeatherRow() {
+    val weather by GameStateRepository.currentWeather.collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Weather", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            // Both limits are the engine's, not ours, and both look like bugs if unexplained.
+            "Sets the weather for your current region. Outdoors only, and it fades in over about " +
+                "half a minute rather than switching instantly, exactly as the game's own weather " +
+                "command does.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            when {
+                weather == null -> "Now: indoors (no weather)"
+                weather!!.transition > 0f && weather!!.next.isNotEmpty() ->
+                    "Now: ${weather!!.name} -> ${weather!!.next} " +
+                        "(${((1f - weather!!.transition) * 100).roundToInt()}%)"
+                else -> "Now: ${weather!!.name}"
+            },
+            color = BronzeLight, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        // Two rows of five: ten pills across the 3.92in screen would each be too narrow to hit.
+        DAY_FLOOR_WEATHERS.chunked(5).forEach { row ->
+            Row(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                row.forEach { w ->
+                    OptionPill(
+                        Modifier.weight(1f),
+                        label = w.label,
+                        active = false,
+                        enabled = true
+                    ) { CompanionActions.devSetWeather(w.weather) }
+                }
+            }
+        }
     }
 }
 

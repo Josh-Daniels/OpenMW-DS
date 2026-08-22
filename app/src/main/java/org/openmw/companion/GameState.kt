@@ -1216,3 +1216,17 @@ data class GameState(
 ) {
     val hasData: Boolean get() = lastUpdateMs > 0L
 }
+
+/**
+ * Current weather, for the Developer Tools weather readout (COMPANION_WEATHER).
+ *
+ * [transition] is the engine's `mTransitionFactor`, which counts DOWN from 1 to 0 as the change
+ * completes — so it is "how much of the OLD weather is left", not progress toward the new one. It is
+ * 0 when nothing is in progress, and [next] is empty then. Quantized to 0.05 in Lua, because the raw
+ * value moves every frame and nothing reads it that finely.
+ */
+data class WeatherInfo(
+    val name: String,
+    val next: String,
+    val transition: Float,
+)
