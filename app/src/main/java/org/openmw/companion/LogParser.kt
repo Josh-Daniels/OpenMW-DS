@@ -200,6 +200,15 @@ object LogParser {
     const val P_JOURNAL_FINISHED_START = "COMPANION_JOURNAL_FINISHED_START:"
     const val P_JOURNAL_FINISHED_QUEST = "COMPANION_JOURNAL_FINISHED_QUEST:"
     const val P_JOURNAL_FINISHED_END = "COMPANION_JOURNAL_FINISHED_END:"
+    // The QUEST LIST proper (companion.lua exportQuests) — vanilla's own derivation, i.e. every
+    // STARTED quest that has a QS_Name, one line each. Distinct from the JOURNAL_* batch above,
+    // which is the journal's text entries: a quest can be in this list with no entry to its name,
+    // and an entry can belong to a quest that is deliberately not in it. Streamed START/QUEST/END.
+    // No contains() collision: the char after "COMPANION_QUEST" is ':' here and 'S' in the
+    // brackets, and "COMPANION_JOURNAL_FINISHED_QUEST:" is a different literal entirely.
+    const val P_QUESTS_START = "COMPANION_QUESTS_START:"
+    const val P_QUEST = "COMPANION_QUEST:"
+    const val P_QUESTS_END = "COMPANION_QUESTS_END:"
     // Current in-game date, from companion_global.lua (the MWScript globals the engine itself
     // stamps journal entries with). Change-detected on day rollover, so this arrives rarely.
     // Backs the date stamp on manual journal entries.
@@ -1097,6 +1106,17 @@ object LogParser {
             attributes = attributes,
             skills = skills
         )
+    }
+
+    /** One `COMPANION_QUEST:` line — a started quest's id and its QS_Name display name. */
+    fun parseQuestInfo(json: String): QuestInfo? = try {
+        val o = JSONObject(json)
+        val id = o.optString("id", "")
+        val name = o.optString("name", "")
+        if (id.isEmpty() || name.isEmpty()) null else QuestInfo(id = id, name = name)
+    } catch (e: Exception) {
+        Log.e(TAG, "Quest parse failed: $json", e)
+        null
     }
 
     fun parseJournalEntry(json: String): JournalEntry? = try {

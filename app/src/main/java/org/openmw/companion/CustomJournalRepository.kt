@@ -31,8 +31,8 @@ import java.util.UUID
 const val MANUAL_QUEST_ID = "__openmw_ds_manual__"
 
 /**
- * Display name for the pseudo-quest. Passed as [JournalEntry.questName], which `questDisplayName`
- * title-cases word by word — so this exact spacing is what appears in the quest list.
+ * Display name for the pseudo-quest. Fed into the quest list as a synthetic [QuestInfo] name and
+ * shown verbatim, exactly as a real quest's QS_Name is — so this string is what appears.
  */
 const val MANUAL_QUEST_NAME = "Manual Entries"
 

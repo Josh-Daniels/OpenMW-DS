@@ -301,6 +301,13 @@ object GameStateRepository {
     // Accumulates journal entries across JOURNAL_START / JOURNAL_ENTRY / JOURNAL_END lines.
     private var journalBuffer: MutableList<JournalEntry>? = null
 
+    // The QUEST LIST (COMPANION_QUESTS_*), i.e. every started quest carrying a QS_Name — vanilla's
+    // own source for its Quests tab. NOT interchangeable with journalEntries: see QuestInfo.
+    // Buffered START/QUEST/END and committed only on END, like every other streamed batch.
+    private val _quests = MutableStateFlow<List<QuestInfo>>(emptyList())
+    val quests: StateFlow<List<QuestInfo>> = _quests.asStateFlow()
+    private var questsBuffer: MutableList<QuestInfo>? = null
+
     // Current in-game date (COMPANION_GAMEDATE, change-detected on day rollover in
     // companion_global.lua). null until the first line arrives, which is deliberate: a manual
     // journal entry must be stamped with a REAL date or not written at all, so the UI gates on
@@ -901,6 +908,21 @@ object GameStateRepository {
                     // composed at load time, and the entries must be right the moment it is.
                     CustomJournalRepository.setSaveId(token)
                 }
+            }
+            // Quest list. Checked BEFORE the JOURNAL_* branches purely for locality; none of
+            // these six literals is a substring of another (see the note on P_QUEST).
+            trimmed.contains(LogParser.P_QUESTS_START) -> {
+                questsBuffer = mutableListOf()
+            }
+            trimmed.contains(LogParser.P_QUEST) -> {
+                questsBuffer?.let { buf ->
+                    val idx = trimmed.indexOf(LogParser.P_QUEST) + LogParser.P_QUEST.length
+                    LogParser.parseQuestInfo(trimmed.substring(idx).trim())?.let { buf.add(it) }
+                }
+            }
+            trimmed.contains(LogParser.P_QUESTS_END) -> {
+                questsBuffer?.let { _quests.value = it.toList() }
+                questsBuffer = null
             }
             trimmed.contains(LogParser.P_JOURNAL_START) -> {
                 journalBuffer = mutableListOf()

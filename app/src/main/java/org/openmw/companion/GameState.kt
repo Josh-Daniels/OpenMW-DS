@@ -1116,9 +1116,54 @@ data class GameDate(
     val dayOfMonth: Int
 )
 
+/**
+ * One STARTED quest, as vanilla's own journal derives its Quests list: an entry of the engine's
+ * `Journal::getQuests()` map that carries a QS_Name.
+ *
+ * DELIBERATELY NOT DERIVED FROM [JournalEntry]. The two are different things and they disagree in
+ * both directions — a quest advanced by MWScript `SetJournalIndex`, or whose entries so far have
+ * empty text, is a real quest with no journal entry; and a quest whose dialogue record has no
+ * QS_Name has entries but is not a quest as far as the journal window is concerned. See
+ * `exportQuests` in companion.lua.
+ *
+ * [name] is the raw QS_Name response, shown VERBATIM: it is already the display string vanilla
+ * prints ("Temple: Pilgrimages of the Seven Graces"), so it must not be re-cased.
+ *
+ * There is no `finished` here on purpose — completion arrives separately and per-id as
+ * `GameStateRepository.finishedQuestIds` (the native `exportFinishedQuests`), and is rolled up to
+ * the quest LOG by [QuestGroup].
+ */
+data class QuestInfo(
+    val id: String,
+    val name: String
+)
+
+/**
+ * One ROW of the Quests list — a quest LOG, which is vanilla's unit rather than a quest id.
+ *
+ * The engine is explicit about this: "for purposes of the journal GUI, quests are identified by
+ * the name, not the ID, so several different quest IDs can end up in the same quest log. A quest
+ * log should be considered finished when any quest ID in that log is finished."
+ * (`JournalViewModelImpl::visitQuestNames`.) Both halves are here: [ids] is every started quest id
+ * sharing [name], and [finished] is true when ANY of them is finished.
+ *
+ * [id] is the group's representative — the first member in export order, which is stable because
+ * the engine's quest map is keyed by RefId and the export is sorted by id. It is the address used
+ * for selection, hide and follow. Membership tests must use [ids], never [id] alone, so a stored
+ * preference against any member still resolves.
+ */
+data class QuestGroup(
+    val id: String,
+    val ids: Set<String>,
+    val name: String,
+    val finished: Boolean
+)
+
 data class JournalEntry(
     val questId: String,
-    val questName: String = "",  // display name from core.dialogue; empty = fall back to prettified ID
+    // The quest's QS_Name, or "" when its dialogue record has none. Carried for reference only —
+    // the Quests list is built from QuestInfo, not from these. See buildQuestGroups.
+    val questName: String = "",
     val text: String,
     val day: Int,
     val month: Int,

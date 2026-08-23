@@ -1216,8 +1216,14 @@ private fun CompanionScreenContent() {
     // followed quest out of the previous character's bucket during a runtime save switch.
     val mergedJournal = rememberMergedJournal(state.journalEntries)
     val finishedQuestIdsForPrefs by GameStateRepository.finishedQuestIds.collectAsState()
+    // The quest LIST ids ride along too. A quest can be in that list with no journal entry at all
+    // (started by SetJournalIndex, or entries with empty text), so pruning against the entries
+    // alone would silently drop the player's hide/follow flag for exactly the quests the entry-
+    // derived list used to miss entirely.
+    val questInfosForPrefs by GameStateRepository.quests.collectAsState()
     LaunchedEffect(
-        state.character.name, mergedJournal, state.journalEntries, finishedQuestIdsForPrefs
+        state.character.name, mergedJournal, state.journalEntries, finishedQuestIdsForPrefs,
+        questInfosForPrefs
     ) {
         val name = state.character.name
         if (name.isNotBlank()) {
@@ -1225,7 +1231,10 @@ private fun CompanionScreenContent() {
             QuestPrefsRepository.reconcile(
                 context,
                 questIds = state.journalEntries.takeIf { it.isNotEmpty() }
-                    ?.let { mergedJournal.map { e -> e.questId }.toSet() }
+                    ?.let {
+                        mergedJournal.mapTo(mutableSetOf()) { e -> e.questId }
+                            .apply { addAll(questInfosForPrefs.map { q -> q.id }) }
+                    }
             )
             // A completed quest stops being a sensible HUD pointer — drop it (no-op unless the
             // followed quest is actually in the finished set; see clearFollowedIfFinished).
@@ -13729,16 +13738,22 @@ private fun MapPanel(
             EmptyTrackedQuestLabel(modifier = Modifier.align(Alignment.TopCenter))
         }
         if (!targetOverlayShowing && followedId != null) {
-            // Resolved against the MERGED journal so following "Manual Entries" shows its real
-            // name. The raw list never contains the reserved id, so this would otherwise fall
-            // through to prettifyQuestId("__openmw_ds_manual__") and print garbage on the HUD.
-            val mergedForLabel = rememberMergedJournal(state.journalEntries)
-            val followedEntry = remember(followedId, mergedForLabel) {
-                mergedForLabel.lastOrNull { it.questId == followedId }
+            // Resolved against the QUEST LIST, the same source the Quests tab now reads, so the
+            // HUD can never name a quest differently from the page it navigates to. The manual
+            // pseudo-quest is special-cased because it exists only on this side and is never in
+            // the export — without it this falls through to prettifyQuestId of the reserved id and
+            // prints garbage on the HUD.
+            val followedQuests by GameStateRepository.quests.collectAsState()
+            val followedTitle = remember(followedId, followedQuests) {
+                when {
+                    followedId == MANUAL_QUEST_ID -> MANUAL_QUEST_NAME
+                    else -> followedQuests.firstOrNull { it.id == followedId }?.name
+                        ?: prettifyQuestId(followedId)
+                }
             }
             FollowedQuestLabel(
                 questId = followedId,
-                title = followedEntry?.let { questDisplayName(it) } ?: prettifyQuestId(followedId),
+                title = followedTitle,
                 hidden = followedId in questPrefs.hidden,
                 modifier = Modifier.align(Alignment.TopCenter)
             )
@@ -16254,12 +16269,14 @@ private fun journalDateLabel(entry: JournalEntry): String =
  * would be wiped moments later, and it would blur the line between "what the game exported" and
  * "what the player wrote".
  *
- * CUSTOM ENTRIES ARE APPENDED AT THE END, and that single choice gets both orderings right:
- * - `JournalChronological` groups with `getOrPut(e.day)` into a LinkedHashMap, so a manual entry
- *   joins the bottom of its own day's column, or — if it is the first entry of a new day — creates
- *   the last column, which is correct since it can only ever be written "now".
- * - `JournalQuestList` builds from `entries.reversed()` + `putIfAbsent`, i.e. most-recently-active
- *   first, so appending is exactly what floats "Manual Entries" to the TOP of the quest list.
+ * CUSTOM ENTRIES ARE APPENDED AT THE END, which is what `JournalChronological` wants: it groups
+ * with `getOrPut(e.day)` into a LinkedHashMap, so a manual entry joins the bottom of its own day's
+ * column, or — if it is the first entry of a new day — creates the last column, which is correct
+ * since it can only ever be written "now".
+ *
+ * The QUEST LIST no longer depends on this ordering at all (Aug 24 2026). It is built from the
+ * quest export by `buildQuestGroups`, sorted alphabetically, with "Manual Entries" pinned first by
+ * `rememberQuestGroups` — where the append used to float it to the top implicitly.
  */
 @Composable
 private fun rememberMergedJournal(entries: List<JournalEntry>): List<JournalEntry> {
@@ -16269,15 +16286,90 @@ private fun rememberMergedJournal(entries: List<JournalEntry>): List<JournalEntr
     }
 }
 
+/**
+ * The Quests list as vanilla derives it, from the quest export rather than the journal entries.
+ *
+ * Transcribes `JournalViewModelImpl::visitQuestNames` (journalviewmodel.cpp): [quests] already
+ * excludes the nameless ones on the Lua side, so what is left here is the two things that function
+ * does — collapse quests sharing a name into ONE log, and mark a log finished when ANY of its
+ * members is. Neither could be done from journal entries, which is where this list used to come
+ * from and why it both invented rows and dropped real ones.
+ *
+ * ORDERING IS ALPHABETICAL, also matching vanilla: `notifyQuests` calls `MWList::sort()`, which is
+ * `Misc::StringUtils::ciLess` — a case-insensitive lexicographic compare. `lowercase()` is
+ * Locale.ROOT, so it agrees with that byte-for-byte over ASCII; it differs only in that it also
+ * folds non-ASCII, which the engine's ASCII-only `toLower` leaves alone. That is the better
+ * behaviour for a localised name and cannot arise in vanilla English content.
+ *
+ * This REPLACED a most-recently-active ordering (Aug 24 2026). That was a DS-only choice carried
+ * over from when the list was built from journal entries, and it had a real cost beyond being
+ * unlike vanilla: a quest log with no journal entry — one advanced by `SetJournalIndex`, or whose
+ * entries so far are empty-texted — has no recency at all, so it could only ever be dumped at the
+ * bottom. Alphabetical gives every log a real position and makes a named quest findable.
+ */
+private fun buildQuestGroups(
+    quests: List<QuestInfo>,
+    finishedQuestIds: Set<String>
+): List<QuestGroup> {
+    val byName = LinkedHashMap<String, MutableList<QuestInfo>>()
+    quests.forEach { q -> byName.getOrPut(q.name.lowercase()) { mutableListOf() }.add(q) }
+    return byName.values.map { members ->
+        QuestGroup(
+            id = members.first().id,
+            ids = members.mapTo(LinkedHashSet()) { it.id },
+            // Verbatim: QS_Name is already the string vanilla prints.
+            name = members.first().name,
+            finished = members.any { it.id in finishedQuestIds }
+        )
+    }.sortedBy { it.name.lowercase() }
+}
+
+/**
+ * [buildQuestGroups] with the manual-entries pseudo-quest PINNED FIRST.
+ *
+ * It is prepended rather than sorted in among the quests, which is a deliberate departure from the
+ * alphabetical rule above: it is not a quest, it is the player's own notebook, and it kept its
+ * top-of-list position from the day it was added. Sorting it under "M" would bury it in the middle
+ * of a long list of things the game wrote. It exists only on this side and is never in the export,
+ * hence the synthetic group here.
+ */
+@Composable
+private fun rememberQuestGroups(
+    quests: List<QuestInfo>,
+    finishedQuestIds: Set<String>,
+    hasManualEntries: Boolean
+): List<QuestGroup> = remember(quests, finishedQuestIds, hasManualEntries) {
+    val groups = buildQuestGroups(quests, finishedQuestIds)
+    if (!hasManualEntries) groups
+    else listOf(
+        QuestGroup(
+            id = MANUAL_QUEST_ID,
+            ids = setOf(MANUAL_QUEST_ID),
+            name = MANUAL_QUEST_NAME,
+            // Never finished — the notebook always reads active. Mirrors the reserved id's
+            // deliberate absence from finishedQuestIds.
+            finished = false
+        )
+    ) + groups
+}
+
 @Composable
 private fun JournalPanel() {
     val state by GameStateRepository.state.collectAsState()
     val finishedQuestIds by GameStateRepository.finishedQuestIds.collectAsState()
+    // The quest list proper. NOT derived from journalEntries — see QuestInfo / buildQuestGroups.
+    val questInfos by GameStateRepository.quests.collectAsState()
+    val customEntries by CustomJournalRepository.state.collectAsState()
     val topics by GameStateRepository.journalTopics.collectAsState()
     // The game's entries plus the player's manual ones. Every view below reads THIS, never
     // state.journalEntries — the three of them already take a List<JournalEntry>, so merging once
     // here is the whole integration.
     val journalEntries = rememberMergedJournal(state.journalEntries)
+    val questGroups = rememberQuestGroups(
+        quests = questInfos,
+        finishedQuestIds = finishedQuestIds,
+        hasManualEntries = customEntries.isNotEmpty()
+    )
     var selectedJournalTab by remember { mutableStateOf(JournalTab.Journal) }
     // Sub-navigation within the QUESTS tab: null = quest list, non-null = detail.
     var selectedQuestId by remember { mutableStateOf<String?>(null) }
@@ -16392,8 +16484,7 @@ private fun JournalPanel() {
                         val qid = selectedQuestId
                         if (qid == null)
                             JournalQuestList(
-                                entries = journalEntries,
-                                finishedQuestIds = finishedQuestIds,
+                                groups = questGroups,
                                 showAll = showAllQuests,
                                 showHidden = showHiddenQuests,
                                 // Choosing Active/All always leaves the hidden-only view (exclusive).
@@ -16401,14 +16492,23 @@ private fun JournalPanel() {
                                 onShowHidden = { showHiddenQuests = it },
                                 onQuest = { selectedQuestId = it }
                             )
-                        else
+                        else {
+                            // Resolved against the group so the detail page shows the entries of
+                            // EVERY quest id in this log, as visitJournalEntries(questName) does.
+                            // A miss (the HUD label pointing at a quest that has since gone) still
+                            // renders, as a single-id group with whatever entries exist.
+                            val group = remember(questGroups, qid) {
+                                questGroups.firstOrNull { qid in it.ids }
+                                    ?: QuestGroup(qid, setOf(qid), "", false)
+                            }
                             JournalQuestDetail(
-                                questId = qid,
-                                entries = journalEntries.filter { it.questId == qid },
+                                group = group,
+                                entries = journalEntries.filter { it.questId in group.ids },
                                 onBack = { selectedQuestId = null },
                                 topicNames = topicNames,
                                 onTopicLink = openTopic
                             )
+                        }
                     }
                 }
             }
@@ -17686,8 +17786,7 @@ private fun AddJournalEntryButton(style: TextStyle) {
 
 @Composable
 private fun JournalQuestList(
-    entries: List<JournalEntry>,
-    finishedQuestIds: Set<String>,
+    groups: List<QuestGroup>,
     // Filter state is OWNED BY JournalPanel, not remembered here: this composable leaves
     // composition on every quest-detail navigation, so state held locally would silently reset the
     // view under the player each time they came back from reading a quest.
@@ -17699,20 +17798,16 @@ private fun JournalQuestList(
 ) {
     val questPrefs by QuestPrefsRepository.state.collectAsState()
 
-    // Most-recently-active quest first. Keep one representative entry per quest to resolve the display name.
-    val quests = remember(entries) {
-        val seen = LinkedHashMap<String, JournalEntry>()
-        entries.reversed().forEach { e -> seen.putIfAbsent(e.questId, e) }
-        seen.values.toList()
-    }
     // A hidden quest is gone from BOTH the Active and All views regardless of its completion state
-    // — hiding is the player's own "I'm done with this" flag, independent of the engine's.
-    val visible = remember(quests, finishedQuestIds, showAll, showHidden, questPrefs.hidden) {
+    // — hiding is the player's own "I'm done with this" flag, independent of the engine's. Tested
+    // across the whole group so a preference stored against any member id still resolves.
+    val visible = remember(groups, showAll, showHidden, questPrefs.hidden) {
         val hidden = questPrefs.hidden
+        fun isHidden(g: QuestGroup) = g.ids.any { it in hidden }
         when {
-            showHidden -> quests.filter { it.questId in hidden }
-            showAll -> quests.filter { it.questId !in hidden }
-            else -> quests.filter { it.questId !in hidden && it.questId !in finishedQuestIds }
+            showHidden -> groups.filter { isHidden(it) }
+            showAll -> groups.filter { !isHidden(it) }
+            else -> groups.filter { !isHidden(it) && !it.finished }
         }
     }
 
@@ -17743,13 +17838,12 @@ private fun JournalQuestList(
             return@Column
         }
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
-            items(visible, key = { it.questId }) { rep ->
+            items(visible, key = { it.id }) { group ->
                 QuestRow(
-                    entry = rep,
-                    finished = rep.questId in finishedQuestIds,
-                    hidden = rep.questId in questPrefs.hidden,
-                    followed = questPrefs.followed == rep.questId,
-                    onClick = { onQuest(rep.questId) }
+                    group = group,
+                    hidden = group.ids.any { it in questPrefs.hidden },
+                    followed = questPrefs.followed in group.ids,
+                    onClick = { onQuest(group.id) }
                 )
             }
             item { Spacer(Modifier.height(8.dp)) }
@@ -17765,8 +17859,7 @@ private fun JournalQuestList(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun QuestRow(
-    entry: JournalEntry,
-    finished: Boolean,
+    group: QuestGroup,
     hidden: Boolean,
     followed: Boolean,
     onClick: () -> Unit
@@ -17775,7 +17868,8 @@ private fun QuestRow(
     LaunchedEffect(DropdownState.closeRequest) {
         if (DropdownState.closeRequest > 0) menuOpen = false
     }
-    val title = questDisplayName(entry)
+    val finished = group.finished
+    val title = questGroupTitle(group)
 
     Box {
         Column {
@@ -17814,7 +17908,8 @@ private fun QuestRow(
         }
 
         QuestContextMenu(
-            questId = entry.questId, title = title, hidden = hidden, followed = followed,
+            questId = group.id, groupIds = group.ids, title = title,
+            hidden = hidden, followed = followed,
             expanded = menuOpen,
             onDismiss = { menuOpen = false; DropdownState.closeAll() }
         )
@@ -17829,6 +17924,11 @@ private fun QuestRow(
 @Composable
 private fun QuestContextMenu(
     questId: String,
+    // Every quest id in this log. Hiding writes the representative id, but UNHIDING has to clear
+    // all of them: the row reads as hidden while ANY member is in the set, so clearing only the
+    // representative could leave it stuck out of view (and a set stored before quest logs were
+    // grouped may hold a non-representative member).
+    groupIds: Set<String> = setOf(questId),
     title: String,
     hidden: Boolean,
     followed: Boolean,
@@ -17859,7 +17959,7 @@ private fun QuestContextMenu(
             },
             onClick = {
                 onDismiss()
-                if (hidden) QuestPrefsRepository.unhide(context, questId)
+                if (hidden) groupIds.forEach { QuestPrefsRepository.unhide(context, it) }
                 else QuestPrefsRepository.hide(context, questId)
             },
             colors = menuItemColors
@@ -17882,18 +17982,18 @@ private fun QuestContextMenu(
 
 @Composable
 private fun JournalQuestDetail(
-    questId: String,
+    group: QuestGroup,
     entries: List<JournalEntry>,
     onBack: () -> Unit,
     topicNames: List<String>,
     onTopicLink: (String) -> Unit
 ) {
-    val title = entries.firstOrNull()?.let { questDisplayName(it) } ?: prettifyQuestId(questId)
+    val title = questGroupTitle(group)
     // The manual pseudo-quest renders from the CustomJournalEntry list rather than the projected
     // JournalEntry one, purely so each row carries its own stable id to delete by. Resolving the id
     // positionally against the merged list would work today but only because both happen to be in
     // the same order — an invariant nothing enforces.
-    val isManual = questId == MANUAL_QUEST_ID
+    val isManual = MANUAL_QUEST_ID in group.ids
     val customEntries by CustomJournalRepository.state.collectAsState()
 
     Column(Modifier.fillMaxSize().mwPanel()) {
@@ -18014,34 +18114,21 @@ private fun ManualEntryContextMenu(
     }
 }
 
-private fun questDisplayName(entry: JournalEntry): String {
-    val raw = entry.questName
-    return when {
-        raw.isEmpty() -> prettifyQuestId(entry.questId)
-        raw.contains(' ') -> raw.split(' ')
-            .joinToString(" ") { it.replaceFirstChar(Char::uppercaseChar) }
-        else -> prettifyRawQuestName(raw)
-    }
-}
-
-// Processes ESM CamelCase names like "A1_1_FindSpymaster" → "Find Spymaster".
-// Strips short code prefixes (BM, MS, A1, …) and pure-number segments, then
-// splits CamelCase boundaries.
-private fun prettifyRawQuestName(raw: String): String {
-    val parts = raw.split('_')
-    val meaningful = parts.filter { seg ->
-        seg.isNotEmpty() &&
-        !seg.all { it.isDigit() } &&
-        !(seg.length <= 3 && seg.all { it.isUpperCase() || it.isDigit() })
-    }
-    val toProcess = meaningful.ifEmpty { parts.takeLast(1) }
-    return toProcess.flatMap { seg ->
-        seg.replace(Regex("([a-z])([A-Z])"), "$1 $2")
-           .replace(Regex("([A-Z]{2,})([A-Z][a-z])"), "$1 $2")
-           .split(' ')
-    }.filter { it.isNotEmpty() }
-     .joinToString(" ") { it.replaceFirstChar(Char::uppercaseChar) }
-}
+/**
+ * The name shown for a quest log — the QS_Name response, VERBATIM.
+ *
+ * It is already the exact string vanilla's journal prints ("Temple: Pilgrimages of the Seven
+ * Graces"), so it is not re-cased. The word-by-word title-casing that used to be applied here was
+ * for the days when the name could be a record id in disguise; on real names it only mangled them
+ * ("Pilgrimages Of The Seven Graces"), and record ids no longer reach this function at all — a
+ * quest without a QS_Name is not a quest as far as the journal is concerned, and is now dropped in
+ * `exportQuests`.
+ *
+ * The id fallback survives for one case only: a [QuestGroup] synthesised for a selection that no
+ * longer matches any exported quest (see JournalPanel), which has no name to show.
+ */
+private fun questGroupTitle(group: QuestGroup): String =
+    group.name.ifEmpty { prettifyQuestId(group.id) }
 
 private fun prettifyQuestId(id: String): String {
     val parts = id.split(Regex("[\\s_]+")).filter { it.isNotEmpty() }

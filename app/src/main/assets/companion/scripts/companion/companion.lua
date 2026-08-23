@@ -1502,9 +1502,18 @@ local function exportEquippedCharge()
     emit('COMPANION_EQUIPPED_CHARGE:' .. str)
 end
 
--- Lazy per-questId lookup from core.dialogue.journal.records.
--- The .name field returns the ESM's original CamelCase id string
--- (e.g. "A1_1_FindSpymaster") which the app prettifies further.
+-- Lazy per-questId QUEST NAME lookup from core.dialogue.journal.records.
+--
+-- This is MWDialogue::Quest::getName() (quest.cpp) exactly: the `questName` property scans the
+-- journal dialogue record's infos for the one flagged QS_Name and returns its response, or nil.
+-- An EMPTY RESULT IS MEANINGFUL, not a lookup failure -- see exportQuests below.
+--
+-- THERE IS DELIBERATELY NO FALLBACK TO THE RECORD ID. There used to be one (r.name, the ESM's
+-- original id string), and it is what put phantom rows like "Blades Gildan2" / "Book History" in
+-- the DS quest list: vanilla's journal window SKIPS a quest with no QS_Name outright ("Morrowind
+-- .esm has no quest names, since the quest book was added with Tribunal ... I'm assuming those
+-- are not supposed to appear in the quest book" -- journalviewmodel.cpp), so inventing a name for
+-- one manufactures a quest the game does not have.
 local questNameCache = {}
 local journalRecords = nil
 
@@ -1518,24 +1527,14 @@ local function getQuestName(questId)
         end
         local r = journalRecords[questId]
         if r then
-            -- questName is the proper display name (QS_Name info record).
-            -- Fall back to r.name (raw ID) if questName is nil/empty.
             local qn = nil
             pcall(function() qn = r.questName end)
-            if qn and qn ~= "" then
-                name = qn
-            elseif r.name and r.name ~= "" then
-                name = r.name
-            end
+            if qn and qn ~= "" then name = qn end
         end
     end)
     questNameCache[questId] = name
     return name
 end
-
--- NOTE: OpenMW 0.52 Lua does not expose quest completion status.
--- Probed: j.questStages, j.quests, entry.stage/isFinished, types.Player.getQuestStage,
--- core.getJournalIndex — all nil or ERR. Active/done split requires a C++ engine change.
 
 local journalExportedCount = -1
 local function exportJournal()
@@ -1574,6 +1573,118 @@ local function exportJournal()
         emit("COMPANION_DEBUG: journal error: " .. tostring(err))
     end
 end
+
+-- ===== Quest list export (COMPANION_QUESTS_*) =====
+--
+-- The DS Quests tab USED TO derive its list from the journal's TEXT ENTRIES, grouping them by
+-- questId. That is not where vanilla gets its list from, and it diverged in both directions.
+-- This mirrors JournalViewModelImpl::visitQuestNames (journalviewmodel.cpp), which is the whole
+-- of vanilla's derivation:
+--
+--   * THE SOURCE IS journal->getQuests(), NOT the text entries. A quest lands there via
+--     getOrStartQuest, which Journal::addEntry AND Journal::setJournalIndex both call -- so a
+--     quest advanced by MWScript SetJournalIndex, or whose entries so far carry empty text
+--     (addEntry only pushes to mJournal `if (!entry.getText().empty())`), is in vanilla's list
+--     with no text entry to its name. Deriving from entries silently dropped those.
+--   * A QUEST WITH NO QS_Name IS SKIPPED ENTIRELY. See getQuestName above.
+--   * QUESTS ARE IDENTIFIED BY NAME, NOT ID -- "several different quest IDs can end up in the
+--     same quest log. A quest log should be considered finished when any quest ID in that log is
+--     finished." The dedupe-by-name and the finished-by-name roll-up are done on the KOTLIN side,
+--     which needs the id->name mapping anyway to attach journal entries to a row; this export
+--     stays raw, one line per quest id.
+--
+-- HOW THE STARTED SET IS READ. types.Player.quests(player) is the Lua view of getQuests()
+-- (mwlua/types/player.cpp), and the old note here claiming quest state is not exposed to Lua was
+-- simply looking in the wrong place -- it had been sought on types.Player.journal, which indeed
+-- carries only text entries, while the accessor is on types.Player itself.
+--
+-- BUT ONLY ITS INDEX FORM IS USABLE. That usertype also has a pairs metamethod, which would walk
+-- getQuests() directly and be the obvious thing to use here -- except that it returns a bare C++
+-- lambda, and sol3 has no pusher for a callable object: unqualified_pusher falls through to
+-- as_value_tag and pushes it as plain userdata whose metatable (set_undefined_methods_on) has no
+-- __call. So `for id in pairs(types.Player.quests(self))` errors on the first iteration. The
+-- sibling journal.topics binding wraps its iterator in sol::as_function for exactly this reason;
+-- this one does not. Only `quests[id].started` is documented, and it is what is used below.
+--
+-- So the walk is inverted: enumerate the game's JOURNAL RECORDS once (immutable game data), keep
+-- the ones with a QS_Name, and ask each whether it has started. The result set is identical to
+-- filtering getQuests() by name -- a quest is in getQuests() iff it has started -- and it is built
+-- on the one binding that is actually contracted.
+--
+-- Completion is NOT sent here. It already arrives as COMPANION_JOURNAL_FINISHED_* (the native
+-- exportFinishedQuests, on demand via CMP:questStatus) and a second source would be one more
+-- thing to keep in step.
+--
+-- Streamed one small line each, per the standing no-unbounded-line rule: the count is the
+-- player's started-quest total, which a content mod can push arbitrarily high.
+
+-- Every journal record in the game that carries a QS_Name, {id, name}, built once. The record
+-- store is content-file data and cannot change during a session, so this never needs rebuilding
+-- -- which is what keeps the per-export cost down to one `started` lookup per candidate.
+local namedQuestRecords = nil
+local function namedQuestList()
+    if namedQuestRecords then return namedQuestRecords end
+    local out = {}
+    pcall(function()
+        if not journalRecords then
+            journalRecords = core.dialogue.journal.records
+        end
+        -- The store answers both integer (1-based, ordinal) and string (by id) indexing; this is
+        -- the ordinal form. getQuestName caches, so the QS_Name scan is paid once per record here
+        -- and is free for the journal-entry export afterwards.
+        for i = 1, #journalRecords do
+            local r = journalRecords[i]
+            if r then
+                local id = r.id
+                local name = getQuestName(id)
+                if name ~= "" then out[#out + 1] = { id = id, name = name } end
+            end
+        end
+    end)
+    -- Sorted by id purely so the change-detection signature below is stable. Display order is the
+    -- Kotlin side's business.
+    table.sort(out, function(a, b) return a.id < b.id end)
+    namedQuestRecords = out
+    return out
+end
+
+local questsExportedSig = nil
+local function exportQuests()
+    local ok, err = pcall(function()
+        local candidates = namedQuestList()
+        local quests = types.Player.quests(self)
+        local rows = {}
+        for i = 1, #candidates do
+            local c = candidates[i]
+            local started = false
+            pcall(function()
+                local q = quests[c.id]
+                started = (q ~= nil) and q.started
+            end)
+            if started then rows[#rows + 1] = c end
+        end
+
+        local parts = {}
+        for i = 1, #rows do parts[i] = rows[i].id .. "\1" .. rows[i].name end
+        local sig = table.concat(parts, "\2")
+        if sig == questsExportedSig then return end
+
+        emit('COMPANION_QUESTS_START:' .. #rows)
+        for i = 1, #rows do
+            emit(string.format('COMPANION_QUEST:{"id":"%s","name":"%s"}',
+                jsonEscape(rows[i].id), jsonEscape(rows[i].name)))
+        end
+        emit('COMPANION_QUESTS_END:' .. #rows)
+        -- Recorded only AFTER the closing END is away, for the same reason exportJournal records
+        -- its count there: Kotlin buffers from START and commits on END, so a batch lost part-way
+        -- must leave this stale and be redone on the next tick.
+        questsExportedSig = sig
+    end)
+    if not ok then
+        emit("COMPANION_DEBUG: quests error: " .. tostring(err))
+    end
+end
+
 
 
 
@@ -3409,6 +3520,10 @@ local function dispatchCommand(command)
     if payload == "journal" then
         journalExportedCount = -1
         exportJournal()
+        -- The Quests tab is one tap from the Journal tab and both are refreshed by this single
+        -- command, so force the quest list out too rather than leaving it up to 5s stale.
+        questsExportedSig = nil
+        exportQuests()
         return
     end
     if payload == "openmap" then
@@ -3869,6 +3984,10 @@ local function onUpdate(dt)
     if journalTimer >= JOURNAL_INTERVAL then
         journalTimer = 0
         exportJournal()
+        -- Rides the journal tick rather than the 0.2s slow one: the quest list changes about as
+        -- often as the journal does, and both are change-detected, so an unchanged tick costs one
+        -- walk of getQuests() every 5s instead of every 0.2s.
+        exportQuests()
     end
 end
 
@@ -3912,6 +4031,7 @@ local function onActive()
     -- reading the console window's own mConsoleMode. So the `mode ~= "Companion"` guard below still
     -- matches injected commands, and now correctly ignores anything the player types.
     exportJournal()
+    exportQuests()
     -- Re-apply the exterior night ambient floor. Weather records are engine data rebuilt from
     -- content files on every game start and are NOT stored in the .omwsave, so the write has to be
     -- redone each session; onActive also fires on the script recreated after a load. Kotlin pushes
