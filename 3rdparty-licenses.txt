@@ -1,32 +1,40 @@
-=================
-Font Awesome Free
-=================
+================
+Material Symbols
+================
 
-This software includes graphical resources based on Font Awesome icons. Font Awesome is licensed under the Creative Commons Attribution 4.0 International license. See https://fontawesome.com/license/free for more details.
+This software includes interface icons from Google's Material Symbols set
+(https://fonts.google.com/icons), used in the launcher and settings screens.
+Material Symbols is licensed under the Apache License, Version 2.0.
 
-journal.png: https://fontawesome.com/icons/book-open?style=solid
-jump.png: https://fontawesome.com/icons/reply?style=solid
-keyboard.png: https://fontawesome.com/icons/keyboard?style=solid
-pause.png: https://fontawesome.com/icons/pause?style=solid
-save.png: https://fontawesome.com/icons/file-download?style=solid
-sneak.png: https://fontawesome.com/icons/eye-slash?style=solid 
-third_person.png: https://fontawesome.com/icons/video?style=solid
-toggle.png: https://fontawesome.com/icons/bars?style=solid
-toggle_magic.png: https://fontawesome.com/icons/bolt?style=solid
-use.png: https://fontawesome.com/icons/hand-point-up?style=solid
-wait.png: https://fontawesome.com/icons/hourglass?style=solid
-mouse.png - https://github.com/FortAwesome/Font-Awesome/issues/2376#issuecomment-215401368 - Based on an icon by t1k3 https://github.com/t1k3
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 
 
-============
-Noun Project
-============
+=====
+Fonts
+=====
 
-This software includes graphical resources based on Noun Project icons.
+The typefaces bundled with this software (MysticCards, DemonicLetters and
+DejaVu LGC Sans Mono) come from OpenMW and are licensed under the SIL Open
+Font License 1.1. Their full licence texts ship with the app alongside the
+fonts themselves, under resources/vfs/fonts/.
 
-inventory.png: https://thenounproject.com/term/backpack/2551/ - CC-0 - By Rémy Médard, FR
-weapon.png: https://thenounproject.com/term/sword/1161/ - CC-BY-3 - By Christopher T. Howlett, CA
-attack.png: Based on the weapon.png by Christopher T. Howlett and modified by treio
+MysticCards is by the OpenMW Team, derived from Pelagiad by Isak Larborn
+(https://isaskar.github.io/Pelagiad/). It is not Morrowind's own font, which
+stays in the user's own Data Files and is never copied or redistributed.
 
 
 =============
