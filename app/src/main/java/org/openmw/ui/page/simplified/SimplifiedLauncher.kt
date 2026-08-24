@@ -122,6 +122,7 @@ import org.openmw.ui.page.main.MainPageViewModel
 import org.openmw.ui.page.mod.ModAssistantViewModel
 import org.openmw.ui.page.mod.ModValue
 import org.openmw.ui.page.mod.readModValues
+import org.openmw.ui.page.mod.sortedByDefaultLoadOrder
 import org.openmw.ui.page.setting.SettingRow
 import org.openmw.ui.theme.MwBone
 import org.openmw.ui.theme.MwBoneBright
@@ -407,10 +408,13 @@ private fun unregisteredContent(all: List<ModValue>): List<ModValue> {
         .toList()
 
     var nextId = all.maxOfOrNull { it.id } ?: 0
-    val discovered = mutableListOf<ModValue>()
 
+    // Gathered across ALL folders first, then ordered once. Ordering per folder (as this did while
+    // it merely sorted alphabetically) would interleave by folder and leave the result dependent on
+    // which folder each plugin happened to live in.
+    val names = mutableListOf<String>()
     folders.forEach { dir ->
-        val names = File(dir).takeIf { it.isDirectory }
+        File(dir).takeIf { it.isDirectory }
             ?.listFiles()
             ?.asSequence()
             ?.filter { it.isFile }
@@ -418,15 +422,16 @@ private fun unregisteredContent(all: List<ModValue>): List<ModValue> {
             ?.filter { it.substringAfterLast('.', "").lowercase() in ENGINE_CONTENT_EXTENSIONS }
             ?.filter { it.isNotBlank() && it == it.trim() && '\n' !in it }
             ?.sorted()
-            ?: return@forEach
-
-        names.forEach { name ->
-            if (known.add(name.lowercase())) {
-                discovered += ModValue(++nextId, "content", name, isChecked = true)
-            }
-        }
+            ?.forEach { name -> if (known.add(name.lowercase())) names += name }
     }
-    return discovered
+
+    // The default load order, not plain alphabetical (see LoadOrder.kt). Newly discovered plugins
+    // are still APPENDED after everything already registered — this decides only their order among
+    // themselves, so an established order is never rearranged. On a first-time setup that is the
+    // whole library bar the base masters, which is exactly when the default matters.
+    return names.sortedByDefaultLoadOrder().map { name ->
+        ModValue(++nextId, "content", name, isChecked = true)
+    }
 }
 
 /**
@@ -1738,6 +1743,34 @@ private fun ModLoadOrderPanel(
         }
     }
 
+    var showResetOrder by remember { mutableStateOf(false) }
+    if (showResetOrder) {
+        AlertDialog(
+            onDismissRequest = { showResetOrder = false },
+            title = { Text(stringResource(R.string.simplified_reset_load_order)) },
+            text = { Text(stringResource(R.string.simplified_reset_load_order_tip)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    // Renumbered exactly as the drag handle does — writeModValuesToFile sorts by
+                    // id, so reordering the list without reassigning ids would write the OLD order
+                    // straight back. isChecked rides along on the copy, so a disabled plugin stays
+                    // disabled through a reset; this reorders, it does not re-enable anything.
+                    val reset = items
+                        .sortedByDefaultLoadOrder { it.value }
+                        .mapIndexed { i, item -> item.copy(id = i + 1) }
+                    items = reset
+                    persist(reset)
+                    showResetOrder = false
+                }) { Text(stringResource(R.string.btn_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetOrder = false }) {
+                    Text(stringResource(R.string.btn_cancel))
+                }
+            }
+        )
+    }
+
     Column(
         modifier = modifier
             .background(MwFloatStone, RoundedCornerShape(12.dp))
@@ -1746,14 +1779,32 @@ private fun ModLoadOrderPanel(
             .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
             .padding(8.dp)
     ) {
-        Text(
-            // Own string, NOT the shared R.string.content — that one is ConfigKeyType.Content.tag
-            // and the Alpha3 tab label, so renaming it would rename those too.
-            text = stringResource(R.string.simplified_load_order),
-            color = MwBronzeLight,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                // Own string, NOT the shared R.string.content — that one is ConfigKeyType.Content.tag
+                // and the Alpha3 tab label, so renaming it would rename those too.
+                text = stringResource(R.string.simplified_load_order),
+                color = MwBronzeLight,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 4.dp).weight(1f)
+            )
+            // The way back to the default order (LoadOrder.kt) once it has been rearranged — and the
+            // only way for an EXISTING player to get it at all, since the default is applied when a
+            // plugin is first registered and their library was registered before it existed.
+            // Confirmed, because it discards whatever arrangement is there.
+            if (items.isNotEmpty()) {
+                TextButton(onClick = { showResetOrder = true }) {
+                    Text(
+                        text = stringResource(R.string.simplified_reset_load_order),
+                        color = MwBronzeLight,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+        }
 
         if (items.isEmpty()) {
             // Two DIFFERENT empty states. Showing "Morrowind folder not found" for both is what

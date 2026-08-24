@@ -204,11 +204,15 @@ class ModAssistantViewModel @Inject constructor(
 
                 newModValues.add(ModValue(newModValues.size + 1, "data", modPath, isChecked = true))
 
-                // Convert new mod values to file lines
+                // Convert new mod values to file lines, in the default load order rather than
+                // raw listFiles() order (see LoadOrder.kt). This decides the order of the plugins
+                // being added NOW and nothing else — anything already in the file keeps its place,
+                // so a player's arrangement is never rearranged by adding another folder.
                 val newContentLines = newModValues
                     .filter { it.category == "content" }
+                    .sortedByDefaultLoadOrder { it.value }
                     .map { "content=${it.value}" }
-                    .toSet()
+                    .distinct()
 
                 val newDataLines = newModValues
                     .filter { it.category == "data" }
@@ -222,23 +226,22 @@ class ModAssistantViewModel @Inject constructor(
                 // Create a new list with inserted lines
                 val updatedLines = existingLines.toMutableList()
 
-                // Insert new content lines after the last existing content line
-                newContentLines.forEach { line ->
-                    if (!existingLines.contains(line)) {
-                        if (lastContentIndex != -1) {
-                            updatedLines.add(lastContentIndex + 1, line)
-                        } else {
+                // Insert new content lines after the last existing content line.
+                //
+                // As ONE block via addAll, not one add() per line: adding them individually at the
+                // same index inserted each ahead of the previous, so the group came out REVERSED --
+                // which is the other half of why the resulting load order looked arbitrary.
+                val contentToInsert = newContentLines.filterNot { existingLines.contains(it) }
+                if (contentToInsert.isNotEmpty()) {
+                    val contentInsertAt = when {
+                        lastContentIndex != -1 -> lastContentIndex + 1
+                        else -> {
                             // If no existing content lines, find or create the Plugins section
                             val pluginsSectionIndex = existingLines.indexOfFirst { it.contains("## Plugins") }
-                            if (pluginsSectionIndex != -1) {
-                                // Add after the section header
-                                updatedLines.add(pluginsSectionIndex + 1, line)
-                            } else {
-                                // Add at the end if no section found
-                                updatedLines.add(line)
-                            }
+                            if (pluginsSectionIndex != -1) pluginsSectionIndex + 1 else updatedLines.size
                         }
                     }
+                    updatedLines.addAll(contentInsertAt, contentToInsert)
                 }
 
                 // Insert new data lines after the last existing data line
