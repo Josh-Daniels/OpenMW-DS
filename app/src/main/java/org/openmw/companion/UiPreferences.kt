@@ -686,11 +686,15 @@ enum class GameBrightnessPreset(
     NORMAL("Normal", NIGHT_BRIGHTNESS_DEFAULT, INTERIOR_BRIGHTNESS_DEFAULT,
         ADAPTIVE_DIM_NIGHT_MAX_DEFAULT, DAY_BRIGHTNESS_DEFAULT, DAY_BRIGHTNESS_DEFAULT),
 
-    /** The middle tier. Retuned from play on Aug 22 2026 (was 0.20 / 0.25 with no dim change).
-     *  Interior 0.30 is now just past the 0.2988 point at which authored interior contrast is
-     *  entirely gone, so unlike the earlier value this tier no longer preserves any of it — the
-     *  brightness was judged worth more than the variety. */
-    BRIGHT("Bright", 0.40f, 0.30f, 0.90f, 0.30f, 0.40f),
+    /** The middle tier. Retuned from play on Aug 22 2026 (was 0.20 / 0.25 with no dim change),
+     *  then interior 0.30 -> 0.40 on Aug 24 2026.
+     *  Interior is well past the 0.2988 point at which authored interior contrast is entirely
+     *  gone, so unlike the earliest value this tier no longer preserves any of it — the brightness
+     *  was judged worth more than the variety. 0.40 costs nothing further on that axis (above
+     *  0.2988 there is no variety left to lose) and stays below the 0.5522 point at which an
+     *  interior out-brightens a clear noon; the one growing cost is channel clipping, which
+     *  affects 2 of the 594 authored interiors here against 0 at 0.30. */
+    BRIGHT("Bright", 0.40f, 0.40f, 0.90f, 0.30f, 0.40f),
 
     /**
      * The RECOMMENDED maximum from the Aug 22 2026 measurement pass — **deliberately NOT the

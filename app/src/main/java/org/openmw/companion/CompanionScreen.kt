@@ -1221,9 +1221,17 @@ private fun CompanionScreenContent() {
     // alone would silently drop the player's hide/follow flag for exactly the quests the entry-
     // derived list used to miss entirely.
     val questInfosForPrefs by GameStateRepository.quests.collectAsState()
+    // Every id belonging to a quest log that has FINISHED, not just the ids the engine flagged.
+    // Empty when the quest export hasn't arrived, in which case the raw finished set is used
+    // instead — a superset is what this is for, never a narrower one.
+    val finishedGroupIdsForPrefs = remember(questInfosForPrefs, finishedQuestIdsForPrefs) {
+        buildQuestGroups(questInfosForPrefs, finishedQuestIdsForPrefs)
+            .filter { it.finished }
+            .flatMapTo(mutableSetOf()) { it.ids }
+    }
     LaunchedEffect(
         state.character.name, mergedJournal, state.journalEntries, finishedQuestIdsForPrefs,
-        questInfosForPrefs
+        finishedGroupIdsForPrefs, questInfosForPrefs
     ) {
         val name = state.character.name
         if (name.isNotBlank()) {
@@ -1238,7 +1246,39 @@ private fun CompanionScreenContent() {
             )
             // A completed quest stops being a sensible HUD pointer — drop it (no-op unless the
             // followed quest is actually in the finished set; see clearFollowedIfFinished).
-            QuestPrefsRepository.clearFollowedIfFinished(context, finishedQuestIdsForPrefs)
+            //
+            // The set passed is GROUP-EXPANDED, not the raw finished ids. Several quest ids can
+            // share one quest log and the log is finished when ANY of them is (see
+            // buildQuestGroups), while `follow` stores the group's REPRESENTATIVE id — so a log
+            // finished under a sibling id would never match the followed id and the HUD would keep
+            // pointing at a completed quest. Same reasoning as QuestContextMenu's unhide, which
+            // already clears every member id rather than the representative alone.
+            QuestPrefsRepository.clearFollowedIfFinished(
+                context,
+                finishedGroupIdsForPrefs.ifEmpty { finishedQuestIdsForPrefs }
+            )
+        }
+    }
+
+    // KEEPING THE FINISHED SET CURRENT — without this the auto-unfollow above can only fire late.
+    //
+    // `finishedQuestIds` is an ON-DEMAND export (`CMP:questStatus`, read from the C++ journal), and
+    // the only thing that ever asked for it was JournalPanel's one-shot LaunchedEffect when the
+    // Journal tab composes. So a quest completed while the player was anywhere else stayed followed
+    // on the HUD until they next opened the journal — which is exactly the case this is for.
+    //
+    // Only polls while a quest is actually followed, so the common case costs nothing. Keyed on the
+    // journal entry count as well as the followed id: finishing a quest normally writes a journal
+    // entry, so that restarts the loop and refreshes IMMEDIATELY; the periodic tick is the backstop
+    // for a quest finished by MWScript SetJournalIndex or by an empty-text entry, neither of which
+    // moves the journal.
+    val followedQuestForRefresh by QuestPrefsRepository.state.collectAsState()
+    val followedIdForRefresh = followedQuestForRefresh.followed
+    LaunchedEffect(followedIdForRefresh, state.journalEntries.size) {
+        if (followedIdForRefresh == null) return@LaunchedEffect
+        while (true) {
+            CompanionActions.refreshQuestStatus()
+            delay(QUEST_STATUS_POLL_MS)
         }
     }
 
@@ -13889,6 +13929,20 @@ private fun MapPanel(
  * look at first — not this constant.
  */
 private val FOLLOWED_QUEST_MAX_WIDTH = 400.dp
+
+/**
+ * How often to re-ask for the finished-quest set while a quest is followed on the HUD, so the
+ * auto-unfollow fires without the player having to open the journal.
+ *
+ * 10s rather than something snappier because the normal completion path does NOT wait for it: a
+ * finished quest almost always adds a journal entry, and the effect that owns this loop is keyed on
+ * the entry count, so that case refreshes on the next journal tick (5s) regardless. This interval
+ * only bounds the rarer no-entry case (MWScript SetJournalIndex, or an entry with empty text).
+ *
+ * The export it triggers is one small line per FINISHED quest, which grows over a playthrough, so
+ * this is deliberately not run when nothing is followed and deliberately not run fast.
+ */
+private const val QUEST_STATUS_POLL_MS = 10_000L
 
 /**
  * Hint copy for the three empty-state taps. Deliberately says "long-press an item" rather than
