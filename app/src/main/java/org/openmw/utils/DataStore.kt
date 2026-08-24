@@ -19,6 +19,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import androidx.datastore.preferences.core.emptyPreferences
+import kotlinx.coroutines.flow.catch
+import java.io.IOException
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -32,8 +35,44 @@ private val dataStoreLock = Any()
 val Context.dataStore: DataStore<Preferences>
     get() = synchronized(dataStoreLock) {
         dataStoreInstance ?: PreferenceDataStoreFactory.create(
-            produceFile = { File(Constants.USER_FILE_STORAGE, "game_files_prefs.preferences_pb") }
+            produceFile = {
+                // mkdirs FIRST. This store lives on EXTERNAL storage, not in the app's own data
+                // dir, so nothing has necessarily created `/OpenMW-DS/` by the time the first read
+                // or write arrives -- on a genuinely first launch the folder does not exist at all
+                // until UserManageAssets.onFirstLaunch runs, and that itself waits on the user
+                // granting MANAGE_EXTERNAL_STORAGE. Failure is ignored on purpose: without the
+                // permission it cannot succeed, and [prefsData] is what makes that survivable.
+                runCatching { File(Constants.USER_FILE_STORAGE).mkdirs() }
+                File(Constants.USER_FILE_STORAGE, "game_files_prefs.preferences_pb")
+            }
         ).also { dataStoreInstance = it }
+    }
+
+/**
+ * The preferences stream, with the FIRST-LAUNCH read failure neutralised. **Use this for every read;
+ * never collect `dataStore.data` directly.**
+ *
+ * A DataStore read that fails throws into its COLLECTOR, and this store is collected all over the
+ * app by `collectAsState` inside composables that have no way to handle it — so one IOException
+ * takes the process down. That is not hypothetical: a first launch crashed here with
+ * `java.io.IOException: Inoperable file: canonical[/OpenMW-DS/game_files_prefs.preferences_pb]`
+ * during the first Play, and only on a first launch, because that is the one moment when the file
+ * does not exist yet, the folder may not either, and MANAGE_EXTERNAL_STORAGE has only just been
+ * granted mid-session. There had never been any IOException handling on any of the ~52 read sites.
+ *
+ * Emitting `emptyPreferences()` is DataStore's own documented recovery, and it degrades correctly
+ * here: every accessor below already supplies a default for a missing key, so a failed read reads as
+ * "nothing stored yet" — which on a first launch is also the truth. A non-IO exception is rethrown,
+ * so a genuine programming error still surfaces rather than being silently swallowed.
+ */
+internal val Context.prefsData: Flow<Preferences>
+    get() = dataStore.data.catch { e ->
+        if (e is IOException) {
+            Log.w("GameFilesPreferences", "preferences read failed; using defaults", e)
+            emit(emptyPreferences())
+        } else {
+            throw e
+        }
     }
 
 object GameFilesPreferences {
@@ -117,20 +156,20 @@ object GameFilesPreferences {
     val VIRTUAL_RIGHT_THUMBSTICK = booleanPreferencesKey("enable_virtual_right_thumbstick")
 
     fun getNexusAPIFlow(context: Context): Flow<String?> {
-        return context.dataStore.data.map { settings ->
+        return context.prefsData.map { settings ->
             settings[NEXUS_API_KEY]
         }
     }
 
     fun loadIsPremiumTier(context: Context): Flow<Boolean?> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[IS_NEXUS_PREMIUM]
             }
     }
 
     fun getVirtualRightThumbstick(context: Context): Flow<Boolean> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[VIRTUAL_RIGHT_THUMBSTICK] ?: false
             }
@@ -143,7 +182,7 @@ object GameFilesPreferences {
     }
 
     fun getVirtualLeftThumbstick(context: Context): Flow<Boolean> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[VIRTUAL_LEFT_THUMBSTICK] ?: true
             }
@@ -158,7 +197,7 @@ object GameFilesPreferences {
     fun initialize(context: Context) {
         // Collect DataStore changes to update UIStateManager.languageSet
         CoroutineScope(Dispatchers.Main).launch {
-            context.dataStore.data
+            context.prefsData
                 .map { preferences ->
                     preferences[LANGUAGE_KEY] ?: "en"
                 }
@@ -171,7 +210,7 @@ object GameFilesPreferences {
         }
 
         CoroutineScope(Dispatchers.Main).launch {
-            context.dataStore.data.collect { preferences ->
+            context.prefsData.collect { preferences ->
                 UIStateManager.userSetGPU = preferences[USER_SET_GPU_KEY] ?: "kgsl-3d0"
                 UIStateManager.userSetTemp = preferences[USER_SET_TEMP_KEY] ?: "thermal_zone0"
                 UIStateManager.userSetGPUTemp = preferences[USER_SET_GPU_TEMP_KEY] ?: "thermal_zone32"
@@ -192,13 +231,13 @@ object GameFilesPreferences {
     }
 
     fun getOffsetXMouse(context: Context): Flow<Float?> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[OFFSET_X_MOUSE]
         }
     }
 
     fun getOffsetYMouse(context: Context): Flow<Float?> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[OFFSET_Y_MOUSE]
         }
     }
@@ -210,7 +249,7 @@ object GameFilesPreferences {
     }
 
     fun getSensitivityMouse(context: Context): Flow<Float?> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[SENSITIVITY_MOUSE]
         }
     }
@@ -222,7 +261,7 @@ object GameFilesPreferences {
     }
 
     fun getSensitivityRT(context: Context): Flow<Float?> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[SENSITIVITY_RT]
         }
     }
@@ -235,7 +274,7 @@ object GameFilesPreferences {
     }
 
     fun getLanguageFlow(context: Context): StateFlow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[LANGUAGE_KEY] ?: "en"
         }.stateIn(
             scope = CoroutineScope(Dispatchers.Main),
@@ -251,7 +290,7 @@ object GameFilesPreferences {
     }
 
     fun loadButtonShape(context: Context): Flow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[BUTTON_SHAPE] ?: "CircleShape"
         }
     }
@@ -264,7 +303,7 @@ object GameFilesPreferences {
     }
 
     fun getSupportedLanguagesFlow(context: Context): Flow<List<String>> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[SUPPORTED_LANGUAGES]?.split(",")?.map { it.trim() } ?: run {
                 val defaultLanguages = "en,ru,hr,fr,es,de,it,pt,ja,zh,ar,hi,pl,uk,vi,ko,th,bn,ta,ur,cs"
                 context.dataStore.edit { prefs ->
@@ -278,9 +317,8 @@ object GameFilesPreferences {
 
     fun getGameFilesUri(context: Context): String? {
         val dataStoreKey = GAME_FILES_URI_KEY
-        val dataStore = context.dataStore
         return runBlocking {
-            val preferences = dataStore.data.first()
+            val preferences = context.prefsData.first()
             preferences[dataStoreKey]?.also {
                 _gameFilesUri.value = it
             }
@@ -289,8 +327,7 @@ object GameFilesPreferences {
 
     fun getGameFilesUriState(context: Context): Flow<String?> {
         val dataStoreKey = GAME_FILES_URI_KEY
-        val dataStore = context.dataStore
-        return dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[dataStoreKey]
         }
     }
@@ -305,7 +342,7 @@ object GameFilesPreferences {
     // Synchronous function to get env line string from DataStore
     fun getENVLine(context: Context): String? {
         return runBlocking {
-            context.dataStore.data.first()[ENV_LINE_KEY]
+            context.prefsData.first()[ENV_LINE_KEY]
         }
     }
 
@@ -335,7 +372,7 @@ object GameFilesPreferences {
     }
 
     fun loadUIState(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[UI_HIDDEN_STATE_KEY]?.toBoolean() ?: false
         }
     }
@@ -381,7 +418,7 @@ object GameFilesPreferences {
     }
 
     fun loadVibrationState(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[VIBRATION_STATE_KEY]?.toBoolean() ?: false  // haptics OFF by default
         }
     }
@@ -407,7 +444,7 @@ object GameFilesPreferences {
      *  always true. The branch that reads it is kept as the backstop for the one case that can
      *  still produce a stored `false`: a device where that one-shot has not run yet, or failed. */
     fun loadSimplifiedLauncher(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[SIMPLIFIED_LAUNCHER_KEY] ?: true  // simplified launcher by default
         }
     }
@@ -450,7 +487,7 @@ object GameFilesPreferences {
      *  every `collectAsState(initial = true)` call site in step with this fallback, so an unset
      *  preference never flashes the wrong font for a frame. */
     fun loadLauncherGameFont(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[LAUNCHER_GAME_FONT_KEY] ?: true  // game font by default
         }
     }
@@ -467,7 +504,7 @@ object GameFilesPreferences {
     /** The version whose update banner was dismissed, or "" if none. Callers compare this against
      *  the CURRENT latest version, so a newer release re-shows the banner automatically. */
     fun loadDismissedUpdateBanner(context: Context): Flow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[UPDATE_BANNER_DISMISSED_KEY] ?: ""
         }
     }
@@ -479,12 +516,12 @@ object GameFilesPreferences {
     }
 
     fun loadMatchIconColorState(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[MATCH_ICON_COLOR_KEY]?.toBoolean() ?: false
         }
     }
     suspend fun getAllPreferences(context: Context): Map<String, String> {
-        val preferences = context.dataStore.data.first()
+        val preferences = context.prefsData.first()
         return preferences.asMap().mapKeys { it.key.name }.mapValues { it.value.toString() }
     }
 
@@ -495,7 +532,7 @@ object GameFilesPreferences {
     }
 
     fun loadIconGlow(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[ICON_GLOW_KEY] ?: true
         }
     }
@@ -507,7 +544,7 @@ object GameFilesPreferences {
     }
 
     fun loadBypassGameCheck(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[BYPASS_GAME_FILES_KEY] ?: false
         }
     }
@@ -519,7 +556,7 @@ object GameFilesPreferences {
     }
 
     fun getARGLine(context: Context): Flow<String?> {
-        return context.dataStore.data.map { settings ->
+        return context.prefsData.map { settings ->
             settings[ARG_LINE_KEY]
         }
     }
@@ -533,7 +570,7 @@ object GameFilesPreferences {
     }
 
     fun getUserOptions(context: Context): Flow<Set<String>> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[USER_OPTIONS_KEY]?.split(",")?.filterNot { it.isEmpty() }?.toSet() ?: emptySet()
         }
     }
@@ -553,13 +590,13 @@ object GameFilesPreferences {
     }
 
     fun loadAutoMouseMode(context: Context): Flow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[AUTO_MOUSE_MODE_KEY] ?: "Hybrid"
         }
     }
 
     fun readAvoid16Bits(context: Context): Flow<Boolean> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[AVOID_16_BITS_KEY] ?: true
             }
@@ -572,7 +609,7 @@ object GameFilesPreferences {
     }
 
     fun readSPIRV(context: Context): Flow<Boolean> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[USE_SPIRV] ?: false
             }
@@ -585,7 +622,7 @@ object GameFilesPreferences {
     }
 
     fun readAngle(context: Context): Flow<Boolean> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[USE_ANGLE] ?: false
             }
@@ -598,7 +635,7 @@ object GameFilesPreferences {
     }
 
     fun useVirtualKeyboard(context: Context): Flow<Boolean> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[USE_VIRTUAL_KB] ?: true
             }
@@ -611,7 +648,7 @@ object GameFilesPreferences {
     }
 
     fun readResolutionInsertion(context: Context): Flow<Boolean> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[AVOID_RESOLUTION_INSERTION] ?: false
             }
@@ -624,7 +661,7 @@ object GameFilesPreferences {
     }
 
     fun readTextureShrinkingOption(context: Context): Flow<String> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[TEXTURE_SHRINKING_KEY] ?: "None"
             }
@@ -637,7 +674,7 @@ object GameFilesPreferences {
     }
 
     fun readCodeGroup(context: Context): Flow<String> {
-        return context.dataStore.data
+        return context.prefsData
             .map { preferences ->
                 preferences[CODE_GROUP_KEY] ?: "OpenMW"
             }
@@ -650,7 +687,7 @@ object GameFilesPreferences {
     }
 
     fun getButtonGroupSwitch(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[BUTTON_GROUP_SWITCH_KEY] ?: false
         }
     }
@@ -662,7 +699,7 @@ object GameFilesPreferences {
     }
 
     fun getSelectedAnimation(context: Context): Flow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[SELECTED_ANIMATION_KEY] ?: "None"
         }
     }
@@ -674,7 +711,7 @@ object GameFilesPreferences {
     }
 
     fun getSelectedKeycodes(context: Context): Flow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[SELECTED_MOUSE_KEYS] ?: "54,111"
         }
     }
@@ -686,7 +723,7 @@ object GameFilesPreferences {
     }
 
     fun getExtensionAllowedToEdit(context: Context): Flow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[ALLOWED_TO_TEXT_EDITOR] ?: "sh,txt,db,xml,cfg,json,py,yaml,lua,omwscripts,log,frag,vert,layout,glsl,omwfx"
         }
     }
@@ -704,7 +741,7 @@ object GameFilesPreferences {
     }
 
     fun loadNewFeatureEnabledState(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[NEW_FEATURE_ENABLED_KEY] ?: false
         }
     }
@@ -716,13 +753,13 @@ object GameFilesPreferences {
     }
 
     fun loadTranslationState(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[TRANSLATION_ENABLED_KEY] ?: false
         }
     }
 
     fun getBackgroundAnimationFlow(context: Context): Flow<String> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[BACKGROUND_ANIMATION_KEY] ?: "BouncingBackground"
         }
     }
@@ -740,7 +777,7 @@ object GameFilesPreferences {
     }
 
     fun getWhatsNew(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             // Default OFF: the first-launch "Welcome to OpenMW-DS!" / Getting Started tutorial dialog
             // is gated on this in MainActivity, so an unset key (fresh install) must NOT show it.
             preferences[WHATS_NEW_KEY] == true
@@ -754,7 +791,7 @@ object GameFilesPreferences {
     }
 
     fun getAutoRun(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[AUTO_RUN] != false
         }
     }
@@ -766,7 +803,7 @@ object GameFilesPreferences {
     }
 
     fun getSystemBars(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[HIDE_SYSTEM_BARS] != true
         }
     }
@@ -778,7 +815,7 @@ object GameFilesPreferences {
     }
 
     fun getScreenStayOn(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[SCREEN_STAY_ON] != true
         }
     }
@@ -790,7 +827,7 @@ object GameFilesPreferences {
     }
 
     fun getTutorial(context: Context): Flow<Boolean> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[TUTORIAL_KEY] != false
         }
     }
@@ -802,7 +839,7 @@ object GameFilesPreferences {
     }
 
     fun getMenuCorner(context: Context): Flow<Int> {
-        return context.dataStore.data.map { preferences ->
+        return context.prefsData.map { preferences ->
             preferences[MENU_CORNER_KEY] ?: 1 // Default to TopLeft
         }
     }
@@ -825,25 +862,25 @@ object GameFilesPreferences {
         }
     }
 
-    fun getKeyboardBacklight(context: Context): Flow<Float> = context.dataStore.data.map { it[KEYBOARD_BACKLIGHT] ?: 1f }
+    fun getKeyboardBacklight(context: Context): Flow<Float> = context.prefsData.map { it[KEYBOARD_BACKLIGHT] ?: 1f }
 
     suspend fun setKeyboardBacklight(context: Context, value: Float) {
         context.dataStore.edit { it[KEYBOARD_BACKLIGHT] = value }
     }
 
-    fun getKeyboardTheme(context: Context): Flow<String> = context.dataStore.data.map { it[KEYBOARD_THEME] ?: "lightMode" }
+    fun getKeyboardTheme(context: Context): Flow<String> = context.prefsData.map { it[KEYBOARD_THEME] ?: "lightMode" }
 
     suspend fun setKeyboardTheme(context: Context, value: String) {
         context.dataStore.edit { it[KEYBOARD_THEME] = value }
     }
 
-    fun getKeyboardWidth(context: Context): Flow<Float?> = context.dataStore.data.map { it[KEYBOARD_WIDTH] }
+    fun getKeyboardWidth(context: Context): Flow<Float?> = context.prefsData.map { it[KEYBOARD_WIDTH] }
 
     suspend fun setKeyboardWidth(context: Context, value: Float) {
         context.dataStore.edit { it[KEYBOARD_WIDTH] = value }
     }
 
-    fun getKeyboardHeight(context: Context): Flow<Float?> = context.dataStore.data.map { it[KEYBOARD_HEIGHT] }
+    fun getKeyboardHeight(context: Context): Flow<Float?> = context.prefsData.map { it[KEYBOARD_HEIGHT] }
 
     suspend fun setKeyboardHeight(context: Context, value: Float) {
         context.dataStore.edit { it[KEYBOARD_HEIGHT] = value }

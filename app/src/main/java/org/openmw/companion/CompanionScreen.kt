@@ -152,6 +152,7 @@ import android.util.Log
 import android.view.KeyEvent
 import androidx.compose.ui.graphics.ImageBitmap
 import org.openmw.Constants
+import org.openmw.ui.page.mod.tamrielDataEnabledInConfig
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -13060,14 +13061,53 @@ private fun BarterRejectedAlert(reason: String, onDismiss: () -> Unit) {
  */
 @Composable
 private fun SplashPanel() {
-    Image(
-        painter = painterResource(id = R.drawable.openmw_ds_splash),
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
+    // Tamriel Rebuilt's launch-time notice, the same one the launcher shows. It earns its place
+    // MORE here than there: this screen is what the player is looking at during the wait, and with
+    // TR on it can sit unchanged for around half a minute, which reads as a hung game.
+    //
+    // Read from openmw.cfg rather than passed in, because nothing in the companion's state carries
+    // the load order — this process only ever sees COMPANION_* lines. Done once per splash, off the
+    // main thread, and the null default means the notice simply does not appear until the answer is
+    // known (never a wrong notice for a frame). The file cannot change while the game is booting,
+    // so there is nothing to keep watching.
+    var tamrielRebuiltOn by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(Unit) {
+        tamrielRebuiltOn = withContext(Dispatchers.IO) {
+            tamrielDataEnabledInConfig(File(Constants.USER_OPENMW_CFG))
+        }
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) { detectTapGestures { } }
-    )
+    ) {
+        Image(
+            painter = painterResource(id = R.drawable.openmw_ds_splash),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
+        if (tamrielRebuiltOn == true) {
+            Text(
+                "Tamriel Rebuilt is on. Expect around 30 seconds to launch.",
+                color = BoneBright,
+                fontSize = 13.sp,
+                fontFamily = MwBody,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 11.dp)
+                    .fillMaxWidth(0.86f)
+                    // Its own plate rather than text straight onto the artwork, which cannot be
+                    // relied on to stay legible behind it.
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xCC0B0906))
+                    .border(1.dp, Bronze, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+        }
+    }
 }
 
 /* ---- Top stat bar (floats over all tabs) ---- */

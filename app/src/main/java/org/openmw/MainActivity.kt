@@ -169,7 +169,13 @@ class MainActivity : ComponentActivity() {
                 // Alpha3-launcher removal. Deliberately inside this AWAITED block rather than in a
                 // detached launch: setContent runs straight after it, and a write that landed later
                 // would show the Alpha3 launcher for a frame before swapping it out.
-                GameFilesPreferences.forceSimplifiedLauncherOnce(this@MainActivity)
+                // runCatching for the same reason [prefsData] exists: this is the FIRST write to
+                // a store that lives on external storage, so on a first launch it is the call most
+                // likely to meet a folder that does not exist yet. A one-shot repair must never be
+                // able to take startup down; failing here just means it retries next launch.
+                runCatching {
+                    GameFilesPreferences.forceSimplifiedLauncherOnce(this@MainActivity)
+                }.onFailure { Log.w("MainActivity", "simplified-launcher one-shot failed", it) }
             }
 
             setContent {

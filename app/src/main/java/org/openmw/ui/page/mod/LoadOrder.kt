@@ -1,5 +1,7 @@
 package org.openmw.ui.page.mod
 
+import java.io.File
+
 /**
  * The default plugin load order applied when a load order is first SEEDED — never to one the player
  * has arranged.
@@ -91,6 +93,37 @@ val BETHESDA_OFFICIAL_PLUGINS: Set<String> = setOf(
  */
 fun defaultEnabledFor(name: String): Boolean =
     name.trim().lowercase() !in BETHESDA_OFFICIAL_PLUGINS
+
+/**
+ * `Tamriel_Data.esm`, the shared asset master every Tamriel Rebuilt install loads.
+ *
+ * Used as the "is Tamriel Rebuilt on?" test rather than `TR_Mainland.esm`, because this one is also
+ * the master for the other Project Tamriel landmasses, so it catches a setup running those without
+ * TR itself. Both take the same toll on launch time, which is what the notice is about.
+ */
+private const val TAMRIEL_DATA = "tamriel_data.esm"
+
+/** Is this plugin the Tamriel Rebuilt asset master? Case-insensitive, as everything here is. */
+fun isTamrielData(name: String): Boolean = name.trim().equals(TAMRIEL_DATA, ignoreCase = true)
+
+/**
+ * Does `openmw.cfg` name an ENABLED [TAMRIEL_DATA]?
+ *
+ * For callers with no parsed load order to hand — the companion splash runs in the game process and
+ * has never read that file. Callers that already hold `ModValue`s should test those instead of
+ * re-reading the file.
+ *
+ * Reads the file directly, so call it off the main thread. A missing or unreadable file answers
+ * false, which is the right way to fail: no notice rather than a wrong one.
+ */
+fun tamrielDataEnabledInConfig(cfg: File): Boolean = runCatching {
+    cfg.takeIf { it.isFile }?.readLines().orEmpty().any { line ->
+        val trimmed = line.trim()
+        // A DISABLED entry is `;content=…`, so the `;` must be rejected rather than trimmed off —
+        // this asks whether TR is switched ON, not whether it is registered.
+        trimmed.startsWith("content=") && isTamrielData(trimmed.removePrefix("content="))
+    }
+}.getOrDefault(false)
 
 /** Everything not named above sorts between the two, by [middleRank] then case-insensitive name. */
 private const val MIDDLE_RANK = 1_000

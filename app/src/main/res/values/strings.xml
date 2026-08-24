@@ -142,6 +142,7 @@
     <string name="regenerate_navmesh">Regenerate Navmesh</string>
     <string name="generate_navmesh">Generate Navmesh</string>
     <string name="reset_settings">Reset Settings</string>
+    <string name="simplified_tr_notice">Tamriel Rebuilt is on. Expect around 30 seconds to launch.</string>
     <string name="simplified_reset_load_order">Reset order</string>
     <string name="simplified_reset_load_order_tip">Put the load order back to the default: Morrowind, Tribunal and Bloodmoon first, then Tamriel Rebuilt, then everything else. The eight official add-ons that come with Morrowind are switched off, as they are in the original game. Any order you have set yourself will be lost, and every other mod keeps its on or off setting.</string>
     <string name="use_simplified_launcher">Use simplified launcher</string>

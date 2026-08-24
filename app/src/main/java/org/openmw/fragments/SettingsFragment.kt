@@ -15,6 +15,7 @@ import org.openmw.ui.controls.UIStateManager.customCFG
 import org.openmw.utils.IniConverter
 import org.openmw.utils.MToast
 import org.openmw.utils.dataStore
+import org.openmw.utils.prefsData
 import org.openmw.utils.stringRes
 import java.io.File
 
@@ -116,7 +117,7 @@ fun onFirstLaunch(context: Context) {
     val dataStoreKey = stringPreferencesKey("game_files_uri")
     scope.launch {
         try {
-            val uriString = context.dataStore.data.first()[dataStoreKey]
+            val uriString = context.prefsData.first()[dataStoreKey]
             if (!uriString.isNullOrBlank()) {
                 val folder = File(uriString)
                 val cfgFile = File(Constants.OPENMW_CFG)
@@ -162,7 +163,7 @@ fun processSelectedFolder(context: Context, folder: File, onUriPersisted: (Strin
 
             if (iniFile != null && dataFilesFolder?.isDirectory == true) {
                 // Persist URI and notify UI
-                val uriString = context.dataStore.data.first()[dataStoreKey]
+                val uriString = context.prefsData.first()[dataStoreKey]
                 onUriPersisted(uriString)
 
                 val gameFiles = scanForGameFiles(dataFilesFolder)

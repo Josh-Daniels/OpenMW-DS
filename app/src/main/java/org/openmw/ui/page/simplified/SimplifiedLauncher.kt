@@ -122,6 +122,7 @@ import org.openmw.ui.page.main.MainPageViewModel
 import org.openmw.ui.page.mod.ModAssistantViewModel
 import org.openmw.ui.page.mod.ModValue
 import org.openmw.ui.page.mod.defaultEnabledFor
+import org.openmw.ui.page.mod.isTamrielData
 import org.openmw.ui.page.mod.readModValues
 import org.openmw.ui.page.mod.sortedByDefaultLoadOrder
 import org.openmw.ui.page.setting.SettingRow
@@ -1306,6 +1307,21 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
             Spacer(Modifier.height(8.dp))
         }
 
+        // 1c. Tamriel Rebuilt launch-time notice. Derived from the SAME `allModValues` the panel
+        //     below renders, so it appears and disappears in step with the checkbox the player just
+        //     ticked, with no second read of openmw.cfg to fall out of sync.
+        val tamrielRebuiltOn = remember(allModValues) {
+            allModValues.any { it.category == "content" && it.isChecked && isTamrielData(it.value) }
+        }
+        if (tamrielRebuiltOn) {
+            TamrielRebuiltNotice(
+                modifier = Modifier
+                    .fillMaxWidth(MOD_PANEL_WIDTH_FRACTION)
+                    .align(Alignment.CenterHorizontally)
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+
         // 2. Mod load order. weight(1f) bounds it so the LIST scrolls inside the panel and the
         //    screen itself never scrolls — a scrolling screen would fight the drag-reorder gesture.
         ModLoadOrderPanel(
@@ -1592,6 +1608,43 @@ private fun UpdateBanner(
             modifier = Modifier
                 .clickable { onDismiss() }
                 .padding(horizontal = 6.dp, vertical = 3.dp)
+        )
+    }
+}
+
+/**
+ * Launch-time notice for Tamriel Rebuilt, shown only while `Tamriel_Data.esm` is registered AND
+ * enabled.
+ *
+ * TR adds a very large amount of content to load, and the resulting wait looks like a hang on a
+ * handheld: the launcher disappears and nothing visible happens for around half a minute. Saying so
+ * up front turns that into an expected pause.
+ *
+ * Purely informational, so it has NO dismiss control, unlike [UpdateBanner]. Dismissing it would
+ * have to be remembered somewhere, and the condition already removes it the moment the player turns
+ * TR off. Styled as that banner's quieter sibling: same card, bronze rather than the update accent,
+ * so it reads as a note about the current setup rather than as something to act on.
+ */
+@Composable
+private fun TamrielRebuiltNotice(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .background(MwFloatStone, RoundedCornerShape(10.dp))
+            .border(1.dp, MwBronze, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(MwBronzeLight, CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.simplified_tr_notice),
+            color = MwBone,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f)
         )
     }
 }
