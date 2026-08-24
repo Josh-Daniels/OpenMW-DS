@@ -1264,9 +1264,10 @@ private fun CompanionScreenContent() {
         // (below) so its scrim covers the tab bars, exactly like ItemInfoOverlay.
         var selectedStat by remember { mutableStateOf<StatInfo?>(null) }
 
-        // Hoisted above the tab content so MapPanel can gate its map-canvas
-        // clickable on it — otherwise a tap meant to dismiss the splash lands on
-        // the map canvas (HUD is the default tab) and fires openWorldMap instead.
+        // Hoisted above the tab content so MapPanel can gate its map-canvas clickable on it.
+        // Belt-and-braces since SplashPanel now swallows taps itself, but kept: it is the gate that
+        // guarantees a press landing on the HUD's map canvas cannot fire openWorldMap while the
+        // splash is up, without depending on the two composables' z-order staying as it is.
         var splashVisible by remember { mutableStateOf(true) }
 
         when (tab) {
@@ -1339,7 +1340,7 @@ private fun CompanionScreenContent() {
             }
         }
         if (splashVisible) {
-            SplashPanel(onDismiss = { splashVisible = false })
+            SplashPanel()
         }
 
         // Item info popup — a small, position-aware tooltip anchored near the triggering item
@@ -7372,16 +7373,30 @@ private const val MAP_GLOBAL_FIT = 22f
 private const val MAP_GLOBAL_MAX = 260f
 
 /**
- * The local map's DEFAULT zoom, matched to the HUD minimap so the two read as the same map at the
- * same scale rather than two different views of it.
+ * How much further OUT the DS local map opens than the HUD minimap sits.
+ *
+ * A multiplier on the pixels-per-cell below, so `< 1` is zoomed out: 0.75 shows a third more map
+ * across each axis. The minimap's own crop is deliberately tight because it is a corner widget a
+ * few centimetres across; a full surface at that same scale opens showing about a third of one
+ * cell, which is less than the room actually warrants. This is the one knob for that — the
+ * minimap's [MINIMAP_CROP_FRACTION] is left alone so the HUD widget is unchanged.
+ */
+private const val MAP_LOCAL_DEFAULT_ZOOM_OUT = 0.75f
+
+/**
+ * The local map's DEFAULT zoom, derived from the HUD minimap so the two read as the same map rather
+ * than two different views of it, then pulled [MAP_LOCAL_DEFAULT_ZOOM_OUT] further out.
  *
  * The minimap works in exactly these units — `cellPx = size.minDimension / MINIMAP_CROP_FRACTION`
  * — so this is that same expression against whichever surface the local map currently occupies.
  * Derived per surface rather than stored as a constant, because the two displays differ in size and
- * the map can be swapped between them.
+ * the map can be swapped between them. The caller clamps the result into [mapZoomBounds], so this
+ * can never open further out than there is loaded content to show.
  */
 private fun mapLocalDefaultScale(viewport: Size): Float =
-    if (viewport.minDimension > 0f) viewport.minDimension / MINIMAP_CROP_FRACTION else 620f
+    if (viewport.minDimension > 0f)
+        viewport.minDimension / MINIMAP_CROP_FRACTION * MAP_LOCAL_DEFAULT_ZOOM_OUT
+    else 620f
 
 /** Marker size as a FRACTION OF A CELL, so markers are locked to the map and grow as you zoom in.
  *
@@ -7561,17 +7576,60 @@ private fun mapCentreOnPlayer(s: MapDsState, gi: GlobalMapInfo, scale: Float): O
 
 private data class MapZoomBounds(val min: Float, val max: Float)
 
+/** The local map's rect in cell/segment indices — see [mapLocalCellRect]. */
+private data class MapCellRect(val xMin: Int, val xMax: Int, val yMin: Int, val yMax: Int) {
+    val cellsAcross: Int get() = (xMax - xMin + 1).coerceAtLeast(1)
+}
+
+/**
+ * WHAT THE LOCAL MAP ACTUALLY HAS CONTENT FOR, as a rect of cell/segment indices. The zoom FLOOR
+ * and the pan CLAMP are both measured from this, so neither can travel past real content.
+ *
+ * It is the intersection of TWO different notions of "loaded", because each is authoritative for a
+ * different case and each is wrong on its own:
+ *
+ *  - **The cached segments.** Measured from the segments that ACTUALLY have imagery rather than
+ *    from the declared grid, because for an INTERIOR `mGrid` is `getInteriorGrid()` — the whole
+ *    interior, however large — while only rendered segments are exported, so trusting the grid let
+ *    big interiors zoom out into black.
+ *  - **The engine's grid** (`gridXMin..gridXMax`), EXTERIORS ONLY. `GameStateRepository` keeps a
+ *    rolling cache of up to `MAX_EXTERIOR_SEGMENTS` (25) segments so the HUD minimap survives
+ *    boundary transitions, but the engine itself only ever has a **3x3** window loaded
+ *    (`Constants::CellGridRadius` = 1, short-circuited by `[Map] allow zooming = false`). So after
+ *    walking a few cells the cache spans far more columns than exist: those stale segments have no
+ *    fog mask any more (fog is cleared on unmount and re-pushed only for `mGrid`), and the draw
+ *    fills imagery-without-fog SOLID BLACK on purpose. Measuring the floor from the cache therefore
+ *    let the player zoom out into a field of black squares and empty background. The grid is exact
+ *    here — it is the same `mGrid` the fog export walks — so it is the cap.
+ *
+ * Intersected rather than either one alone, and the intersection is IGNORED if it comes out empty:
+ * a nonsense grid must degrade to the old cache-measured behaviour, never to a map with nothing on
+ * it. Interiors keep the cache bounds untouched, for the reason in the first bullet.
+ */
+private fun mapLocalCellRect(s: MapDsState?, segmentKeys: Set<Pair<Int, Int>>): MapCellRect? {
+    if (segmentKeys.isEmpty()) return null
+    val xs = segmentKeys.map { it.first }
+    val ys = segmentKeys.map { it.second }
+    val cached = MapCellRect(xs.min(), xs.max(), ys.min(), ys.max())
+    if (s == null || s.interior) return cached
+    val clipped = MapCellRect(
+        maxOf(cached.xMin, s.gridXMin), minOf(cached.xMax, s.gridXMax),
+        maxOf(cached.yMin, s.gridYMin), minOf(cached.yMax, s.gridYMax)
+    )
+    return if (clipped.xMin <= clipped.xMax && clipped.yMin <= clipped.yMax) clipped else cached
+}
+
 /**
  * Zoom limits for ONE map on ONE surface. The floor is "the map exactly fills the viewport width",
  * so neither map can be shrunk into empty background; the ceiling is the fixed cap that stops each
  * map impersonating the other.
  *
- * The LOCAL floor is measured from the segments that ACTUALLY have imagery, not from the declared
- * grid: for an interior `mGrid` is `getInteriorGrid()` — the whole interior, however large — while
- * only rendered segments are exported, so trusting the grid let big interiors zoom out into black.
+ * The LOCAL floor is measured against [mapLocalCellRect] — the content that genuinely exists, which
+ * outdoors is the engine's 3x3 window and NOT the larger rolling segment cache.
  */
 private fun mapZoomBounds(
-    view: MapView, viewportWidth: Float, info: GlobalMapInfo?, segmentKeys: Set<Pair<Int, Int>>
+    view: MapView, viewportWidth: Float, info: GlobalMapInfo?, segmentKeys: Set<Pair<Int, Int>>,
+    s: MapDsState?
 ): MapZoomBounds = when (view) {
     MapView.GLOBAL -> {
         val floor = if (info != null && info.width > 0 && viewportWidth > 0f)
@@ -7580,10 +7638,7 @@ private fun mapZoomBounds(
         MapZoomBounds(floor, maxOf(MAP_GLOBAL_MAX, floor))
     }
     MapView.LOCAL -> {
-        val cellsAcross = if (segmentKeys.isNotEmpty()) {
-            val xs = segmentKeys.map { it.first }
-            (xs.max() - xs.min() + 1).coerceAtLeast(1)
-        } else 3
+        val cellsAcross = mapLocalCellRect(s, segmentKeys)?.cellsAcross ?: 3
         val floor = if (viewportWidth > 0f) viewportWidth / cellsAcross else 620f
         MapZoomBounds(floor, maxOf(MAP_LOCAL_MAX, floor))
     }
@@ -7611,17 +7666,18 @@ private fun mapClampOffset(
         t = viewport.height / 2f - h / 2f; b = t + h
     } else {
         val st = s ?: return offset
-        if (segmentKeys.isEmpty()) return offset
-        val xs = segmentKeys.map { it.first }
-        val ys = segmentKeys.map { it.second }
+        // The LOADED rect, not the raw segment cache — outdoors the cache outlives the engine's
+        // 3x3 window, and panning onto a stale segment shows the same black squares zooming out
+        // used to. Zoom and pan share this so they can never disagree about where the map ends.
+        val rect = mapLocalCellRect(st, segmentKeys) ?: return offset
         // SEGMENT space, via the same rotation-aware conversion the draw uses — otherwise the clamp
         // disagrees with what is on screen indoors.
         val pr = mapLocalRaw(st.playerX, st.playerY, st, frame)
-        l = viewport.width / 2f + (xs.min() - pr.x) * scale
-        r = viewport.width / 2f + (xs.max() + 1 - pr.x) * scale
+        l = viewport.width / 2f + (rect.xMin - pr.x) * scale
+        r = viewport.width / 2f + (rect.xMax + 1 - pr.x) * scale
         // Y is inverted (segment +Y up, screen +Y down), so the MAX row is the TOP edge.
-        t = viewport.height / 2f - ((ys.max() + 1) - pr.y) * scale
-        b = viewport.height / 2f - (ys.min() - pr.y) * scale
+        t = viewport.height / 2f - ((rect.yMax + 1) - pr.y) * scale
+        b = viewport.height / 2f - (rect.yMin - pr.y) * scale
     }
     fun clamp1(off: Float, lo: Float, hi: Float, extent: Float): Float {
         val min = extent - hi
@@ -7657,6 +7713,26 @@ private object MapDsUiState {
     var worldOffset by mutableStateOf(Offset.Zero)
     var localScale by mutableStateOf(620f)   // replaced on first measure — see mapLocalDefaultScale
     var localOffset by mutableStateOf(Offset.Zero)
+
+    /**
+     * CENTRE is a REQUEST, not an assignment — the action bar bumps this and each surface answers
+     * it for the map it currently holds ([MapSurface]).
+     *
+     * It has to work that way because centring must be CLAMPED, and the button cannot clamp:
+     * [mapClampOffset] needs the measured VIEWPORT, and only a surface knows its own (the two
+     * displays differ in size, and either map can be on either one). Writing the centred offset
+     * straight from the button is exactly the bug this replaced — near a map edge, putting the
+     * player dead centre pushes the map's edge inside the viewport and shows background past it.
+     * The local map is not exempt: it is player-centred by construction, but the player stands at a
+     * FRACTIONAL position inside the middle cell, so at the zoom floor a zero offset still leaves a
+     * gap on whichever side they are nearer.
+     *
+     * 0 means "never pressed", so a surface can tell a real press from its own first composition.
+     */
+    var centreRequest by mutableStateOf(0)
+        private set
+
+    fun requestCentre() { centreRequest++ }
 
     fun scaleOf(v: MapView) = if (v == MapView.GLOBAL) worldScale else localScale
     fun offsetOf(v: MapView) = if (v == MapView.GLOBAL) worldOffset else localOffset
@@ -7718,6 +7794,7 @@ private object MapDsUiState {
         worldScale = MAP_GLOBAL_FIT; worldOffset = Offset.Zero
         localScale = 620f; localOffset = Offset.Zero
         worldInit = false; localInit = false
+        centreRequest = 0
         clearSelection()
         noteEditorOpen = false; noteEditIndex = -1; noteDraft = ""; keyboardOpen = false
     }
@@ -7857,7 +7934,7 @@ private fun MapSurface(
             val wPx = with(d) { maxWidth.toPx() }
             val hPx = with(d) { maxHeight.toPx() }
             val vp = Size(wPx, hPx)
-            val bounds = mapZoomBounds(view, wPx, info, segmentKeys)
+            val bounds = mapZoomBounds(view, wPx, info, segmentKeys, s)
             LaunchedEffect(view, bounds, vp, s, info, segmentKeys, MapDsUiState.scaleOf(view)) {
                 // ONE-SHOT INIT: default zoom + centred on the player. Runs on the first frame this
                 // surface has a size AND the data it needs, then never again for that map.
@@ -7880,6 +7957,28 @@ private fun MapSurface(
                 MapDsUiState.setOffset(view, mapClampOffset(
                     MapDsUiState.offsetOf(view), vp, clamped, view, s, info, segmentKeys, frame))
             }
+
+            // CENTRE, answered here rather than in the action bar so the result goes through the
+            // SAME clamp every other pan does — see MapDsUiState.centreRequest. Its own effect, not
+            // another key on the one above: that one restarts on every zoom change and would then
+            // re-centre the map out from under a pinch.
+            LaunchedEffect(MapDsUiState.centreRequest, vp, s, info, segmentKeys) {
+                if (MapDsUiState.centreRequest == 0) return@LaunchedEffect   // first composition
+                // Before the one-shot init the scale is still a pre-measure placeholder, so
+                // centring against it would be meaningless; the init centres anyway.
+                if (!(if (isWorld) MapDsUiState.worldInit else MapDsUiState.localInit)) return@LaunchedEffect
+                if (vp.minDimension <= 0f) return@LaunchedEffect
+                val scale = MapDsUiState.scaleOf(view)
+                val gi = info   // local val: `info` is a delegated property and cannot smart-cast
+                val centred = if (!isWorld) Offset.Zero
+                    // Outdoors only: indoors the player's coordinates are in the interior's own
+                    // space, so the world map keeps its pan rather than jumping somewhere
+                    // meaningless. Re-clamped regardless, which is harmless when nothing moved.
+                    else if (gi != null && !s.interior) mapCentreOnPlayer(s, gi, scale)
+                    else MapDsUiState.worldOffset
+                MapDsUiState.setOffset(view, mapClampOffset(
+                    centred, vp, scale, view, s, info, segmentKeys, frame))
+            }
         }
 
         Box(
@@ -7893,7 +7992,7 @@ private fun MapSurface(
                     // MyGUI sees it, so the native map has only ever had single-finger drag.
                     detectTransformGestures { centroid, pan, zoom, _ ->
                         val vp = Size(size.width.toFloat(), size.height.toFloat())
-                        val bounds = mapZoomBounds(view, vp.width, info, segmentKeys)
+                        val bounds = mapZoomBounds(view, vp.width, info, segmentKeys, s)
                         val before = MapDsUiState.scaleOf(view)
                         val after = (before * zoom).coerceIn(bounds.min, bounds.max)
                         // Anchor on the pinch centroid so whatever is under the fingers stays there.
@@ -8231,8 +8330,9 @@ fun MapDsTopOverlay() {
  */
 @Composable
 private fun MapDsControls() {
-    val s = GameStateRepository.mapDsState.collectAsState().value
-    val info by GameStateRepository.globalMapInfo.collectAsState()
+    // No map state is collected here any more. Centring used to be computed in this composable and
+    // needed it; now the surfaces do that (MapDsUiState.centreRequest), so subscribing would only
+    // recompose the whole panel every time the map state or the global-map info changed.
     DisposableEffect(Unit) {
         MapDsUiState.reset()
         CompanionActions.mapMount(true)
@@ -8259,17 +8359,13 @@ private fun MapDsControls() {
                 onSwap = { MapDsUiState.swapMaps() },
                 onCentre = {
                     // CENTRE recentres BOTH maps on the player, because both are on screen at once
-                    // and "where am I" is the question either one is being asked. On the local map
-                    // that is the origin (it is player-centred by construction); on the world map it
-                    // is the player's exterior position — and OUTDOORS ONLY, since indoors those
-                    // coordinates are in the interior's own space. Indoors the world map keeps its
-                    // current pan rather than jumping somewhere meaningless.
-                    MapDsUiState.localOffset = Offset.Zero
-                    val gi = info
-                    if (s != null && gi != null && !s.interior) {
-                        MapDsUiState.worldOffset =
-                            mapCentreOnPlayer(s, gi, MapDsUiState.worldScale)
-                    }
+                    // and "where am I" is the question either one is being asked.
+                    //
+                    // Only REQUESTED here — each surface performs it, because the result has to go
+                    // through mapClampOffset and only a surface knows its own measured viewport.
+                    // This used to assign the two offsets directly, which let a player near a map
+                    // edge centre the map off its own bounds and show background past the edge.
+                    MapDsUiState.requestCentre()
                 },
                 onClose = {
                     // Closes via the same toggle the minimap tap uses, so the native mode pops
@@ -12844,15 +12940,34 @@ private fun BarterRejectedAlert(reason: String, onDismiss: () -> Unit) {
 }
 
 /* ---- Splash panel for when not in game ---- */
+/**
+ * Shown from companion start until the first `COMPANION_STATS` line arrives — i.e. across the
+ * engine's boot and its initial loading screen — then auto-dismissed by the `state.hasData` effect
+ * at the call site.
+ *
+ * **TAPPING IT DOES NOTHING, DELIBERATELY.** It used to carry `clickable(onClick = onDismiss)`, a
+ * manual escape from the days before the auto-dismiss worked (the call site's comment still records
+ * why that effect once never fired). With auto-dismiss in place the tap only ever fired by
+ * accident, and what it revealed was the thing the splash exists to hide: a live HUD with no game
+ * data behind it. So the gesture is gone — but the panel must still SWALLOW the tap, because an
+ * Image carrying no pointer modifier does not consume input and the press would fall through to the
+ * tab content and the tab bar underneath (HUD is the default tab, so it would open the world map).
+ * An empty `detectTapGestures` is the same swallow the DS overlays' panels use.
+ *
+ * Consequence worth knowing: with no manual dismissal, a game that never sends a single stats line
+ * (engine failed to start, or the companion mod is not loaded) leaves this up indefinitely. That is
+ * the better of the two outcomes — the alternative was an empty HUD that looks like a broken game
+ * rather than one that never started.
+ */
 @Composable
-private fun SplashPanel(onDismiss: () -> Unit = {}) {
+private fun SplashPanel() {
     Image(
         painter = painterResource(id = R.drawable.openmw_ds_splash),
         contentDescription = null,
         contentScale = ContentScale.Crop,
         modifier = Modifier
             .fillMaxSize()
-            .clickable(onClick = onDismiss)
+            .pointerInput(Unit) { detectTapGestures { } }
     )
 }
 
