@@ -121,6 +121,7 @@ import org.openmw.ui.controls.UIStateManager.customCFG
 import org.openmw.ui.page.main.MainPageViewModel
 import org.openmw.ui.page.mod.ModAssistantViewModel
 import org.openmw.ui.page.mod.ModValue
+import org.openmw.ui.page.mod.defaultEnabledFor
 import org.openmw.ui.page.mod.readModValues
 import org.openmw.ui.page.mod.sortedByDefaultLoadOrder
 import org.openmw.ui.page.setting.SettingRow
@@ -429,8 +430,12 @@ private fun unregisteredContent(all: List<ModValue>): List<ModValue> {
     // are still APPENDED after everything already registered — this decides only their order among
     // themselves, so an established order is never rearranged. On a first-time setup that is the
     // whole library bar the base masters, which is exactly when the default matters.
+    // isChecked comes from defaultEnabledFor, not a flat `true`: Bethesda's own official plugins
+    // ship with every copy of the game and vanilla leaves them OFF, so enabling them here made a
+    // first-time setup quietly differ from a stock install. They are still registered, one tick away
+    // in the panel below.
     return names.sortedByDefaultLoadOrder().map { name ->
-        ModValue(++nextId, "content", name, isChecked = true)
+        ModValue(++nextId, "content", name, isChecked = defaultEnabledFor(name))
     }
 }
 
@@ -1755,9 +1760,18 @@ private fun ModLoadOrderPanel(
                     // id, so reordering the list without reassigning ids would write the OLD order
                     // straight back. isChecked rides along on the copy, so a disabled plugin stays
                     // disabled through a reset; this reorders, it does not re-enable anything.
+                    // Also puts Bethesda's official plugins back to vanilla's OFF. That is the
+                    // one enabled-state change a reset makes: every other plugin keeps whatever the
+                    // player set, since disabling a mod is a deliberate act and a reorder button
+                    // must not undo it.
                     val reset = items
                         .sortedByDefaultLoadOrder { it.value }
-                        .mapIndexed { i, item -> item.copy(id = i + 1) }
+                        .mapIndexed { i, item ->
+                            item.copy(
+                                id = i + 1,
+                                isChecked = item.isChecked && defaultEnabledFor(item.value)
+                            )
+                        }
                     items = reset
                     persist(reset)
                     showResetOrder = false

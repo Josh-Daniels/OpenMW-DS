@@ -53,6 +53,45 @@ val DEFAULT_LOAD_ORDER_TAIL: List<String> = listOf(
     "ReAnimation_v2_Rogue.omwscripts",
 )
 
+/**
+ * Bethesda's own official plugins, which every GOTY copy ships (GOG and Steam alike) and which
+ * VANILLA LEAVES SWITCHED OFF.
+ *
+ * They are not mods and not a sign of a tampered install, but they are also not part of the base
+ * game: the original launcher lists them on its Data Files tab unticked, and a stock `Morrowind.ini`
+ * names only the three masters under `[Game Files]`. Registering the folder used to switch all eight
+ * ON, because auto-registration marks everything it discovers as enabled, so a first-time setup
+ * silently played a slightly different game from vanilla: extra items, an extra quest, the Bitter
+ * Coast ambience, and Master Index's map markers. A couple of them (Siege at Firemoth, Master Index)
+ * are also the ones players most often leave off.
+ *
+ * So they are still REGISTERED, keeping them one tick away in the load-order panel, but registered
+ * DISABLED (`;content=`) — which is what the vanilla launcher shows on a fresh install.
+ *
+ * Lowercase, and compared lowercase: the shipped casing is inconsistent (`adamantiumarmor.esp` vs
+ * `AreaEffectArrows.esp` vs `Siege at Firemoth.esp`) and differs again between releases.
+ */
+val BETHESDA_OFFICIAL_PLUGINS: Set<String> = setOf(
+    "adamantiumarmor.esp",      // Adamantium Armor
+    "areaeffectarrows.esp",     // Area Effect Arrows
+    "bcsounds.esp",             // Bitter Coast Sounds
+    "ebq_artifact.esp",         // Helm of Tohan
+    "entertainers.esp",         // Entertainers
+    "lefemmarmor.esp",          // LeFemm Armor
+    "master_index.esp",         // Master Index
+    "siege at firemoth.esp",    // Siege at Firemoth
+)
+
+/**
+ * Should this plugin be ENABLED when it is first registered?
+ *
+ * True for everything except [BETHESDA_OFFICIAL_PLUGINS]. Deliberately a question about the plugin
+ * and not about the folder: the same eight names ship in every copy of the game, so this holds for a
+ * mod folder that happens to contain them as much as for the base Data Files.
+ */
+fun defaultEnabledFor(name: String): Boolean =
+    name.trim().lowercase() !in BETHESDA_OFFICIAL_PLUGINS
+
 /** Everything not named above sorts between the two, by [middleRank] then case-insensitive name. */
 private const val MIDDLE_RANK = 1_000
 private const val TAIL_BASE = 1_000_000

@@ -199,7 +199,11 @@ class ModAssistantViewModel @Inject constructor(
                     val fileName = file.name ?: ""
                     val nameWithoutExtension = fileName.substringBeforeLast(".")
                     val extension = fileName.substringAfterLast(".")
-                    ModValue(index + 1, "content", "$nameWithoutExtension.$extension", isChecked = true)
+                    val value = "$nameWithoutExtension.$extension"
+                    // Bethesda's official plugins register DISABLED, as vanilla has them. Same rule
+                    // as the simplified launcher's auto-registration, so it cannot matter which of
+                    // the two routes a folder was added by.
+                    ModValue(index + 1, "content", value, isChecked = defaultEnabledFor(value))
                 }.toMutableList().filter { it.value !in ignoreList }.toMutableList()
 
                 newModValues.add(ModValue(newModValues.size + 1, "data", modPath, isChecked = true))
@@ -208,11 +212,24 @@ class ModAssistantViewModel @Inject constructor(
                 // raw listFiles() order (see LoadOrder.kt). This decides the order of the plugins
                 // being added NOW and nothing else — anything already in the file keeps its place,
                 // so a player's arrangement is never rearranged by adding another folder.
+                // Which plugins the file already names, ENABLED OR DISABLED, by plugin rather
+                // than by whole line. Comparing whole lines was safe only while every generated
+                // line was `content=`; now that an official plugin is written `;content=`, a line
+                // comparison would miss an existing enabled entry for the same plugin and register
+                // it a SECOND time, leaving the file naming it twice with opposite states.
+                val existingContentValues = existingLines.mapNotNull { line ->
+                    val body = line.trim().removePrefix(";").trimStart()
+                    if (body.startsWith("content=")) {
+                        body.removePrefix("content=").trim().lowercase()
+                    } else null
+                }.toSet()
+
                 val newContentLines = newModValues
                     .filter { it.category == "content" }
+                    .filterNot { it.value.trim().lowercase() in existingContentValues }
+                    .distinctBy { it.value.trim().lowercase() }
                     .sortedByDefaultLoadOrder { it.value }
-                    .map { "content=${it.value}" }
-                    .distinct()
+                    .map { if (it.isChecked) "content=${it.value}" else ";content=${it.value}" }
 
                 val newDataLines = newModValues
                     .filter { it.category == "data" }
@@ -220,7 +237,13 @@ class ModAssistantViewModel @Inject constructor(
                     .toSet()
 
                 // Find insertion points for each category
-                val lastContentIndex = existingLines.indexOfLast { it.startsWith("content=") }
+                // Matches a DISABLED entry too, so "after everything already registered" stays
+                // true when the last one happens to be `;content=`. That case is now common rather
+                // than rare, since the official plugins are registered disabled.
+                val lastContentIndex = existingLines.indexOfLast {
+                    val body = it.trim().removePrefix(";").trimStart()
+                    body.startsWith("content=")
+                }
                 val lastDataIndex = existingLines.indexOfLast { it.startsWith("data=") }
 
                 // Create a new list with inserted lines
@@ -231,7 +254,7 @@ class ModAssistantViewModel @Inject constructor(
                 // As ONE block via addAll, not one add() per line: adding them individually at the
                 // same index inserted each ahead of the previous, so the group came out REVERSED --
                 // which is the other half of why the resulting load order looked arbitrary.
-                val contentToInsert = newContentLines.filterNot { existingLines.contains(it) }
+                val contentToInsert = newContentLines
                 if (contentToInsert.isNotEmpty()) {
                     val contentInsertAt = when {
                         lastContentIndex != -1 -> lastContentIndex + 1

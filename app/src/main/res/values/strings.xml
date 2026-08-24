@@ -143,7 +143,7 @@
     <string name="generate_navmesh">Generate Navmesh</string>
     <string name="reset_settings">Reset Settings</string>
     <string name="simplified_reset_load_order">Reset order</string>
-    <string name="simplified_reset_load_order_tip">Put the load order back to the default: Morrowind, Tribunal and Bloodmoon first, then Tamriel Rebuilt, then everything else. Any order you have set yourself will be lost. Enabled and disabled mods stay as they are.</string>
+    <string name="simplified_reset_load_order_tip">Put the load order back to the default: Morrowind, Tribunal and Bloodmoon first, then Tamriel Rebuilt, then everything else. The eight official add-ons that come with Morrowind are switched off, as they are in the original game. Any order you have set yourself will be lost, and every other mod keeps its on or off setting.</string>
     <string name="use_simplified_launcher">Use simplified launcher</string>
     <string name="use_simplified_launcher_tip">Switch to the streamlined OpenMW-DS launcher. You can switch back from its settings screen at any time.</string>
     <string name="launcher_game_font">Use game font</string>
