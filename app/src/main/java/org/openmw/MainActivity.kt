@@ -42,6 +42,7 @@ import org.openmw.ui.theme.OpenMWTheme
 import org.openmw.ui.view.AlphaMigrationFirstLaunch
 import org.openmw.ui.view.MoeDialog
 import org.openmw.ui.view.topScreenRealSize
+import org.openmw.ui.view.seedConsoleWindowSize
 import org.openmw.ui.view.updateResolutionInConfig
 import org.openmw.utils.CaptureCrash
 import org.openmw.utils.ConfigFileObserver
@@ -160,6 +161,15 @@ class MainActivity : ComponentActivity() {
                 if (!avoidInsertion) {
                     updateResolutionInConfig(topWidth, topHeight)
                 }
+                // Rides the same settings.cfg pass, on the same IO dispatcher. Unrelated to the
+                // resolution insertion and deliberately NOT gated by its opt-out, which is about
+                // this app overwriting a resolution the player chose; this one never overwrites
+                // anything (see seedConsoleWindowSize).
+                seedConsoleWindowSize()
+                // Alpha3-launcher removal. Deliberately inside this AWAITED block rather than in a
+                // detached launch: setContent runs straight after it, and a write that landed later
+                // would show the Alpha3 launcher for a frame before swapping it out.
+                GameFilesPreferences.forceSimplifiedLauncherOnce(this@MainActivity)
             }
 
             setContent {

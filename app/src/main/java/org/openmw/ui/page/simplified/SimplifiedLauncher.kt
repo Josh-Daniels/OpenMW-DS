@@ -1888,12 +1888,6 @@ private fun ModLoadOrderPanel(
 private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    // The SAME preference the Alpha3 launcher's Settings -> Launcher Settings row reads/writes.
-    // Remembered for the same reason as the home screen's flows — an inline accessor call would
-    // restart the DataStore subscription on every recomposition.
-    val simplifiedLauncherFlow =
-        remember(context) { GameFilesPreferences.loadSimplifiedLauncher(context) }
-    val simplifiedLauncher by simplifiedLauncherFlow.collectAsState(initial = true)
     // Same remember-then-collect shape; `initial = true` matches the store's own default so the
     // switch never shows the wrong position for a frame.
     val gameFontFlow = remember(context) { GameFilesPreferences.loadLauncherGameFont(context) }
@@ -2063,24 +2057,11 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 color = MwBronzeDark
             )
 
-            // Launcher toggle — moved down here (Phase 1 had it up near the top) so it sits
-            // directly above Reset settings.
-            SettingRow(
-                title = stringResource(R.string.use_simplified_launcher),
-                subtitle = stringResource(R.string.use_simplified_launcher_tip)
-            ) {
-                Switch(
-                    checked = simplifiedLauncher,
-                    onCheckedChange = {
-                        scope.launch { GameFilesPreferences.saveSimplifiedLauncher(context, it) }
-                    }
-                )
-            }
-
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 8.dp),
-                color = MwBronzeDark
-            )
+            // The "Use simplified launcher" switch stood here. REMOVED (Aug 25 2026) along with
+            // its twin in the Alpha3 launcher's own settings, so the simplified launcher is the
+            // only one a player can reach. Nothing was deleted behind it — the Alpha3 launcher and
+            // GameFilesPreferences.saveSimplifiedLauncher are both intact — only the way in.
+            // GameFilesPreferences.forceSimplifiedLauncherOnce moves anyone already on Alpha3 over.
 
             SettingRow(title = stringResource(R.string.reset_settings)) {
                 OutlinedButton(onClick = { showResetDialog = true }) {

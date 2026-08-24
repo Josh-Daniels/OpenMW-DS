@@ -127,7 +127,6 @@ import org.openmw.ui.controls.VirtualKeyboard
 import org.openmw.ui.overlay.ExpandableCircleButton
 import org.openmw.ui.overlay.GridOverlay
 import org.openmw.ui.overlay.HiddenMenu
-import org.openmw.ui.overlay.OverlayUI
 import org.openmw.ui.view.BackgroundAnimation
 import org.openmw.ui.view.NavmeshScreen
 import org.openmw.ui.view.addCustomLog
@@ -410,14 +409,7 @@ class EngineActivity : SDLActivity() {
                     // Adds Overlay menu for buttons and edit mode
                     composeViewUI.setContent {
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
-                        // In-game Hide UI (OpenMW mHudEnabled), pushed from native via
-                        // onHudVisibilityChanged. The overlay shows only when the app's own
-                        // hide preference is off AND the game HUD is currently visible.
-                        val hudVisible by GameStateRepository.hudVisible.collectAsState()
-                        // Companion toggle for the Alpha3 launcher overlay (gear + arrow cluster).
-                        val showAlpha3Overlay by UiPreferences.alpha3OverlayFlow().collectAsState()
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
-                        val virtualKeyboard by GameFilesPreferences.useVirtualKeyboard(this@EngineActivity).collectAsState(initial = true)
                         val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
 
                         BackHandler {
@@ -490,13 +482,13 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
-                        if (!isUIHidden && hudVisible && showAlpha3Overlay) {
-                            OverlayUI(
-                                context = this@EngineActivity,
-                                virtualKeyboard = virtualKeyboard,
-                                onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
-                            )
-                        }
+                        // The Alpha3 gear + arrow cluster used to render here. REMOVED (Aug 2026):
+                        // it was the only in-game way to reach the legacy touch-control settings,
+                        // and its own "UI is visible" switch hid it while turning those controls
+                        // ON, which on a device with an attached controller is unrecoverable — see
+                        // GameFilesPreferences.resetLegacyTouchOverlayOnce for the full mechanism.
+                        // The DS keyboard (Developer Tools -> Show Keyboard) replaces the one thing
+                        // it was still useful for: a ` key to reach the game's console.
 
                         Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
 
@@ -1002,16 +994,32 @@ class EngineActivity : SDLActivity() {
                 }
         }
 
+        // One-shot repair for the removed Alpha3 overlay: anyone left with the legacy on-screen
+        // touch controls stuck on gets them turned back off, once. See
+        // GameFilesPreferences.resetLegacyTouchOverlayOnce for why it is one-shot and why the state
+        // was unrecoverable. Fire-and-forget: a DataStore write, and the visibility flows below pick
+        // the new value up on their own.
+        lifecycleScope.launch {
+            runCatching { GameFilesPreferences.resetLegacyTouchOverlayOnce(applicationContext) }
+                .onFailure { Log.w(TAG, "legacy touch-overlay reset failed", it) }
+        }
+
         // Hide the options overlay while native text entry is active (e.g. renaming a save file).
         // The options panel is a full-screen opaque FLAG_NOT_FOCUSABLE window; if left up it covers
         // the on-screen keyboard (rendered inside CompanionScreen). GONE (not removed) so the menu's
         // state survives; restored to VISIBLE on COMPANION_TEXT_INPUT_CLOSED (textInputRequest null).
+        // The DS-settings keyboard is folded in here rather than given a collector of its own: it
+        // is drawn by the SAME overlay and needs the same window out of the way. It is also the one
+        // case the player raises from INSIDE this menu, so without it the button would appear to do
+        // nothing at all — the keyboard would come up behind the panel that launched it.
         lifecycleScope.launch {
-            GameStateRepository.textInputRequest
-                .map { it != null }
+            combine(
+                GameStateRepository.textInputRequest.map { it != null },
+                GameStateRepository.devKeyboardVisible
+            ) { textActive, devKeyboard -> textActive || devKeyboard }
                 .distinctUntilChanged()
-                .collect { textActive ->
-                    pauseOverlayView?.visibility = if (textActive) View.GONE else View.VISIBLE
+                .collect { keyboardUp ->
+                    pauseOverlayView?.visibility = if (keyboardUp) View.GONE else View.VISIBLE
                 }
         }
 

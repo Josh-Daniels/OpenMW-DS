@@ -306,27 +306,15 @@ fun GeneralSettingsSection() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val translationChecked by GameFilesPreferences.loadTranslationState(context).collectAsState(initial = false)
-    // Same preference the simplified launcher's own settings screen writes — one source of truth.
-    val simplifiedLauncher by GameFilesPreferences.loadSimplifiedLauncher(context)
-        .collectAsState(initial = true)
 
     SettingSectionCard(
         title = stringResource(R.string.launcher_settings),
         icon = Icons.Default.Settings,
         initialExpanded = launchedActivity
     ) {
-        SettingRow(
-            title = stringResource(R.string.use_simplified_launcher),
-            subtitle = stringResource(R.string.use_simplified_launcher_tip)
-        ) {
-            Switch(
-                checked = simplifiedLauncher,
-                onCheckedChange = {
-                    scope.launch { GameFilesPreferences.saveSimplifiedLauncher(context, it) }
-                }
-            )
-        }
-        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))
+        // The "Use simplified launcher" switch stood here — see the matching note in
+        // SimplifiedLauncher.kt. This screen is now only reachable from a launcher nothing can
+        // select, so the switch would have been a one-way door out of the supported launcher.
 
         CodeGroupOptionSelector()
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = White.copy(alpha = 0.1f))

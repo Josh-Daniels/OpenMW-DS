@@ -185,6 +185,24 @@ object GameStateRepository {
         _textInputRequest.value = null
     }
 
+    // The DS-settings keyboard session — raised by Developer Tools -> "Show Keyboard", cleared by
+    // the keyboard's own Hide key. NOT a second keyboard: it reuses the one TextInputOverlay the
+    // native text-input path already draws, and only adds two keys to it (` and Hide). So this flag
+    // means "the player asked for the keyboard themselves", which is exactly the condition those two
+    // extra keys are scoped to — a keyboard raised by the GAME (a name field, a spell name) must not
+    // offer a way to dismiss itself, and must not carry a key that toggles the console over the
+    // field being typed into.
+    //
+    // Lives here rather than beside ManualJournalComposerState because EngineActivity has to observe
+    // it too: the options overlay is a separate always-on-top window that would otherwise cover the
+    // keyboard it just raised (see the textInputRequest collector it is combined with there).
+    private val _devKeyboardVisible = MutableStateFlow(false)
+    val devKeyboardVisible: StateFlow<Boolean> = _devKeyboardVisible.asStateFlow()
+
+    fun showDevKeyboard() { _devKeyboardVisible.value = true }
+
+    fun hideDevKeyboard() { _devKeyboardVisible.value = false }
+
     /**
      * Flip the current training session into its in-progress state (drives the "Training…" popup).
      * Called by the overlay the moment a train command is sent; cleared when COMPANION_TRAINING_CLOSED

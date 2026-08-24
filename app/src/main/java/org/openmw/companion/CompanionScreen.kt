@@ -1671,15 +1671,52 @@ private fun CompanionScreenContent() {
         // IME pinning. A tappable Compose overlay needs touch, not key-focus, so nothing ever steals
         // focus from the game and the keys are always on the bottom panel for every user. Enter sends
         // the existing CMPTEXT:set (fill the field + accept/advance the dialog natively).
+        //
+        // The SAME overlay also serves the DS-settings keyboard (Developer Tools -> Show Keyboard),
+        // rather than a second one beside it. That is not a saving, it is the only arrangement that
+        // works: pressing this keyboard's ` key focuses the console, which fires
+        // COMPANION_TEXT_INPUT_OPEN and so raises the keyboard by the native route too. Two
+        // overlays would then be stacked on the same zIndex, and the one on top would be the native
+        // instance — the one WITHOUT the ` key needed to close the console again. Sharing one
+        // overlay means the session's extra keys simply stay put across the whole round trip.
         val textInputRequest by GameStateRepository.textInputRequest.collectAsState()
-        textInputRequest?.let { initial ->
-            TextInputOverlay(
-                initialText = initial,
-                onConfirm = { text ->
-                    CompanionActions.submitTextInput(text)
-                    GameStateRepository.dismissTextInput()
-                }
-            )
+        val devKeyboard by GameStateRepository.devKeyboardVisible.collectAsState()
+        if (textInputRequest != null || devKeyboard) {
+            // Keyed so that arriving at (or leaving) a real field resets the typed text: without it,
+            // whatever was typed with no field focused would still be in the buffer when the console
+            // opens, and Enter would send it as a command.
+            key(textInputRequest != null) {
+                TextInputOverlay(
+                    initialText = textInputRequest.orEmpty(),
+                    title = if (textInputRequest != null) "ENTER TEXT" else "KEYBOARD",
+                    onConfirm = { text ->
+                        CompanionActions.submitTextInput(text)
+                        GameStateRepository.dismissTextInput()
+                    },
+                    // Hide clears BOTH conditions, not just the session. Ending the session alone
+                    // left the keyboard on screen in the ordinary case: the console keeps key focus
+                    // after a command runs, so textInputRequest is still non-null and the overlay
+                    // simply re-rendered as the plain game-raised keyboard — the key labelled Hide
+                    // visibly failing to hide anything.
+                    //
+                    // Dismissing the request is a companion-side act only; the console stays open on
+                    // the top screen with its field focused, and no attempt is made to close it from
+                    // here. Injecting ` would do it, but only if the console IS what has focus, and
+                    // a session that outlives its console (a save-name field raised while it is
+                    // still active) would then get the console opened ON TOP of that field. Coming
+                    // back is cheap either way: hiding restores the options panel, and Show Keyboard
+                    // brings back a keyboard that still carries `.
+                    //
+                    // Deliberately NOT wired to [onCancel]: a stray tap beside the keys must never
+                    // dismiss a keyboard, which is why the native path has no outside-tap escape.
+                    onHide = if (devKeyboard) {
+                        {
+                            GameStateRepository.hideDevKeyboard()
+                            GameStateRepository.dismissTextInput()
+                        }
+                    } else null
+                )
+            }
         }
 
         // Manual journal-entry composer — the SECOND, independent use of the same keyboard. Hosted
@@ -6227,7 +6264,18 @@ private fun TextInputOverlay(
      */
     onCancel: (() -> Unit)? = null,
     /** Called on every keystroke. Backs the top-screen live preview; null for the native path. */
-    onTextChange: ((String) -> Unit)? = null
+    onTextChange: ((String) -> Unit)? = null,
+    /**
+     * Non-null marks this as a keyboard the PLAYER asked for (Developer Tools -> Show Keyboard),
+     * which adds two keys to the bottom row: ` (toggles the game's console) and Hide (calls this).
+     *
+     * Scoped to that session on purpose, and BOTH keys are. A keyboard the GAME raised is sitting on
+     * a focused field: Hide would strand the player with a focused field and no way to type into it
+     * (the native path deliberately has no escape — see [onCancel]), and ` would toggle the console
+     * on top of the very field being filled in. Neither key is wrong here only because here the
+     * player opened the keyboard with no field in mind.
+     */
+    onHide: (() -> Unit)? = null
 ) {
     var text by remember(initialText) { mutableStateOf(initialText) }
     // One-shot shift: capitalises the next letter then resets. Starts on for an empty field so names
@@ -6338,6 +6386,14 @@ private fun TextInputOverlay(
             }
             KbRow {
                 KbKey(if (symbols) "ABC" else "123", weight = 1.6f) { symbols = !symbols }
+                if (onHide != null) {
+                    // Injects the real KEYCODE_GRAVE rather than typing a backtick: the character
+                    // is worthless in a console command, while the keypress is the console's own
+                    // TOGGLE, so this both opens it and closes it again afterwards. That matters —
+                    // once the console has key focus the game raises this same keyboard for it, and
+                    // without a ` key there would be nothing on screen able to close it.
+                    KbKey("`", weight = 1.2f) { openNativeConsole() }
+                }
                 if (prose && !symbols) {
                     // Comma and period flank the space bar, as on a phone keyboard. Only on the
                     // letters page — the symbols page already carries both.
@@ -6345,7 +6401,10 @@ private fun TextInputOverlay(
                     KbKey("space", weight = 2.4f) { setText("$text ") }
                     KbKey(".") { typeKey(".") }
                 } else {
-                    KbKey("space", weight = 4.4f) { setText("$text ") }
+                    KbKey("space", weight = if (onHide != null) 3.2f else 4.4f) { setText("$text ") }
+                }
+                if (onHide != null) {
+                    KbKey("Hide", weight = 1.6f) { onHide() }
                 }
                 KbKey("Enter", weight = 2.2f, primary = true) { onConfirm(text) }
             }
@@ -19935,6 +19994,9 @@ private fun OptionsSubPage(
                         // the one entry here that is a general-purpose tool rather than a specific
                         // cheat or a tuning knob.
                         item(key = "dev_console") { OpenConsoleRow() }
+                        // Directly under the console because it is the other half of the same
+                        // job: the console needs typing, and this is what types into it.
+                        item(key = "dev_keyboard") { ShowKeyboardRow() }
                         // Correct-by-default settings, relocated here Aug 21 2026 so the main pages
                         // hold only the choices a player has a reason to make.
                         item(key = "dev_dimming") { AdaptiveDimmingRow() }
@@ -19943,7 +20005,6 @@ private fun OptionsSubPage(
                         item(key = "dev_game_font") { GameFontRow() }
                         item(key = "dev_inv_tab_style") { InventoryTabStyleRow() }
                         item(key = "dev_journal_page_turn") { JournalPageTurnRow() }
-                        item(key = "dev_alpha3_overlay") { Alpha3OverlayRow() }
                         item(key = "dev_actions") { DeveloperActionsPanel() }
                     }
                 }
@@ -21777,6 +21838,57 @@ private fun OpenConsoleRow() {
     }
 }
 
+/** Developer Tools action: raise the on-screen keyboard on this screen, on demand.
+ *
+ *  The keyboard itself is not new — it is the same [TextInputOverlay] the game already raises when a
+ *  native text field takes focus. What this adds is a way to ask for it when the GAME has not, which
+ *  matters for exactly one thing: the ` key it carries while the session is active, and therefore
+ *  the console. The Alpha3 overlay's virtual keyboard used to be the other way to reach `; that
+ *  overlay is gone (see the note where [Alpha3OverlayRow] was), so this replaces it.
+ *
+ *  Filed under the console rather than beside the other input settings because it is a tool, not a
+ *  preference: nothing is persisted, and the session ends the moment the keyboard's Hide key is
+ *  pressed. */
+@Composable
+private fun ShowKeyboardRow() {
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Keyboard", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Puts the on-screen keyboard on this screen so you can type into the game. It gains a " +
+                "` key, which opens and closes the console, and a Hide key to put it away.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            lineHeight = 13.sp,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(PillActiveBg.copy(alpha = 0.94f))
+                .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+                // Same hand-wired cue/flash as [OpenConsoleRow], its neighbour, for the same reason.
+                .tapFlash {
+                    UiSounds.play(UiSounds.Cue.ACTION)
+                    GameStateRepository.showDevKeyboard()
+                }
+                .padding(vertical = 9.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "Show Keyboard",
+                color = BronzeLight,
+                fontSize = 14.sp,
+                fontFamily = MwDisplay,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+    }
+}
+
 /** Master switch for the Developer Tools action panel. [Off][On] pill selector, default Off,
  *  persisted in UiPreferences. Turning it off only HIDES the panel — nothing any button did is
  *  undone (god mode and noclip in particular stay however they were left, which is why those two
@@ -22209,51 +22321,14 @@ private fun GameCursorRow() {
 // OptionsSectionHeader — the flat in-place section heading. Removed Aug 21 2026 along with the
 // collapsible sections it was the basis for; sub-pages carry [OptionsSubPageHeader] instead.
 
-/** Toggle for the Alpha3 launcher overlay (the gear + arrow cluster on the top screen).
- *  [On][Off] pill selector (default Off). On = shown; Off hides the whole cluster including the
- *  arrow's expanded quick-action row (one composable). Purely Kotlin-side; writes on every tap.
- *
- *  **Named "Alpha3 Overlay" again, and moved to Developer Tools (Aug 21 2026).** It had been
- *  relabelled "Launcher touch overlay" on the reasoning that "Alpha3" names a different app and
- *  means nothing to an OpenMW-DS player — true, but the conclusion has been reversed: this control
- *  is inherited from that app, is not part of the DS design, and is kept only for anyone still
- *  relying on it. Calling it by its real name and filing it with the other legacy/advanced entries
- *  is more honest than a neutral label on a main page, and the subtitle now says outright that it is
- *  legacy. It still describes where the cluster sits, so it stays findable from "what is that thing
- *  in the corner of my top screen". */
-@Composable
-private fun Alpha3OverlayRow() {
-    val context = LocalContext.current
-    val shown by UiPreferences.alpha3OverlayFlow().collectAsState()
-
-    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text("Alpha3 Overlay", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
-        Text(
-            "Legacy. The gear + arrow button cluster in the top corner of the top screen, " +
-                "inherited from the Alpha3 launcher. Not part of the DS interface; off by default.",
-            color = BoneDim,
-            fontSize = 10.sp,
-            fontFamily = MwBody,
-            lineHeight = 13.sp,
-            modifier = Modifier.padding(top = 1.dp)
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(
-                Modifier.weight(1f),
-                label = "On",
-                active = shown,
-                enabled = true
-            ) { UiPreferences.setAlpha3Overlay(context, true) }
-            OptionPill(
-                Modifier.weight(1f),
-                label = "Off",
-                active = !shown,
-                enabled = true
-            ) { UiPreferences.setAlpha3Overlay(context, false) }
-        }
-    }
-}
+// Alpha3OverlayRow — REMOVED (Aug 2026). The gear + arrow cluster it toggled is gone: its own
+// "UI is visible" switch hid the cluster while turning the legacy on-screen touch controls ON, and
+// with a controller attached (always, on this device) that state showed the touch buttons with no
+// remaining way to reach the settings that turn them off. The simplified launcher carries no copy
+// of that switch, so the only reported escape was deleting the preferences file. See
+// GameFilesPreferences.resetLegacyTouchOverlayOnce, which turns those controls back off once for
+// anyone already stuck, and ShowKeyboardRow, which replaces the ` key the cluster's virtual
+// keyboard was still wanted for.
 
 /** A HUD-element row: element name (+ PENDING tag) over an [On][Off] pill selector. On = the native
  *  top-screen version is visible; Off = hidden (companion bottom-screen version only). The companion

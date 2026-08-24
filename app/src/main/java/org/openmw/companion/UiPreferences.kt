@@ -828,7 +828,10 @@ object UiPreferences {
     private const val PERSUASION_LOCATION = "layout_persuasion"
     private const val PLAYER_COMBAT = "layout_player_combat"
     private const val HUD_ON_PREFIX = "hud_on_"
-    private const val ALPHA3_OVERLAY = "alpha3_overlay"
+    // ALPHA3_OVERLAY ("alpha3_overlay") — REMOVED (Aug 2026) with the overlay it gated. The stored
+    // key is deliberately NOT migrated or cleaned up: nothing reads it, and leaving it costs one
+    // dead boolean in the prefs file. See EngineActivity's removal comment and
+    // GameFilesPreferences.resetLegacyTouchOverlayOnce, which repairs the state it could leave.
 
     // The controller button-hint bar is a native (Native HUD) element, but it only makes sense
     // alongside native menus, so it follows the DS/Native quick-set: All DS hides it, All Native
@@ -1025,10 +1028,6 @@ object UiPreferences {
     // tapping while the cursor is HIDDEN: with the game cursor on, taps already reach the engine
     // through the ordinary visible-cursor path. INDEPENDENT of gameCursorFlow — see setTouchInput.
     private val touchInputFlow = MutableStateFlow(true)
-
-    // Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. Default true (shown on
-    // first launch). Purely Kotlin-side (gates a composable in EngineActivity); no native involvement.
-    private val alpha3OverlayFlow = MutableStateFlow(false)
 
     /** Default On/Off for a Native HUD element on first launch. The crosshair and the controller
      *  button-hint bar default On (the app ships in the all-Vanilla state, which shows the hint bar
@@ -1273,7 +1272,6 @@ object UiPreferences {
         HUD_ELEMENTS.forEach { el ->
             hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, hudDefaultOn(el.key))
         }
-        alpha3OverlayFlow.value = p.getBoolean(ALPHA3_OVERLAY, false)
     }
 
     /** The DS/Vanilla mode for a Game UI element (e.g. "game_ui_looting"). */
@@ -1431,15 +1429,6 @@ object UiPreferences {
         touchInputFlow.value = enabled
         editor(context).putBoolean(TOUCH_INPUT, enabled).apply()
         if (!enabled && !gameCursorFlow.value) setGameCursor(context, true)
-    }
-
-    /** Whether the Alpha3 launcher overlay (gear + arrow cluster) is shown. */
-    fun alpha3OverlayFlow(): StateFlow<Boolean> = alpha3OverlayFlow.asStateFlow()
-
-    /** Show/hide the Alpha3 launcher overlay and persist. */
-    fun setAlpha3Overlay(context: Context, shown: Boolean) {
-        alpha3OverlayFlow.value = shown
-        editor(context).putBoolean(ALPHA3_OVERLAY, shown).apply()
     }
 
     /** Item-list layout (CLASSIC grid / SHELF) for looting + barter — one shared switch. */

@@ -1,0 +1,82 @@
+--- a/apps/openmw/mwgui/windowmanagerimp.cpp
++++ b/apps/openmw/mwgui/windowmanagerimp.cpp
+@@ -827,7 +827,14 @@
+ 
+             if (Settings::gui().mControllerMenus)
+             {
+-                if (mControllerButtonsOverlay)
++                // COMPANION: `&& !isConsoleMode()`. This branch is the no-GUI-mode (gameplay) case,
++                // and it force-hides the hint bar -- so closing the pause menu while the console was
++                // still open took the console's own "Press Start to Close Console" hint away and
++                // left the console sitting there with nothing saying how to dismiss it. The console
++                // is deliberately NOT a GUI mode, so it survives this transition and its hint must
++                // too. Every other reason the bar could be showing here is genuinely finished, hence
++                // the narrow test rather than skipping the hide outright.
++                if (mControllerButtonsOverlay && !isConsoleMode())
+                     mControllerButtonsOverlay->setVisible(false);
+                 if (mInventoryTabsOverlay)
+                     mInventoryTabsOverlay->setVisible(false);
+@@ -2850,6 +2857,16 @@
+             mKeyboardNavigation->restoreFocus(mGuiModes.back());
+ 
+         updateVisible();
++
++#ifdef __ANDROID__
++        // COMPANION: refresh the button-hint bar so the console's own "Close Console" hint appears
++        // and disappears with it (see updateControllerButtonsOverlay). Needed explicitly because
++        // Console is a plain WindowBase: WindowBase::setVisible does NOT call that update -- only
++        // WindowModal::onClose and a handful of windows do -- and updateVisible() never touches the
++        // overlay either. Placed AFTER updateVisible() so nothing later here can undo it. Both edges
++        // are covered, this being the sole toggle path.
++        updateControllerButtonsOverlay();
++#endif
+     }
+ 
+     void WindowManager::toggleDebugWindow()
+@@ -3213,6 +3230,46 @@
+     void WindowManager::updateControllerButtonsOverlay()
+     {
+ #ifdef __ANDROID__
++        // COMPANION: the console gets an unconditional hint of its own, ahead of every gate below.
++        //
++        // The console has no controller support at all -- no getControllerButtons, no
++        // onControllerButtonEvent -- so it never reached this bar by the ordinary route, and yet it
++        // IS closed with a controller: Start is A_GameMenu, and ActionManager::toggleMainMenu tests
++        // isConsoleMode() before anything else and toggles the console back off. On this device the
++        // console is opened from the OTHER screen (the DS keyboard's ` key), so without a hint there
++        // is nothing on screen saying how to get rid of it.
++        //
++        // Deliberately NOT subject to companionHudControllerTooltips() (the "Controller tooltips"
++        // HUD toggle) nor to Settings::gui().mControllerMenus: this is not a tooltip for a menu the
++        // player is navigating, it is the only signposted exit from a window covering the screen, so
++        // it must not be something they can switch off and then be stuck behind.
++        // mControllerButtonsOverlay is constructed unconditionally, so using it while controller
++        // menus are off is safe.
++        //
++        // Returning early also PINS the hint: several windows call this while the console is open
++        // (journal, map, every modal close) and each would otherwise overwrite the bar with its own
++        // buttons while the console still had focus.
++        if (mConsole && mConsole->isVisible() && mControllerButtonsOverlay)
++        {
++            static ControllerButtons sConsoleButtons = [] {
++                ControllerButtons buttons;
++                // mView, NOT mMenu. The two are named the opposite way round from what the fields
++                // suggest: sButtonDefs maps Button_View to SDL_CONTROLLER_BUTTON_START and
++                // Button_Menu to SDL_CONTROLLER_BUTTON_BACK. Start is what A_GameMenu is bound to
++                // and therefore what closes the console.
++                //
++                // The text names the button as well as the action, which the other windows' hints
++                // do not need to: the icon this bar draws for START is not recognisable as Start on
++                // this device, so the label has to carry the instruction on its own.
++                buttons.mView = "Press Start to Close Console";
++                return buttons;
++            }();
++            mControllerButtonsOverlay->setButtons(&sConsoleButtons);
++            if (mInventoryTabsOverlay)
++                mInventoryTabsOverlay->setVisible(false);
++            return;
++        }
++
+         // COMPANION: gate the controller button-hint bar ("Controller tooltips" HUD toggle) at its
+         // sole visibility chokepoint. This bar is ControllerButtonsOverlay (its own MyGUI window),
+         // NOT part of HUD, so the hud.cpp companionHud*() gates do not cover it. Independent of

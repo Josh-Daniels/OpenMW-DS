@@ -85,6 +85,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.util.Log
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.ui.controls.UIStateManager
@@ -527,6 +528,62 @@ fun updateResolutionInConfig(width: Int, height: Int) {
     if (lines != original) {
         file.writeText(lines.joinToString("\n"))
     }
+}
+
+/**
+ * Seed a larger default size for the native console window into the user's `settings.cfg`.
+ *
+ * The engine's own default (`0.255 / 0.215 / 0.49 / 0.3125`) is a small floating box in the middle
+ * of the screen: 470x169 px at the shipped `[GUI] scaling factor = 2.0`, which shows very little
+ * command history. On this device the console is reached from the bottom screen (DS Settings ->
+ * Developer Tools, or the on-screen keyboard's ` key) and typed into from there, so it can afford to
+ * be much wider without getting in the way of anything.
+ *
+ * INSERT-IF-ABSENT, and that is the whole safety argument — there is no guard key and none is
+ * needed. Absent means the player is on the engine default and has never touched the window
+ * (`Settings::Manager::saveUser` omits anything still equal to the default layer); present means
+ * either they resized it, in which case `WindowManager::onWindowChangeCoord` wrote their fractions
+ * and we must not clobber them, or that a previous run already seeded it. Either way the correct
+ * action is to leave it alone, so this is idempotent by construction and hands the keys over to the
+ * engine's own writeback from the first run onwards.
+ *
+ * All four keys are treated as one unit: a partial set is left untouched rather than half-filled,
+ * since that can only mean the engine wrote what differed from its defaults.
+ *
+ * This is the ONLY `[Windows]` value seeded at runtime. The rest live in `settings.fallback.cfg`,
+ * which `ManageAssets` copies with `copyIfNotExists` and therefore reaches fresh installs only;
+ * the console keys are also shipped there, but they were added long after this app's installs
+ * existed, so without this the devices already in the field would never see them.
+ */
+fun seedConsoleWindowSize() {
+    val file = File(Constants.SETTINGS_FILE)
+    if (!file.exists()) return
+
+    val keys = listOf(
+        "console x" to "0.02",
+        "console y" to "0.02",
+        "console w" to "0.96",
+        "console h" to "0.55"
+    )
+
+    val lines = file.readLines().toMutableList()
+    // "console x" must not match "console maximized x" (a separate rect the engine keeps for the
+    // maximized state), so compare against the text before the "=" rather than using startsWith.
+    val present = lines.mapNotNull { line ->
+        line.substringBefore('=', "").trim().lowercase().takeIf { it.isNotEmpty() }
+    }.toSet()
+    if (keys.any { it.first in present }) return
+
+    var windowsIndex = lines.indexOfFirst { it.trim().equals("[Windows]", ignoreCase = true) }
+    if (windowsIndex < 0) {
+        lines.add("[Windows]")
+        windowsIndex = lines.lastIndex
+    }
+    keys.asReversed().forEach { (key, value) ->
+        lines.add(windowsIndex + 1, "$key = $value")
+    }
+    file.writeText(lines.joinToString("\n"))
+    Log.d("UITools", "Seeded default console window size into ${Constants.SETTINGS_FILE}")
 }
 
 /**

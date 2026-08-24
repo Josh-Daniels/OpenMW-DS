@@ -42,6 +42,8 @@ object GameFilesPreferences {
     val IS_NEXUS_PREMIUM = booleanPreferencesKey("nexus_is_premium")
     val IS_NEXUS_VALIDATED = booleanPreferencesKey("nexus_is_validated")
     val UI_HIDDEN_STATE_KEY = stringPreferencesKey("ui_hidden_state")
+    // One-shot marker for the Alpha3-overlay removal (see [resetLegacyTouchOverlayOnce]).
+    val LEGACY_OVERLAY_RESET_KEY = booleanPreferencesKey("alpha3_overlay_reset_done")
     val VIBRATION_STATE_KEY = stringPreferencesKey("vibration_state")
     val MATCH_ICON_COLOR_KEY = stringPreferencesKey("match_icon_color")
     val RESOLUTION_X_KEY = intPreferencesKey("resolution_x")
@@ -66,6 +68,8 @@ object GameFilesPreferences {
     // Which launcher home screen MainActivity renders: false = the Alpha3 launcher (default,
     // existing behaviour), true = the simplified OpenMW-DS launcher.
     val SIMPLIFIED_LAUNCHER_KEY = booleanPreferencesKey("simplified_launcher")
+    // One-shot marker for the Alpha3-launcher removal (see [forceSimplifiedLauncherOnce]).
+    val SIMPLIFIED_LAUNCHER_FORCED_KEY = booleanPreferencesKey("simplified_launcher_forced")
     val LAUNCHER_GAME_FONT_KEY = booleanPreferencesKey("launcher_game_font")
     // Version of the update whose home-screen banner the user dismissed, e.g. "0.9.0".
     // Deliberately stores the VERSION STRING rather than a boolean: dismissing the banner for
@@ -336,6 +340,40 @@ object GameFilesPreferences {
         }
     }
 
+    /**
+     * One-shot repair for the Alpha3-overlay removal: force the legacy on-screen touch controls
+     * back off, once, for anyone who had turned them on.
+     *
+     * WHY THIS IS NEEDED AT ALL. [UI_HIDDEN_STATE_KEY] drives BOTH halves of the legacy overlay, in
+     * OPPOSITE directions once a controller is attached — which on the AYN Thor is always. The gear
+     * cluster showed on `!isHidden`, while DynamicButtons/DynamicRightThumbstick short-circuit to
+     * `visibilityFinal = isUIHidden` when a controller is connected. So turning the gear menu's "UI
+     * is visible" switch on put the device in the one state that shows the touch buttons and hides
+     * the gear that turns them off, with no other in-game route back: the simplified launcher (the
+     * default) carries no copy of that switch, so the reported fix was deleting the whole
+     * preferences file. The gear cluster is gone as of the Alpha3-overlay removal, so nothing can
+     * reach that state again, but the stored `true` outlives the removal and would leave those
+     * users with permanently stuck touch controls.
+     *
+     * ONE-SHOT, not a per-launch force. The Alpha3 launcher's Settings -> Interface page still
+     * carries the same switch and is still a legitimate way to ask for the touch controls; a
+     * per-launch reset would make that switch look live while doing nothing, which this project
+     * treats as worse than the setting itself. The guard key lives in this DataStore rather than in
+     * SharedPreferences so it shares the lifetime of the value it guards (SharedPreferences is
+     * wiped by a reinstall while this file is not, which would silently re-run the reset).
+     *
+     * Both writes happen inside a single `edit` block, so the check and the reset cannot interleave
+     * with another writer.
+     */
+    suspend fun resetLegacyTouchOverlayOnce(context: Context) {
+        context.dataStore.edit { preferences ->
+            if (preferences[LEGACY_OVERLAY_RESET_KEY] != true) {
+                preferences[LEGACY_OVERLAY_RESET_KEY] = true
+                preferences[UI_HIDDEN_STATE_KEY] = false.toString()
+            }
+        }
+    }
+
     suspend fun saveVibrationState(context: Context, isVibrate: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[VIBRATION_STATE_KEY] = isVibrate.toString()
@@ -349,8 +387,11 @@ object GameFilesPreferences {
     }
 
     /** Switch between the Alpha3 launcher (false) and the simplified launcher (true), and persist.
-     *  Non-destructive: the Alpha3 launcher is left fully intact and is reachable again by
-     *  flipping this back. */
+     *
+     *  NO LONGER CALLED FROM ANY UI (Aug 25 2026) — the switch that drove it was removed from both
+     *  settings screens, so the simplified launcher is the only one a player can reach. Kept, along
+     *  with the whole Alpha3 launcher, because the removal is deliberately non-destructive: nothing
+     *  was deleted, only the way in. */
     suspend fun saveSimplifiedLauncher(context: Context, enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[SIMPLIFIED_LAUNCHER_KEY] = enabled
@@ -359,10 +400,39 @@ object GameFilesPreferences {
 
     /** Whether the simplified launcher is in use. Defaults to true (simplified) — keep every
      *  `collectAsState(initial = true)` call site in step with this fallback, so an unset
-     *  preference never flashes the wrong launcher for a frame. */
+     *  preference never flashes the wrong launcher for a frame.
+     *
+     *  Since the Alpha3-launcher removal nothing can store `false` any more and
+     *  [forceSimplifiedLauncherOnce] clears any that was already stored, so in practice this is
+     *  always true. The branch that reads it is kept as the backstop for the one case that can
+     *  still produce a stored `false`: a device where that one-shot has not run yet, or failed. */
     fun loadSimplifiedLauncher(context: Context): Flow<Boolean> {
         return context.dataStore.data.map { preferences ->
             preferences[SIMPLIFIED_LAUNCHER_KEY] ?: true  // simplified launcher by default
+        }
+    }
+
+    /**
+     * One-shot for the Alpha3-launcher removal: move anyone still on the Alpha3 launcher over to
+     * the simplified one, so the next launch opens the launcher they will actually be able to
+     * configure.
+     *
+     * Needed because the preference DEFAULTS to simplified: a player on Alpha3 got there by
+     * explicitly storing `false`, which outlives the removal of the switch that stored it. Without
+     * this they would keep booting into a launcher whose only route back has just been taken away.
+     *
+     * ONE-SHOT rather than a per-launch force, for the same reason as
+     * [resetLegacyTouchOverlayOnce]: the value is still meaningful, and the app should be able to
+     * honour a `false` written by hand (or by a future opt-out) rather than silently overwriting it
+     * on every boot. The guard key sits in this same DataStore so it shares the lifetime of the
+     * value it guards. Both writes happen in one `edit` block, so check and write cannot interleave.
+     */
+    suspend fun forceSimplifiedLauncherOnce(context: Context) {
+        context.dataStore.edit { preferences ->
+            if (preferences[SIMPLIFIED_LAUNCHER_FORCED_KEY] != true) {
+                preferences[SIMPLIFIED_LAUNCHER_FORCED_KEY] = true
+                preferences[SIMPLIFIED_LAUNCHER_KEY] = true
+            }
         }
     }
 
