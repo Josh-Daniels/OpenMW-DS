@@ -10,7 +10,7 @@ which is itself a fork of the **[openmw-android](#credits)** project, which buil
 
 If you don't have a Thor, or don't care about dual-screen Morrowind, you probably want **[Alpha3](#credits)** instead.
 
-![Image of the HUD tab in game](outputs/OpenMW-DSThumbnail.png)
+![Image of the HUD tab in game](outputs/OpenMW-DS%20Thumnail.jpg))
 > Image is more blurry than in real life.
 
 ---
