@@ -6222,29 +6222,64 @@ private fun QtyActionButton(
 
 /* ---- On-screen text-entry keyboard (bottom screen) ---- */
 
-// Custom keyboard rows: a letters page and a numbers/symbols page. See TextInputOverlay for why
+// Custom keyboard rows: a letters page and TWO numbers/symbols pages. See TextInputOverlay for why
 // this is a hand-drawn Compose keyboard rather than the Android IME.
+//
+// ONE layout, used by every call site. There used to be a second letters page for prose entry
+// (the manual journal composer) carrying an apostrophe and comma/period, which meant the keyboard
+// the game raises for a character name was quietly missing keys the journal keyboard had. Those
+// keys are wanted everywhere — Dunmer names are full of apostrophes, and a save name wants a
+// comma as much as a note does — so the prose layout simply became the layout. `prose` still
+// controls the FIELD (taller, wrapping, smaller text); it no longer controls the keys.
 private val KB_LETTERS = listOf(
     listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
-    listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"),
+    listOf("a", "s", "d", "f", "g", "h", "j", "k", "l", "'"),
     listOf("z", "x", "c", "v", "b", "n", "m"),
 )
+
+/**
+ * Symbols, page 1 — the common ones.
+ *
+ * `<` and `>` are here rather than on page 2 because of the CONSOLE: MWScript's member operator is
+ * `->`, so `player->additem "gold_001" 100` needs `>` on the same page as `-` and `"` or every
+ * command costs two page flips. That is also why `_` stays on this page: object ids are full of it.
+ */
 private val KB_SYMBOLS = listOf(
     listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
     listOf("-", "/", ":", ";", "(", ")", "&", "@", "'", "\""),
-    listOf(".", ",", "?", "!", "+", "_"),
+    listOf(".", ",", "?", "!", "+", "_", "<", ">"),
 )
 
-// Letters page for PROSE entry (manual journal notes). An apostrophe is appended to the home row —
-// which brings it to ten keys, the same as the top row, so nothing is narrowed — and comma/period
-// flank the space bar below, exactly where a phone keyboard puts them. Writing a sentence should
-// not require a trip to the symbols page for every contraction and full stop. Deliberately NOT
-// applied to the native-triggered instance, where the field is a character/class/save NAME.
-private val KB_LETTERS_PROSE = listOf(
-    KB_LETTERS[0],
-    KB_LETTERS[1] + "'",
-    KB_LETTERS[2],
+/**
+ * Symbols, page 2 — the remainder.
+ *
+ * Between the two pages every printable ASCII punctuation character is reachable, with NOTHING
+ * duplicated between them: that is the whole selection rule, so there is never a question of which
+ * page a character lives on beyond "common or not". Reached by the `#+=` key that occupies the
+ * shift slot on page 1, the way a phone keyboard does it.
+ *
+ * The rows are deliberately short. [KbPad] centres them and keeps every key the same width as on
+ * the other pages, which is why this reads as a sparse page rather than as a page of oversized keys.
+ */
+private val KB_SYMBOLS_2 = listOf(
+    listOf("[", "]", "{", "}", "\\"),
+    listOf("#", "$", "%", "^", "*"),
+    listOf("=", "|", "~", "`"),
 )
+
+// Which page the keyboard is showing. An Int rather than a Boolean because there are now three.
+private const val KB_PAGE_LETTERS = 0
+private const val KB_PAGE_SYMBOLS = 1
+private const val KB_PAGE_SYMBOLS_2 = 2
+
+/**
+ * Width of a full key row in [RowScope] weight units, i.e. ten standard keys.
+ *
+ * Rows are padded out to this so a key is the same size on every page — without it, page 2's
+ * five-key rows would stretch to double-width keys and the keyboard would visibly change shape
+ * under the player as they flip pages.
+ */
+private const val KB_ROW_UNITS = 10f
 
 private fun shiftLabel(k: String, shift: Boolean): String = if (shift) k.uppercase() else k
 
@@ -6294,7 +6329,7 @@ private fun TextInputOverlay(
     // One-shot shift: capitalises the next letter then resets. Starts on for an empty field so names
     // (and sentences) begin with a capital.
     var shift by remember(initialText) { mutableStateOf(initialText.isEmpty()) }
-    var symbols by remember(initialText) { mutableStateOf(false) }
+    var page by remember(initialText) { mutableStateOf(KB_PAGE_LETTERS) }
 
     // Single choke point so the preview can never drift from the field — every mutation below goes
     // through this rather than assigning `text` directly.
@@ -6384,21 +6419,42 @@ private fun TextInputOverlay(
             }
             Spacer(Modifier.height(10.dp))
 
-            val letters = if (prose) KB_LETTERS_PROSE else KB_LETTERS
-            val rows = if (symbols) KB_SYMBOLS else letters
-            KbRow { rows[0].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } } }
-            KbRow { rows[1].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } } }
+            val rows = when (page) {
+                KB_PAGE_SYMBOLS -> KB_SYMBOLS
+                KB_PAGE_SYMBOLS_2 -> KB_SYMBOLS_2
+                else -> KB_LETTERS
+            }
             KbRow {
-                if (symbols) {
-                    Spacer(Modifier.weight(1.6f))
-                } else {
-                    KbKey("⇧", weight = 1.6f, active = shift) { shift = !shift }
+                KbPad(rows[0].size)
+                rows[0].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } }
+                KbPad(rows[0].size)
+            }
+            KbRow {
+                KbPad(rows[1].size)
+                rows[1].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } }
+                KbPad(rows[1].size)
+            }
+            KbRow {
+                // The shift slot doubles as the symbols-page flip, exactly as a phone keyboard
+                // does it — shift means nothing on a symbols page, and the slot was previously an
+                // inert Spacer there, so the second page costs no room.
+                when (page) {
+                    KB_PAGE_SYMBOLS -> KbKey("#+=", weight = 1.6f) { page = KB_PAGE_SYMBOLS_2 }
+                    KB_PAGE_SYMBOLS_2 -> KbKey("123", weight = 1.6f) { page = KB_PAGE_SYMBOLS }
+                    else -> KbKey("⇧", weight = 1.6f, active = shift) { shift = !shift }
                 }
+                KbPad(rows[2].size, reserved = KB_ROW2_RESERVED)
                 rows[2].forEach { k -> KbKey(shiftLabel(k, shift)) { typeKey(k) } }
+                KbPad(rows[2].size, reserved = KB_ROW2_RESERVED)
                 KbKey("⌫", weight = 1.6f) { if (text.isNotEmpty()) setText(text.dropLast(1)) }
             }
             KbRow {
-                KbKey(if (symbols) "ABC" else "123", weight = 1.6f) { symbols = !symbols }
+                // Always returns to the LETTERS page from either symbols page, so there is never a
+                // two-step route back to typing.
+                val onLetters = page == KB_PAGE_LETTERS
+                KbKey(if (onLetters) "123" else "ABC", weight = 1.6f) {
+                    page = if (onLetters) KB_PAGE_SYMBOLS else KB_PAGE_LETTERS
+                }
                 if (onHide != null) {
                     // Injects the real KEYCODE_GRAVE rather than typing a backtick: the character
                     // is worthless in a console command, while the keypress is the console's own
@@ -6407,9 +6463,10 @@ private fun TextInputOverlay(
                     // without a ` key there would be nothing on screen able to close it.
                     KbKey("`", weight = 1.2f) { openNativeConsole() }
                 }
-                if (prose && !symbols) {
+                if (onLetters) {
                     // Comma and period flank the space bar, as on a phone keyboard. Only on the
-                    // letters page — the symbols page already carries both.
+                    // letters page — both symbols pages are reached from here anyway, and page 1
+                    // already carries the pair.
                     KbKey(",") { typeKey(",") }
                     KbKey("space", weight = 2.4f) { setText("$text ") }
                     KbKey(".") { typeKey(".") }
@@ -6429,9 +6486,30 @@ private fun TextInputOverlay(
 // given to the field before the key grid starts to crowd on the 1240x1080 bottom panel.
 private val TEXT_INPUT_PROSE_FIELD_HEIGHT = 120.dp
 
+/** Weight taken by the two fixed keys that bracket row 3: the shift/page slot and backspace. */
+private const val KB_ROW2_RESERVED = 3.2f
+
 @Composable
 private fun KbRow(content: @Composable RowScope.() -> Unit) {
     Row(modifier = Modifier.fillMaxWidth(), content = content)
+}
+
+/**
+ * Half the leftover width of a short key row, so placing one of these at each end centres the row
+ * and leaves every key the same width as on a full ten-key row.
+ *
+ * Without it a five-key row (symbols page 2) would stretch to double-width keys, and the keyboard
+ * would change shape under the player's fingers as they flipped pages. [reserved] accounts for
+ * fixed keys already in the row that are not part of [keys].
+ *
+ * Emits nothing when the row is already full or over — a row slightly wider than [KB_ROW_UNITS]
+ * (letters row 3, or symbols row 3 now that it carries `<` and `>`) simply gets marginally
+ * narrower keys, which is how it has always looked.
+ */
+@Composable
+private fun RowScope.KbPad(keys: Int, reserved: Float = 0f) {
+    val pad = (KB_ROW_UNITS - reserved - keys) / 2f
+    if (pad > 0f) Spacer(Modifier.weight(pad))
 }
 
 @Composable
