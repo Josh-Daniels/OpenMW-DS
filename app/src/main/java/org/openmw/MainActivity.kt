@@ -42,6 +42,8 @@ import org.openmw.ui.theme.OpenMWTheme
 import org.openmw.ui.view.AlphaMigrationFirstLaunch
 import org.openmw.ui.view.MoeDialog
 import org.openmw.ui.view.topScreenRealSize
+import org.openmw.ui.view.TUNED_PERF_SETTINGS_VERSION
+import org.openmw.ui.view.applyTunedPerformanceSettings
 import org.openmw.ui.view.seedConsoleWindowSize
 import org.openmw.ui.view.updateResolutionInConfig
 import org.openmw.utils.CaptureCrash
@@ -166,6 +168,20 @@ class MainActivity : ComponentActivity() {
                 // this app overwriting a resolution the player chose; this one never overwrites
                 // anything (see seedConsoleWindowSize).
                 seedConsoleWindowSize()
+                // Push this build's measured performance defaults ONCE per version. Must run here,
+                // before the engine is ever started: settings.cfg is read at engine startup and
+                // rewritten from memory on a clean exit, so a write made while the game is running
+                // is silently discarded. Unlike updateResolutionInConfig above this is NOT
+                // authoritative every launch, because the simplified launcher ships the whole
+                // settings.cfg editor and the player must be able to keep their own values.
+                if (GameFilesPreferences.readTunedPerfSettingsVersion(this@MainActivity)
+                    < TUNED_PERF_SETTINGS_VERSION
+                ) {
+                    applyTunedPerformanceSettings()
+                    GameFilesPreferences.setTunedPerfSettingsVersion(
+                        this@MainActivity, TUNED_PERF_SETTINGS_VERSION
+                    )
+                }
                 // Alpha3-launcher removal. Deliberately inside this AWAITED block rather than in a
                 // detached launch: setContent runs straight after it, and a write that landed later
                 // would show the Alpha3 launcher for a frame before swapping it out.

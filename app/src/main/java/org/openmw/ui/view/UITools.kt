@@ -603,6 +603,110 @@ fun seedConsoleWindowSize() {
 }
 
 /**
+ * Version of the tuned performance defaults this build wants applied.
+ *
+ * **BUMP THIS whenever the values in [applyTunedPerformanceSettings] change.** It is compared
+ * against the copy stored in the DataStore, so a bump re-applies the new values exactly once to
+ * every install that has already been through an older version. A plain boolean guard could only
+ * ever fire once in the app's lifetime and could never push a later tuning pass — same reasoning as
+ * the per-version `UPDATE_BANNER_DISMISSED_KEY` and the identity marker's `migrationSchemaVersion`.
+ *
+ * v1 (Sep 1 2026): `small feature culling pixel size = 8.0`, `preload num threads = 3`.
+ */
+const val TUNED_PERF_SETTINGS_VERSION = 1
+
+/**
+ * Force this build's measured performance defaults into the user's `settings.cfg`.
+ *
+ * WHY THIS EXISTS: `settings.fallback.cfg` is deployed by `copyIfNotExists` in
+ * `UserManageAssets.onFirstLaunch`, so editing it reaches FRESH INSTALLS ONLY. Both values below
+ * were measured on device long after this app had installs in the field, and neither would ever
+ * reach them without a runtime write.
+ *
+ * ONE-SHOT PER VERSION, not authoritative-every-launch, and the difference matters: the simplified
+ * launcher hosts the ENTIRE `settings.cfg` editor (`IniSettings`, with a search field), so both of
+ * these keys are directly editable by the player. Overwriting on every launch — as
+ * [updateResolutionInConfig] deliberately does for the resolution — would silently revert their
+ * edit with no way to tell why, which is the same writeback-loop trap that made a wrong resolution
+ * unfixable without an uninstall. So the caller gates this on [TUNED_PERF_SETTINGS_VERSION] and the
+ * player owns these keys from then on.
+ *
+ * The guard lives in the DataStore (EXTERNAL storage, beside `settings.cfg`) rather than in
+ * SharedPreferences, so the guard and the thing it guards share a lifetime: SharedPreferences is
+ * wiped by a reinstall while `/OpenMW-DS/` survives, which would re-fire this and stomp a
+ * deliberate choice.
+ *
+ * THE VALUES, both measured in Narsis (the worst exterior cell of 3,851) against the developer's
+ * TR + HD-texture load order — see `CLAUDE_HISTORY.md`, Aug 31 and Sep 1 2026:
+ * - `small feature culling pixel size = 8.0` (engine default 2.0): **+62% fps**, frames slower than
+ *   30fps 60.2% -> 0.81%. 8 is the knee of the curve; 16 visibly pops and 32 leaves distant NPCs'
+ *   clothing floating without its wearer, because an actor is many drawables and this culls each.
+ * - `preload num threads = 3` (engine default 1): time lost to frames over 33ms while walking fell
+ *   **46.7 -> 26.5 ms per second**, worst frame 258 -> 225 ms, at a cost of ~3% average fps. No
+ *   visual effect at all.
+ *
+ * Deliberately NOT included: `[Cells] prediction time = 3` measured as noise (26.5 -> 25.4 ms/s,
+ * inside route variance) and did not fix what it was aimed at, so shipping it would put an
+ * unjustified value in front of every user; `[Terrain] lod factor = 0.5` is a real +9.3% but raises
+ * walking spikes 28%, and was rejected on smoothness grounds.
+ */
+fun applyTunedPerformanceSettings() {
+    val file = File(Constants.SETTINGS_FILE)
+    if (!file.exists()) return
+
+    val original = file.readLines()
+    val lines = original.toMutableList()
+    setSettingInSection(lines, "[Camera]", "small feature culling pixel size", "8.0")
+    setSettingInSection(lines, "[Cells]", "preload num threads", "3")
+
+    if (lines != original) {
+        file.writeText(lines.joinToString("\n"))
+        Log.d("UITools", "Applied tuned performance defaults v$TUNED_PERF_SETTINGS_VERSION")
+    }
+}
+
+/**
+ * Set `key = value` inside [section] of a settings.cfg line list, replacing the existing entry in
+ * that section or inserting one directly under the header (adding the section itself if absent).
+ *
+ * SECTION-SCOPED ON PURPOSE. A bare key match across the whole file is ambiguous — the engine reuses
+ * names across sections — and the comparison is against the text BEFORE the `=` rather than a
+ * `startsWith`, so `console x` cannot match `console maximized x` (the trap [seedConsoleWindowSize]
+ * documents). Comment lines are skipped, so a commented-out example never gets rewritten.
+ *
+ * NOTE the engine's parser does NOT strip trailing comments — `parser.cpp` says so itself — so the
+ * value written here must never carry an inline `#`, or it becomes part of the value.
+ */
+private fun setSettingInSection(
+    lines: MutableList<String>,
+    section: String,
+    key: String,
+    value: String
+) {
+    val sectionStart = lines.indexOfFirst { it.trim().equals(section, ignoreCase = true) }
+    if (sectionStart < 0) {
+        if (lines.isNotEmpty() && lines.last().isNotBlank()) lines.add("")
+        lines.add(section)
+        lines.add("$key = $value")
+        return
+    }
+
+    var i = sectionStart + 1
+    while (i < lines.size) {
+        val trimmed = lines[i].trim()
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) break // reached the next section
+        if (!trimmed.startsWith("#") &&
+            trimmed.substringBefore('=', "").trim().equals(key, ignoreCase = true)
+        ) {
+            lines[i] = "$key = $value"
+            return
+        }
+        i++
+    }
+    lines.add(sectionStart + 1, "$key = $value")
+}
+
+/**
  * Real pixel size of the TOP screen ([Display.DEFAULT_DISPLAY]), independent of whichever
  * physical display the calling Activity happens to be running on.
  *

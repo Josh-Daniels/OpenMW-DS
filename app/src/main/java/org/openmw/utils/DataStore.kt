@@ -142,6 +142,10 @@ object GameFilesPreferences {
     // Developer Options
     val AVOID_RESOLUTION_INSERTION = booleanPreferencesKey("avoidInsertion")
 
+    // Version of the tuned performance defaults last written into settings.cfg by
+    // applyTunedPerformanceSettings(). 0 / absent means never applied. See TUNED_PERF_SETTINGS_VERSION.
+    val TUNED_PERF_SETTINGS_KEY = intPreferencesKey("tuned_perf_settings_version")
+
     // Mouse Settings
     val OFFSET_X_MOUSE = floatPreferencesKey("offset_x_mouse")
     val OFFSET_Y_MOUSE = floatPreferencesKey("offset_y_mouse")
@@ -407,6 +411,33 @@ object GameFilesPreferences {
             if (preferences[LEGACY_OVERLAY_RESET_KEY] != true) {
                 preferences[LEGACY_OVERLAY_RESET_KEY] = true
                 preferences[UI_HIDDEN_STATE_KEY] = false.toString()
+            }
+        }
+    }
+
+    /**
+     * Version of the tuned performance defaults already written into `settings.cfg`, or 0 if none.
+     *
+     * Read at launcher startup and compared against `TUNED_PERF_SETTINGS_VERSION`; see
+     * `applyTunedPerformanceSettings` for why this is versioned rather than a boolean, and why the
+     * guard belongs in this store (external storage, same lifetime as `settings.cfg`) rather than in
+     * SharedPreferences.
+     */
+    suspend fun readTunedPerfSettingsVersion(context: Context): Int =
+        context.prefsData.map { preferences -> preferences[TUNED_PERF_SETTINGS_KEY] ?: 0 }.first()
+
+    /**
+     * Record that the tuned performance defaults of [version] have been written.
+     *
+     * Called only AFTER the file write succeeds, so a failure part-way leaves the stored version
+     * behind and the write is simply retried on the next launch — the write is idempotent, so a
+     * repeat costs nothing. Wrapped in `runCatching` for the same reason the other one-shot repairs
+     * are: a migration must never be able to take startup down.
+     */
+    suspend fun setTunedPerfSettingsVersion(context: Context, version: Int) {
+        runCatching {
+            context.dataStore.edit { preferences ->
+                preferences[TUNED_PERF_SETTINGS_KEY] = version
             }
         }
     }
