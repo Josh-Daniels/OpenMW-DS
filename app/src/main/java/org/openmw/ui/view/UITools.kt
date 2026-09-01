@@ -1,5 +1,21 @@
 package org.openmw.ui.view
 
+import androidx.compose.material3.Button
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
+import org.openmw.ui.theme.MwBone
+import org.openmw.ui.theme.MwBoneDim
+import org.openmw.ui.theme.MwBronze
+import org.openmw.ui.theme.MwBronzeDark
+import org.openmw.ui.theme.MwBronzeLight
+import org.openmw.ui.theme.MwFloatStone
+import org.openmw.ui.theme.MwSlotBg
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.ActivityManager
@@ -673,134 +689,254 @@ fun hasInternetPermission(context: Context): Boolean {
     return ContextCompat.checkSelfPermission(context, Manifest.permission.INTERNET) == PackageManager.PERMISSION_GRANTED
 }
 
+/**
+ * Live progress for a navmesh pre-generation run.
+ *
+ * **The tool gives us a PERCENTAGE and nothing else.** `NAVMESHTOOL_MESSAGE` is a process env var
+ * set by `setenv()` on the native side (see navmeshtool.patch), carrying `std::to_string(pct)` and
+ * updated at most once per second by `Misc::ProgressReporter`. No tile counts, no cell name, no
+ * estimate — so time remaining is extrapolated here.
+ *
+ * **THE PROCESS ALWAYS DIES AT THE END OF A RUN, AND THAT IS NOT A BUG WE CAN FIX HERE.** The hook
+ * makes the engine's `main()` RETURN once the tool finishes; on this SDL build a returning native
+ * main takes the process down with it, and `libSDL2.so` is one of the pinned prebuilt libraries so
+ * the behaviour is not ours to change. Navigating back to the launcher on completion — which is what
+ * the original Alpha3 flow did — therefore produces a launcher window that is destroyed a few
+ * seconds later, which reads as a crash. Measured: the engine took 6.4s to tear down after the tool
+ * finished (closing a 1.5GB SQLite DB), during which `SDLActivity.onDestroy()` blocks the MAIN
+ * thread in `mSDLThread.join()`. So instead this screen ends in an explained, deliberate close.
+ *
+ * [onFinished] must therefore CLOSE THE APP, not navigate. See EngineActivity for the two variants:
+ * completion finishes the task and lets the join protect the final DB commit; Stop kills the process
+ * outright, because nothing can interrupt navmeshtool mid-run.
+ */
 @Suppress("DEPRECATION")
 @Composable
-fun ProgressWithNavmesh(onComplete: () -> Unit) {
+fun ProgressWithNavmesh(onFinished: (stopped: Boolean) -> Unit) {
     val progressFlow = remember { MutableStateFlow(0f) }
-    val navmeshStatus = remember { MutableStateFlow("0.0") }
     val fileSizeFlow = remember { MutableStateFlow(0L) }
     val memoryInfoFlow = remember { MutableStateFlow(MemoryInfo("", "", "")) }
+    val logLinesFlow = remember { MutableStateFlow<List<String>>(emptyList()) }
+    // Null until there is enough progress to extrapolate from - see ETA_MIN_PROGRESS.
+    val etaFlow = remember { MutableStateFlow<String?>(null) }
+
     val context = LocalContext.current
     val availableSpace = getAvailableStorageSpace()
-    val logLinesFlow = remember { MutableStateFlow<List<String>>(emptyList()) }
     val scrollState = rememberScrollState()
     val progress by progressFlow.collectAsState()
     val fileSize by fileSizeFlow.collectAsState()
     val memoryInfo by memoryInfoFlow.collectAsState()
     val logLines by logLinesFlow.collectAsState()
-    var detailedLogs by remember { mutableStateOf(false) }
+    val eta by etaFlow.collectAsState()
+    // Defaults ON. It is the only thing on screen that moves in the first few seconds, and a panel
+    // reading "0%" with no estimate yet looks broken; it also stops the toggle being mistaken for a
+    // start button, which is exactly what happened the first time this screen was used.
+    var showLog by remember { mutableStateOf(true) }
     var cpuUsage by remember { mutableIntStateOf(0) }
+    val done = progress >= 1f
 
-    Row(
-        modifier = Modifier
-            .wrapContentSize(),
-    ) {
-        Box(
+    Row(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+        Column(
             modifier = Modifier
-                .wrapContentSize(),
-            contentAlignment = Alignment.Center
+                .weight(1f)
+                .background(MwFloatStone, RoundedCornerShape(12.dp))
+                .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
+                .padding(16.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Column(
-                modifier = Modifier
-                    .wrapContentSize()
-                    .padding(16.dp)
-                    .background(Color.Black, shape = RoundedCornerShape(8.dp))
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                if (progress < 1f) {
-                    Text("${stringRes(R.string.cpu_usage)}: $cpuUsage%", color = Color.White)
-                    CustomProgressIndicator(progress = progress)
-                    Spacer(modifier = Modifier.height(32.dp))
-                    Text(
-                        text = "Building Navmesh... ${(progress * 100).toInt()}%",
-                        color = Color.White
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = if (done) "NAVMESH COMPLETE" else "BUILDING NAVMESH",
+                color = MwBronzeLight,
+                fontSize = 18.sp,
+                fontFamily = FontFamily.Serif,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(12.dp))
 
-                    Text(
-                        text = "${stringResource(R.string.file_size)}: ${fileSize / 1024} KB \n${stringResource(R.string.free_space)}: $availableSpace bytes \n${stringResource(R.string.memory)}: ${memoryInfo.usedMemory} / ${memoryInfo.totalMemory}",
-                        color = Color.White
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(text = stringResource(R.string.navmesh_details), color = Color.White)
-                        Switch(
-                            checked = detailedLogs,
-                            onCheckedChange = { detailedLogs = it },
-                            colors = SwitchDefaults.colors(checkedThumbColor = Color.Green)
+            if (done) {
+                Text(
+                    text = "Pathfinding data has been cached for your whole load order.",
+                    color = MwBone,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "The app will now close. Reopen OpenMW-DS to play.",
+                    color = MwBoneDim,
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                )
+            } else {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
+                    color = MwBronzeLight,
+                    trackColor = MwSlotBg,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "${(progress * 100).toInt()}%",
+                    color = MwBone,
+                    fontSize = 22.sp,
+                    fontFamily = FontFamily.Serif,
+                )
+                Text(
+                    // Honest about not knowing yet, rather than showing a wild early guess.
+                    text = eta ?: "estimating time remaining...",
+                    color = MwBoneDim,
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    // "$availableSpace bytes" used to render as "367GiB bytes" - the helper already
+                    // returns a formatted, unit-bearing string.
+                    text = "Cache: ${fileSize / 1024 / 1024} MB written\n" +
+                        "Free space: $availableSpace\n" +
+                        "Memory: ${memoryInfo.usedMemory} / ${memoryInfo.totalMemory}\n" +
+                        "CPU: $cpuUsage%",
+                    color = MwBoneDim,
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(16.dp))
+                Button(
+                    onClick = { onFinished(true) },
+                    colors = ButtonDefaults.buttonColors(containerColor = MwSlotBg),
+                    border = BorderStroke(1.dp, MwBronzeDark),
+                    shape = RoundedCornerShape(10.dp),
+                ) { Text("Stop and close", color = MwBone) }
+                Text(
+                    // Says what stopping actually costs, because the answer is "almost nothing" and
+                    // that is not obvious: tiles are content-addressed and committed about once a
+                    // second, so a partial cache is valid and simply covers less ground.
+                    text = "Progress so far is kept. You can resume by generating again.",
+                    color = MwBoneDim,
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(text = "Show log", color = MwBoneDim, fontSize = 12.sp)
+                    Switch(
+                        checked = showLog,
+                        onCheckedChange = { showLog = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MwBronzeLight,
+                            checkedTrackColor = MwBronzeDark,
+                            uncheckedThumbColor = MwBoneDim,
+                            uncheckedTrackColor = MwSlotBg,
                         )
-                    }
-                } else {
-                    Text(text = stringResource(R.string.navmesh_complete), color = Color.White)
-                    onComplete()
+                    )
                 }
             }
         }
-        if (detailedLogs) {
-            Box(
+
+        if (showLog && !done) {
+            Column(
                 modifier = Modifier
-                    .wrapContentSize()
+                    .weight(1.6f)
+                    .padding(start = 12.dp)
+                    .background(MwSlotBg, RoundedCornerShape(12.dp))
+                    .border(1.dp, MwBronzeDark, RoundedCornerShape(12.dp))
+                    .padding(8.dp)
                     .verticalScroll(scrollState)
             ) {
-                Column(
-                    modifier = Modifier
-                        .padding(8.dp)
-                        .background(Color.Black, shape = RoundedCornerShape(8.dp))
-                ) {
-                    logLines.forEach { line ->
-                        Text(text = line, color = Color.White)
-                    }
+                logLines.forEach { line ->
+                    Text(text = line, color = MwBoneDim, fontSize = 10.sp, maxLines = 1)
                 }
             }
         }
     }
+
+    // Completion close. The linger is so the message is actually read before the app goes away.
+    LaunchedEffect(done) {
+        if (done) {
+            delay(NAVMESH_COMPLETE_LINGER_MS)
+            onFinished(false)
+        }
+    }
+
     LaunchedEffect(Unit) {
-        //Log.d("ProgressWithNavmesh", "LaunchedEffect triggered")
         launch(Dispatchers.IO) {
+            // Wall clock for the ETA.
+            val startedAt = System.currentTimeMillis()
+            while (true) {
+                // toFloatOrNull, not toFloat: a malformed or absent value must not throw inside the
+                // poll loop and take the whole progress screen down.
+                val pct = Os.getenv("NAVMESHTOOL_MESSAGE")?.toFloatOrNull()
+                if (pct != null) progressFlow.value = (pct / 100.0f).coerceIn(0f, 1f)
 
-            while (navmeshStatus.value != "Done") {
-                val statusMessage = Os.getenv("NAVMESHTOOL_MESSAGE")
-                if (statusMessage != null) {
-                    navmeshStatus.value = statusMessage
-                    progressFlow.value = statusMessage.toFloat() / 100.0f
-                }
-
-                // Update file size
                 val file = File("${Constants.USER_FILE_STORAGE}/navmesh.db")
-                if (file.exists()) {
-                    fileSizeFlow.value = file.length()
-                }
-
-                // Update memory info
+                if (file.exists()) fileSizeFlow.value = file.length()
                 memoryInfoFlow.value = getMemoryInfo(context)
 
-                // Read navmeshtool.log
                 val logFile = File("${Constants.USER_CONFIG}/navmeshtool.log")
-                if (logFile.exists()) {
-                    val lines = logFile.readLines()
-                    //Log.d("LogLines", "Read ${lines.size} lines from navmeshtool.log")
-                    logLinesFlow.value = lines
-                }
+                if (logFile.exists()) logLinesFlow.value = logFile.readLines().takeLast(NAVMESH_LOG_TAIL)
 
-                // Update CPU usage
                 val usage = getCpuProcessUsage()
-                withContext(Dispatchers.Main) {
-                    cpuUsage = usage
+                withContext(Dispatchers.Main) { cpuUsage = usage }
+
+                // TIME REMAINING, held back until there is enough signal to be worth showing: a
+                // guess made from the first 1% of a Tamriel-Rebuilt-sized run is worse than none.
+                // Derived from CUMULATIVE elapsed/progress rather than a windowed rate, which makes
+                // it inherently smooth because it is an average, not a derivative.
+                val p = progressFlow.value
+                val elapsed = System.currentTimeMillis() - startedAt
+                etaFlow.value = when {
+                    p >= 1f -> null
+                    p < ETA_MIN_PROGRESS || elapsed < ETA_MIN_ELAPSED_MS -> null
+                    else -> formatNavmeshEta(((elapsed / p) * (1f - p)).toLong())
                 }
 
-                delay(50)
+                if (p >= 1f) break
+                // The native channel updates at ~1Hz, so the old 50ms cadence was 20x oversampling -
+                // and this screen runs DURING a CPU-saturating operation, where polling getenv, file
+                // size, meminfo and CPU usage that hard works against the thing it is measuring.
+                delay(NAVMESH_POLL_INTERVAL_MS)
             }
-            progressFlow.value = 1f
-
         }
     }
     LaunchedEffect(logLines.size) { scrollState.animateScrollTo(scrollState.maxValue) }
 }
+
+/** How long the "complete" message stays up before the app closes. */
+private const val NAVMESH_COMPLETE_LINGER_MS = 3500L
+
+/** Poll cadence. The native progress channel updates at ~1Hz. */
+private const val NAVMESH_POLL_INTERVAL_MS = 250L
+
+/** Lines of navmeshtool.log kept on screen. The file grows to tens of thousands of lines. */
+private const val NAVMESH_LOG_TAIL = 200
+
+/** Below this fraction an ETA extrapolated from elapsed time is noise, so none is shown. */
+private const val ETA_MIN_PROGRESS = 0.02f
+
+/** ...and likewise before this much wall time has passed. */
+private const val ETA_MIN_ELAPSED_MS = 8_000L
+
+/**
+ * Rough "time remaining". Deliberately COARSE — it is an extrapolation from a percentage, and
+ * navmesh tiles are not uniformly expensive, so minute-level precision would be false confidence.
+ * The point is to let a player decide whether to leave the device alone for two minutes or two
+ * hours before committing to a Tamriel-Rebuilt-sized run.
+ */
+private fun formatNavmeshEta(ms: Long): String {
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    return when {
+        h > 0 -> "about ${h}h ${m}m remaining"
+        m > 1 -> "about $m minutes remaining"
+        else -> "less than a minute remaining"
+    }
+}
+
 
 @Composable
 fun BackgroundAnimation() {

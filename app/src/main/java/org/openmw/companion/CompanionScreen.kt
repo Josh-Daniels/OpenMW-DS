@@ -89,6 +89,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -186,6 +187,7 @@ import kotlin.math.sin
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -652,9 +654,21 @@ private fun rememberPlayerName(fallback: String = "You"): String {
     return name.ifBlank { fallback }
 }
 
-/** A thin, subtle horizontal scrollbar for a [LazyHorizontalGrid], shown ONLY when the content is
- *  wider than the viewport (more item-columns than fit). Track = muted bronze, thumb = brighter
- *  bronze; thumb width/position approximated from the visible/total item counts. */
+/** A thin, subtle horizontal scrollbar for a [LazyHorizontalGrid]. Track = muted bronze, thumb =
+ *  brighter bronze; thumb width/position approximated from the visible/total item counts.
+ *
+ *  ALWAYS RENDERED, AND ALWAYS THE SAME HEIGHT — it does not appear/disappear with whether the
+ *  content currently overflows (Aug 2026 fix). It used to emit nothing when `visible >= total`,
+ *  which made it a LAYOUT-AFFECTING element: every call site puts it in a Column beside a
+ *  `weight(1f)` grid, so its 8dp (4dp bar + 4dp top padding) was handed back to the grid the moment
+ *  it vanished. In the inventory CARDS grid that is worst — [ItemCard] scales its whole geometry by
+ *  `cellHeight / INV_CARD_HEIGHT`, so 8dp across 4 rows visibly resizes every card's width, icon
+ *  and text. And it vanished mid-gesture: with content only slightly wider than the viewport there
+ *  are scroll positions where every item is at least partly visible, so `visible >= total` flickers
+ *  true during a slow scroll.
+ *
+ *  When there is nothing to scroll the thumb simply fills the track (the usual desktop convention),
+ *  so the bar reads as an inert full-width rule rather than as a broken control. */
 @Composable
 private fun HorizontalGridScrollbar(state: LazyGridState, modifier: Modifier = Modifier) {
     val metrics by remember(state) {
@@ -662,7 +676,8 @@ private fun HorizontalGridScrollbar(state: LazyGridState, modifier: Modifier = M
             val info = state.layoutInfo
             val total = info.totalItemsCount
             val visible = info.visibleItemsInfo.size
-            if (total <= 0 || visible >= total) null
+            // Nothing to scroll (also covers the pre-layout / empty-grid case): full-width thumb.
+            if (total <= 0 || visible >= total) 0f to 1f
             else {
                 val thumb = (visible.toFloat() / total).coerceIn(0.08f, 1f)
                 val start = (state.firstVisibleItemIndex.toFloat() / total).coerceIn(0f, 1f - thumb)
@@ -670,21 +685,18 @@ private fun HorizontalGridScrollbar(state: LazyGridState, modifier: Modifier = M
             }
         }
     }
-    val m = metrics
-    if (m != null) {
-        val (start, thumb) = m
-        BoxWithConstraints(modifier.fillMaxWidth().height(4.dp)) {
-            val w = maxWidth
-            Box(
-                Modifier.fillMaxWidth().height(3.dp).align(Alignment.Center)
-                    .clip(RoundedCornerShape(2.dp)).background(BronzeDark.copy(alpha = 0.35f))
-            )
-            Box(
-                Modifier.align(Alignment.CenterStart)
-                    .offset(x = w * start).width(w * thumb).height(3.dp)
-                    .clip(RoundedCornerShape(2.dp)).background(BronzeLight.copy(alpha = 0.7f))
-            )
-        }
+    val (start, thumb) = metrics
+    BoxWithConstraints(modifier.fillMaxWidth().height(4.dp)) {
+        val w = maxWidth
+        Box(
+            Modifier.fillMaxWidth().height(3.dp).align(Alignment.Center)
+                .clip(RoundedCornerShape(2.dp)).background(BronzeDark.copy(alpha = 0.35f))
+        )
+        Box(
+            Modifier.align(Alignment.CenterStart)
+                .offset(x = w * start).width(w * thumb).height(3.dp)
+                .clip(RoundedCornerShape(2.dp)).background(BronzeLight.copy(alpha = 0.7f))
+        )
     }
 }
 
@@ -8079,6 +8091,11 @@ private fun MapSurface(
                 MapDsUiState.setOffset(view, mapClampOffset(
                     centred, vp, scale, view, s, info, segmentKeys, frame))
             }
+
+            // CONTROLLER STICKS. Only the TOP surface answers them — see MapStickDrive.
+            if (LocalIsTopScreen.current) {
+                MapStickDrive(view, vp, bounds, s, info, segmentKeys, frame)
+            }
         }
 
         Box(
@@ -8398,6 +8415,106 @@ private fun MapLabelAction(label: String, colour: Color = BronzeLight, onTap: ()
             .clickable { UiSounds.play(UiSounds.Cue.TOGGLE); onTap() }
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) { Text(label, color = colour, fontSize = 12.sp, fontFamily = MwDisplay) }
+}
+
+/* ---- DS map: controller sticks ---- */
+
+// Zoom rate at FULL right-stick deflection, as an exponential per second: the scale is multiplied by
+// exp(rate * dt), so a given deflection multiplies the zoom by the same FACTOR per second wherever
+// you are in the range. Linear-in-scale would crawl when zoomed out and tear away when zoomed in.
+// ln(2) / 0.63 ≈ 1.1, i.e. full deflection doubles (or halves) the zoom in about two thirds of a
+// second.
+private const val MAP_STICK_ZOOM_RATE = 1.1f
+
+// Pan rate at FULL left-stick deflection, as a fraction of the surface's SHORTER side per second.
+// Expressed against the viewport rather than in pixels so the two surfaces (which are different
+// sizes, and either map can be on either one) feel the same, and so a pan crosses the visible area
+// in a predictable time at any zoom.
+private const val MAP_STICK_PAN_RATE = 1.15f
+
+// Response curve applied to each stick's magnitude: linear blended with square. Pure linear makes
+// fine positioning near a marker fiddly; pure square makes the first third of the travel feel dead.
+// value * (LINEAR + (1 - LINEAR) * |value|).
+private const val MAP_STICK_CURVE_LINEAR = 0.3f
+
+private fun mapStickCurve(v: Float): Float =
+    v * (MAP_STICK_CURVE_LINEAR + (1f - MAP_STICK_CURVE_LINEAR) * abs(v))
+
+/**
+ * Right stick = zoom, left stick = pan, for the DS map on the TOP screen.
+ *
+ * **WHICH MAP: the one on the top screen, and Swap Screens is how you choose it.** Both surfaces
+ * are mounted at once and neither has ever had a focus concept, so "the active map" had to be
+ * defined rather than discovered. The top screen is the larger surface and the one being looked at,
+ * and on this device it is also the one the player has to reach PAST the sticks to touch, while the
+ * bottom map sits directly under the thumbs — so the sticks are worth most exactly where touch is
+ * worth least. [LocalIsTopScreen] is the test, the same one [rememberMapDimAlpha] uses.
+ *
+ * **This is additive: it shares its state with touch and nothing arbitrates between them.** Both
+ * write the same [MapDsUiState] scale/offset through the same [mapClampOffset], so a pinch during a
+ * stick pan simply composes, and neither can put the map anywhere the other could not. There is no
+ * gesture-vs-stick mode and no capture.
+ *
+ * INTEGRATED PER FRAME, not per line. [StickState] is the stick's POSITION, quantized and
+ * change-detected natively, so a held stick sends nothing; this loop multiplies it by the real
+ * elapsed frame time. Motion is therefore as smooth as the display regardless of the emit rate, and
+ * a dropped frame slows the map down rather than skipping it.
+ *
+ * The loop self-sustains rather than free-running: applying a pan or zoom writes [MapDsUiState],
+ * which invalidates the Canvas and produces the next frame; when the sticks are neutral nothing is
+ * written, no frame is requested, and `withFrameNanos` simply parks until the next stick change
+ * recomposes this (the collected [StickState] is read in composition, so it does).
+ */
+@Composable
+private fun MapStickDrive(
+    view: MapView,
+    vp: Size,
+    bounds: MapZoomBounds,
+    s: MapDsState?,
+    info: GlobalMapInfo?,
+    segmentKeys: Set<Pair<Int, Int>>,
+    frame: MapLocalFrame,
+) {
+    val stick by GameStateRepository.stickState.collectAsState()
+    // The note composer owns the screen while it is up; panning the map under it reads as the
+    // controller fighting the keyboard.
+    val editing = MapDsUiState.keyboardOpen || MapDsUiState.noteEditorOpen
+
+    LaunchedEffect(view, vp, bounds, s, info, segmentKeys, frame, editing) {
+        if (editing || vp.minDimension <= 0f) return@LaunchedEffect
+        var last = 0L
+        while (true) {
+            val now = withFrameNanos { it }
+            // First tick has no interval to measure; a long gap (a stall, or the loop parking while
+            // neutral) must not teleport the map, so it is capped at ~3 frames.
+            val dt = if (last == 0L) 0f else ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
+            last = now
+            val st = stick
+            if (dt <= 0f || st.isNeutral) continue
+
+            val before = MapDsUiState.scaleOf(view)
+            // Stick UP is negative in SDL, and up means zoom IN.
+            val after = if (st.ry != 0f)
+                (before * exp(-mapStickCurve(st.ry) * MAP_STICK_ZOOM_RATE * dt))
+                    .coerceIn(bounds.min, bounds.max)
+            else before
+
+            // Zoom about the VIEWPORT CENTRE, which is the pinch formula with centroid == centre:
+            // it collapses to scaling the offset by the ACTUAL ratio. Use the actual one, not the
+            // requested one, or panning dies at a zoom limit — same trap the pinch handler notes.
+            val k = if (before > 0f) after / before else 1f
+            // Pushing the stick right moves the VIEW right, so the map content slides left: the
+            // offset moves opposite the stick. Speed is in surface-fractions per second, so it is
+            // independent of zoom and of which surface this is.
+            val speed = vp.minDimension * MAP_STICK_PAN_RATE * dt
+            val moved = MapDsUiState.offsetOf(view) * k -
+                Offset(mapStickCurve(st.lx), mapStickCurve(st.ly)) * speed
+
+            if (after != before) MapDsUiState.setScale(view, after)
+            MapDsUiState.setOffset(view, mapClampOffset(
+                moved, vp, after, view, s, info, segmentKeys, frame))
+        }
+    }
 }
 
 /** TOP-screen map surface — whichever map is currently assigned to the top display. */
@@ -19976,6 +20093,7 @@ private fun OptionsSubPage(
                     item { TravelMenuRow() }
                     item { SpellBuyingMenuRow() }
                     item { TrainingMenuRow() }
+                    item { MapMenuRow() }
                     item { RestwaitMenuRow() }
                     item { CrimeMenuRow() }
                     // The menus with no companion version yet: one muted line each.
@@ -20638,6 +20756,36 @@ private fun TrainingMenuRow() {
     ServiceMenuRow("Training", "game_ui_training", loc, dsLocation = ScreenLocation.BOTTOM) {
         UiPreferences.setTrainingLocation(context, it)
     }
+}
+
+/**
+ * Map: `[Native] [DS]`.
+ *
+ * No screen pills and no `layout_map` pref, unlike every [ServiceMenuRow] above. The DS map is
+ * inherently a BOTH-screens layout (the two map surfaces on the top screen, the view toggle, zoom
+ * and note controls on the bottom), and which map sits on which surface is a swap button inside the
+ * feature rather than a setting. So there is no location to store and nothing for a second pill to
+ * mean.
+ *
+ * The subtitle states the SCOPE out loud because "Map" invites the reading that this governs every
+ * map in the game. It governs only the maximized map opened by tapping the companion minimap: the
+ * map pane inside the combined inventory view and the pinned HUD map stay native whatever this is
+ * set to, because those share `GM_Inventory` with three other windows and suppressing the mode
+ * would take the whole four-pane layout with it. See GAME_UI_ELEMENTS.
+ */
+@Composable
+private fun MapMenuRow() {
+    GameMenuRow(
+        label = "Map",
+        gameUiKey = "game_ui_map",
+        subtitle = "The full-screen map opened from the minimap",
+        screens = listOf(
+            // Unconditionally "selected": with no location pref there is nothing else this pill
+            // could be showing. GameMenuRow lights a screen pill only while the element is DS
+            // (`active = !isNative && s.selected`), so Native still reads correctly.
+            MenuScreenOption("DS", selected = true) { }
+        )
+    )
 }
 
 /**

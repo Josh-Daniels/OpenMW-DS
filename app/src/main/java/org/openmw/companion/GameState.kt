@@ -1171,6 +1171,35 @@ data class JournalEntry(
 )
 
 /**
+ * Live analog thumbstick STATE, from `COMPANION_STICK:<lx>|<ly>|<rx>|<ry>`
+ * (companion-map-stick-input.patch). The only place a real axis MAGNITUDE reaches the companion:
+ * every [NavEvent] below is a discrete, throttled, payload-less step, which is right for moving a
+ * focus index and wrong for zooming and panning a map.
+ *
+ * STATE, NOT AN EVENT, and that is the whole design. The native side reports where the sticks are
+ * and says nothing while they do not move (the values are quantized to 0.05 and change-detected, so
+ * a held stick is silent); the consumer integrates against real frame time. Smoothness therefore
+ * does not depend on how often this arrives. It is consequently NOT stamped with a seq and NOT in
+ * the COMPANION_NAV_ namespace, both of which would be wrong for a value that is meant to dedupe.
+ *
+ * Axis convention is SDL's: x positive = right, **y positive = DOWN**. The deadzone is already
+ * applied natively (radial, per stick, rescaled from the deadzone edge), so a value of exactly zero
+ * means "at rest" rather than "nearly at rest", and [isNeutral] is an exact comparison.
+ */
+data class StickState(
+    val lx: Float = 0f,
+    val ly: Float = 0f,
+    val rx: Float = 0f,
+    val ry: Float = 0f,
+) {
+    val isNeutral: Boolean get() = lx == 0f && ly == 0f && rx == 0f && ry == 0f
+
+    companion object {
+        val NEUTRAL = StickState()
+    }
+}
+
+/**
  * A one-shot controller-navigation signal for the DS overlays, produced natively
  * (companion-controller-nav.patch → COMPANION_NAV_* log lines) while a DS overlay owns input
  * (companionNavActive()). Exposed as GameStateRepository.navEvent: StateFlow<NavEvent?>.

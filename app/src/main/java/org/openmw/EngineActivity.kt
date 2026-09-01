@@ -571,13 +571,45 @@ class EngineActivity : SDLActivity() {
                 } else if (UIStateManager.useNavmesh) {
                     composeViewUI.setContent {
                         BackgroundAnimation()
-                        NavmeshScreen(onComplete = { navigateToMain() })
+                        NavmeshScreen(onFinished = { stopped -> finishNavmeshRun(stopped) })
                     }
                 }
                 // Remove the Global Layout Listener to prevent multiple calls
                 sdlContainer.viewTreeObserver.removeOnGlobalLayoutListener(this)
             }
         })
+    }
+
+    /**
+     * Ends a navmesh pre-generation run. **Both paths CLOSE THE APP, and neither returns to the
+     * launcher** — see [ProgressWithNavmesh] for why: the navmeshtool hook makes the engine's
+     * native `main()` return, and on this SDL build that takes the process down a few seconds later
+     * regardless of what we do. Navigating to MainActivity (which is what this used to do) just
+     * produced a launcher window that was destroyed under the user and read as a crash.
+     *
+     * The two paths differ in ONE load-bearing way, and it is about not losing the database:
+     *
+     *  - [stopped] = false (finished): [finishAffinity] only. The tool reports 100% BEFORE its final
+     *    `mTransaction.commit()` (navmesh.cpp: 100% at :233, commits at :242/:248/:341), so killing
+     *    the process here would risk discarding the last transaction. Finishing the task instead
+     *    lets `SDLActivity.onDestroy()`'s `mSDLThread.join()` block until the native side has
+     *    genuinely finished committing, and the process then exits on its own.
+     *  - [stopped] = true: the process MUST be killed. `nativeSendQuit()` cannot interrupt
+     *    navmeshtool (it does not pump SDL events), so a graceful finish would leave `join()`
+     *    blocking until the full run completed — i.e. Stop would not stop anything. Killing is safe
+     *    for the cache: SQLite rolls back the open transaction, and since those commit about once a
+     *    second, at most a second of tiles is lost. Tiles are content-addressed, so what survives
+     *    stays valid and a later run simply resumes from there.
+     */
+    private fun finishNavmeshRun(stopped: Boolean) {
+        if (stopped) {
+            Log.d(TAG, "Navmesh run stopped by user; killing process (partial cache is kept)")
+            finishAffinity()
+            android.os.Process.killProcess(android.os.Process.myPid())
+        } else {
+            Log.d(TAG, "Navmesh run complete; closing app (join protects the final DB commit)")
+            finishAffinity()
+        }
     }
 
     @OptIn(ExperimentalMaterial3Api::class)

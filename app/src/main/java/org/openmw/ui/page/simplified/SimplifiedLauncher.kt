@@ -1,5 +1,7 @@
 package org.openmw.ui.page.simplified
 
+import android.database.sqlite.SQLiteDatabase
+import android.system.Os
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -117,6 +119,7 @@ import org.openmw.BuildConfig
 import org.openmw.Constants
 import org.openmw.R
 import org.openmw.fragments.USER_CFG_DEFAULT_LINE
+import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.controls.UIStateManager.customCFG
 import org.openmw.ui.page.main.MainPageViewModel
 import org.openmw.ui.page.mod.ModAssistantViewModel
@@ -2118,6 +2121,13 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
             UpdatesCard()
             Spacer(Modifier.height(14.dp))
 
+            // Navmesh pre-generation. Sits with the other occasional maintenance actions rather
+            // than on the home screen: it is a long, deliberate, load-order-scoped operation that
+            // takes over the app while it runs, so it wants a confirm step and no chance of a
+            // stray tap from the Play screen.
+            NavmeshCard()
+            Spacer(Modifier.height(14.dp))
+
             // Settings.cfg editor in its own bordered card, same family as the Transfer card above
             // but wider. Deliberately NO fixed height and no weight(): the Column wraps its content,
             // so the box grows and shrinks as the section drop-downs expand, and the surrounding
@@ -2249,6 +2259,277 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
  * All state lives in [UpdateChecker], not here, so the result of the automatic on-launch check is
  * already showing when this screen opens instead of being re-fetched.
  */
+/** Where the engine keeps the navmesh cache. Matches `Constants.USER_FILE_STORAGE/navmesh.db`,
+ *  which is what the engine logs as "Using ... to store navigation mesh cache". */
+private fun navmeshDbFile() = File("${Constants.USER_FILE_STORAGE}/navmesh.db")
+
+/**
+ * How many navmesh tiles the cache actually holds.
+ *
+ * **File size is NOT a usable proxy and reporting it alone is actively misleading** — an EMPTY
+ * navmesh.db is 24,576 bytes of SQLite schema, which reads as "24 KB, looks populated" while
+ * containing nothing. That is exactly how the cache went unnoticed as non-functional: both apps
+ * ship `write to navmeshdb = false`, so the engine opens the DB, creates the schema and never
+ * writes a tile. Counting rows is the only honest answer to "is this generated yet".
+ *
+ * Returns null if the file is absent or unreadable; -1 is never returned, so a null reads as
+ * "nothing there" and any Int as a real count.
+ */
+private fun navmeshDbSize(): Long = navmeshDbFile().let { if (it.exists()) it.length() else 0L }
+
+/**
+ * Delete the cache. Also removes `navmesh.db-journal` if present: a run killed mid-transaction (the
+ * Stop button does exactly that) leaves one behind, and an orphan journal beside a missing database
+ * is a state SQLite has to reason about for no reason.
+ */
+private fun deleteNavmeshDb() {
+    runCatching { navmeshDbFile().takeIf { it.exists() }?.delete() }
+    runCatching { File("${Constants.USER_FILE_STORAGE}/navmesh.db-journal").takeIf { it.exists() }?.delete() }
+}
+
+private fun navmeshTileCount(): Int? {
+    val f = navmeshDbFile()
+    if (!f.exists()) return null
+    return runCatching {
+        SQLiteDatabase.openDatabase(f.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            db.rawQuery("SELECT COUNT(*) FROM tiles", null).use { c ->
+                if (c.moveToFirst()) c.getInt(0) else 0
+            }
+        }
+    }.getOrNull()
+}
+
+/**
+ * Pre-generate the navmesh for the whole load order.
+ *
+ * **Nothing here is new machinery.** `navmeshtool` is already compiled into `libopenmw.so` by
+ * `navmeshtool.patch`, which hooks `main.cpp`: if `OPENMW_GENERATE_NAVMESH_CACHE` is set the engine
+ * runs the tool instead of the game and exits. `EngineActivity` already branches on
+ * `UIStateManager.useNavmesh` to show [ProgressWithNavmesh] instead of the HUD. All of that has
+ * been present and working the whole time — it was reachable only from the ALPHA3 launcher's top-bar
+ * menu (`TopBottomBar.kt`), which stopped being reachable when that launcher was removed on
+ * Aug 25 2026. This card is the same three lines of trigger logic, re-exposed here.
+ *
+ * Launch goes through [attemptLaunchGame], NOT a bare `startGame()` — the Alpha3 menu item calls
+ * `startGame()` directly, which skips `resourcePrepare()`. See that function for why Play must not
+ * do this; the tool needs the same `resources/` tree the engine does.
+ */
+@Composable
+private fun ColumnScope.NavmeshCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val savedPathFlow = remember(context) { GameFilesPreferences.getGameFilesUriState(context) }
+    val savedPath by savedPathFlow.collectAsState(initial = null)
+    val codeGroupFlow = remember(context) { readCodeGroup(context) }
+    val codeGroupOption by codeGroupFlow.collectAsState(initial = "OpenMW")
+    val bypassFlow = remember(context) { GameFilesPreferences.loadBypassGameCheck(context) }
+    val bypassGameCheck by bypassFlow.collectAsState(initial = false)
+
+    // Read once per composition of this card rather than on a timer: it only changes as a result of
+    // a run, and a run leaves this screen entirely.
+    // MUTABLE, not a plain remember: deleting happens in-place without leaving this screen, so the
+    // card has to be able to re-read itself. Everything else here leaves for the engine.
+    var tiles by remember { mutableStateOf(navmeshTileCount()) }
+    var sizeBytes by remember { mutableStateOf(navmeshDbSize()) }
+    var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    val hasCache = (tiles ?: 0) > 0
+    // null = no dialog open. true = REBUILD (delete the DB first), false = UPDATE (keep it).
+    var pendingRebuild by rememberSaveable { mutableStateOf<Boolean?>(null) }
+
+    /**
+     * Start a run. [rebuild] decides the ONE behavioural difference between the two buttons:
+     * whether the existing DB is deleted first.
+     *
+     * **navmeshtool is incremental by nature** — for every tile it calls
+     * `find(worldspace, tilePosition, input)` and REUSES a match rather than regenerating it. Since
+     * `input` is the tile's own collision geometry, an update run rebuilds only what actually
+     * changed. Deleting first throws that away, which is why it is a separate, clearly-labelled
+     * action rather than the default.
+     *
+     * The reason rebuild exists at all is ORPHANS: tiles from a previous load order are never
+     * evicted, so an update-only cache grows forever toward the engine's 2GB
+     * `max navmeshdb file size`. The tool's own `--remove-unused-tiles` would solve that, but it
+     * defaults off and there is no way to pass arguments (the app's ARG_LINE plumbing stores a
+     * string and nothing ever reads it back). So deleting is currently the only way to reclaim it.
+     */
+    fun startRun(rebuild: Boolean) {
+        if (rebuild) runCatching { navmeshDbFile().takeIf { it.exists() }?.delete() }
+        // The progress channel is a PROCESS env var set by setenv() natively, so it outlives a run.
+        // A second run in the same process would otherwise open by reading the previous run's final
+        // "100.0" and report complete instantly. In practice the process dies at the end of every
+        // run so this is belt-and-braces, but it costs nothing and the failure would be silent.
+        Os.setenv("NAVMESHTOOL_MESSAGE", "0.0", true)
+        // The trigger the patched main.cpp checks with getenv().
+        Os.setenv("OPENMW_GENERATE_NAVMESH_CACHE", "1", true)
+        UIStateManager.useNavmesh = true
+        scope.launch {
+            attemptLaunchGame(
+                context = context,
+                savedPath = savedPath,
+                codeGroupOption = codeGroupOption,
+                bypassGameCheck = bypassGameCheck,
+            )
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth(SETTINGS_SECTION_WIDTH_FRACTION)
+            .align(Alignment.CenterHorizontally)
+            .background(MwFloatStone, RoundedCornerShape(12.dp))
+            .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
+            .padding(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Navmesh Cache",
+            color = MwBronzeLight,
+            fontSize = 16.sp,
+            fontFamily = LauncherSerif,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Text(
+            text = if (hasCache) {
+                "Generated: ${"%,d".format(tiles)} tiles cached " +
+                    "(${"%.2f".format(sizeBytes / 1e9)} GB)."
+            } else {
+                "Not generated. Pathfinding data is rebuilt every session as you explore."
+            },
+            color = MwBoneDim,
+            fontSize = 12.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        if (hasCache) {
+            // Two actions once a cache exists, because they cost wildly different amounts of time
+            // and only one of them reclaims space. Update first: it is the one you want after an
+            // ordinary mod change.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                LauncherActionButton(
+                    text = "Update navmesh",
+                    onClick = { pendingRebuild = false },
+                    modifier = Modifier.weight(1f),
+                )
+                LauncherActionButton(
+                    text = stringResource(R.string.regenerate_navmesh),
+                    onClick = { pendingRebuild = true },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Text(
+                text = "Update only builds what changed, so it is much faster after a small mod " +
+                    "change. Rebuild starts from scratch, which takes far longer but reclaims the " +
+                    "space used by tiles from your previous load order.",
+                color = MwBoneDim,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+            // Deliberately quieter than the two run buttons and set apart from them: it is
+            // destructive, it is the least likely thing you came here to do, and it must not sit in
+            // the same row where a mistap costs 20 minutes of rebuilding.
+            Text(
+                text = "Delete cache",
+                color = MwBronzeLight,
+                fontSize = 12.sp,
+                textDecoration = TextDecoration.Underline,
+                modifier = Modifier
+                    .padding(top = 10.dp)
+                    .clickable { confirmDelete = true }
+            )
+        } else {
+            LauncherActionButton(
+                text = stringResource(R.string.generate_navmesh),
+                onClick = { pendingRebuild = true },
+                modifier = Modifier.fillMaxWidth(0.8f),
+            )
+            Text(
+                text = "Builds pathfinding data for your whole load order in one pass. This can take " +
+                    "a long time on a large mod list, and the game cannot be played while it runs.",
+                color = MwBoneDim,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+    }
+
+    val rebuild = pendingRebuild
+    if (rebuild != null) {
+        AlertDialog(
+            onDismissRequest = { pendingRebuild = null },
+            title = {
+                Text(
+                    when {
+                        !hasCache -> stringResource(R.string.generate_navmesh)
+                        rebuild -> stringResource(R.string.regenerate_navmesh)
+                        else -> "Update navmesh"
+                    }
+                )
+            },
+            text = {
+                Text(
+                    when {
+                        !hasCache ->
+                            "This builds the navmesh for your whole load order in one pass. It can " +
+                                "take a long time on a large mod list. The device should be left " +
+                                "alone until it finishes."
+                        rebuild ->
+                            "This deletes the existing cache and rebuilds it from scratch, which " +
+                                "takes as long as the first build did. Use it to reclaim space " +
+                                "after changing your load order."
+                        else ->
+                            "This keeps the existing cache and builds only what has changed, so it " +
+                                "is usually much faster. Tiles from mods you have removed stay in " +
+                                "the file, so it will grow over time."
+                    }
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    pendingRebuild = null
+                    startRun(rebuild)
+                }) { Text(stringResource(R.string.btn_confirm)) }
+            },
+            dismissButton = {
+                Button(onClick = { pendingRebuild = null }) { Text(stringResource(R.string.cancel)) }
+            }
+        )
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete navmesh cache") },
+            text = {
+                Text(
+                    "This frees ${"%.2f".format(sizeBytes / 1e9)} GB. Pathfinding data will be " +
+                        "rebuilt as you explore, and regenerating it later takes as long as the " +
+                        "first build did. Nothing else is affected, and your saves are untouched."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    confirmDelete = false
+                    deleteNavmeshDb()
+                    // Re-read rather than assuming: if the delete failed (file in use, permissions)
+                    // the card should keep saying the cache is there, not claim a success it did
+                    // not achieve.
+                    tiles = navmeshTileCount()
+                    sizeBytes = navmeshDbSize()
+                }) { Text(stringResource(R.string.btn_confirm)) }
+            },
+            dismissButton = {
+                Button(onClick = { confirmDelete = false }) { Text(stringResource(R.string.cancel)) }
+            }
+        )
+    }
+}
+
 @Composable
 private fun ColumnScope.UpdatesCard() {
     val context = LocalContext.current

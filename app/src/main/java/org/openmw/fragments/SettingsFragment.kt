@@ -202,9 +202,54 @@ private fun scanForGameFiles(dataFilesFolder: DocumentFile): GameFiles {
     )
 }
 
+/**
+ * Is [line] the internal config's MORROWIND `data=` line — the one [updateMainConfig] repoints at
+ * whichever game folder was just selected?
+ *
+ * **This exists because that line has to be matched by SHAPE, and both of the obvious shapes are
+ * wrong** (Aug 2026). The internal `openmw.cfg` carries several `data=` lines, and only one of them
+ * belongs to the player's Morrowind install:
+ *
+ * ```
+ * data="<morrowind>/Data Files"                  <- this one, and only this one
+ * data=<USER_RESOURCES>/vfs-mw                   <- ours (unquoted)
+ * data="<USER_FILE_STORAGE>/OpenMW/Mods/companion"  <- ours (quoted, so a lazy regex hits it)
+ * data-local=<USER_FILE_STORAGE>/OpenMW/Override <- ours
+ * ```
+ *
+ * The two failed attempts, in order, because neither should be reintroduced:
+ *
+ *  - `^data\s*=\s*".*?"` (Alpha3's original) matches ANY quoted line, so it also rewrote the
+ *    companion mod line into a second copy of the Morrowind path. That is the clobbering the
+ *    duplicate-dropping pass just below still cleans up after.
+ *  - `^data\s*=\s*"specify-me!"` (the over-correction that replaced it) matches only the
+ *    placeholder `app/openmw.cfg` ships. It cured the clobbering by making the line **write-once**:
+ *    the first folder selection after a fresh install consumes the sentinel, and every later
+ *    selection then silently fails to update it. The internal config stays frozen on the first
+ *    folder ever chosen while [updateUserConfig] follows the newest one, so the engine registers
+ *    BOTH as VFS data directories. Measured cost of that on one device: a second full scan of a
+ *    whole Data Files tree at startup (27.6s of data-directory indexing against 14.6s once fixed),
+ *    plus every loose asset of the abandoned folder silently live in the VFS.
+ *
+ * So: the sentinel, OR a quoted path ending in `Data Files`, AND never one of our own paths. The
+ * app-storage exclusion is belt-and-braces — no app-managed line ends in `Data Files` today — but it
+ * is what keeps this correct if one ever does.
+ *
+ * Only the INTERNAL config is in scope. Mods added later append their `data=` lines to the USER
+ * config (`ModAssistant` / the simplified launcher), which this function never touches.
+ */
+private fun isMorrowindDataLine(line: String): Boolean {
+    val value = Regex("""^data\s*=\s*"(.*)"\s*$""").find(line.trim())?.groupValues?.get(1)
+        ?: return false
+    if (value == "specify-me!") return true
+    if (value.startsWith(Constants.USER_FILE_STORAGE) || value.startsWith(Constants.USER_RESOURCES)) {
+        return false
+    }
+    return value.trimEnd('/', '\\').endsWith("Data Files", ignoreCase = true)
+}
+
 private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedData: String) {
     val cfgFile = File(Constants.OPENMW_CFG)
-    val regexData = Regex("""^data\s*=\s*"specify-me!"""")
     val replacementStringData = """data="${savedPath}/Data Files""""
     val vfsPathLine = "data=${Constants.USER_RESOURCES}/vfs-mw"
     val overridePathLine = "data-local=${Constants.USER_FILE_STORAGE}/OpenMW/Override"
@@ -214,7 +259,7 @@ private fun updateMainConfig(savedPath: String, gameFiles: GameFiles, convertedD
 
     val mappedLines = currentLines.map { line ->
         when {
-            line.contains(regexData) -> line.replace(regexData, replacementStringData)
+            isMorrowindDataLine(line) -> replacementStringData
             line.contains("resources=./resources") -> line.replace(
                 "resources=./resources",
                 "resources=${Constants.USER_RESOURCES}"

@@ -292,6 +292,11 @@ object LogParser {
     // sCrimeMessage text; surfaced as a DS toast because the native message hides behind the
     // looting/barter panel windows.
     const val P_CRIME_MSG = "COMPANION_CRIME_MSG:"
+    /** Analog stick state for the DS map (companion-map-stick-input.patch). Deliberately OUTSIDE
+     *  the COMPANION_NAV_ namespace: [P_NAV] routes into [parseNav], which builds a seq-stamped
+     *  one-shot [NavEvent], and this line is neither payload-less nor an event. Its own prefix
+     *  means its own branch in onRawLine rather than an ordering rule to remember. */
+    const val P_STICK = "COMPANION_STICK:"
     const val P_NAV = "COMPANION_NAV_"
     const val P_NAV_LEFT = "COMPANION_NAV_LEFT:"
     const val P_NAV_RIGHT = "COMPANION_NAV_RIGHT:"
@@ -315,6 +320,20 @@ object LogParser {
     const val P_NAV_CANCEL = "COMPANION_NAV_CANCEL:"             // B while a quantity selector is open
     const val P_NAV_INFO = "COMPANION_NAV_INFO:"                 // R3 (right stick click) — item info popup
     const val P_NAV_SORT = "COMPANION_NAV_SORT:"                 // L3 (left stick click) — cycle sort mode
+
+    /** `<lx>|<ly>|<rx>|<ry>`, already deadzoned and quantized natively. Null if malformed, which
+     *  the repo treats as "ignore this line" rather than as a neutral stick — reading a parse
+     *  failure as "released" would stall a pan mid-gesture. */
+    fun parseStick(payload: String): StickState? {
+        val p = payload.split("|")
+        if (p.size != 4) return null
+        val v = p.map { it.trim().toFloatOrNull() ?: return null }
+        if (v.any { !it.isFinite() }) return null
+        return StickState(
+            lx = v[0].coerceIn(-1f, 1f), ly = v[1].coerceIn(-1f, 1f),
+            rx = v[2].coerceIn(-1f, 1f), ry = v[3].coerceIn(-1f, 1f),
+        )
+    }
 
     /**
      * Maps a COMPANION_NAV_* line to a factory that builds the [NavEvent] once the repo stamps it

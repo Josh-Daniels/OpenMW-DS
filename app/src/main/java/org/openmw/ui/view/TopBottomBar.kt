@@ -107,12 +107,12 @@ fun MyTopBar(context: Context) {
 }
 
 @Composable
-fun NavmeshScreen(onComplete: () -> Unit) {
+fun NavmeshScreen(onFinished: (stopped: Boolean) -> Unit) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        ProgressWithNavmesh(onComplete = onComplete)
+        ProgressWithNavmesh(onFinished = onFinished)
     }
 }
 

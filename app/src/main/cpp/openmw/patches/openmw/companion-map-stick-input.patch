@@ -1,0 +1,129 @@
+--- a/apps/openmw/mwinput/controllermanager.cpp
++++ b/apps/openmw/mwinput/controllermanager.cpp
+@@ -6,6 +6,8 @@
+ 
+ #include <SDL.h>
+ 
++#include <cmath> // COMPANION: std::round / std::sqrt for the analog stick stream
++
+ #include <components/debug/debuglog.hpp>
+ #include <components/esm/refid.hpp>
+ #include <components/files/conversion.hpp>
+@@ -54,6 +56,14 @@
+ // SWALLOWED while the menu was up doesn't leave the ICS movement/look channels stuck deflected,
+ // making the player keep moving/looking after the menu closes. See companion-controller-nav.patch (FIX 1).
+ extern "C" bool companionConsumeResetAxes();
++// COMPANION: defined in androidmain.cpp (g_companionDsMap && g_companionMapMounted). True only
++// while the DS map overlay is actually on screen — so it is false for the combined GM_Inventory
++// map pane and the pinned HUD map, both of which stay native. Gates the analog stick STREAM below,
++// and switches OFF the discrete per-frame scroll/slider polls while it is true. Declared by
++// companion-map-stick-input.patch; also declared in mapwindow.cpp / windowmanagerimp.cpp by
++// companion-map-export.patch (an identical redeclaration is legal and keeps the patches
++// independently resettable).
++extern "C" bool companionDsMapActive();
+ #endif
+ 
+ namespace MWInput
+@@ -226,15 +236,101 @@
+                 else
+                 {
+                     sDlgScrollAccum = interval; // re-arm in the deadzone
++                }
++            }
++        }
++
++        // COMPANION (companion-map-stick-input.patch): ANALOG STICK STREAM for the DS map.
++        //
++        // Every other companion controller signal is a DISCRETE, payload-less step: the polls below
++        // emit COMPANION_NAV_SCROLL_*/SLIDER_* at a fixed ~16Hz whenever an axis is past 0.5, so a
++        // half-pushed stick is indistinguishable from a fully-pushed one. That is exactly right for
++        // moving a focus index one row at a time and exactly wrong for zooming and panning a map,
++        // which have to be continuous and speed-sensitive. So this is the one place a real axis
++        // MAGNITUDE crosses to Kotlin.
++        //
++        // It reports STATE, not events: the line carries where the sticks currently are, and the
++        // Compose side integrates it against real frame time (withFrameNanos). That split is what
++        // makes the motion smooth independently of how often this fires — which is rarely, because
++        // the value is QUANTIZED to 0.05 and change-detected, so holding a stick perfectly still
++        // emits nothing at all. Same reasoning as quantizeRemaining on COMPANION_ACTIVE_EFFECTS: a
++        // raw float would differ every frame and put a 60Hz line stream on the wire for a motion
++        // nothing reads that finely.
++        //
++        // NOT in the COMPANION_NAV_ namespace on purpose. GameStateRepository.onRawLine routes
++        // anything containing "COMPANION_NAV_" into parseNav, which builds a seq-stamped NavEvent;
++        // this is neither payload-less nor an event, so it gets its own prefix and its own branch
++        // rather than an ordering rule someone has to remember.
++        //
++        // The deadzone is applied HERE, radially per stick (not per axis — a diagonal push must not
++        // need more travel than a cardinal one), and rescaled so the value ramps from 0 at the
++        // deadzone edge rather than jumping to 0.2. Doing it natively is what guarantees the idle
++        // case is silent: a worn stick resting at 0.06 would otherwise stream quantization noise
++        // for as long as the map is open. The response CURVE is deliberately left to Kotlin, where
++        // it can be retuned without a native rebuild.
++        {
++            constexpr float deadzone = 0.18f;
++            constexpr float step = 0.05f; // quantization; ~21 distinct values per axis
++            // Last EMITTED values, so drift accumulates against what Kotlin actually has rather
++            // than against the previous frame.
++            static float sLX = 0.f, sLY = 0.f, sRX = 0.f, sRY = 0.f;
++            static bool sStreaming = false;
++
++            auto quantize = [](float v) { return std::round(v / step) * step; };
++            // Radial deadzone + rescale, magnitude clamped to 1 (a full diagonal reads sqrt(2)).
++            auto applyStick = [&](SDL_GameControllerAxis ax, SDL_GameControllerAxis ay,
++                                   float& outX, float& outY) {
++                const float x = getAxisValue(ax);
++                const float y = getAxisValue(ay);
++                const float m = std::sqrt(x * x + y * y);
++                if (m <= deadzone)
++                {
++                    outX = 0.f;
++                    outY = 0.f;
++                    return;
++                }
++                const float scaled = std::min(1.f, (m - deadzone) / (1.f - deadzone));
++                outX = quantize(x / m * scaled);
++                outY = quantize(y / m * scaled);
++            };
++
++            if (companionDsMapActive())
++            {
++                float lx, ly, rx, ry;
++                applyStick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, lx, ly);
++                applyStick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, rx, ry);
++                if (!sStreaming || lx != sLX || ly != sLY || rx != sRX || ry != sRY)
++                {
++                    sStreaming = true;
++                    sLX = lx; sLY = ly; sRX = rx; sRY = ry;
++                    Log(Debug::Info) << "COMPANION_STICK:" << lx << "|" << ly << "|" << rx << "|" << ry;
+                 }
+             }
++            else if (sStreaming)
++            {
++                // The map just closed. Emit ONE neutral line: change detection means the last thing
++                // Kotlin heard was a deflection, and without this the map would resume mid-pan the
++                // next time it opens. Mirrors the four-axis reset FIX 1 does for the ICS channels.
++                sStreaming = false;
++                sLX = sLY = sRX = sRY = 0.f;
++                Log(Debug::Info) << "COMPANION_STICK:0|0|0|0";
++            }
+         }
+ #endif
+ #ifdef __ANDROID__
+         // COMPANION: right-stick scroll for DS overlays. SDL emits axis events only on CHANGE, so a
+         // HELD stick can't drive continuous scrolling from the event path — poll the live axis state
+         // each frame instead and emit COMPANION_NAV_SCROLL_* at a throttled cadence while deflected.
+-        if (companionNavActive() && MWBase::Environment::get().getWindowManager()->isGuiMode())
++        //
++        // COMPANION (companion-map-stick-input.patch): `&& !companionDsMapActive()`. These four
++        // polls emit DISCRETE, throttled, payload-less steps for list and grid scrolling, which is
++        // the wrong shape for a map — and the DS map consumes none of them. Left on, all four fire
++        // at ~16Hz each while the sticks are deflected (up to ~66 lines/s of JNI push + parse +
++        // StateFlow churn) for nothing at all. The analog block above owns both sticks while the DS
++        // map is up; this one hands them over rather than duplicating them. Button and D-pad
++        // interception in gamepadToGuiControl is untouched, so B still closes the map.
++        if (companionNavActive() && !companionDsMapActive()
++            && MWBase::Environment::get().getWindowManager()->isGuiMode())
+         {
+             const float ry = getAxisValue(SDL_CONTROLLER_AXIS_RIGHTY); // live hardware state, [-1,1)
+             constexpr float threshold = 0.5f;  // ~16000/32768, matches the old event threshold

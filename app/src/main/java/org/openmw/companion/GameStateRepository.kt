@@ -160,6 +160,14 @@ object GameStateRepository {
     private val _navEvent = MutableStateFlow<NavEvent?>(null)
     val navEvent: StateFlow<NavEvent?> = _navEvent.asStateFlow()
 
+    // Live analog thumbstick state for the DS map (COMPANION_STICK). Unlike navEvent this is STATE,
+    // not a stream of one-shots, so it is deliberately NOT seq-stamped: two consecutive identical
+    // readings mean the sticks have not moved, and deduping them is exactly what we want. Native
+    // change-detects and quantizes, so a held stick produces no lines at all and this flow simply
+    // holds its value while the consumer integrates it per frame.
+    private val _stickState = MutableStateFlow(StickState.NEUTRAL)
+    val stickState: StateFlow<StickState> = _stickState.asStateFlow()
+
     // Transient crime-message toast (COMPANION_CRIME_MSG): text + a monotonic seq so an identical
     // repeat message still re-fires the toast (a plain StateFlow would dedupe equal values). The DS
     // shows a top-of-stack, auto-dismissing banner — the native message renders behind the looting/
@@ -633,6 +641,10 @@ object GameStateRepository {
         _globalMapOverlay.value?.recycle(); _globalMapOverlay.value = null
         _globalMapInfo.value = null
         mapStateBuffer = null; mapNoteBuffer = null; mapPlaceBuffer = null
+        // Belt and braces: native already emits one neutral COMPANION_STICK when the map closes, but
+        // that is a separate path, and a stale deflection here would make the map resume mid-pan the
+        // next time it opens.
+        _stickState.value = StickState.NEUTRAL
     }
 
     // One-shot popup requests from the engine, both seq'd for the same reason as the message above:
@@ -903,6 +915,15 @@ object GameStateRepository {
             // Controller-nav signals (companion-controller-nav.patch). Discrete/high-frequency
             // while a DS overlay is open, so route them first. Each maps to a NavEvent stamped with
             // a fresh seq so repeats re-emit. Non-nav lines fall through to the state parsing below.
+            // Analog stick state for the DS map (companion-map-stick-input.patch). Matched first
+            // because it is the highest-frequency line while the map is open. It does NOT contain
+            // P_NAV, so this is locality rather than an ordering requirement. A malformed payload is
+            // IGNORED rather than read as neutral: treating a parse failure as "sticks released"
+            // would stall a pan mid-gesture.
+            trimmed.contains(LogParser.P_STICK) -> {
+                val idx = trimmed.indexOf(LogParser.P_STICK) + LogParser.P_STICK.length
+                LogParser.parseStick(trimmed.substring(idx).trim())?.let { _stickState.value = it }
+            }
             trimmed.contains(LogParser.P_NAV) -> {
                 LogParser.parseNav(trimmed)?.let { factory -> _navEvent.value = factory(navSeq++) }
             }
