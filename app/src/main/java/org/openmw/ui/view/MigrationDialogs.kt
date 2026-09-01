@@ -28,7 +28,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openmw.ui.controls.UIStateManager
 import org.openmw.ui.page.main.MainPageViewModel
-import org.openmw.ui.page.mod.ModAssistantViewModel
 import org.openmw.utils.AlphaMigration
 import org.openmw.utils.FileBrowserMode
 import org.openmw.utils.FileBrowserPopup
@@ -135,31 +134,39 @@ private fun Spacer12() {
 
 // -------------------------------------------------------------- first-launch popups --
 
-private enum class MigStep { SAVES, SETTINGS, GAME_FILES, DATA_FILES, DONE }
+private enum class MigStep { SAVES, SETTINGS, GAME_FILES, DONE }
 
 /**
  * First-launch, one-shot migration sequence for a user coming from the old shared
- * `/Alpha3/` folder. Four dialogs in order:
+ * `/Alpha3/` folder. Three dialogs in order:
  *   1. copy saves?      (optional — Yes/No)
  *   2. copy settings?   (optional — Yes/No)
  *   3. select Morrowind folder   (MANDATORY — reuses the Select-Game-Files action)
- *   4. select Data Files folder  (MANDATORY — reuses the Add-Mods folder-picker action)
  *
- * The whole sequence is gated as ONE unit by `migration_prompted`, which is only set once
- * dialog 4 completes — so a genuinely new user (no old folder) sees none of this, and a
- * migrating user isn't re-prompted after finishing.
+ * THERE IS DELIBERATELY NO "select Data Files" STEP (removed Sep 1 2026). It used to be a
+ * fourth, non-dismissable dialog, and it asked for something the app already has: selecting the
+ * Morrowind folder auto-derives `data="<morrowind>/Data Files"` (`SettingsFragment.updateMainConfig`
+ * / `updateUserConfig`), and that selection VALIDATES the `Data Files` subfolder exists before it
+ * is accepted. So the step could not add information, could not be skipped, and blocked first
+ * launch. The home screen's "Add Mods (select Data Files)" button still exists for adding EXTRA
+ * mod folders, which is that picker's real job.
  *
- * Dialogs 3 & 4 reuse the EXISTING selection logic (`MainPageViewModel.selectMorrowWindFolder`
- * / `onGameFolderSelected` and `ModAssistantViewModel.modPathSelection`). While a folder
- * browser is open, the current action dialog is hidden (`selecting`) so the browser Popup
- * never has to stack over an AlertDialog.
+ * The whole sequence is gated as ONE unit by `migration_prompted`, which is set once the
+ * Morrowind folder is stored — so a genuinely new user (no old folder) sees none of this, and a
+ * migrating user isn't re-prompted after finishing. **That flag used to be written by the
+ * data-files picker**; it moved to the game-files completion with that dialog's removal, and if it
+ * is ever moved again it must stay on a path every completing user reaches, or the sequence
+ * re-fires on every launch.
+ *
+ * Dialog 3 reuses the EXISTING selection logic (`MainPageViewModel.selectMorrowWindFolder`
+ * / `onGameFolderSelected`). While the folder browser is open, the action dialog is hidden
+ * (`selecting`) so the browser Popup never has to stack over an AlertDialog.
  */
 @Composable
 fun AlphaMigrationFirstLaunch() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val mainVm: MainPageViewModel = hiltViewModel()
-    val modVm: ModAssistantViewModel = hiltViewModel()
 
     var step by remember {
         mutableStateOf(
@@ -181,18 +188,20 @@ fun AlphaMigrationFirstLaunch() {
     }
     // True while a folder browser is open — hides the action dialog behind it.
     var selecting by remember { mutableStateOf(false) }
-    // Our own data-files browser flag (separate from the home-screen one in ModValuesList).
-    var dataBrowser by remember { mutableStateOf(false) }
 
     val savedPath by GameFilesPreferences.getGameFilesUriState(context).collectAsState(initial = null)
     val gameBrowser by mainVm.showFileBrowser
 
     // Advance out of GAME_FILES the moment a valid Morrowind folder is stored (whether it
-    // was chosen via the auto-detect confirm or the manual browser).
+    // was chosen via the auto-detect confirm or the manual browser). This is ALSO where the
+    // one-shot flag is written now that the data-files dialog is gone: it is the last mandatory
+    // step, and it is reached by BOTH selection routes, so no completing user can escape it
+    // unmarked and get re-prompted next launch.
     LaunchedEffect(step, savedPath) {
         if (step == MigStep.GAME_FILES && gameFilesSelected(savedPath)) {
             selecting = false
-            step = MigStep.DATA_FILES
+            AlphaMigration.markPrompted(context)
+            step = MigStep.DONE
         }
     }
 
@@ -238,21 +247,6 @@ fun AlphaMigrationFirstLaunch() {
             }
         }
 
-        MigStep.DATA_FILES -> {
-            if (!selecting) {
-                MigrationActionAlert(
-                    title = "Select your Data Files folder",
-                    message = "Now select your Data Files folder so your game data and any " +
-                        "mods are registered.",
-                    buttonText = "Add Mods (select Data Files)",
-                    onAction = {
-                        selecting = true
-                        dataBrowser = true
-                    },
-                )
-            }
-        }
-
         MigStep.DONE -> Unit
     }
 
@@ -267,24 +261,6 @@ fun AlphaMigrationFirstLaunch() {
                 selecting = false
             },
             onFolderSelected = { folder -> mainVm.onGameFolderSelected(folder, context) },
-            mode = FileBrowserMode.FOLDER,
-        )
-    }
-
-    // Data files: same underlying add-mods-folder logic (modPathSelection).
-    if (step == MigStep.DATA_FILES && dataBrowser) {
-        FileBrowserPopup(
-            onDismiss = {
-                // Fired for both "Select folder" and cancel. Only advance on a real pick
-                // (handled in onFolderSelected); a plain cancel re-shows the dialog.
-                dataBrowser = false
-                if (step == MigStep.DATA_FILES) selecting = false
-            },
-            onFolderSelected = { folder ->
-                modVm.modPathSelection(context, folder) { }
-                AlphaMigration.markPrompted(context)
-                step = MigStep.DONE
-            },
             mode = FileBrowserMode.FOLDER,
         )
     }
