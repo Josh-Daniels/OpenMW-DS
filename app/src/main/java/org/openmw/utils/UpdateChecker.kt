@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
@@ -98,6 +99,23 @@ object UpdateChecker {
 
     private val _state = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
+
+    private val _latestRelease = MutableStateFlow<ReleaseNotes?>(null)
+
+    /**
+     * The newest release GitHub told us about, with its notes — regardless of whether it is NEWER
+     * than what is installed.
+     *
+     * Deliberately SEPARATE from [state] rather than a field on [UpdateInfo] alone. [UpdateInfo]
+     * only exists in the Available/Downloading/Ready states, so notes hung off it would vanish the
+     * moment a check came back up to date — and "up to date" is exactly when the notes are for the
+     * release you are running, which is the common case worth reading. This flow keeps the last
+     * successful fetch either way.
+     *
+     * Null until a check succeeds. A failed check leaves the previous value in place rather than
+     * clearing it, so a lost network connection does not blank out notes already on screen.
+     */
+    val latestRelease: StateFlow<ReleaseNotes?> = _latestRelease.asStateFlow()
 
     /** Serialises check/download so a manual tap can't race the on-launch check. */
     private val lock = Mutex()
@@ -199,6 +217,19 @@ object UpdateChecker {
 
                 val current = BuildConfig.RELEASE_VERSION
                 Log.d(TAG, "installed=$current latest=$latest (tag=$tag, asset=$name, ${size}B)")
+
+                // The release notes were always in this response and were simply discarded. They
+                // are published on every SUCCESSFUL check, before the up-to-date comparison, so
+                // the notes card has content in the up-to-date case too.
+                val rawBody = release["body"]?.jsonPrimitive?.contentOrNull.orEmpty().trim()
+                _latestRelease.value = ReleaseNotes(
+                    version = latest,
+                    tag = tag,
+                    title = release["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
+                    body = rawBody,
+                    summary = condenseReleaseNotes(rawBody),
+                    isNewer = compareVersions(latest, current) > 0,
+                )
 
                 if (compareVersions(latest, current) > 0) {
                     UpdateState.Available(
@@ -397,7 +428,98 @@ object UpdateChecker {
         bytes >= 1024L -> String.format("%.0f KB", bytes / 1024.0)
         else -> "$bytes B"
     }
+
+    // -------------------------------------------------------------------------------------
+    // Release notes
+    // -------------------------------------------------------------------------------------
+
+    /** A Markdown horizontal rule on a line of its own: `---`, `***` or `___`. */
+    private val HORIZONTAL_RULE = Regex("""^\s*(?:-{3,}|\*{3,}|_{3,})\s*$""")
+
+    /** A leading ATX heading marker, e.g. the `## ` in `## Updates for v1.0.0`. */
+    private val HEADING_MARKER = Regex("""^\s{0,3}#{1,6}\s+""")
+
+    /** A LEVEL-1 heading specifically — one hash, not two. */
+    private val H1_MARKER = Regex("""^\s{0,3}#\s+\S""")
+
+    /** `[label](url)` — kept as its label, since a URL is unusable in a non-interactive card. */
+    private val MARKDOWN_LINK = Regex("""!?\[([^\]]*)]\([^)]*\)""")
+
+    /** Bold/italic runs and code ticks, which are noise once nothing is being rendered. */
+    private val EMPHASIS = Regex("""\*\*|__|`""")
+
+    /** Three or more consecutive newlines, i.e. more than one blank line. */
+    private val EXTRA_BLANK_LINES = Regex("""\n{3,}""")
+
+    /**
+     * Reduce a release body to just the part that describes THIS release.
+     *
+     * Our release notes are a short changelog followed by the whole README — Requirements,
+     * Installation, Setup Guide, Mods — because GitHub release bodies double as the landing page
+     * for the download. All of that is permanent reference material, identical release to release,
+     * and showing it in a small card buries the handful of lines the player actually came to read.
+     *
+     * Two cuts, both structural rather than keyword-based, so a reworded changelog still works:
+     *  - **Everything from the first horizontal rule onward is dropped.** That `---` is what
+     *    separates the changelog from the boilerplate in every release so far. A rule at position
+     *    zero is ignored, so a body that merely OPENS with one is not reduced to nothing.
+     *  - **A leading level-1 heading is dropped** ("# Version 1.0.0 released!"), because the card
+     *    already names the release directly above this text.
+     *
+     * The remainder is then lightly de-marked-down — heading hashes, link syntax, emphasis and
+     * code ticks removed — because it is displayed as plain text (see [ReleaseNotes]). Bullet
+     * hyphens are deliberately LEFT ALONE: they read correctly unrendered, and the game font has
+     * no bullet glyph to replace them with.
+     *
+     * Returns the trimmed original if the result would be empty, so an unusual body degrades to
+     * "show everything" rather than to a blank card.
+     */
+    fun condenseReleaseNotes(raw: String): String {
+        val lines = raw.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+
+        val ruleAt = lines.indexOfFirst { HORIZONTAL_RULE.matches(it) }
+        var kept = if (ruleAt > 0) lines.subList(0, ruleAt) else lines
+
+        kept = kept.dropWhile { it.isBlank() }
+        if (kept.firstOrNull()?.let { H1_MARKER.containsMatchIn(it) } == true) kept = kept.drop(1)
+
+        val condensed = kept.joinToString("\n") { line ->
+            line.replace(HEADING_MARKER, "")
+                .replace(MARKDOWN_LINK, "$1")
+                .replace(EMPHASIS, "")
+                .trimEnd()
+        }.replace(EXTRA_BLANK_LINES, "\n\n").trim()
+
+        return condensed.ifBlank { raw.trim() }
+    }
 }
+
+/**
+ * The notes for a GitHub release, as returned by the same `/releases/latest` call the update check
+ * already makes.
+ *
+ * [body] is raw GitHub-flavoured Markdown and is shown as plain text — no Markdown renderer is
+ * pulled in for it. That is a deliberate limit rather than an oversight: our own release notes are
+ * short prose and bullet lines, which read fine unrendered, and a renderer would be a new
+ * dependency for one card.
+ */
+data class ReleaseNotes(
+    /** Version with any `v` prefix stripped, e.g. `1.0.0`. */
+    val version: String,
+    /** The raw git tag, e.g. `v1.0.0` — what [body] belongs to, and what a link should point at. */
+    val tag: String,
+    /** The release's own title, when it has one distinct from the tag. */
+    val title: String?,
+    /** The notes exactly as GitHub returned them. Empty when the release was published without
+     *  any. Kept alongside [summary] so the trimming can be revisited without another fetch. */
+    val body: String,
+    /** [body] reduced to just this release's own changes, ready to display — see
+     *  [UpdateChecker.condenseReleaseNotes]. */
+    val summary: String,
+    /** Whether this release is newer than the installed build. False means these are (normally)
+     *  the notes for the version currently running. */
+    val isNewer: Boolean,
+)
 
 /** A newer release found on GitHub, plus what is needed to fetch it. */
 data class UpdateInfo(

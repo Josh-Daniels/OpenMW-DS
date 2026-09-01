@@ -143,6 +143,21 @@
     <string name="generate_navmesh">Generate Navmesh</string>
     <string name="reset_settings">Reset Settings</string>
     <string name="simplified_tr_notice">Tamriel Rebuilt is on. Expect around 30 seconds to launch.</string>
+    <string name="simplified_tips_title">Tips</string>
+    <!--
+      Home-screen tips, one <item> per tip, shown as a bulleted list in the Tips box beside the
+      load order. THIS ARRAY IS THE ONLY PLACE TIP COPY LIVES — add, remove or rewrite entries
+      here and the box follows, with no code change. An empty array hides the list and shows the
+      placeholder line below it instead.
+      The entries below are placeholders describing existing behaviour; replace them freely.
+    -->
+    <string-array name="launcher_tips">
+        <item>Poor performance in large modded cities? The game is CPU heavy, so if you have the ClusterTune app running, switch it to stock. Capping the CPU makes the frame rate noticeably choppier.</item>
+        <item>Drag a mod by its handle to change the load order. The checkbox next to it turns the mod on or off.</item>
+        <item>Reset order puts the list back to the default: Morrowind, Tribunal and Bloodmoon first, then Tamriel Rebuilt, then everything else.</item>
+        <item>Generating the navmesh cache in Settings makes pathfinding smoother, at the cost of a long one-off build.</item>
+    </string-array>
+    <string name="simplified_tips_empty">No tips yet.</string>
     <string name="simplified_reset_load_order">Reset order</string>
     <string name="simplified_reset_load_order_tip">Put the load order back to the default: Morrowind, Tribunal and Bloodmoon first, then Tamriel Rebuilt, then everything else. The eight official add-ons that come with Morrowind are switched off, as they are in the original game. Any order you have set yourself will be lost, and every other mod keeps its on or off setting.</string>
     <string name="use_simplified_launcher">Use simplified launcher</string>
@@ -205,6 +220,11 @@
     <string name="updates_badge_desc">Update available</string>
     <string name="updates_release_notes">View release notes</string>
     <string name="updates_release_notes_failed">Couldn\'t open the release page.</string>
+    <string name="updates_notes_title">Release Notes</string>
+    <string name="updates_notes_empty">Check for updates to load the latest release notes.</string>
+    <string name="updates_notes_none">This release was published without notes.</string>
+    <string name="updates_notes_installed">Notes for %1$s, the version you are running.</string>
+    <string name="updates_notes_newer">Notes for %1$s, which is newer than the version you are running.</string>
 
     <string name="enable_logcat">Enable Logcat for launcher</string>
     <string name="total_device_memory">Total Device Memory</string>

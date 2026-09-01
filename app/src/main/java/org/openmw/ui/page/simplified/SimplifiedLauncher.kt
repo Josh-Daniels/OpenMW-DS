@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,6 +48,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.rounded.Menu
@@ -95,7 +98,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Density
@@ -154,6 +160,7 @@ import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.IniSettings
 import org.openmw.utils.MToast
 import org.openmw.utils.OpenMWConfigUtils
+import org.openmw.utils.ReleaseNotes
 import org.openmw.utils.UpdateChecker
 import org.openmw.utils.UpdateInfo
 import org.openmw.utils.UpdateState
@@ -589,18 +596,43 @@ private suspend fun applyModFolderRemoval(
 private const val PLAY_FOCUS_ATTEMPTS = 3
 private const val PLAY_FOCUS_RETRY_MS = 100L
 
-/** Width of the centred mod load-order card, as a fraction of the screen. The action row and Play
- *  button stay full width — only this middle panel narrows. */
-private const val MOD_PANEL_WIDTH_FRACTION = 0.8f
+/**
+ * Width of the mod load-order card, as a fraction of the screen.
+ *
+ * LEFT-ALIGNED rather than centred, so its left edge lines up with the game-files button directly
+ * above it. 0.52 is the old centred 0.8 reduced by 35%: the space freed on the right is what the
+ * notices and Tips column now occupy. The action row and Play button stay full width.
+ */
+private const val MOD_PANEL_WIDTH_FRACTION = 0.52f
 
-/** Width of the centred "Transfer from Alpha3" card on the settings screen. Matches the mod-list
- *  panel's fraction so the two bordered cards read as the same visual family. */
-private const val TRANSFER_SECTION_WIDTH_FRACTION = 0.6f
+/** Gap between the load-order card and the Tips column beside it. */
+private val HOME_COLUMN_GAP = 12.dp
+
+/** Text size and line height for a tip line. The line height is stated explicitly because the
+ *  bullet dot beside it is centred against it — see [TipsBox]. */
+private val TIP_FONT_SIZE = 12.sp
+private val TIP_LINE_HEIGHT = 17.sp
 
 /** Width of the centred "OpenMW Settings" card. Wider than the transfer card because it holds
  *  full-width option rows rather than buttons; its HEIGHT is unconstrained so it grows with the
  *  section drop-downs. */
 private const val SETTINGS_SECTION_WIDTH_FRACTION = 0.9f
+
+/**
+ * How the updater row's width (itself [SETTINGS_SECTION_WIDTH_FRACTION] of the screen) is split
+ * between the Updates card and the Release Notes card beside it.
+ *
+ * Weights, not fractions: [Arrangement.spacedBy] takes [UPDATES_ROW_GAP] out of the row FIRST and
+ * the weights then divide what is left, so the two cards keep their 40/60 relationship and the gap
+ * stays a real gap at any screen width instead of being absorbed by one of them.
+ */
+private const val UPDATES_CARD_WEIGHT = 0.4f
+private const val UPDATE_NOTES_CARD_WEIGHT = 0.6f
+private val UPDATES_ROW_GAP = 12.dp
+
+/** Shared height of the Updates and Release Notes cards. Both are pinned to it so the pair reads
+ *  as one block; each scrolls its own body, so neither can clip whatever it has to show. */
+private val UPDATES_ROW_HEIGHT = 240.dp
 
 /** Attention colour for the update badge and banner — the same warm orange as the setup buttons
  *  (`SetupOrange`), mirrored locally so this file needs no new theme import. It reads as "notice
@@ -1148,6 +1180,16 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
         dismissedVersion != null &&
         dismissedVersion != offeredUpdate.version
 
+    // Tamriel Rebuilt notice dismissal. Same remember-the-flow rule and same `initial = null`
+    // "not loaded yet" sentinel as the update banner above, so a previously-dismissed notice never
+    // flashes for a frame before the stored value arrives. Compared against the RUNNING app
+    // version, so the notice returns after an update rather than being gone for good.
+    val trDismissedFlow = remember(context) {
+        GameFilesPreferences.loadDismissedTamrielRebuiltNotice(context)
+    }
+    val trDismissedVersion by trDismissedFlow.collectAsState(initial = null)
+    val trNoticeDismissed = trDismissedVersion == BuildConfig.RELEASE_VERSION
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1289,56 +1331,88 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
 
         Spacer(Modifier.height(10.dp))
 
-        // 1b. Update banner, directly above the load-order panel and matched to its width so the
-        //     two read as one centred column. Dismiss is remembered PER VERSION, so a later
-        //     release brings it back. Not weighted — it sizes to its content and simply takes a
-        //     little height from the panel below.
-        if (showUpdateBanner && offeredUpdate != null) {
-            UpdateBanner(
-                version = offeredUpdate.version,
-                onDismiss = {
-                    coroutineScope.launch {
-                        GameFilesPreferences.saveDismissedUpdateBanner(
-                            context, offeredUpdate.version
-                        )
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth(MOD_PANEL_WIDTH_FRACTION)
-                    .align(Alignment.CenterHorizontally)
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-
-        // 1c. Tamriel Rebuilt launch-time notice. Derived from the SAME `allModValues` the panel
-        //     below renders, so it appears and disappears in step with the checkbox the player just
-        //     ticked, with no second read of openmw.cfg to fall out of sync.
+        // 1b. Tamriel Rebuilt launch-time notice. Derived from the SAME `allModValues` the load
+        //     order renders, so it appears and disappears in step with the checkbox the player just
+        //     ticked, with no second read of openmw.cfg to fall out of sync. It is rendered inside
+        //     the right-hand column below.
         val tamrielRebuiltOn = remember(allModValues) {
             allModValues.any { it.category == "content" && it.isChecked && isTamrielData(it.value) }
         }
-        if (tamrielRebuiltOn) {
-            TamrielRebuiltNotice(
+
+        // 2. The main body: load order on the LEFT, notices and Tips on the RIGHT.
+        //
+        //    weight(1f) on the Row bounds both columns so their content scrolls INSIDE them and the
+        //    screen itself never scrolls — a scrolling screen would fight the drag-reorder gesture.
+        //
+        //    The load-order card takes a fixed fraction of the FULL screen width (so it can be
+        //    reasoned about against the action row above it) and the Tips column takes what is
+        //    left, inset on the right by the Settings button's slot so it ends level with the
+        //    data-files button rather than with the screen edge.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            ModLoadOrderPanel(
+                viewModel = modVm,
+                refreshKey = refreshKey,
+                savedPath = savedPath,
+                gameFilesMissing = gameFilesMissing,
+                // Left-aligned by being the Row's first child: its left edge is the Column's
+                // content edge, which is exactly where the game-files button above it starts.
                 modifier = Modifier
                     .fillMaxWidth(MOD_PANEL_WIDTH_FRACTION)
-                    .align(Alignment.CenterHorizontally)
+                    .fillMaxHeight()
             )
-            Spacer(Modifier.height(8.dp))
-        }
 
-        // 2. Mod load order. weight(1f) bounds it so the LIST scrolls inside the panel and the
-        //    screen itself never scrolls — a scrolling screen would fight the drag-reorder gesture.
-        ModLoadOrderPanel(
-            viewModel = modVm,
-            refreshKey = refreshKey,
-            savedPath = savedPath,
-            gameFilesMissing = gameFilesMissing,
-            // Deliberately narrower than the full screen and centred, so it reads as a card rather
-            // than as content that failed to fill the width. The top row and Play stay full width.
-            modifier = Modifier
-                .fillMaxWidth(MOD_PANEL_WIDTH_FRACTION)
-                .align(Alignment.CenterHorizontally)
-                .weight(1f)
-        )
+            Spacer(Modifier.width(HOME_COLUMN_GAP))
+
+            Column(
+                // Full remaining width: the right edge lands level with the SETTINGS BUTTON, the
+                // last thing in the action row, so the two rows end at the same place.
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+            ) {
+                // Both notices sit ABOVE the Tips box and share its width, so the right-hand
+                // column reads as one stack. Neither is weighted — each sizes to its content and
+                // simply takes a little height from the Tips box below.
+                if (showUpdateBanner && offeredUpdate != null) {
+                    UpdateBanner(
+                        version = offeredUpdate.version,
+                        onDismiss = {
+                            coroutineScope.launch {
+                                GameFilesPreferences.saveDismissedUpdateBanner(
+                                    context, offeredUpdate.version
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                if (tamrielRebuiltOn && !trNoticeDismissed) {
+                    TamrielRebuiltNotice(
+                        onDismiss = {
+                            coroutineScope.launch {
+                                GameFilesPreferences.saveDismissedTamrielRebuiltNotice(
+                                    context, BuildConfig.RELEASE_VERSION
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                TipsBox(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                )
+            }
+        }
 
         Spacer(Modifier.height(10.dp))
 
@@ -1623,13 +1697,19 @@ private fun UpdateBanner(
  * handheld: the launcher disappears and nothing visible happens for around half a minute. Saying so
  * up front turns that into an expected pause.
  *
- * Purely informational, so it has NO dismiss control, unlike [UpdateBanner]. Dismissing it would
- * have to be remembered somewhere, and the condition already removes it the moment the player turns
- * TR off. Styled as that banner's quieter sibling: same card, bronze rather than the update accent,
- * so it reads as a note about the current setup rather than as something to act on.
+ * DISMISSIBLE, and remembered across restarts — the point of the notice is to set an expectation
+ * once, and repeating it at every launch for a player who has already read it is noise. The
+ * dismissal is stored the same way [UpdateBanner]'s is (a VERSION STRING, not a boolean), so it
+ * comes back after the app updates and a reworded notice is not silently suppressed forever; see
+ * [GameFilesPreferences.saveDismissedTamrielRebuiltNotice]. The `TR is enabled` condition still
+ * removes it the moment the player turns TR off, independently of any dismissal.
+ *
+ * Styled as [UpdateBanner]'s quieter sibling: same card, bronze rather than the update accent, so
+ * it reads as a note about the current setup rather than as something to act on. Only the Dismiss
+ * word is clickable, for the same reason it is there — a stray tap must not silence it.
  */
 @Composable
-private fun TamrielRebuiltNotice(modifier: Modifier = Modifier) {
+private fun TamrielRebuiltNotice(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
             .background(MwFloatStone, RoundedCornerShape(10.dp))
@@ -1648,6 +1728,210 @@ private fun TamrielRebuiltNotice(modifier: Modifier = Modifier) {
             color = MwBone,
             fontSize = 13.sp,
             modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.updates_banner_dismiss),
+            color = MwBronzeLight,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            textDecoration = TextDecoration.Underline,
+            modifier = Modifier
+                .clickable { onDismiss() }
+                .padding(horizontal = 6.dp, vertical = 3.dp)
+        )
+    }
+}
+
+/**
+ * Home-screen "Tips" box, filling the right-hand column beside the load order.
+ *
+ * The copy lives ENTIRELY in the `launcher_tips` string-array (`values/strings.xml`), one `<item>`
+ * per tip — so tips are added, removed and reworded there with no change to this file, and they
+ * are translatable like any other string. An empty array is a supported state and shows the
+ * placeholder line instead of an empty card.
+ *
+ * The list scrolls inside the card rather than growing it: the card is height-bounded by the row
+ * that hosts it, exactly as the load-order panel beside it is, so the home screen itself never
+ * scrolls.
+ *
+ * Bullets are DRAWN dots rather than a `\u00b7` or `\u2022` glyph, because the game font
+ * (MysticCards) has no `cmap` entry for either and would fall back or tofu — the same reason the
+ * update banner draws its own dot.
+ */
+@Composable
+private fun TipsBox(modifier: Modifier = Modifier) {
+    val tips = stringArrayResource(R.array.launcher_tips)
+    Column(
+        modifier = modifier
+            .background(MwFloatStone, RoundedCornerShape(12.dp))
+            .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
+            .padding(10.dp),
+    ) {
+        Text(
+            text = stringResource(R.string.simplified_tips_title),
+            color = MwBronzeLight,
+            fontSize = 16.sp,
+            fontFamily = LauncherSerif,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(bottom = 6.dp)
+        )
+        // The dot is centred inside a box exactly one LINE HIGH, so it sits on the optical centre
+        // of the tip's first line rather than at a hand-picked offset from the top. Derived from
+        // the same sp value the text is given, so it stays aligned when the game font's own size
+        // scale is applied (that scales fontScale, which is what toDp() reads).
+        val lineHeight = with(LocalDensity.current) { TIP_LINE_HEIGHT.toDp() }
+        if (tips.isEmpty()) {
+            Text(
+                text = stringResource(R.string.simplified_tips_empty),
+                color = MwBoneDim,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            )
+            return@Column
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+        ) {
+            tips.forEachIndexed { index, tip ->
+                if (index > 0) Spacer(Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier.height(lineHeight),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(5.dp)
+                                .background(MwBronzeLight, CircleShape)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = tip,
+                        color = MwBone,
+                        fontSize = TIP_FONT_SIZE,
+                        lineHeight = TIP_LINE_HEIGHT,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A bronze settings card whose body collapses to just its heading.
+ *
+ * Reuses the collapsible pattern the settings tree already established in [IniSectionCard] — a
+ * clickable heading row with a `KeyboardArrowUp`/`Down` chevron, content composed only while
+ * expanded — rather than introducing a second one. What is NOT reused is that composable itself:
+ * it is an `ElevatedCard` in the Material palette, hardcoded to a list of ini settings, whereas
+ * these cards are the launcher's own `MwFloatStone`/`MwBronze` family with a `LauncherSerif`
+ * heading. So the mechanism is shared by convention and the shell is shared by this helper, which
+ * both collapsible cards call so the header can only ever be written once.
+ *
+ * Collapsed by DEFAULT: both callers are occasional, deliberate maintenance actions that were
+ * pushing the settings tree itself off the first screen.
+ *
+ * State is `rememberSaveable`, so a card stays open across a rotation or a process death — but it
+ * is deliberately NOT persisted to the DataStore. Which sections are open is transient navigation
+ * state, not a setting.
+ */
+@Composable
+private fun ColumnScope.LauncherCollapsibleCard(
+    title: String,
+    widthFraction: Float,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    var expanded by rememberSaveable(title) { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth(widthFraction)
+            .align(Alignment.CenterHorizontally)
+            .background(MwFloatStone, RoundedCornerShape(12.dp))
+            .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
+            .padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CollapsibleCardHeader(
+            title = title,
+            expanded = expanded,
+            onToggle = { expanded = !expanded },
+        )
+        if (expanded) {
+            Spacer(Modifier.height(6.dp))
+            content()
+        }
+    }
+}
+
+/**
+ * The heading row of a collapsible launcher card: title, an optional attention dot, and the
+ * expand/collapse chevron.
+ *
+ * Split out of [LauncherCollapsibleCard] so the Updates and Release Notes pair can use the same
+ * header while SHARING one expanded state between them — that card owns its state, which is right
+ * for a standalone section and wrong for two cards that open and close together.
+ *
+ * State is passed in rather than held here, so a caller can hoist it as far as it needs to.
+ */
+@Composable
+private fun CollapsibleCardHeader(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    badgeDescription: String? = null,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            // The whole heading row is the target, not just the chevron: a 16sp chevron alone
+            // is a poor touch target, and tapping a section title to open it is the gesture
+            // the ini section cards already teach.
+            .clickable { onToggle() }
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (badgeDescription != null) {
+            // The SAME dot as the home screen's Settings badge and update banner, so "there is an
+            // update" looks identical everywhere it is said. It lives on the HEADER rather than in
+            // the card body precisely so it survives the card being collapsed — a collapsed card
+            // that could not say an update was waiting would be a good way to miss one.
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(UpdateAccent, CircleShape)
+                    // Decorative, so the meaning is carried by the text description below.
+                    .semantics { contentDescription = badgeDescription }
+            )
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(
+            text = title,
+            color = MwBronzeLight,
+            fontSize = 16.sp,
+            fontFamily = LauncherSerif,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.width(6.dp))
+        Icon(
+            imageVector = if (expanded) {
+                Icons.Default.KeyboardArrowUp
+            } else {
+                Icons.Default.KeyboardArrowDown
+            },
+            // The row's own state is announced by the heading plus this icon; a separate
+            // description would be read out twice.
+            contentDescription = null,
+            tint = MwBronzeLight,
         )
     }
 }
@@ -2074,51 +2358,12 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 16.dp)
         ) {
-            // Alpha3 transfer. Placed ABOVE the Settings.cfg cards, with its own header, because
-            // it is a transient first-run affordance — AlphaMigrationButtons returns early (and
-            // this whole block disappears) once /Alpha3/ is gone, so it never permanently competes
-            // with the settings content, and a migrating user shouldn't have to scroll past 20
-            // category cards to find it.
+            // In-app updater, paired with the release notes for whatever GitHub last reported.
+            // Sits ABOVE the Settings.cfg cards (and below the transient Alpha3 transfer block) so
+            // it's reachable without scrolling past 20 category cards — it's an occasional,
+            // deliberate action, not something buried in the settings tree.
             //
-            // The buttons themselves are the SAME composable the Alpha3 home screen uses: it owns
-            // the oldFolderExists() gate, the confirm dialogs, the copySaves()/copySettings() calls
-            // and the result toasts. Nothing about the copy behaviour is re-expressed here.
-            if (AlphaMigration.oldFolderExists()) {
-                // Centred bordered card, matching the home screen's "Content" mod-list panel, so
-                // the three migration actions read as one deliberate group rather than as loose
-                // buttons above the Settings.cfg cards.
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth(TRANSFER_SECTION_WIDTH_FRACTION)
-                        .align(Alignment.CenterHorizontally)
-                        .background(MwFloatStone, RoundedCornerShape(12.dp))
-                        .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
-                        .padding(8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = stringResource(R.string.simplified_transfer_from_alpha3),
-                        color = MwBronzeLight,
-                        fontSize = 16.sp,
-                        fontFamily = LauncherSerif,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 6.dp)
-                    )
-                    AlphaMigrationButtons(onSettingsCopied = { settingsRefreshKey++ })
-                    // Third migration action, alongside the two AlphaMigrationButtons renders.
-                    // Same SetupButton styling so the group reads as one set.
-                    SetupButton(
-                        text = stringResource(R.string.simplified_copy_mod_order),
-                        onClick = { confirmModOrder = true },
-                    )
-                }
-                Spacer(Modifier.height(14.dp))
-            }
-
-            // In-app updater. Sits ABOVE the Settings.cfg cards (and below the transient Alpha3
-            // transfer block) so it's reachable without scrolling past 20 category cards — it's
-            // an occasional, deliberate action, not something buried in the settings tree.
-            UpdatesCard()
+            UpdatesSection()
             Spacer(Modifier.height(14.dp))
 
             // Navmesh pre-generation. Sits with the other occasional maintenance actions rather
@@ -2157,6 +2402,31 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 // settings) discards its one-shot snapshot and re-reads the file.
                 key(settingsRefreshKey) {
                     IniSettings(externalSearchQuery = searchQuery)
+                }
+            }
+
+            // Alpha3 transfer, BELOW the Settings.cfg card and matched to its width so the three
+            // cards on this screen read as one column. It is a transient first-run affordance —
+            // AlphaMigrationButtons returns early (and this whole block disappears) once /Alpha3/
+            // is gone — and it is COLLAPSED by default, so sitting last costs a migrating user one
+            // scroll while keeping the settings tree at the top for everyone else, permanently.
+            //
+            // The buttons themselves are the SAME composable the Alpha3 home screen uses: it owns
+            // the oldFolderExists() gate, the confirm dialogs, the copySaves()/copySettings() calls
+            // and the result toasts. Nothing about the copy behaviour is re-expressed here.
+            if (AlphaMigration.oldFolderExists()) {
+                Spacer(Modifier.height(14.dp))
+                LauncherCollapsibleCard(
+                    title = stringResource(R.string.simplified_transfer_from_alpha3),
+                    widthFraction = SETTINGS_SECTION_WIDTH_FRACTION,
+                ) {
+                    AlphaMigrationButtons(onSettingsCopied = { settingsRefreshKey++ })
+                    // Third migration action, alongside the two AlphaMigrationButtons renders.
+                    // Same SetupButton styling so the group reads as one set.
+                    SetupButton(
+                        text = stringResource(R.string.simplified_copy_mod_order),
+                        onClick = { confirmModOrder = true },
+                    )
                 }
             }
 
@@ -2372,23 +2642,13 @@ private fun ColumnScope.NavmeshCard() {
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth(SETTINGS_SECTION_WIDTH_FRACTION)
-            .align(Alignment.CenterHorizontally)
-            .background(MwFloatStone, RoundedCornerShape(12.dp))
-            .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
-            .padding(10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+    // Collapsed to its heading by default, like the transfer card above it: every action in here
+    // takes over the app for a long time, so it is somewhere you go deliberately rather than
+    // something that should occupy a screenful on the way to the settings tree.
+    LauncherCollapsibleCard(
+        title = "Navmesh Cache",
+        widthFraction = SETTINGS_SECTION_WIDTH_FRACTION,
     ) {
-        Text(
-            text = "Navmesh Cache",
-            color = MwBronzeLight,
-            fontSize = 16.sp,
-            fontFamily = LauncherSerif,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 4.dp)
-        )
         Text(
             text = if (hasCache) {
                 "Generated: ${"%,d".format(tiles)} tiles cached " +
@@ -2530,8 +2790,193 @@ private fun ColumnScope.NavmeshCard() {
     }
 }
 
+/**
+ * The Updates and Release Notes cards, side by side and collapsing as ONE unit.
+ *
+ * They share a single expanded state, hoisted here, because they are two halves of one subject:
+ * collapsing the updater while its own notes stayed open (or the reverse) would read as a glitch,
+ * and neither is much use without the other. Either heading toggles both.
+ *
+ * **Opens itself when an update is available.** The whole point of collapsing this section is that
+ * there is usually nothing to do here — but the one time that stops being true, it should not be
+ * behind a tap. Keyed on the offered VERSION rather than on a boolean, so it fires once when an
+ * offer arrives and once more if a different release supersedes it; a deliberate collapse in
+ * between therefore sticks, instead of springing open again on the next recomposition.
+ *
+ * Collapsing is not persisted, and does not need to be: leaving the settings screen destroys this
+ * composable, so every visit re-evaluates "collapsed, unless there is an update".
+ *
+ * The updater is the narrower of the pair: it is a status line and one button, while the notes are
+ * prose that wants the room.
+ *
+ * While expanded both are pinned to the SAME FIXED height so the pair reads as one block. A fixed
+ * height rather than IntrinsicSize.Min: intrinsic measurement would have to reach through the
+ * notes card's own scroll container, and a card whose height depended on how long this release's
+ * notes happened to be would move the whole settings tree up and down between releases. Neither
+ * card can clip as a result: each scrolls its own body. Collapsed, the height constraint is
+ * dropped entirely and both shrink to their heading — which is the same height in each, so they
+ * stay level.
+ */
 @Composable
-private fun ColumnScope.UpdatesCard() {
+private fun ColumnScope.UpdatesSection() {
+    val offeredVersion = UpdateChecker.state.collectAsState().value.offeredUpdate()?.version
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(offeredVersion) {
+        if (offeredVersion != null) expanded = true
+    }
+    val toggle = { expanded = !expanded }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth(SETTINGS_SECTION_WIDTH_FRACTION)
+            .align(Alignment.CenterHorizontally),
+        horizontalArrangement = Arrangement.spacedBy(UPDATES_ROW_GAP),
+    ) {
+        val heightWhenOpen = if (expanded) Modifier.height(UPDATES_ROW_HEIGHT) else Modifier
+        UpdatesCard(
+            expanded = expanded,
+            onToggle = toggle,
+            modifier = Modifier
+                .weight(UPDATES_CARD_WEIGHT)
+                .then(heightWhenOpen)
+        )
+        UpdateNotesCard(
+            expanded = expanded,
+            onToggle = toggle,
+            modifier = Modifier
+                .weight(UPDATE_NOTES_CARD_WEIGHT)
+                .then(heightWhenOpen)
+        )
+    }
+}
+
+/**
+ * "Release Notes" card — the notes for the newest release GitHub has told us about, beside the
+ * updater that told us about it.
+ *
+ * NO new content plumbing: the notes are the `body` of the very same `/releases/latest` response
+ * [UpdateChecker.check] already fetches for the version comparison, and which was previously
+ * parsed and thrown away. So this card costs no extra request, needs nothing written by hand per
+ * release, and cannot fall out of step with the version the card next to it is offering.
+ *
+ * It reads [UpdateChecker.latestRelease] rather than [UpdateChecker.state], so it still has
+ * content in the UP-TO-DATE case — where the notes are for the build the player is running, which
+ * is the common and useful case. See that flow for why the two are kept separate.
+ *
+ * The body is shown as PLAIN TEXT. GitHub returns Markdown, and our notes are short prose and
+ * bullet lines that read fine unrendered; a Markdown renderer would be a new dependency for one
+ * card. The "View release notes" link is kept as the way to see it properly formatted, reusing
+ * [openReleaseNotes] — the same helper, and the same real tag, the updater card already links with.
+ */
+@Composable
+private fun UpdateNotesCard(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val notes by UpdateChecker.latestRelease.collectAsState()
+
+    Column(
+        modifier = modifier
+            .background(MwFloatStone, RoundedCornerShape(12.dp))
+            .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
+            .padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // No badge on this side: the update dot belongs to the card that can act on it, and two
+        // dots for one fact would read as two facts.
+        CollapsibleCardHeader(
+            title = stringResource(R.string.updates_notes_title),
+            expanded = expanded,
+            onToggle = onToggle,
+        )
+        if (!expanded) return@Column
+
+        val release: ReleaseNotes? = notes
+
+        // Which release these notes belong to, and how it relates to what is installed — without
+        // it, notes for the version you are already running read as if they were describing an
+        // update you had not taken.
+        if (release != null) {
+            Text(
+                text = stringResource(
+                    if (release.isNewer) {
+                        R.string.updates_notes_newer
+                    } else {
+                        R.string.updates_notes_installed
+                    },
+                    release.title ?: release.tag
+                ),
+                color = MwBoneDim,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+        }
+
+        // The body area takes whatever the fixed card height leaves and scrolls inside it, so a
+        // long changelog cannot make this card taller than the updater beside it.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            when {
+                // Nothing fetched yet this session, or every check so far has failed. Says what to
+                // do about it rather than sitting blank — the button that fixes it is right beside
+                // this card.
+                release == null -> Text(
+                    text = stringResource(R.string.updates_notes_empty),
+                    color = MwBoneDim,
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                release.summary.isBlank() -> Text(
+                    text = stringResource(R.string.updates_notes_none),
+                    color = MwBoneDim,
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // SUMMARY, not the raw body: a release body here is the changelog followed by the
+                // whole README, and only the changelog belongs in a card this size. See
+                // UpdateChecker.condenseReleaseNotes.
+                else -> Text(
+                    text = release.summary,
+                    color = MwBone,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                )
+            }
+        }
+
+        // Pinned below the scroll area rather than inside it, so the way to the full, formatted
+        // notes is always visible however far down the summary the reader is.
+        Text(
+            text = stringResource(R.string.updates_release_notes),
+            color = MwBronzeLight,
+            fontSize = 12.sp,
+            textDecoration = TextDecoration.Underline,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .padding(top = 6.dp)
+                .clickable { openReleaseNotes(context, release?.tag) }
+                .padding(horizontal = 6.dp, vertical = 3.dp)
+        )
+    }
+}
+
+@Composable
+private fun UpdatesCard(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val state by UpdateChecker.state.collectAsState()
@@ -2593,22 +3038,25 @@ private fun ColumnScope.UpdatesCard() {
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth(TRANSFER_SECTION_WIDTH_FRACTION)
-            .align(Alignment.CenterHorizontally)
+        // Width comes from the caller now that this card shares a row with the notes card, so it
+        // is no longer a ColumnScope extension and no longer centres itself.
+        modifier = modifier
             .background(MwFloatStone, RoundedCornerShape(12.dp))
             .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(
-            text = stringResource(R.string.updates_title),
-            color = MwBronzeLight,
-            fontSize = 16.sp,
-            fontFamily = LauncherSerif,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 2.dp)
+        CollapsibleCardHeader(
+            title = stringResource(R.string.updates_title),
+            expanded = expanded,
+            onToggle = onToggle,
+            // Derived from this card's own `state` collection rather than passed in, so the dot
+            // and the status line below it can never disagree about whether there is an update.
+            badgeDescription = stringResource(R.string.updates_badge_desc)
+                .takeIf { state.offeredUpdate() != null },
         )
+        if (!expanded) return@Column
+
         Text(
             text = stringResource(R.string.updates_current_version, BuildConfig.RELEASE_VERSION),
             color = MwBoneDim,
@@ -2616,123 +3064,121 @@ private fun ColumnScope.UpdatesCard() {
             modifier = Modifier.padding(bottom = 6.dp)
         )
 
-        // Status line — one per state, so the card always says what just happened.
-        val status: String? = when (val s = state) {
-            is UpdateState.Idle -> null
-            is UpdateState.Checking -> stringResource(R.string.updates_checking)
-            is UpdateState.UpToDate -> stringResource(R.string.updates_up_to_date)
-            is UpdateState.Available -> stringResource(R.string.updates_available, s.info.version)
-            is UpdateState.Downloading ->
-                if (s.isDeterminate) {
-                    stringResource(
-                        R.string.updates_downloading,
-                        "${UpdateChecker.formatBytes(s.bytesRead)} / " +
-                            UpdateChecker.formatBytes(s.totalBytes)
-                    )
-                } else {
-                    stringResource(R.string.updates_downloading_indeterminate)
-                }
-            is UpdateState.Ready -> stringResource(R.string.updates_ready, s.info.version)
-            is UpdateState.Failed -> stringResource(R.string.updates_failed, s.message)
-        }
-        if (status != null) {
-            Text(
-                text = status,
-                color = if (state is UpdateState.Failed) Color(0xFFC75C5C) else MwBone,
-                fontSize = 13.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(bottom = 6.dp)
-            )
-        }
+        // Everything below the heading scrolls, for the same reason the notes card's body does:
+        // this card is pinned to a fixed height, and the Ready state (status + progress + button +
+        // install hint) is considerably taller than the Idle one.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
 
-        // Real progress, not a spinner — this is a ~71MB transfer, so an indeterminate bar would
-        // leave the user with no idea whether it is 5 seconds or 5 minutes from done.
-        (state as? UpdateState.Downloading)?.let { s ->
-            if (s.isDeterminate) {
-                LinearProgressIndicator(
-                    progress = { s.fraction },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 6.dp),
-                    color = MwBronzeLight,
-                    trackColor = MwSlotBg
-                )
-            } else {
-                LinearProgressIndicator(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 6.dp),
-                    color = MwBronzeLight,
-                    trackColor = MwSlotBg
-                )
-            }
-        }
-
-        when (val s = state) {
-            is UpdateState.Downloading -> {
-                SetupButton(
-                    text = stringResource(R.string.updates_cancel),
-                    onClick = {
-                        downloadJob?.cancel()
-                        downloadJob = null
-                    }
-                )
-            }
-
-            is UpdateState.Available -> {
-                SetupButton(
-                    text = if (s.info.sizeBytes > 0) {
+            // Status line — one per state, so the card always says what just happened.
+            val status: String? = when (val s = state) {
+                is UpdateState.Idle -> null
+                is UpdateState.Checking -> stringResource(R.string.updates_checking)
+                is UpdateState.UpToDate -> stringResource(R.string.updates_up_to_date)
+                is UpdateState.Available -> stringResource(R.string.updates_available, s.info.version)
+                is UpdateState.Downloading ->
+                    if (s.isDeterminate) {
                         stringResource(
-                            R.string.updates_download,
-                            UpdateChecker.formatBytes(s.info.sizeBytes)
+                            R.string.updates_downloading,
+                            "${UpdateChecker.formatBytes(s.bytesRead)} / " +
+                                UpdateChecker.formatBytes(s.totalBytes)
                         )
                     } else {
-                        stringResource(R.string.updates_download_no_size)
-                    },
-                    onClick = {
-                        downloadJob = scope.launch { UpdateChecker.download(context) }
+                        stringResource(R.string.updates_downloading_indeterminate)
                     }
-                )
+                is UpdateState.Ready -> stringResource(R.string.updates_ready, s.info.version)
+                is UpdateState.Failed -> stringResource(R.string.updates_failed, s.message)
             }
-
-            is UpdateState.Ready -> {
-                SetupButton(
-                    text = stringResource(R.string.updates_install, s.info.version),
-                    onClick = { startInstall() }
-                )
+            if (status != null) {
                 Text(
-                    text = stringResource(R.string.updates_install_hint),
-                    color = MwBoneDim,
-                    fontSize = 11.sp,
+                    text = status,
+                    color = if (state is UpdateState.Failed) Color(0xFFC75C5C) else MwBone,
+                    fontSize = 13.sp,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 4.dp)
+                    modifier = Modifier.padding(bottom = 6.dp)
                 )
             }
 
-            else -> {
-                SetupButton(
-                    text = stringResource(R.string.updates_check),
-                    onClick = { scope.launch { UpdateChecker.check() } }
-                )
+            // Real progress, not a spinner — this is a ~71MB transfer, so an indeterminate bar would
+            // leave the user with no idea whether it is 5 seconds or 5 minutes from done.
+            (state as? UpdateState.Downloading)?.let { s ->
+                if (s.isDeterminate) {
+                    LinearProgressIndicator(
+                        progress = { s.fraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        color = MwBronzeLight,
+                        trackColor = MwSlotBg
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        color = MwBronzeLight,
+                        trackColor = MwSlotBg
+                    )
+                }
+            }
+
+            when (val s = state) {
+                is UpdateState.Downloading -> {
+                    SetupButton(
+                        text = stringResource(R.string.updates_cancel),
+                        onClick = {
+                            downloadJob?.cancel()
+                            downloadJob = null
+                        }
+                    )
+                }
+
+                is UpdateState.Available -> {
+                    SetupButton(
+                        text = if (s.info.sizeBytes > 0) {
+                            stringResource(
+                                R.string.updates_download,
+                                UpdateChecker.formatBytes(s.info.sizeBytes)
+                            )
+                        } else {
+                            stringResource(R.string.updates_download_no_size)
+                        },
+                        onClick = {
+                            downloadJob = scope.launch { UpdateChecker.download(context) }
+                        }
+                    )
+                }
+
+                is UpdateState.Ready -> {
+                    SetupButton(
+                        text = stringResource(R.string.updates_install, s.info.version),
+                        onClick = { startInstall() }
+                    )
+                    Text(
+                        text = stringResource(R.string.updates_install_hint),
+                        color = MwBoneDim,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+
+                else -> {
+                    SetupButton(
+                        text = stringResource(R.string.updates_check),
+                        onClick = { scope.launch { UpdateChecker.check() } }
+                    )
+                }
             }
         }
 
-        // Release notes for the specific release being offered. Shown only when there IS one —
-        // there is nothing useful to link to in the up-to-date/idle/failed states. Uses the real
-        // tag_name from the API response rather than a /releases/latest redirect, so it always
-        // lands on the release we actually named above.
-        state.offeredUpdate()?.let { info ->
-            Text(
-                text = stringResource(R.string.updates_release_notes),
-                color = MwBronzeLight,
-                fontSize = 12.sp,
-                textDecoration = TextDecoration.Underline,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .padding(top = 8.dp)
-                    .clickable { openReleaseNotes(context, info.tag) }
-                    .padding(horizontal = 6.dp, vertical = 3.dp)
-            )
-        }
+        // The "View release notes" link that stood here has MOVED to the notes card beside this
+        // one, which now shows those notes inline and links to the same tag through the same
+        // helper. Two identical links a few centimetres apart said nothing extra.
     }
 }

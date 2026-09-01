@@ -116,6 +116,11 @@ object GameFilesPreferences {
     // Only the banner reads this — the Settings-icon badge is intentionally NOT mutable, so it
     // keeps reflecting update availability directly.
     val UPDATE_BANNER_DISMISSED_KEY = stringPreferencesKey("update_banner_dismissed_version")
+    // App version whose Tamriel Rebuilt launch-time notice the user dismissed, e.g. "1.0.0".
+    // Same VERSION-STRING shape as UPDATE_BANNER_DISMISSED_KEY above, and for the same reason:
+    // the notice must stay dismissed across restarts but come back after the app updates, so a
+    // rewritten or expanded notice is seen again. Absent/empty = never dismissed.
+    val TR_NOTICE_DISMISSED_KEY = stringPreferencesKey("tr_notice_dismissed_version")
     private val _gameFilesUri = MutableStateFlow<String?>(null)
     val BACKGROUND_ANIMATION_KEY = stringPreferencesKey("background_animation")
     val LANGUAGE_KEY = stringPreferencesKey("language")
@@ -537,6 +542,24 @@ object GameFilesPreferences {
     fun loadDismissedUpdateBanner(context: Context): Flow<String> {
         return context.prefsData.map { preferences ->
             preferences[UPDATE_BANNER_DISMISSED_KEY] ?: ""
+        }
+    }
+
+    /** Record that the home-screen Tamriel Rebuilt notice was dismissed while running [version]
+     *  (pass [org.openmw.BuildConfig.RELEASE_VERSION]). Persists across restarts. */
+    suspend fun saveDismissedTamrielRebuiltNotice(context: Context, version: String) {
+        context.dataStore.edit { preferences ->
+            preferences[TR_NOTICE_DISMISSED_KEY] = version
+        }
+    }
+
+    /** The app version the Tamriel Rebuilt notice was dismissed under, or "" if never. Callers
+     *  compare it against the RUNNING version, so the notice returns after an app update — the
+     *  same self-clearing shape as [loadDismissedUpdateBanner], keyed on our version rather than
+     *  on a release being offered. */
+    fun loadDismissedTamrielRebuiltNotice(context: Context): Flow<String> {
+        return context.prefsData.map { preferences ->
+            preferences[TR_NOTICE_DISMISSED_KEY] ?: ""
         }
     }
 
