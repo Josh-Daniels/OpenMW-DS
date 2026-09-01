@@ -55,6 +55,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -6331,6 +6333,33 @@ private fun TextInputOverlay(
     var shift by remember(initialText) { mutableStateOf(initialText.isEmpty()) }
     var page by remember(initialText) { mutableStateOf(KB_PAGE_LETTERS) }
 
+    // --- Console command history (Up/Down), on EVERY keyboard --------------------------------
+    // Deliberately NOT gated on onHide, which is how ` and Hide are scoped. Those are session
+    // controls that would misbehave on a game-raised field; this is just a key, and gating it that
+    // way missed the main case: "Open Console" (Developer Tools) opens the console through the
+    // NATIVE route, so the keyboard that appears is a plain game-raised one with devKeyboard false.
+    // Recall was therefore absent from the one workflow it exists for.
+    //
+    // Gating precisely on "the focused field IS the console" would need a native signal —
+    // COMPANION_TEXT_INPUT_OPEN carries only the caption, not which widget — i.e. a whole engine
+    // rebuild to hide two buttons. Not worth it, because the cost of NOT gating is close to zero:
+    // the list comes from the engine's console history file, so for anyone who has never opened
+    // the console it is empty and Up is simply inert.
+    var history by remember { mutableStateOf(emptyList<String>()) }
+    // Bumped after each Enter so the list is re-read: the engine appends to the file as it accepts
+    // each command, and this overlay is NOT re-created between commands (the console keeps key
+    // focus), so a list cached at open would go stale within the session.
+    var historyNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(historyNonce) {
+        history = withContext(Dispatchers.IO) { readConsoleHistory() }
+    }
+    // -1 = not cycling. Anything else indexes [history].
+    var historyIndex by remember(initialText) { mutableStateOf(-1) }
+    // The half-typed command stashed when cycling STARTS, restored on stepping back past the
+    // newest entry. This is the engine's own `mEditString` behaviour (Console::commandBoxKeyPress),
+    // reproduced here because this drives OUR buffer, not the console's EditBox.
+    var historyStash by remember(initialText) { mutableStateOf("") }
+
     // Single choke point so the preview can never drift from the field — every mutation below goes
     // through this rather than assigning `text` directly.
     val setText: (String) -> Unit = { next ->
@@ -6340,6 +6369,33 @@ private fun TextInputOverlay(
     val typeKey: (String) -> Unit = { k ->
         setText(text + shiftLabel(k, shift))
         if (shift) shift = false
+    }
+
+    // Older. Mirrors the engine's ArrowUp: stash the in-progress edit on the FIRST step only, then
+    // walk backwards and stop at the oldest entry rather than wrapping.
+    val historyOlder: () -> Unit = {
+        if (history.isNotEmpty()) {
+            if (historyIndex < 0) {
+                historyStash = text
+                historyIndex = history.lastIndex
+            } else if (historyIndex > 0) {
+                historyIndex--
+            }
+            setText(history[historyIndex])
+        }
+    }
+    // Newer. Mirrors the engine's ArrowDown: a no-op when not already cycling, and stepping past
+    // the newest entry restores the stashed edit rather than clearing the field.
+    val historyNewer: () -> Unit = {
+        if (historyIndex >= 0) {
+            if (historyIndex < history.lastIndex) {
+                historyIndex++
+                setText(history[historyIndex])
+            } else {
+                historyIndex = -1
+                setText(historyStash)
+            }
+        }
     }
 
     Box(
@@ -6393,28 +6449,54 @@ private fun TextInputOverlay(
             // Keep the newest text in view as it grows past the field. Without this, prose entry
             // types off the bottom edge and the player is writing blind.
             LaunchedEffect(text) { if (prose) fieldScroll.animateScrollTo(fieldScroll.maxValue) }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(SlotBg)
-                    .border(1.dp, Bronze, RoundedCornerShape(4.dp))
-                    .then(
-                        if (prose) Modifier.height(TEXT_INPUT_PROSE_FIELD_HEIGHT)
-                                           .verticalScroll(fieldScroll)
-                        else Modifier
-                    )
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            // The history steppers sit BESIDE the field rather than in the key grid, deliberately.
+            // The key layout was just unified so every keyboard shows the same keys; two more
+            // session-only keys in the bottom row would start pulling it apart again. Here they
+            // also sit next to the text they replace, which is what they act on.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text.ifEmpty { " " },
-                    color = BoneBright,
-                    // Prose wraps at journal-ish sizing; the name field keeps its original single
-                    // large line.
-                    fontSize = if (prose) 15.sp else 20.sp,
-                    fontFamily = if (prose) MwBody else MwData,
-                    lineHeight = if (prose) 20.sp else TextUnit.Unspecified,
-                    maxLines = if (prose) Int.MAX_VALUE else 1
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(SlotBg)
+                        .border(1.dp, Bronze, RoundedCornerShape(4.dp))
+                        .then(
+                            if (prose) Modifier.height(TEXT_INPUT_PROSE_FIELD_HEIGHT)
+                                               .verticalScroll(fieldScroll)
+                            else Modifier
+                        )
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        text.ifEmpty { " " },
+                        color = BoneBright,
+                        // Prose wraps at journal-ish sizing; the name field keeps its original
+                        // single large line.
+                        fontSize = if (prose) 15.sp else 20.sp,
+                        fontFamily = if (prose) MwBody else MwData,
+                        lineHeight = if (prose) 20.sp else TextUnit.Unspecified,
+                        maxLines = if (prose) Int.MAX_VALUE else 1
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                // Always PRESENT, individually enabled. Showing them only when there is history
+                // would put the keyboard back to changing shape depending on state, which is the
+                // thing the unified layout exists to avoid; greyed-out is the honest signal that
+                // there is nothing to recall. Each has its own condition, so the pair also says
+                // where in the history you are: Newer stays inert until you have stepped back.
+                HistoryKey(
+                    up = true,
+                    enabled = history.isNotEmpty(),
+                    onClick = historyOlder
+                )
+                Spacer(Modifier.width(4.dp))
+                HistoryKey(
+                    up = false,
+                    enabled = historyIndex >= 0,
+                    onClick = historyNewer
                 )
             }
             Spacer(Modifier.height(10.dp))
@@ -6476,7 +6558,14 @@ private fun TextInputOverlay(
                 if (onHide != null) {
                     KbKey("Hide", weight = 1.6f) { onHide() }
                 }
-                KbKey("Enter", weight = 2.2f, primary = true) { onConfirm(text) }
+                KbKey("Enter", weight = 2.2f, primary = true) {
+                    onConfirm(text)
+                    // The engine appends the accepted command to console_history.txt, so re-read
+                    // it; and leave the cycle, since the stashed edit has now been submitted.
+                    historyIndex = -1
+                    historyStash = ""
+                    historyNonce++
+                }
             }
         }
     }
@@ -6488,6 +6577,41 @@ private val TEXT_INPUT_PROSE_FIELD_HEIGHT = 120.dp
 
 /** Weight taken by the two fixed keys that bracket row 3: the shift/page slot and backspace. */
 private const val KB_ROW2_RESERVED = 3.2f
+
+/**
+ * One of the two console-history steppers beside the text field.
+ *
+ * A drawn Material chevron rather than a `▲`/`▼` label: the game font (MysticCards) has no `cmap`
+ * entry for either arrow, so a text key would fall back or tofu. Same reason the settings window's
+ * arrows became vectors when it started using the game font.
+ *
+ * Styled as a [KbKey] so it reads as part of the keyboard, but sized to the field rather than the
+ * key grid, and it carries the same [tapFlash] acknowledgement every key does.
+ */
+@Composable
+private fun HistoryKey(up: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (enabled) SlotBg else SlotBg.copy(alpha = 0.4f))
+            .border(1.dp, if (enabled) BronzeDark else BronzeDark.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+            .then(
+                if (enabled) {
+                    Modifier.tapFlash { UiSounds.play(UiSounds.Cue.KEY); onClick() }
+                } else {
+                    Modifier
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = if (up) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+            contentDescription = if (up) "Previous command" else "Next command",
+            tint = if (enabled) Bone else BoneDim.copy(alpha = 0.5f)
+        )
+    }
+}
 
 @Composable
 private fun KbRow(content: @Composable RowScope.() -> Unit) {
@@ -22056,6 +22180,32 @@ private fun ResetSettingsRow() {
  * `onNativeKeyDown`/`Up` are already `public static native` on the bundled SDLActivity and are what
  * its own key handler calls, so this is a Kotlin-only change.
  */
+/**
+ * The engine's own console command history, newest LAST.
+ *
+ * Read straight from `<config>/console_history.txt`, which is OpenMW's file, not ours:
+ * `Console::initConsoleHistory` reads it at startup (capped by `[General] console history buffer
+ * size`, default 4096), rewrites it, then appends every accepted command with `std::endl` — which
+ * flushes — so the file is complete and current at any moment during a session. Reading it means
+ * the DS keyboard's Up/Down offer exactly what a desktop console would, **including commands from
+ * previous sessions**, with no history of our own to keep in step.
+ *
+ * Deliberately NOT a companion-side list of commands we happened to send. That would start empty
+ * at every launch while the real history sat on disk beside it, and would silently diverge from
+ * what the console itself recalls.
+ *
+ * Read-only: the file stays the engine's to write. Any failure degrades to an empty list, which
+ * simply leaves the history arrows inert.
+ */
+private fun readConsoleHistory(): List<String> = runCatching {
+    val f = File("${Constants.USER_CONFIG}/console_history.txt")
+    if (!f.isFile) return@runCatching emptyList()
+    f.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+}.getOrElse {
+    Log.w("CompanionScreen", "could not read console history", it)
+    emptyList()
+}
+
 private fun openNativeConsole() {
     runCatching {
         SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_GRAVE)
