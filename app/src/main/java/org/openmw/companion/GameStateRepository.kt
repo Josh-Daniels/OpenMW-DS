@@ -599,7 +599,8 @@ object GameStateRepository {
             val a = if (channels == 4) data[o + 3].toInt() and 0xFF else 0xFF
             pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
         }
-        _globalMapBase.value?.recycle()
+        // NEVER recycle the outgoing bitmap here: this runs on the ENGINE thread while Compose
+        // may be drawing that very bitmap on the UI thread (see clearMapDs for the full note).
         _globalMapBase.value = flipVertically(
             Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888))
         _globalMapInfo.value = GlobalMapInfo(width, height, minX, minY, cellPixels)
@@ -617,7 +618,7 @@ object GameStateRepository {
             val a = rgba[o + 3].toInt() and 0xFF
             pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
         }
-        _globalMapOverlay.value?.recycle()
+        // Same as onGlobalMapBase: no recycle of the outgoing bitmap. See clearMapDs.
         _globalMapOverlay.value = flipVertically(
             Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888))
     }
@@ -631,14 +632,32 @@ object GameStateRepository {
     }
 
     /** Dropped when the DS map unmounts — these are the largest bitmaps the companion ever holds
-     *  (~3 MB each for the two global layers), and they are re-pushed on the next mount anyway. */
+     *  (~3 MB each for the two global layers, far more with a landmass mod), and they are re-pushed
+     *  on the next mount anyway.
+     *
+     *  **DO NOT `recycle()` ANY BITMAP THAT HAS BEEN PUBLISHED TO A StateFlow HERE OR IN THE TWO
+     *  PRODUCERS ABOVE.** Doing so crashed the app with `Canvas: trying to use a recycled bitmap`
+     *  at the `drawImage` in `MapSurface` (confirmed from a real stack trace, Aug 31 2026; reported
+     *  as "rapid open/close of the DS map crashes"). Two distinct races, and neither is exclusive
+     *  to rapid toggling:
+     *   - THIS function runs in `MapDsControls`' `DisposableEffect.onDispose` on the UI thread, but
+     *     a draw pass that already captured the old bitmap can still run after it.
+     *   - `onGlobalMapBase`/`onGlobalMapOverlay` run on the ENGINE thread (JNI), so recycling the
+     *     outgoing bitmap there tears it out from under a UI-thread draw. That path fires on every
+     *     re-export, i.e. also on an ordinary note add/edit/delete while the map is open — so this
+     *     was reachable in normal use, just far less often than by toggling.
+     *  Dropping the reference is sufficient: since API 26 a Bitmap's pixels live in the native heap
+     *  behind a NativeAllocationRegistry, and the docs are explicit that `recycle()` "normally need
+     *  not be called, since the normal GC process will free up this memory". The only recycles left
+     *  in this file are of LOCAL intermediates that were never published (`flipVertically`'s `src`,
+     *  `onMapTexture`'s `raw`), which nothing else can be holding. */
     fun clearMapDs() {
         _mapDsState.value = null
         _mapNotes.value = emptyList()
         _mapPlaces.value = emptyList()
         _mapFog.value = emptyMap()
-        _globalMapBase.value?.recycle(); _globalMapBase.value = null
-        _globalMapOverlay.value?.recycle(); _globalMapOverlay.value = null
+        _globalMapBase.value = null
+        _globalMapOverlay.value = null
         _globalMapInfo.value = null
         mapStateBuffer = null; mapNoteBuffer = null; mapPlaceBuffer = null
         // Belt and braces: native already emits one neutral COMPANION_STICK when the map closes, but
