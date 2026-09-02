@@ -6,7 +6,9 @@ the game's own menus (conversation, bartering, looting, alchemy, enchanting, spe
 more), several of which use both screens at once. There is full touch and controller support. 
 
 The current build has an experimental option for Retroid Devices using a Dual Screen Add-On. In the launcher go to Settings > 
-scroll to the bottom and choose "Retroid Dual Screen (Experimental)". It is experimental so use at your own risk.
+scroll to the bottom and choose "Retroid Dual Screen (Experimental)". It is experimental so use at your own risk. Known issues 
+where touching the screen takes focus away from the main screen for controller. Tap the top screen again as a temp fix. Will 
+be patched in next update.
 
 This project is a fork of **[Alpha3](#credits)**, a multi-engine Android launcher that can handle OpenMW,
 which is itself a fork of the **[openmw-android](#credits)** project, which builds on **[OpenMW](#credits)**, the open-source Morrowind engine.
@@ -28,7 +30,7 @@ Five tabs, live-updating while you play.
   and spell, a sneak indicator, the tracked quest, and a combat target's health.
 - **Inventory**: the full item list with tap to equip, use or read, and long press for info, drop or favourite. Sortable
   and filterable by category, showing per-item weight, condition and enchantment charge.
-- **Spells**: spells, powers, scrolls and enchanted items. Tap to select, long press for info or to favourite. Learned
+- **Spells**: spells, powers, scrolls and enchanted items. Tap to select, long press for info, add to favourites, delete spell. Learned
   spells show their magicka cost, school and casting chance; scrolls and enchanted items show their charge. Every row
   summarises its first effect.
 - **Stats**: the character sheet, where every row opens a detail popup. Attributes, skills, health, magicka and
