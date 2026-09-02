@@ -287,8 +287,40 @@ local function effectCount(effects)
     return n
 end
 
+-- The set of spell ids the player cannot delete: every spell granted by their RACE or BIRTHSIGN.
+--
+-- Transcribes SpellWindow::askDeleteSpell's rule, whose other half (type == Power) is applied at the
+-- call site below. Both lists come from the SAME engine helper the native check reads
+-- (createReadOnlyRefIdTable over rec.mPowers.mList -- see the race/birthsign blocks in
+-- exportCharacterDetail), so the two cannot disagree about what is inherent.
+--
+-- This is only what HIDES the menu entry. The delete bridge re-runs the real check natively before
+-- removing anything, so a wrong answer here can hide a deletable spell but can never delete a
+-- protected one. Built once per export rather than per spell.
+local function inherentSpellIds()
+    local out = {}
+    pcall(function()
+        local npcRec = types.NPC.record(self)
+        local r = npcRec and types.NPC.races.records[npcRec.race]
+        if r and r.spells then
+            for _, id in ipairs(r.spells) do out[id] = true end
+        end
+    end)
+    pcall(function()
+        local signId = types.Player.getBirthSign(self)
+        if signId and signId ~= "" then
+            local b = types.Player.birthSigns.records[signId]
+            if b and b.spells then
+                for _, id in ipairs(b.spells) do out[id] = true end
+            end
+        end
+    end)
+    return out
+end
+
 local function exportSpells()
     local parts = {}
+    local inherent = inherentSpellIds()
 
     for _, spell in ipairs(types.Actor.spells(self)) do
         if isCastable(spell.id) then
@@ -308,10 +340,15 @@ local function exportSpells()
             local effName, school = firstEffectInfo(rec and rec.effects)
             local cost = 0
             pcall(function() cost = math.floor((rec.cost or 0) + 0.5) end)
+            -- Deletable exactly when vanilla's Delete button would allow it: a normal spell (not a
+            -- Power) that is not granted by race or birthsign. Only emitted when TRUE, so scroll and
+            -- enchanted-item lines stay byte-identical and older parses are unaffected.
+            local deletable = (typeStr == "spell") and not inherent[spell.id]
             table.insert(parts, string.format(
-                '{"id":"%s","name":"%s","type":"%s","icon":"%s","effect":"%s","school":"%s","cost":%d,"effectCount":%d}',
+                '{"id":"%s","name":"%s","type":"%s","icon":"%s","effect":"%s","school":"%s","cost":%d,"effectCount":%d%s}',
                 jsonEscape(spell.id), jsonEscape(nm), typeStr, jsonEscape(icon),
-                jsonEscape(effName), jsonEscape(school), cost, effectCount(rec and rec.effects)))
+                jsonEscape(effName), jsonEscape(school), cost, effectCount(rec and rec.effects),
+                deletable and ',"deletable":true' or ''))
         end
     end
 

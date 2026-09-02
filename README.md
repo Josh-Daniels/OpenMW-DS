@@ -3,7 +3,10 @@
 A second-screen companion for OpenMW on the AYN Thor handheld. The game plays on the top screen, while the bottom screen
 carries the character sheet, inventory, magic, journal and map. It also offers optional bottom-screen replacements for
 the game's own menus (conversation, bartering, looting, alchemy, enchanting, spellmaking, level up, the world map and
-more), several of which use both screens at once. There is full touch and controller support.
+more), several of which use both screens at once. There is full touch and controller support. 
+
+The current build has an experimental option for Retroid Devices using a Dual Screen Add-On. In the launcher go to Settings > 
+scroll to the bottom and choose "Retroid Dual Screen (Experimental)". It is experimental so use at your own risk.
 
 This project is a fork of **[Alpha3](#credits)**, a multi-engine Android launcher that can handle OpenMW,
 which is itself a fork of the **[openmw-android](#credits)** project, which builds on **[OpenMW](#credits)**, the open-source Morrowind engine.

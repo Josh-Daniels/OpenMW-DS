@@ -423,7 +423,8 @@ object LogParser {
         effect = o.optString("effect", ""),
         school = o.optString("school", ""),
         cost = o.optInt("cost", 0),
-        effectCount = o.optInt("effectCount", 0)
+        effectCount = o.optInt("effectCount", 0),
+        deletable = o.optBoolean("deletable", false)
     )
 
     private fun after(line: String, prefix: String): String {

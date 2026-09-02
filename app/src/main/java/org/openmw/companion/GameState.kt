@@ -69,6 +69,16 @@ data class SpellEntry(
     val school: String = "",
     val cost: Int = 0,
     /**
+     * Whether vanilla's Delete Spell button would accept this spell -- a normal spell (not a Power)
+     * that is not granted by the player's race or birthsign. Emitted by companion.lua only when
+     * true, so it defaults false for scrolls, enchanted items and anything from an older export.
+     *
+     * Display only: it decides whether the long-press menu offers Delete. The native bridge re-runs
+     * the real check before removing anything, so a false positive here cannot delete a protected
+     * spell.
+     */
+    val deletable: Boolean = false,
+    /**
      * TOTAL number of effects on this spell/scroll/enchantment. [effect] describes the FIRST one
      * only, so `effectCount - 1` is how many the row does not show — which is what the list renders
      * as "+N more". The full list is the info popup's job (COMPANION_INFO), not this field's.

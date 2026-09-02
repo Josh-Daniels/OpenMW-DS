@@ -16775,6 +16775,7 @@ private fun MagicPanel(state: GameState) {
                                 selected = spell.id == sel,
                                 effect = spell.effect,
                                 effectCount = spell.effectCount,
+                                deletable = spell.deletable,
                                 school = spell.school,
                                 cost = spell.cost,
                                 onInfo = { ItemInfoPopupState.open(spell.id, spell.name, null, kind = InfoKind.SPELL) },
@@ -16795,6 +16796,7 @@ private fun MagicPanel(state: GameState) {
                                 selected = spell.id == sel,
                                 effect = spell.effect,
                                 effectCount = spell.effectCount,
+                                deletable = spell.deletable,
                                 school = spell.school,
                                 cost = spell.cost,
                                 // Only this section passes a chance. The map is keyed by spell id
@@ -16820,6 +16822,7 @@ private fun MagicPanel(state: GameState) {
                                 selected = false,
                                 effect = spell.effect,
                                 effectCount = spell.effectCount,
+                                deletable = spell.deletable,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -16842,6 +16845,7 @@ private fun MagicPanel(state: GameState) {
                                 maxCharge = spell.maxCharge,
                                 effect = spell.effect,
                                 effectCount = spell.effectCount,
+                                deletable = spell.deletable,
                                 onInfo = {
                                     ItemInfoPopupState.open(spell.id, spell.name, enchantByRecordId[spell.id])
                                 },
@@ -16875,12 +16879,21 @@ private fun SpellRow(
     // power's column is left empty and an enchanted item's second number is charge, not chance),
     // and the exporter already filters to that set, so there is no spell-type test here.
     chance: Int? = null,
+    /** Offer Delete in the long-press menu. True only for spells vanilla's own Delete button would
+     *  accept -- see [SpellEntry.deletable]. */
+    deletable: Boolean = false,
     onInfo: (() -> Unit)? = null,
     iconBitmap: ImageBitmap? = null,
     onTap: () -> Unit
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
+    // Two-step delete, confirmed INSIDE the menu rather than in a separate overlay. A Compose
+    // Dialog cannot be used on the companion at all (its window context is type 2037), and a
+    // root-level overlay would be new plumbing for one confirmation; swapping the menu's own
+    // content keeps it local and makes tapping away a cancel for free.
+    var confirmDelete by remember { mutableStateOf(false) }
+    LaunchedEffect(menuOpen) { if (!menuOpen) confirmDelete = false }
     LaunchedEffect(DropdownState.closeRequest) {
         if (DropdownState.closeRequest > 0) menuOpen = false
     }
@@ -17051,6 +17064,49 @@ private fun SpellRow(
                 makeSlot = { FavSlot(spellId, title) },
                 onDone = { menuOpen = false; DropdownState.closeAll() }
             )
+            // Delete, LAST: it is destructive, and last is furthest from where the menu opens under
+            // a thumb. HIDDEN for spells vanilla refuses to delete (Powers, and anything granted by
+            // race or birthsign) rather than shown-and-refused, because the engine answers a refusal
+            // with a native message box that renders on the TOP screen behind the DS panels, so the
+            // player would see nothing happen at all.
+            if (deletable) {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(BronzeDark))
+                if (!confirmDelete) {
+                    DropdownMenuItem(
+                        text = { Text("Delete Spell", fontFamily = MwBody, fontSize = 13.sp) },
+                        onClick = { confirmDelete = true },
+                        colors = MenuDefaults.itemColors(textColor = Color(0xFFC75C5C))
+                    )
+                } else {
+                    // Vanilla confirms too (ConfirmationDialog / sQuestionDeleteSpell), so this
+                    // MATCHES its behaviour rather than adding caution of our own. It also earns its
+                    // place independently: a long-press menu item under a thumb carries more
+                    // accidental-activation risk than the deliberate button click it replaces.
+                    Text(
+                        "Delete this spell permanently?",
+                        color = Bone,
+                        fontSize = 12.sp,
+                        fontFamily = MwBody,
+                        modifier = Modifier
+                            .widthIn(max = 220.dp)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete", fontFamily = MwBody, fontSize = 13.sp) },
+                        onClick = {
+                            menuOpen = false
+                            DropdownState.closeAll()
+                            CompanionActions.deleteSpell(spellId)
+                        },
+                        colors = MenuDefaults.itemColors(textColor = Color(0xFFC75C5C))
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Cancel", fontFamily = MwBody, fontSize = 13.sp) },
+                        onClick = { confirmDelete = false },
+                        colors = MenuDefaults.itemColors(textColor = Bone)
+                    )
+                }
+            }
         }
     }
 }
@@ -22193,16 +22249,16 @@ private fun FpsOverlayRow() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
                 Modifier.weight(1f),
-                label = "Off",
-                active = !enabled,
-                enabled = true
-            ) { UiPreferences.setFpsOverlay(context, false) }
-            OptionPill(
-                Modifier.weight(1f),
                 label = "On",
                 active = enabled,
                 enabled = true
             ) { UiPreferences.setFpsOverlay(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setFpsOverlay(context, false) }
         }
     }
 }
@@ -22225,16 +22281,16 @@ private fun PlayerCombatRow() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
                 Modifier.weight(1f),
-                label = "Off",
-                active = !enabled,
-                enabled = true
-            ) { UiPreferences.setPlayerCombat(context, false) }
-            OptionPill(
-                Modifier.weight(1f),
                 label = "On",
                 active = enabled,
                 enabled = true
             ) { UiPreferences.setPlayerCombat(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setPlayerCombat(context, false) }
         }
     }
 }
@@ -22591,11 +22647,11 @@ private fun DeveloperModeRow() {
         )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(Modifier.weight(1f), label = "Off", active = !enabled, enabled = true) {
-                UiPreferences.setDeveloperMode(context, false)
-            }
             OptionPill(Modifier.weight(1f), label = "On", active = enabled, enabled = true) {
                 UiPreferences.setDeveloperMode(context, true)
+            }
+            OptionPill(Modifier.weight(1f), label = "Off", active = !enabled, enabled = true) {
+                UiPreferences.setDeveloperMode(context, false)
             }
         }
     }
@@ -22901,11 +22957,11 @@ private fun DevToggleRow(label: String, description: String, on: Boolean, onTogg
         )
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OptionPill(Modifier.weight(1f), label = "Off", active = !on, enabled = true) {
-                if (on) onToggle()
-            }
             OptionPill(Modifier.weight(1f), label = "On", active = on, enabled = true) {
                 if (!on) onToggle()
+            }
+            OptionPill(Modifier.weight(1f), label = "Off", active = !on, enabled = true) {
+                if (on) onToggle()
             }
         }
     }
@@ -22936,16 +22992,16 @@ private fun TouchInputRow() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
                 Modifier.weight(1f),
-                label = "Off",
-                active = !enabled,
-                enabled = true
-            ) { UiPreferences.setTouchInput(context, false) }
-            OptionPill(
-                Modifier.weight(1f),
                 label = "On",
                 active = enabled,
                 enabled = true
             ) { UiPreferences.setTouchInput(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setTouchInput(context, false) }
         }
     }
 }
@@ -22986,16 +23042,16 @@ private fun GameCursorRow() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OptionPill(
                 Modifier.weight(1f),
-                label = "Off",
-                active = !enabled,
-                enabled = true
-            ) { UiPreferences.setGameCursor(context, false) }
-            OptionPill(
-                Modifier.weight(1f),
                 label = "On",
                 active = enabled,
                 enabled = true
             ) { UiPreferences.setGameCursor(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setGameCursor(context, false) }
         }
     }
 }

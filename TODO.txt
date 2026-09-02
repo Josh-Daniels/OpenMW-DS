@@ -1,6 +1,0 @@
-TODO bugs & updates:
-
-Updates to reach 1.0.0:
-- Edit the readme.md heavily
-- Make trailer.
-- Make how to video.

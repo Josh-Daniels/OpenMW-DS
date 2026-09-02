@@ -1,0 +1,81 @@
+diff --git a/apps/openmw/mwgui/spellwindow.cpp b/apps/openmw/mwgui/spellwindow.cpp
+index dfbb863795..7046d118ce 100644
+--- a/apps/openmw/mwgui/spellwindow.cpp
++++ b/apps/openmw/mwgui/spellwindow.cpp
+@@ -150,11 +150,11 @@ namespace MWGui
+         updateSpells();
+     }
+ 
+-    void SpellWindow::askDeleteSpell(const ESM::RefId& spellId)
++    // COMPANION: the "can this spell be deleted" rule, lifted verbatim out of askDeleteSpell so the
++    // DS bridge below and the native Delete button cannot drift apart. Behaviour is unchanged --
++    // this is the same code, named.
++    bool companionSpellIsInherent(const ESM::Spell* spell)
+     {
+-        // delete spell, if allowed
+-        const ESM::Spell* spell = MWBase::Environment::get().getESMStore()->get<ESM::Spell>().find(spellId);
+-
+         MWWorld::Ptr player = MWMechanics::getPlayer();
+         const ESM::RefId& raceId = player.get<ESM::NPC>()->mBase->mRace;
+         const ESM::Race* race = MWBase::Environment::get().getESMStore()->get<ESM::Race>().find(raceId);
+@@ -166,6 +166,15 @@ namespace MWGui
+             const ESM::BirthSign* sign = MWBase::Environment::get().getESMStore()->get<ESM::BirthSign>().find(signId);
+             isInherent = sign->mPowers.exists(spell->mId);
+         }
++        return isInherent;
++    }
++
++    void SpellWindow::askDeleteSpell(const ESM::RefId& spellId)
++    {
++        // delete spell, if allowed
++        const ESM::Spell* spell = MWBase::Environment::get().getESMStore()->get<ESM::Spell>().find(spellId);
++
++        const bool isInherent = companionSpellIsInherent(spell);
+ 
+         const auto windowManager = MWBase::Environment::get().getWindowManager();
+         if (isInherent)
+@@ -229,6 +238,44 @@ namespace MWGui
+         updateSpells();
+     }
+ 
++#ifdef __ANDROID__
++    // COMPANION: delete a spell from the DS spells list (CMP:spell_delete).
++    //
++    // Deliberately NOT routed through askDeleteSpell(), unlike most DS bridges which do call the
++    // real handler. That one raises vanilla's ConfirmationDialog, a MyGUI modal that renders on the
++    // TOP screen behind the DS panels and needs native input to dismiss -- the same problem that
++    // put crime alerts and the alchemy messages on the companion. The DS side asks for confirmation
++    // itself; this performs what onDeleteSpellAccept performs once that confirmation is given.
++    //
++    // The inherent check is repeated here rather than trusted from the DS side: hiding the menu
++    // entry is a display decision, and a display bug must not be able to delete a birthsign power.
++    //
++    // NOTE the removal uses Spells::remove's DEFAULT modifyBase = true, which is why this exists at
++    // all. The Lua binding (types.Actor.spells():remove) passes false, leaving the spell in the
++    // actor's base record -- and Spells::readState re-adds every base-record spell on load, so a
++    // Lua-side delete of a bought or taught spell silently comes back after a save/reload.
++    extern "C" void companionDeleteSpell(const char* idText)
++    {
++        if (idText == nullptr || *idText == '\0')
++            return;
++        const ESM::RefId spellId = ESM::RefId::deserializeText(idText);
++        const ESM::Spell* spell = MWBase::Environment::get().getESMStore()->get<ESM::Spell>().search(spellId);
++        if (spell == nullptr || companionSpellIsInherent(spell))
++            return;
++
++        MWWorld::Ptr player = MWMechanics::getPlayer();
++        MWMechanics::CreatureStats& stats = player.getClass().getCreatureStats(player);
++
++        // Same two steps, in the same order, as onDeleteSpellAccept.
++        if (MWBase::Environment::get().getWindowManager()->getSelectedSpell() == spellId)
++            MWBase::Environment::get().getWindowManager()->unsetSelectedSpell();
++        stats.getSpells().remove(spellId);
++
++        // Keep the native window in step for the case where it is also open behind the DS panel.
++        MWBase::Environment::get().getWindowManager()->updateSpellWindow();
++    }
++#endif
++
+     void SpellWindow::onDeleteSpellAccept()
+     {
+         MWWorld::Ptr player = MWMechanics::getPlayer();

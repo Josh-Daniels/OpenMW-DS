@@ -297,6 +297,7 @@ extern "C" void companionSleepCancel();
 extern "C" void companionTravelGo(int index);
 extern "C" void companionTravelCancel();
 // Bottom-screen training (trainingwindow.cpp). Skills addressed by ordinal index in the best-3 list.
+extern "C" void companionDeleteSpell(const char* idText);
 extern "C" void companionTrainSkill(int index);
 extern "C" void companionTrainingCancel();
 // Bottom-screen spell buying (spellbuyingwindow.cpp). Spells addressed by ordinal index.
@@ -860,6 +861,13 @@ void drainCompanionCommands()
         else if (cmd.rfind("CMP:training_cancel", 0) == 0)
         {
             companionTrainingCancel();
+        }
+        // Delete a spell from the DS spells list. Native because Spells::remove's modifyBase
+        // default is what makes the deletion survive a save/reload -- see companion-spell-delete
+        // .patch. The tail after the prefix is the serialized RefId, raw (ids can contain spaces).
+        else if (cmd.rfind("CMP:spell_delete:", 0) == 0)
+        {
+            companionDeleteSpell(cmd.c_str() + (sizeof("CMP:spell_delete:") - 1));
         }
         else if (cmd.rfind("CMP:training_train:", 0) == 0)
         {

@@ -290,6 +290,18 @@ object CompanionActions {
 
     fun mapDeleteNote(index: Int) = runCommand("CMP:map_note_delete:$index")
 
+    /**
+     * Delete a learned spell, as vanilla's Delete Spell button does.
+     *
+     * NATIVE rather than the Lua spells:remove binding, which passes modifyBase = false and so
+     * leaves the spell in the actor's base record -- Spells::readState re-adds those on load, so a
+     * Lua-side delete of a bought or taught spell silently returns after a save/reload. See
+     * companion-spell-delete.patch.
+     *
+     * The id is the tail of the command and is sent raw, since spell ids can contain spaces.
+     */
+    fun deleteSpell(spellId: String) = runCommand("CMP:spell_delete:$spellId")
+
     fun trainSkill(index: Int) = runCommand("CMP:training_train:$index")
 
     // Cancel training (closes the native window + emits COMPANION_TRAINING_CLOSED). Idempotent —
