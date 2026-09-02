@@ -29,7 +29,7 @@ fun MToast(msg: String, isLong: Boolean = false) {
 fun stringRes(resId: Int) = app.getString(resId)
 
 /**
- * Launch options that pin an Activity to the TOP screen ([Display.DEFAULT_DISPLAY]).
+ * Launch options that pin an Activity to the LAUNCHER's screen ([Display.DEFAULT_DISPLAY]).
  *
  * Without an explicit launch display, Android starts an Activity on whichever display the
  * caller is currently showing on. So anything triggered from the bottom (companion) screen
@@ -39,16 +39,35 @@ fun stringRes(resId: Int) = app.getString(resId)
  * resolves to display 4 regardless of where EngineActivity landed. Both then occupy display
  * 4 and the companion Presentation (TYPE_PRESENTATION) layers over the game, leaving the top
  * screen empty.
+ *
+ * **This is the LAUNCHER's display and is deliberately NOT affected by [DisplayRoles].** The
+ * game moved to [gameLaunchOptions] when the display-role setting landed; every remaining
+ * caller of this function — MainActivity's own self-correction, EngineActivity's return to the
+ * launcher, and the settings-page relaunch — is putting the LAUNCHER somewhere and must stay
+ * pinned to the default display whatever the setting says. That is the safety property that
+ * makes a wrong setting recoverable: it can only ever misplace the game, never leave the player
+ * unable to reach the toggle that undoes it.
  */
 fun topScreenLaunchOptions(): Bundle? =
     ActivityOptions.makeBasic().setLaunchDisplayId(Display.DEFAULT_DISPLAY).toBundle()
+
+/**
+ * Launch options for the GAME, which follows the device display profile — see [DisplayRoles].
+ *
+ * Identical to [topScreenLaunchOptions] on the default (AYN Thor) profile; on the swapped profile
+ * it targets the other display instead. Used by [startGame] only.
+ */
+fun gameLaunchOptions(context: Context): Bundle? =
+    ActivityOptions.makeBasic()
+        .setLaunchDisplayId(DisplayRoles.gameDisplayId(context))
+        .toBundle()
 
 @OptIn(InternalCoroutinesApi::class)
 fun Context.startGame(isFinish: Boolean = true) {
     val intent = Intent(this, EngineActivity::class.java).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
-    this.startActivity(intent, topScreenLaunchOptions())
+    this.startActivity(intent, gameLaunchOptions(this))
     if (isFinish) {
         if ((this is Activity)) {
             this.finish()

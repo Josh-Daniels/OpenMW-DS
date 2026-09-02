@@ -39,9 +39,11 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.graphics.PixelFormat
+import android.app.ActivityOptions
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Process
 import android.system.ErrnoException
 import android.system.Os
@@ -53,6 +55,7 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.Display
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
@@ -138,6 +141,7 @@ import org.openmw.utils.GameFilesPreferences.getENVLine
 import org.openmw.utils.GameFilesPreferences.loadAutoMouseMode
 import org.openmw.utils.GameFilesPreferences.readAngle
 import org.openmw.utils.GameFilesPreferences.readSPIRV
+import org.openmw.utils.DisplayRoles
 import org.openmw.utils.topScreenLaunchOptions
 import kotlin.math.roundToInt
 
@@ -158,9 +162,26 @@ class EngineActivity : SDLActivity() {
     // PRIMARY reason we hide the companion. Set in onStop, cleared in onStart.
     private var companionBackgrounded = false
 
+    /** True when the companion is hosted by [CompanionActivity] rather than by a Presentation. */
+    private var companionActivityHost = false
+
     // Full-screen options/display-settings overlay on the bottom-screen Presentation,
     // shown while the in-game pause/options menu is open.
     private var pauseOverlayView: View? = null
+
+    /** How long to wait before acting on the companion Activity's own background, so this
+     *  activity's onStop has a chance to run first when the WHOLE app is being put away. See
+     *  [reassertCompanionActivity]. */
+    private val COMPANION_REASSERT_DELAY_MS = 400L
+
+    // Loop guard. Re-asserting responds to the companion being backgrounded, and the companion
+    // being re-asserted can itself end in it being backgrounded again — on hardware or an OEM
+    // policy that refuses to keep it foreground, that is an unbounded ping-pong at ~2.5Hz with a
+    // flicker on screen and no way for the player to stop it. After this many attempts in quick
+    // succession it gives up until the game is next brought to the foreground, which is both the
+    // natural reset and the point at which the situation may genuinely have changed.
+    private val COMPANION_REASSERT_MAX = 4
+    private val COMPANION_REASSERT_RETRY_MS = 800L
 
     // Read-only conversation-history overlay on the TOP screen (this activity's own
     // window / Display 0), shown while a conversation is active AND the Conversation
@@ -229,6 +250,11 @@ class EngineActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars(this) // fix sometimes systemBars will show again
+        // Also from onResume, not just onStart: at onStart the task may not yet count as
+        // foreground to ActivityTaskManager, and a start refused for that reason is silently
+        // dropped. Harmless to call twice — ensureCompanionForeground returns immediately once the
+        // companion is actually up.
+        ensureCompanionForeground("onResume")
     }
 
     // OpenMW-DS: the companion lives on a SEPARATE physical display with no automatic tie to
@@ -254,12 +280,20 @@ class EngineActivity : SDLActivity() {
         super.onStop()
         companionBackgrounded = true
         updateCompanionForWindowState("onStop")
+        // Keep the two tasks in lockstep: the game going away takes the second screen with it,
+        // rather than leaving a live companion task on the other display with nothing behind it.
+        if (companionActivityHost) CompanionActivity.moveToBack()
     }
 
     override fun onStart() {
         super.onStart()
         companionBackgrounded = false
         updateCompanionForWindowState("onStart")
+        // The companion's task is separate and excluded from recents, so restoring the game does
+        // not restore it — this is what brings the second screen back with the game. Allowed where
+        // the post-home re-assert was not, because coming back from recents is a foreground,
+        // user-initiated action and the app-switch lock does not apply.
+        ensureCompanionForeground("onStart")
     }
 
     override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
@@ -279,16 +313,83 @@ class EngineActivity : SDLActivity() {
      * Idempotent + guarded: no-ops if the Presentation isn't created yet, and never crashes
      * startup/shutdown (fire-and-forget).
      */
+    /**
+     * Bring the companion Activity to the front on its own display, retrying until it is actually
+     * there.
+     *
+     * **The retry is not padding.** A blocked activity start is invisible to the caller —
+     * `startActivity` neither throws nor reports anything when the system refuses it — so the only
+     * way to know whether a launch landed is to look at whether the activity actually started.
+     * Without this, a single refused launch is lost silently and the second screen stays dark with
+     * no way back, which is exactly what happened on the first attempt at this.
+     *
+     * Self-terminating: it stops as soon as [CompanionActivity.started] is true, so the normal case
+     * is one pass. It gives up after [COMPANION_REASSERT_MAX] rather than looping forever on
+     * hardware that will not keep the window up.
+     */
+    private fun ensureCompanionForeground(reason: String, attempt: Int = 0) {
+        if (!companionActivityHost) return
+        if (isFinishing || isDestroyed) return
+        // The game itself must be foreground; companionBackgrounded is this activity's own onStop
+        // flag, so this is precisely the "was the whole app put away" test.
+        if (companionBackgrounded) {
+            Log.d(TAG, "Second-screen: re-assert skipped ($reason); app is backgrounded")
+            return
+        }
+        if (CompanionActivity.started) return
+        if (attempt >= COMPANION_REASSERT_MAX) {
+            Log.w(TAG, "Second-screen: gave up bringing the companion forward ($reason)")
+            return
+        }
+
+        val displayId = DisplayRoles.companionDisplay(this)?.displayId ?: return
+        Log.d(TAG, "Second-screen: bringing companion forward ($reason, attempt ${attempt + 1})")
+        startCompanionActivity(displayId)
+        window.decorView.postDelayed(
+            { ensureCompanionForeground(reason, attempt + 1) },
+            COMPANION_REASSERT_RETRY_MS
+        )
+    }
+
+    /**
+     * The companion's own task went to the background (the per-display home gesture on its screen).
+     *
+     * **Follows it rather than fighting it.** Relaunching the companion here is refused by the
+     * system's post-home app-switch lock and silently dropped, so instead the GAME's task is sent
+     * to the back as well. That leaves the app uniformly backgrounded — which is what the same
+     * gesture does on the default arrangement anyway, where the companion is a window of the game's
+     * activity and cannot be dismissed on its own — and, crucially, leaves it RECOVERABLE: bringing
+     * the game back from recents restores the companion with it, because that is a foreground,
+     * user-initiated start that the lock does not apply to.
+     *
+     * Delayed so that this activity's own onStop has a chance to run first when the whole app is
+     * being put away; in that case there is nothing to do, since both are already going.
+     */
+    private fun onCompanionBackgrounded() {
+        window.decorView.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            if (companionBackgrounded) return@postDelayed  // whole app already going away
+            if (CompanionActivity.started) return@postDelayed  // came back on its own
+            Log.d(TAG, "Second-screen: companion dismissed; backgrounding the game to match")
+            runCatching { moveTaskToBack(true) }
+        }, COMPANION_REASSERT_DELAY_MS)
+    }
+
     private fun updateCompanionForWindowState(reason: String) {
-        val presentation = companionPresentation ?: return
+        val presentation = companionPresentation
+        // Either host, or neither (no companion running) — in which case there is nothing to do.
+        if (presentation == null && CompanionActivity.instance == null) return
         val shouldHide = companionBackgrounded || isGameWindowShrunk()
         try {
             if (shouldHide && !companionHiddenForShrink) {
-                presentation.hide()
+                // The Activity host composes its content away rather than removing its window,
+                // which is the closest analogue of Presentation.hide(): the window stays put, so
+                // coming back does not mean relaunching an activity onto another display.
+                if (presentation != null) presentation.hide() else CompanionActivity.setVisible(false)
                 companionHiddenForShrink = true
                 Log.d(TAG, "Companion hidden via $reason")
             } else if (!shouldHide && companionHiddenForShrink) {
-                presentation.show()
+                if (presentation != null) presentation.show() else CompanionActivity.setVisible(true)
                 companionHiddenForShrink = false
                 Log.d(TAG, "Companion re-shown via $reason")
             }
@@ -335,8 +436,10 @@ class EngineActivity : SDLActivity() {
         hideLootingTopOverlay()
         hideBarterTopOverlay()
 
-        // OpenMW-DS
+        // OpenMW-DS. Both hosts are torn down: only one of them is ever live, and finishIfRunning
+        // is a no-op when the Activity host was never launched.
         companionPresentation?.dismiss()
+        CompanionActivity.finishIfRunning()
 
         finishAffinity() // kill all activity
         Process.killProcess(Process.myPid())
@@ -967,12 +1070,20 @@ class EngineActivity : SDLActivity() {
 
     // OpenMW-DS Second screen function.
     private fun startCompanionScreen() {
+        // Which display the companion goes on now follows the device display profile — on the
+        // default (AYN Thor) profile this resolves to exactly what it always did, the first
+        // presentation-capable display. See DisplayRoles.
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        val displays = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
-        Log.d(TAG, "Second-screen: found ${displays.size} presentation display(s)")
+        Log.d(
+            TAG,
+            "Second-screen: profile=${DisplayRoles.profile(this)}, " +
+                "${dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION).size} " +
+                "presentation display(s), activity on display ${display?.displayId}"
+        )
+        val companionDisplay = DisplayRoles.companionDisplay(this)
 
-        if (displays.isEmpty()) {
-            Log.e(TAG, "Second-screen: NO presentation display found")
+        if (companionDisplay == null) {
+            Log.e(TAG, "Second-screen: NO display available for the companion")
             return
         }
 
@@ -980,7 +1091,44 @@ class EngineActivity : SDLActivity() {
         runCatching { installCompanionSink() }
             .onFailure { Log.e(TAG, "installCompanionSink failed", it) }
 
-        val presentation = Presentation(this, displays[0])
+        // TWO possible hosts for the same CompanionScreen composable.
+        //
+        // A Presentation is the normal one and cannot be used on the SWAPPED arrangement: Android
+        // refuses TYPE_PRESENTATION on any display without FLAG_PRESENTATION, which it never sets
+        // on the default display. So when swapped the companion is an Activity on that display
+        // instead — see CompanionActivity for the full reasoning. Everything after this point is
+        // shared, because the difference is only which window the same UI lives in.
+        if (DisplayRoles.rolesSwapped(this)) {
+            startCompanionActivity(companionDisplay.displayId)
+        } else {
+            startCompanionPresentation(companionDisplay)
+        }
+
+        startCompanionCollectors()
+    }
+
+    /** Companion host for the swapped arrangement: an Activity pinned to [displayId]. */
+    private fun startCompanionActivity(displayId: Int) {
+        val intent = Intent(this, CompanionActivity::class.java).apply {
+            // NEW_TASK is required for a launch onto another display, and singleInstance in the
+            // manifest keeps it in a task of its own so it cannot drag the game's task across.
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId).toBundle()
+        runCatching { startActivity(intent, options) }
+            .onSuccess {
+                companionActivityHost = true
+                companionHiddenForShrink = false
+                CompanionActivity.setVisible(true)
+                CompanionActivity.onBackgrounded = { onCompanionBackgrounded() }
+                Log.d(TAG, "Second-screen: companion ACTIVITY launched on display $displayId")
+            }
+            .onFailure { Log.e(TAG, "Second-screen: companion activity launch failed", it) }
+    }
+
+    /** Companion host for the default arrangement, unchanged. */
+    private fun startCompanionPresentation(companionDisplay: Display) {
+        val presentation = Presentation(this, companionDisplay)
         val composeView = ComposeView(presentation.context).apply {
             setContent { CompanionScreen() }
         }
@@ -1002,16 +1150,19 @@ class EngineActivity : SDLActivity() {
         runCatching {
             presentation.show()
             companionPresentation = presentation
-            Log.d(TAG, "Second-screen: companion UI shown on display ${displays[0].displayId}")
+            Log.d(TAG, "Second-screen: companion UI shown on display ${companionDisplay.displayId}")
             // If we happened to launch while already in multi-window, hide it immediately.
             companionHiddenForShrink = false
             updateCompanionForWindowState("startCompanionScreen")
         }.onFailure {
             Log.e(TAG, "Second-screen: show() failed", it)
         }
+    }
 
-        // Add/remove a full-screen WindowManager overlay on the bottom-screen
-        // Presentation when the in-game pause/options menu opens/closes.
+    /** Everything that is the same for both companion hosts. */
+    private fun startCompanionCollectors() {
+        // Add/remove a full-screen WindowManager overlay on the companion window
+        // when the in-game pause/options menu opens/closes.
         lifecycleScope.launch {
             // Show the options/display-settings overlay for EITHER the in-game pause menu
             // (pauseMenuVisible, from companion.lua) OR the title-screen main menu
@@ -1796,15 +1947,28 @@ class EngineActivity : SDLActivity() {
         barterTopView = null
     }
 
+    /**
+     * The window the companion is currently living in, whichever host is in use — the Presentation
+     * on the default arrangement, the CompanionActivity on the swapped one.
+     *
+     * The pause/options overlay is the ONE part of the companion that is a separate window rather
+     * than part of CompanionScreen's composition, so it is the only thing that has to know which
+     * host it is attaching to. Everything else in the companion rides inside that composition and
+     * is identical either way.
+     */
+    private fun companionHostWindow(): android.view.Window? =
+        companionPresentation?.window ?: CompanionActivity.instance?.window
+
     private fun showPauseOverlay() {
         if (pauseOverlayView != null) return
-        val presentation = companionPresentation ?: return
-        val wm = presentation.window?.windowManager ?: return
-        val decor = presentation.window?.decorView ?: return
+        val hostWindow = companionHostWindow() ?: return
+        val wm = hostWindow.windowManager ?: return
+        val decor = hostWindow.decorView ?: return
+        val hostContext = hostWindow.context
         decor.post {
             if (pauseOverlayView != null) return@post
             val token = decor.windowToken ?: return@post
-            val overlay = ComposeView(presentation.context).apply {
+            val overlay = ComposeView(hostContext).apply {
                 setViewTreeLifecycleOwner(this@EngineActivity)
                 setViewTreeViewModelStoreOwner(this@EngineActivity)
                 setViewTreeSavedStateRegistryOwner(this@EngineActivity)
@@ -1842,8 +2006,7 @@ class EngineActivity : SDLActivity() {
 
     private fun hidePauseOverlay() {
         val overlay = pauseOverlayView ?: return
-        val wm = companionPresentation?.window?.windowManager
-        runCatching { wm?.removeView(overlay) }
+        runCatching { companionHostWindow()?.windowManager?.removeView(overlay) }
         pauseOverlayView = null
     }
 

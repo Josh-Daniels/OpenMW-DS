@@ -25,6 +25,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Point
 import android.hardware.display.DisplayManager
+import org.openmw.utils.DisplayRoles
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
@@ -503,7 +504,7 @@ fun enableLogcat() {
  * Overwriting unconditionally makes each launch self-correcting, which also repairs
  * devices already stuck on a wrong value. Callers gate this on the user's
  * `AVOID_RESOLUTION_INSERTION` preference; pass the TOP screen's size (see
- * [topScreenRealSize]), never the calling window's.
+ * [gameScreenRealSize]), never the calling window's.
  */
 fun updateResolutionInConfig(width: Int, height: Int) {
     if (width <= 0 || height <= 0) return
@@ -707,19 +708,24 @@ private fun setSettingInSection(
 }
 
 /**
- * Real pixel size of the TOP screen ([Display.DEFAULT_DISPLAY]), independent of whichever
- * physical display the calling Activity happens to be running on.
+ * Real pixel size of the display the GAME will render on, independent of whichever physical
+ * display the calling Activity happens to be running on.
  *
  * Deliberately SEPARATE from [currentDeviceRealSize], which reports the caller's own
- * window and is what the touch-coordinate mapping in the Dynamic* controls wants. The
- * game always renders on the top screen, so resolution detection must be pinned to
- * display 0 — otherwise a first launch placed on the companion (bottom) display detects
- * 1240x1080 and `SDLSurface.setFixedSize` then forces the render target to that. Mirrors
- * the explicit display lookup in `EngineActivity.startCompanionScreen()`.
+ * window and is what the touch-coordinate mapping in the Dynamic* controls wants. Resolution
+ * detection must be pinned to the game's display — otherwise a first launch placed on the
+ * companion display detects that panel's size and `SDLSurface.setFixedSize` then forces the
+ * render target to it.
+ *
+ * The display is resolved through [DisplayRoles], the same resolver that decides where
+ * `EngineActivity` is launched, so it follows the device display profile automatically. **Nothing
+ * here is hardcoded per device**: whichever display currently holds the game role is measured, and
+ * its real size is what gets written to `settings.cfg`. On the default (AYN Thor) profile this
+ * resolves to [Display.DEFAULT_DISPLAY], exactly as before.
  */
-fun Context.topScreenRealSize(): Pair<Int, Int> {
+fun Context.gameScreenRealSize(): Pair<Int, Int> {
     val display = (getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
-        ?.getDisplay(Display.DEFAULT_DISPLAY)
+        ?.getDisplay(DisplayRoles.gameDisplayId(this))
 
     if (display != null) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -743,7 +749,7 @@ fun Context.topScreenRealSize(): Pair<Int, Int> {
         if (size.x > 0 && size.y > 0) return Pair(size.x, size.y)
     }
 
-    // Last resort only: this display is what the old (buggy) detection always used.
+    // Last resort only: the caller's own window, which is what the old (buggy) detection used.
     val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     return windowManager.currentDeviceRealSize()
 }

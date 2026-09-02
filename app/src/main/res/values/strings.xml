@@ -152,6 +152,7 @@
       The entries below are placeholders describing existing behaviour; replace them freely.
     -->
     <string-array name="launcher_tips">
+        <item>On a Retroid dual screen device, is the game on the wrong panel? Open Settings with the gear button above, then set Device to Retroid Dual Screen. The launcher always stays on this screen, so you can change it back.</item>
         <item>Poor performance in large modded cities? The game is CPU heavy, so if you have the ClusterTune app running, switch it to stock. Capping the CPU makes the frame rate noticeably choppier.</item>
         <item>Drag a mod by its handle to change the load order. The checkbox next to it turns the mod on or off.</item>
         <item>Reset order puts the list back to the default: Morrowind, Tribunal and Bloodmoon first, then Tamriel Rebuilt, then everything else.</item>
@@ -163,6 +164,11 @@
     <string name="use_simplified_launcher">Use simplified launcher</string>
     <string name="use_simplified_launcher_tip">Switch to the streamlined OpenMW-DS launcher. You can switch back from its settings screen at any time.</string>
     <string name="launcher_game_font">Use game font</string>
+    <string name="launcher_device">Device</string>
+    <string name="launcher_device_tip">Which screen the game runs on. Change this only if the game and the second screen appear on the wrong panels. The launcher itself always stays on this screen, so you can change it back.</string>
+    <string name="launcher_device_thor">AYN Thor</string>
+    <string name="launcher_device_retroid">Retroid Dual Screen (Experimental)</string>
+    <string name="launcher_device_unsupported">No second screen was detected, so this option has no effect here.</string>
     <string name="launcher_game_font_tip">Show this launcher in the game\'s font, matching the companion screens. Turn off for the standard system font.</string>
     <string name="simplified_launcher_title">OpenMW-DS</string>
     <string name="simplified_launcher_settings_title">Settings</string>

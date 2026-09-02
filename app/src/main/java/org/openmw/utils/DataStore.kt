@@ -121,6 +121,14 @@ object GameFilesPreferences {
     // the notice must stay dismissed across restarts but come back after the app updates, so a
     // rewritten or expanded notice is seen again. Absent/empty = never dismissed.
     val TR_NOTICE_DISMISSED_KEY = stringPreferencesKey("tr_notice_dismissed_version")
+    // Which physical display plays the GAME role and which plays the COMPANION role. Holds a
+    // DisplayRoles.PROFILE_* id, not a boolean, so a third device profile can be added without a
+    // migration. Absent = DisplayRoles.PROFILE_DEFAULT (AYN Thor, i.e. today's behaviour).
+    //
+    // In the DataStore rather than SharedPreferences DELIBERATELY: this store lives on external
+    // storage and survives a reinstall, and a user who needed the non-default profile to see the
+    // game at all must not silently lose it and be handed a swapped screen again.
+    val DISPLAY_PROFILE_KEY = stringPreferencesKey("display_profile")
     private val _gameFilesUri = MutableStateFlow<String?>(null)
     val BACKGROUND_ANIMATION_KEY = stringPreferencesKey("background_animation")
     val LANGUAGE_KEY = stringPreferencesKey("language")
@@ -560,6 +568,22 @@ object GameFilesPreferences {
     fun loadDismissedTamrielRebuiltNotice(context: Context): Flow<String> {
         return context.prefsData.map { preferences ->
             preferences[TR_NOTICE_DISMISSED_KEY] ?: ""
+        }
+    }
+
+    /** Persist the device display profile (a `DisplayRoles.PROFILE_*` id). */
+    suspend fun saveDisplayProfile(context: Context, profileId: String) {
+        context.dataStore.edit { preferences ->
+            preferences[DISPLAY_PROFILE_KEY] = profileId
+        }
+    }
+
+    /** The stored display profile, or the default when unset. Keep every `collectAsState` initial
+     *  value in step with this fallback so an unset preference never shows the wrong option for a
+     *  frame. */
+    fun loadDisplayProfile(context: Context): Flow<String> {
+        return context.prefsData.map { preferences ->
+            preferences[DISPLAY_PROFILE_KEY] ?: DisplayRoles.PROFILE_DEFAULT
         }
     }
 

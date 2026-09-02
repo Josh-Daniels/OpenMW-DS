@@ -61,6 +61,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -152,6 +154,7 @@ import org.openmw.ui.view.attemptLaunchGame
 import org.openmw.ui.view.resetUserSettingsFile
 import org.openmw.utils.AlphaMigration
 import org.openmw.utils.ApkInstaller
+import org.openmw.utils.DisplayRoles
 import org.openmw.utils.FileBrowserMode
 import org.openmw.utils.InstallResult
 import org.openmw.utils.FileBrowserPopup
@@ -2297,6 +2300,10 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
     // switch never shows the wrong position for a frame.
     val gameFontFlow = remember(context) { GameFilesPreferences.loadLauncherGameFont(context) }
     val launcherGameFont by gameFontFlow.collectAsState(initial = true)
+    // Same remember-then-collect shape; the initial value matches the store's own fallback so the
+    // dropdown never shows the wrong device for a frame.
+    val displayProfileFlow = remember(context) { GameFilesPreferences.loadDisplayProfile(context) }
+    val displayProfile by displayProfileFlow.collectAsState(initial = DisplayRoles.PROFILE_DEFAULT)
     var showResetDialog by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var confirmModOrder by rememberSaveable { mutableStateOf(false) }
@@ -2447,6 +2454,51 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                     onCheckedChange = {
                         scope.launch { GameFilesPreferences.saveLauncherGameFont(context, it) }
                     }
+                )
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 8.dp),
+                color = MwBronzeDark
+            )
+
+            // Device display profile — which physical screen the GAME renders on, and therefore
+            // which one the companion takes. Below the font row and above Reset, so it sits with
+            // the other app-level settings rather than beside a destructive action.
+            //
+            // Two users on Retroid dual-screen hardware report the game and companion landing on
+            // opposite panels from the Thor's, which this exists to correct. It is a role SWAP, not
+            // a resolution override: each screen's real size is still detected from whichever
+            // display ends up holding the game role.
+            //
+            // The LAUNCHER never moves, whatever is selected here — see DisplayRoles — so a wrong
+            // choice can only misplace the game and is always undoable from this same screen.
+            SettingRow(
+                title = stringResource(R.string.launcher_device),
+                subtitle = stringResource(R.string.launcher_device_tip)
+            ) {
+                DeviceProfileDropdown(
+                    selected = displayProfile,
+                    onSelected = { id ->
+                        // Cached immediately so the choice applies to the very next Play without
+                        // waiting on the DataStore write to land.
+                        DisplayRoles.onProfileChanged(id)
+                        scope.launch { GameFilesPreferences.saveDisplayProfile(context, id) }
+                    }
+                )
+            }
+
+            // Say so when the selected profile cannot be honoured here, rather than letting it
+            // look applied. Only reachable on a device with no second display, since that is the
+            // one remaining requirement for the swap. See DisplayRoles.swapSupported.
+            if (displayProfile != DisplayRoles.PROFILE_DEFAULT &&
+                !DisplayRoles.swapSupported(context)
+            ) {
+                Text(
+                    text = stringResource(R.string.launcher_device_unsupported),
+                    color = UpdateAccent,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 4.dp)
                 )
             }
 
@@ -2787,6 +2839,47 @@ private fun ColumnScope.NavmeshCard() {
                 Button(onClick = { confirmDelete = false }) { Text(stringResource(R.string.cancel)) }
             }
         )
+    }
+}
+
+/**
+ * Device display-profile picker: which physical screen plays the GAME role.
+ *
+ * A dropdown rather than a switch because this names a DEVICE, not an on/off state — a third
+ * profile can be added to [DisplayRoles] and appear here without the control changing shape or the
+ * stored value needing a migration.
+ */
+@Composable
+private fun DeviceProfileDropdown(selected: String, onSelected: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = listOf(
+        DisplayRoles.PROFILE_THOR to stringResource(R.string.launcher_device_thor),
+        DisplayRoles.PROFILE_RETROID to stringResource(R.string.launcher_device_retroid),
+    )
+    // An unrecognised stored id falls back to showing the id itself rather than silently reading
+    // as the default, so a profile removed in a later build is visible instead of looking like a
+    // spontaneous reset.
+    val label = options.firstOrNull { it.first == selected }?.second ?: selected
+
+    Box {
+        OutlinedButton(onClick = { expanded = true }) {
+            Text(label)
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { (id, text) ->
+                DropdownMenuItem(
+                    text = { Text(text) },
+                    onClick = {
+                        expanded = false
+                        if (id != selected) onSelected(id)
+                    }
+                )
+            }
+        }
     }
 }
 

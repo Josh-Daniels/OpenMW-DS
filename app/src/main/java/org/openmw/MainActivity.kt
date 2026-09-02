@@ -41,7 +41,7 @@ import org.openmw.ui.page.simplified.SimplifiedLauncherRoot
 import org.openmw.ui.theme.OpenMWTheme
 import org.openmw.ui.view.AlphaMigrationFirstLaunch
 import org.openmw.ui.view.MoeDialog
-import org.openmw.ui.view.topScreenRealSize
+import org.openmw.ui.view.gameScreenRealSize
 import org.openmw.ui.view.TUNED_PERF_SETTINGS_VERSION
 import org.openmw.ui.view.applyTunedPerformanceSettings
 import org.openmw.ui.view.seedConsoleWindowSize
@@ -57,6 +57,7 @@ import org.openmw.utils.PermissionHelper
 import org.openmw.utils.PermissionHelper.getManageExternalStoragePermission
 import org.openmw.utils.UpdateChecker
 import org.openmw.utils.UserManageAssets
+import org.openmw.utils.DisplayRoles
 import org.openmw.utils.topScreenLaunchOptions
 
 @InternalCoroutinesApi
@@ -151,12 +152,18 @@ class MainActivity : ComponentActivity() {
                 UserManageAssets(applicationContext).onFirstLaunch()
             }
 
-            // Pin the game's render resolution to the TOP screen, once per launch.
+            // Load the device display profile before anything reads a display role. The launcher
+            // and the engine share a process, so priming it here is what lets startGame() and
+            // startCompanionScreen() resolve their displays without suspending. See DisplayRoles.
+            DisplayRoles.prime(this@MainActivity)
+
+            // Pin the game's render resolution to the display the GAME will use, once per launch.
             // Must NOT use this Activity's own window metrics: MainActivity can be placed
-            // on the companion (bottom) display, and SDLSurface force-sizes the render
-            // target to whatever ends up in settings.cfg. Runs here rather than in the
-            // composition so it can't re-fire on every recomposition.
-            val (topWidth, topHeight) = topScreenRealSize()
+            // on the companion display, and SDLSurface force-sizes the render target to whatever
+            // ends up in settings.cfg. Runs here rather than in the composition so it can't
+            // re-fire on every recomposition. gameScreenRealSize() follows the display profile, so
+            // a swapped profile writes the OTHER panel's real size with nothing hardcoded.
+            val (topWidth, topHeight) = gameScreenRealSize()
             withContext(Dispatchers.IO) {
                 val avoidInsertion =
                     GameFilesPreferences.readResolutionInsertion(this@MainActivity).first()

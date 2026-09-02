@@ -160,6 +160,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.openmw.utils.DisplayRoles
 import org.openmw.utils.GameFilesPreferences
 import java.io.File
 import java.nio.ByteBuffer
@@ -13358,6 +13359,16 @@ private fun BarterRejectedAlert(reason: String, onDismiss: () -> Unit) {
     }
 }
 
+/** Splash notice while the load order includes Tamriel Rebuilt: it can sit on this screen
+ *  unchanged for around half a minute, which otherwise reads as a hung game. */
+private const val SPLASH_NOTICE_TAMRIEL_REBUILT =
+    "Tamriel Rebuilt is on. Expect around 30 seconds to launch."
+
+/** Splash notice while the screens are swapped. Replaces the Tamriel Rebuilt one, since it is
+ *  actionable and play is blocked without it. */
+private const val SPLASH_NOTICE_SWAPPED_CONTROLS =
+    "Tap the game screen to enable controls."
+
 /* ---- Splash panel for when not in game ---- */
 /**
  * Shown from companion start until the first `COMPANION_STATS` line arrives — i.e. across the
@@ -13380,19 +13391,33 @@ private fun BarterRejectedAlert(reason: String, onDismiss: () -> Unit) {
  */
 @Composable
 private fun SplashPanel() {
-    // Tamriel Rebuilt's launch-time notice, the same one the launcher shows. It earns its place
-    // MORE here than there: this screen is what the player is looking at during the wait, and with
-    // TR on it can sit unchanged for around half a minute, which reads as a hung game.
+    // The one line of text on the splash. At most ONE notice is ever shown, and the swapped
+    // display arrangement takes precedence over the Tamriel Rebuilt one.
     //
-    // Read from openmw.cfg rather than passed in, because nothing in the companion's state carries
-    // the load order — this process only ever sees COMPANION_* lines. Done once per splash, off the
-    // main thread, and the null default means the notice simply does not appear until the answer is
-    // known (never a wrong notice for a frame). The file cannot change while the game is booting,
-    // so there is nothing to keep watching.
-    var tamrielRebuiltOn by remember { mutableStateOf<Boolean?>(null) }
+    // WHY THAT PRECEDENCE: with the screens swapped, the game and the companion are separate tasks
+    // on separate displays, and this device gives each display its own input focus. Which one the
+    // controller is talking to on the very first frame is therefore not guaranteed, and the fix is
+    // a single tap on the game screen. That is actionable and blocks play if missed; the TR notice
+    // only sets an expectation about waiting, so it is the one that gives way. It is also exactly
+    // when the player is looking at this screen, which is what makes the splash the right place for
+    // either message.
+    //
+    // The TR answer is read from openmw.cfg rather than passed in, because nothing in the
+    // companion's state carries the load order — this process only ever sees COMPANION_* lines.
+    // Both answers are resolved once per splash, off the main thread (rolesSwapped can fall back to
+    // a blocking preference read if its cache is somehow cold), and the null default means no
+    // notice appears until the answer is known rather than the wrong one appearing for a frame. The
+    // file cannot change while the game is booting, so there is nothing to keep watching.
+    val context = LocalContext.current
+    var notice by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
-        tamrielRebuiltOn = withContext(Dispatchers.IO) {
-            tamrielDataEnabledInConfig(File(Constants.USER_OPENMW_CFG))
+        notice = withContext(Dispatchers.IO) {
+            when {
+                DisplayRoles.rolesSwapped(context) -> SPLASH_NOTICE_SWAPPED_CONTROLS
+                tamrielDataEnabledInConfig(File(Constants.USER_OPENMW_CFG)) ->
+                    SPLASH_NOTICE_TAMRIEL_REBUILT
+                else -> null
+            }
         }
     }
 
@@ -13407,9 +13432,9 @@ private fun SplashPanel() {
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
         )
-        if (tamrielRebuiltOn == true) {
+        notice?.let { text ->
             Text(
-                "Tamriel Rebuilt is on. Expect around 30 seconds to launch.",
+                text,
                 color = BoneBright,
                 fontSize = 13.sp,
                 fontFamily = MwBody,

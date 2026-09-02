@@ -112,6 +112,28 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!--
+             Companion UI host for the SWAPPED display arrangement only (see DisplayRoles). On the
+             default arrangement the companion is an android.app.Presentation and this is never
+             launched.
+
+             singleInstance + an empty taskAffinity so it always forms its own task: a task keeps
+             its display, and this one has to live on a different display from EngineActivity.
+             excludeFromRecents because it is a second screen, not somewhere the user navigates to.
+             The configChanges list mirrors EngineActivity's so a rotation or density change does
+             not recreate it underneath the game.
+        -->
+        <activity
+            android:name="org.openmw.CompanionActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
+            tools:ignore="DiscouragedApi" />
+
         <activity
             android:name="org.openmw.EngineActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density"
