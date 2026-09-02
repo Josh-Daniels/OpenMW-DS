@@ -99,6 +99,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -112,6 +113,7 @@ import org.openmw.ui.controls.UIStateManager.logMessagesFlow
 import org.openmw.ui.controls.UIStateManager.memoryInfoFlow
 import org.openmw.ui.controls.UIStateManager.userUI
 import org.openmw.ui.overlay.MemoryInfo
+import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.getBackgroundAnimationFlow
 import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.stringRes
@@ -723,6 +725,32 @@ private fun setSettingInSection(
  * its real size is what gets written to `settings.cfg`. On the default (AYN Thor) profile this
  * resolves to [Display.DEFAULT_DISPLAY], exactly as before.
  */
+/**
+ * Measure the display the game will use and pin `[Video] resolution x/y` to it, honouring the
+ * player's `AVOID_RESOLUTION_INSERTION` opt-out.
+ *
+ * **Called from TWO places, and both are required.** `MainActivity` runs it once per launch, which
+ * is what keeps a device repaired after the engine's own shutdown writeback. The display-profile
+ * dropdown runs it again the moment the profile CHANGES — without that the resolution is always one
+ * launch behind the setting, because MainActivity's pass already happened: switch profile, press
+ * Play, and the game renders on the newly-chosen panel at the OTHER panel's resolution. It only
+ * came right after closing and reopening the launcher, which is a poor thing to require and an easy
+ * one to mistake for a rendering bug.
+ *
+ * Safe to call whenever the game is NOT running. `settings.cfg` is read at engine startup and
+ * rewritten from the engine's in-memory copy on a clean exit, so a write made mid-session would be
+ * silently discarded — both callers are in the launcher, before Play.
+ */
+suspend fun Context.applyGameScreenResolution() {
+    // Measured on the caller's thread (the display query is cheap and is what MainActivity has
+    // always done); only the file write moves to IO.
+    val (width, height) = gameScreenRealSize()
+    withContext(Dispatchers.IO) {
+        val avoidInsertion = GameFilesPreferences.readResolutionInsertion(this@applyGameScreenResolution).first()
+        if (!avoidInsertion) updateResolutionInConfig(width, height)
+    }
+}
+
 fun Context.gameScreenRealSize(): Pair<Int, Int> {
     val display = (getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
         ?.getDisplay(DisplayRoles.gameDisplayId(this))

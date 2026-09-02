@@ -41,11 +41,10 @@ import org.openmw.ui.page.simplified.SimplifiedLauncherRoot
 import org.openmw.ui.theme.OpenMWTheme
 import org.openmw.ui.view.AlphaMigrationFirstLaunch
 import org.openmw.ui.view.MoeDialog
-import org.openmw.ui.view.gameScreenRealSize
+import org.openmw.ui.view.applyGameScreenResolution
 import org.openmw.ui.view.TUNED_PERF_SETTINGS_VERSION
 import org.openmw.ui.view.applyTunedPerformanceSettings
 import org.openmw.ui.view.seedConsoleWindowSize
-import org.openmw.ui.view.updateResolutionInConfig
 import org.openmw.utils.CaptureCrash
 import org.openmw.utils.ConfigFileObserver
 import org.openmw.utils.GameFilesPreferences
@@ -158,18 +157,14 @@ class MainActivity : ComponentActivity() {
             DisplayRoles.prime(this@MainActivity)
 
             // Pin the game's render resolution to the display the GAME will use, once per launch.
-            // Must NOT use this Activity's own window metrics: MainActivity can be placed
-            // on the companion display, and SDLSurface force-sizes the render target to whatever
-            // ends up in settings.cfg. Runs here rather than in the composition so it can't
-            // re-fire on every recomposition. gameScreenRealSize() follows the display profile, so
-            // a swapped profile writes the OTHER panel's real size with nothing hardcoded.
-            val (topWidth, topHeight) = gameScreenRealSize()
+            // Must NOT use this Activity's own window metrics: MainActivity can be placed on the
+            // companion display, and SDLSurface force-sizes the render target to whatever ends up
+            // in settings.cfg. Runs here rather than in the composition so it can't re-fire on
+            // every recomposition. It follows the display profile, so a swapped profile writes the
+            // OTHER panel's real size with nothing hardcoded. SHARED with the display-profile
+            // dropdown, which re-runs it on a profile change — see applyGameScreenResolution.
+            applyGameScreenResolution()
             withContext(Dispatchers.IO) {
-                val avoidInsertion =
-                    GameFilesPreferences.readResolutionInsertion(this@MainActivity).first()
-                if (!avoidInsertion) {
-                    updateResolutionInConfig(topWidth, topHeight)
-                }
                 // Rides the same settings.cfg pass, on the same IO dispatcher. Unrelated to the
                 // resolution insertion and deliberately NOT gated by its opt-out, which is about
                 // this app overwriting a resolution the player chose; this one never overwrites
@@ -178,7 +173,7 @@ class MainActivity : ComponentActivity() {
                 // Push this build's measured performance defaults ONCE per version. Must run here,
                 // before the engine is ever started: settings.cfg is read at engine startup and
                 // rewritten from memory on a clean exit, so a write made while the game is running
-                // is silently discarded. Unlike updateResolutionInConfig above this is NOT
+                // is silently discarded. Unlike the resolution pin above this is NOT
                 // authoritative every launch, because the simplified launcher ships the whole
                 // settings.cfg editor and the player must be able to keep their own values.
                 if (GameFilesPreferences.readTunedPerfSettingsVersion(this@MainActivity)

@@ -137,6 +137,7 @@ import org.openmw.ui.page.mod.isTamrielData
 import org.openmw.ui.page.mod.readModValues
 import org.openmw.ui.page.mod.sortedByDefaultLoadOrder
 import org.openmw.ui.page.setting.SettingRow
+import org.openmw.ui.view.applyGameScreenResolution
 import org.openmw.ui.theme.MwBone
 import org.openmw.ui.theme.MwBoneBright
 import org.openmw.ui.theme.MwBoneDim
@@ -2483,7 +2484,15 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                         // Cached immediately so the choice applies to the very next Play without
                         // waiting on the DataStore write to land.
                         DisplayRoles.onProfileChanged(id)
-                        scope.launch { GameFilesPreferences.saveDisplayProfile(context, id) }
+                        scope.launch {
+                            GameFilesPreferences.saveDisplayProfile(context, id)
+                            // Re-pin the render resolution to the display the game will now use.
+                            // MainActivity's own pass already ran at launch, so without this the
+                            // resolution stays one launch behind the setting: switch profile, press
+                            // Play, and the game renders on the new panel at the old panel's size.
+                            // It only corrected itself after closing and reopening the launcher.
+                            context.applyGameScreenResolution()
+                        }
                     }
                 )
             }
