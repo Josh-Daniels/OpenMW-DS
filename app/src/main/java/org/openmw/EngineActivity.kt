@@ -30,6 +30,7 @@ import org.openmw.companion.ManualJournalDraftTopOverlay
 import org.openmw.companion.PersuasionLocation
 import org.openmw.companion.PersuasionTopOverlay
 import org.openmw.companion.PlayerCombatTopOverlay
+import org.openmw.companion.FpsTopOverlay
 import org.openmw.companion.ProvideTopPanelOpacity
 import org.openmw.companion.ScreenLocation
 import org.openmw.companion.TargetHealthLocation
@@ -197,6 +198,7 @@ class EngineActivity : SDLActivity() {
     // Screen Layout option == TOP; player vitals (top-left) on the "Player status in combat" == On.
     private var combatTargetTopView: View? = null
     private var playerCombatTopView: View? = null
+    private var fpsTopView: View? = null
     private var manualJournalTopView: View? = null
     private var levelUpTopView: View? = null
     private var alchemyTopView: View? = null
@@ -428,6 +430,7 @@ class EngineActivity : SDLActivity() {
         hidePersuasionTopOverlay()
         hideCombatTargetTopOverlay()
         hidePlayerCombatTopOverlay()
+        hideFpsTopOverlay()
         hideManualJournalTopOverlay()
         hideLevelUpTopOverlay()
         hideAlchemyTopOverlay()
@@ -968,6 +971,16 @@ class EngineActivity : SDLActivity() {
          */
         @JvmStatic external fun setMinimumInteriorBrightness(value: Float)
 
+        /**
+         * The engine's recent per-frame timings, or null before any frame has been recorded.
+         *
+         * Layout: `[validCount, work x N (oldest..newest), delivered x N (oldest..newest)]`, in
+         * milliseconds. PULL rather than push — see the ring in androidmain.cpp for why one
+         * COMPANION_ line per frame was rejected, and why the two series differ (the frame-rate
+         * limiter's own duration is pinned to the cap and cannot show headroom).
+         */
+        @JvmStatic external fun getCompanionFrameTimes(): FloatArray?
+
         @JvmStatic external fun setCompanionHudHms(on: Boolean)
         @JvmStatic external fun setCompanionHudEquipped(on: Boolean)
         @JvmStatic external fun setCompanionHudMinimap(on: Boolean)
@@ -1447,6 +1460,18 @@ class EngineActivity : SDLActivity() {
                 }
         }
 
+        // FPS counter / frametime graph. Purely preference-driven — unlike every other top-screen
+        // overlay it has no game-state term, because a diagnostic that only appears in combat or a
+        // conversation would be useless for the thing it diagnoses.
+        lifecycleScope.launch {
+            // No distinctUntilChanged: a StateFlow already conflates, and applying it is a
+            // deprecation error in this Kotlin/coroutines version.
+            UiPreferences.fpsOverlayFlow()
+                .collect { show ->
+                    if (show) showFpsTopOverlay() else hideFpsTopOverlay()
+                }
+        }
+
         // Top-screen live preview of a manual journal entry being typed on the bottom screen.
         // Non-interactive (FLAG_NOT_TOUCHABLE), so all touch still reaches the game while the
         // bottom-screen keyboard does the input. No Screen Layout option gates this: the preview is
@@ -1788,6 +1813,17 @@ class EngineActivity : SDLActivity() {
         val overlay = combatTargetTopView ?: return
         runCatching { windowManager.removeView(overlay) }
         combatTargetTopView = null
+    }
+
+    private fun showFpsTopOverlay() = showTopScreenOverlay(
+        alreadyShown = { fpsTopView != null },
+        onAdded = { fpsTopView = it },
+    ) { ProvideTopPanelOpacity { FpsTopOverlay() } }
+
+    private fun hideFpsTopOverlay() {
+        val overlay = fpsTopView ?: return
+        runCatching { windowManager.removeView(overlay) }
+        fpsTopView = null
     }
 
     private fun showPlayerCombatTopOverlay() = showTopScreenOverlay(

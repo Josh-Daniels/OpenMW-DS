@@ -1450,6 +1450,77 @@ extern int argcData;
 extern const char** argvData;
 void releaseArgv();
 
+// ---------------------------------------------------------------------------------------------
+// FRAME TIMING for the on-screen FPS counter / frametime graph (Sep 2026)
+//
+// PULL, not push. The engine writes each frame's timings into this ring and Kotlin reads the whole
+// ring when it redraws the overlay. Pushing one COMPANION_ line per frame would be ~60 lines/s of
+// JNI + parse + StateFlow churn for a readout nothing consumes faster than a few Hz -- the same
+// reasoning that switched the four COMPANION_NAV_ polls off for the DS map. This way an overlay
+// that is not on screen costs literally nothing but two stores per frame.
+//
+// TWO SERIES, and the distinction is the whole point of the feature:
+//   work  -- frame start up to just before FrameRateLimiter::limit(), i.e. real work, no cap sleep
+//   total -- frame start to frame start, i.e. the interval actually delivered
+// Misc::FrameRateLimiter::limit() OVERWRITES its own reported duration with the cap exactly
+// whenever a frame finishes early (mLastFrameDuration = mMaxFrameDuration), so the `frametime` the
+// engine passes around reads a flat 16.667ms at our shipped `framerate limit = 60` and can never
+// show headroom. `work` is what a graph needs; `total` is what an FPS number should say. Note that
+// when the cap IS being missed the two are equal, so the work series is a superset of the other.
+//
+// THREADING: written on the engine thread, read on the Android UI thread, deliberately WITHOUT a
+// lock -- the engine thread must never block on the UI. The write index is released after the two
+// stores, so a reader that sees index N sees the samples before it; a sample torn by a wrapping
+// writer is one wrong bar in a graph and is not worth a mutex on the frame loop.
+static constexpr int kCompanionFrameRing = 192; // ~3.2s at 60fps; the graph shows a window of this
+static float g_companionFrameWork[kCompanionFrameRing] = {};
+static float g_companionFrameTotal[kCompanionFrameRing] = {};
+static std::atomic<uint32_t> g_companionFrameCount{ 0 };
+
+// Called once per simulation frame from Engine::go()'s loop -- see companion-frame-timing.patch.
+// NOTE this is per SIMULATION frame; a loading screen renders extra viewer frames inside one, so
+// the counter under-reports during loads. Accepted: it is a diagnostic, not an accounting tool.
+extern "C" void companionRecordFrame(float workMs, float totalMs)
+{
+    const uint32_t n = g_companionFrameCount.load(std::memory_order_relaxed);
+    const int i = static_cast<int>(n % kCompanionFrameRing);
+    g_companionFrameWork[i] = workMs;
+    g_companionFrameTotal[i] = totalMs;
+    g_companionFrameCount.store(n + 1, std::memory_order_release);
+}
+
+// Returns [validCount, work x N (oldest..newest), total x N (oldest..newest)], or null before any
+// frame has been recorded. Ordering is resolved HERE rather than in Kotlin so the ring's wrap is
+// not a second place that can get the arithmetic wrong.
+extern "C" JNIEXPORT jfloatArray JNICALL Java_org_openmw_EngineActivity_getCompanionFrameTimes(
+    JNIEnv* env, jclass /*cls*/)
+{
+    const uint32_t n = g_companionFrameCount.load(std::memory_order_acquire);
+    if (n == 0)
+        return nullptr;
+
+    const int valid = static_cast<int>(std::min<uint32_t>(n, kCompanionFrameRing));
+    const int total = 1 + 2 * valid;
+    std::vector<float> out(static_cast<size_t>(total));
+    out[0] = static_cast<float>(valid);
+    // Oldest sample first. When the ring has wrapped the oldest lives at (n % size).
+    const int start = static_cast<int>(n % kCompanionFrameRing);
+    for (int k = 0; k < valid; ++k)
+    {
+        const int src = (n < static_cast<uint32_t>(kCompanionFrameRing))
+            ? k
+            : ((start + k) % kCompanionFrameRing);
+        out[1 + k] = g_companionFrameWork[src];
+        out[1 + valid + k] = g_companionFrameTotal[src];
+    }
+
+    jfloatArray arr = env->NewFloatArray(total);
+    if (arr == nullptr)
+        return nullptr;
+    env->SetFloatArrayRegion(arr, 0, total, out.data());
+    return arr;
+}
+
 extern "C" JNIEXPORT jstring JNICALL Java_org_openmw_EngineActivity_getLastResourceName(JNIEnv* env, jobject thiz)
 {
     return env->NewStringUTF(MWSound::g_lastResourceName.c_str());

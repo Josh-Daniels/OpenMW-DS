@@ -1,0 +1,49 @@
+--- a/apps/openmw/engine.cpp
++++ b/apps/openmw/engine.cpp
+@@ -936,6 +936,13 @@
+ }
+ 
+ // Initialise and enter main loop.
++#ifdef __ANDROID__
++// Defined in androidmain.cpp. Records one simulation frame's timings into the ring the on-screen
++// FPS overlay reads. Declared at NAMESPACE scope because extern "C" at block scope is a compile
++// error -- the same shape as the companionDs*() decls in windowmanagerimp.cpp.
++extern "C" void companionRecordFrame(float workMs, float totalMs);
++#endif
++
+ void OMW::Engine::go()
+ {
+     assert(!mContentFiles.empty());
+@@ -1035,6 +1042,9 @@
+     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
+     while (!mViewer->done() && !mStateManager->hasQuitRequest())
+     {
++#ifdef __ANDROID__
++        const auto companionFrameStart = std::chrono::steady_clock::now();
++#endif
+         const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
+                               std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
+                               .count()
+@@ -1071,7 +1081,22 @@
+             }
+         }
+ 
++#ifdef __ANDROID__
++        // Captured BEFORE limit(), which sleeps to hold the frame cap. That sleep is exactly what
++        // makes FrameRateLimiter's own getLastFrameDuration() useless for a graph: it reports the
++        // cap verbatim for any frame that finished early, so it can never show headroom.
++        const auto companionWorkEnd = std::chrono::steady_clock::now();
++#endif
+         frameRateLimiter.limit();
++#ifdef __ANDROID__
++        // Placed after limit(), and after the early-continue above, so a frame that did not
++        // render is never recorded as one.
++        companionRecordFrame(
++            std::chrono::duration<float, std::milli>(companionWorkEnd - companionFrameStart).count(),
++            std::chrono::duration<float, std::milli>(
++                std::chrono::steady_clock::now() - companionFrameStart)
++                .count());
++#endif
+     }
+ 
+     mLuaWorker->join();

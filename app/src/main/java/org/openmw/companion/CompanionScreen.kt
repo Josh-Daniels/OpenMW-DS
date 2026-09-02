@@ -142,6 +142,7 @@ import org.libsdl.app.SDLActivity
 import org.openmw.BuildConfig
 import org.openmw.R
 import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -155,6 +156,7 @@ import android.util.Log
 import android.view.KeyEvent
 import androidx.compose.ui.graphics.ImageBitmap
 import org.openmw.Constants
+import org.openmw.EngineActivity
 import org.openmw.ui.page.mod.tamrielDataEnabledInConfig
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.Dispatchers
@@ -2302,6 +2304,211 @@ fun PlayerCombatTopOverlay() {
             Spacer(Modifier.height(3.dp))
             CombatBar(ratio = state.fatigue.ratio, color = FatigueCol, centerText = dynValue(state.fatigue),
                 height = 9.dp, textSize = 7.sp)
+        }
+    }
+}
+
+/* ---- FPS counter + frametime graph (top-screen overlay, Developer Tools) ---- */
+
+/** How often the overlay re-reads the native ring. Deliberately slow: the ring holds ~3s of
+ *  history and every redraw paints all of it, so a faster poll buys nothing but recompositions —
+ *  and a counter that costs frames defeats itself. */
+private const val FPS_POLL_MS = 200L
+
+/** How much recent history the FPS NUMBER averages over. Long enough not to flicker, short enough
+ *  to track a change as it happens; the graph is what carries the long view. */
+private const val FPS_AVG_WINDOW_MS = 500f
+
+/** Reference lines on the graph, in milliseconds: our shipped 60fps cap and the 30fps floor. */
+private const val FPS_MS_60 = 1000f / 60f
+private const val FPS_MS_30 = 1000f / 30f
+
+/** Vertical span of the graph. Fixed rather than auto-scaled to the observed max: an axis that
+ *  rescales under you makes two moments impossible to compare by eye, which is the one thing a
+ *  frametime graph is for. Spikes past this simply clip at the top. */
+private const val FPS_GRAPH_MAX_MS = 50f
+
+private val FpsGood = Color(0xFF7FBF7F)
+private val FpsWarn = Color(0xFFC8A040)
+private val FpsBad = Color(0xFFC75C5C)
+
+/**
+ * On-screen FPS counter with a frametime graph, top RIGHT of the game screen.
+ *
+ * **TOP RIGHT, not left**, because [PlayerCombatTopOverlay] already owns `TopStart` for the player
+ * vitals during combat.
+ *
+ * **The graph plots WORK time, not the delivered frame interval, and that is the whole point.**
+ * `Misc::FrameRateLimiter::limit()` overwrites its own reported duration with the frame cap exactly
+ * whenever a frame finishes early, so anything derived from the engine's own `frametime` reads a
+ * flat 16.667ms at our shipped `framerate limit = 60` and can never show headroom. Work time is
+ * measured before that sleep, so it shows how close each frame came to missing the cap. It is also
+ * a SUPERSET of the delivered series: once the cap is actually being missed the two are equal, so
+ * every spike a delivered-interval graph would show is still here.
+ *
+ * The big number is the delivered rate, because that is the one a player means by "fps".
+ *
+ * Data is PULLED from a native ring ([EngineActivity.getCompanionFrameTimes]) rather than pushed as
+ * COMPANION_ lines: one line per frame would be ~60/s of JNI, parse and StateFlow churn for a
+ * readout nothing reads faster than 5Hz.
+ */
+// EngineActivity carries a pre-existing class-level @InternalCoroutinesApi (EngineActivity.kt:150,
+// inherited from Alpha3), so every reference to it needs the opt-in. Scoped to this function rather
+// than the file so it cannot quietly widen.
+@OptIn(InternalCoroutinesApi::class)
+@Composable
+fun FpsTopOverlay() {
+    // Snapshot of the ring: work times, delivered times, both oldest-first.
+    var work by remember { mutableStateOf(FloatArray(0)) }
+    var delivered by remember { mutableStateOf(FloatArray(0)) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            // Plain try/catch, not runCatching: runCatching swallows CancellationException, which
+            // in a LaunchedEffect means a cancelled composition would keep this loop alive.
+            val raw: FloatArray? = try {
+                EngineActivity.getCompanionFrameTimes()
+            } catch (t: Throwable) {
+                null
+            }
+            if (raw != null && raw.isNotEmpty()) {
+                val n = raw[0].toInt()
+                // Defensive: the array is built natively, and a short read must not crash the game
+                // screen. Anything malformed is simply skipped until the next poll.
+                if (n > 0 && raw.size >= 1 + 2 * n) {
+                    work = FloatArray(n) { raw[1 + it] }
+                    delivered = FloatArray(n) { raw[1 + n + it] }
+                }
+            }
+            delay(FPS_POLL_MS)
+        }
+    }
+
+    if (work.isEmpty()) return
+
+    // The NUMBER averages only the most recent FPS_AVG_WINDOW_MS of frames, walking back from the
+    // newest. Averaging the whole ring (as this first did) made the readout lag several seconds
+    // behind reality, because the ring is ~3.2s at 60fps -- correct on average and useless for
+    // "what is happening right now", which is the entire job of an FPS counter.
+    //
+    // TIME-based rather than a fixed sample count, because the sample count means different things
+    // at different frame rates: 30 frames is half a second at 60fps but a tenth of one at 300.
+    var acc = 0f
+    var used = 0
+    for (i in delivered.indices.reversed()) {
+        acc += delivered[i]
+        used++
+        if (acc >= FPS_AVG_WINDOW_MS) break
+    }
+    val fps = if (acc > 0f) 1000f * used / acc else 0f
+    // The GRAPH and its summary keep the full window -- a peak is only meaningful over a span.
+    val worstWork = work.max()
+    val avgWork = work.average().toFloat()
+
+    val fpsColor = when {
+        fps >= 55f -> FpsGood
+        fps >= 30f -> FpsWarn
+        else -> FpsBad
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize().padding(top = 8.dp, end = 12.dp),
+        contentAlignment = Alignment.TopEnd
+    ) {
+        Column(
+            modifier = Modifier
+                .width(150.dp)
+                .mwPanel()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    "%.0f".format(fps),
+                    color = fpsColor,
+                    fontSize = 22.sp,
+                    fontFamily = MwData,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "FPS",
+                    color = BoneDim,
+                    fontSize = 10.sp,
+                    fontFamily = MwBody,
+                    modifier = Modifier.padding(bottom = 3.dp)
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            FrameTimeGraph(
+                work = work,
+                modifier = Modifier.fillMaxWidth().height(38.dp)
+            )
+            Spacer(Modifier.height(3.dp))
+            // Plain milliseconds. This used to read "work N / peak N ms" -- "work" was the
+            // internal name for the pre-cap-sleep measurement and meant nothing to a reader, which
+            // is the same jargon-leak the settings.cfg comments were cleaned up for.
+            Text(
+                "avg %.1f ms   peak %.1f ms".format(avgWork, worstWork),
+                color = BoneDim,
+                fontSize = 9.sp,
+                fontFamily = MwData
+            )
+            // Names the two guide lines by the frame rate they mark, in their own colours, so the
+            // graph is readable without knowing that 16.7 and 33.3 ms are 60 and 30 FPS. No middle
+            // dot separator: the game font has no glyph for it.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("60", color = FpsGood, fontSize = 9.sp, fontFamily = MwData)
+                Text(" / ", color = BoneDim, fontSize = 9.sp, fontFamily = MwData)
+                Text("30", color = FpsBad, fontSize = 9.sp, fontFamily = MwData)
+                Text(" FPS guides", color = BoneDim, fontSize = 9.sp, fontFamily = MwBody)
+            }
+        }
+    }
+}
+
+/**
+ * The frametime graph itself: one vertical bar per recorded frame, oldest at the left.
+ *
+ * Bars are coloured against the two reference lines rather than by a gradient, so "is this frame
+ * costing me the cap" is answerable at a glance without reading the axis.
+ */
+@Composable
+private fun FrameTimeGraph(work: FloatArray, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        if (w <= 0f || h <= 0f || work.isEmpty()) return@Canvas
+
+        fun yFor(ms: Float): Float = h - (ms.coerceIn(0f, FPS_GRAPH_MAX_MS) / FPS_GRAPH_MAX_MS) * h
+
+        // Reference lines first, so bars paint over them.
+        drawLine(
+            color = FpsGood.copy(alpha = 0.45f),
+            start = Offset(0f, yFor(FPS_MS_60)),
+            end = Offset(w, yFor(FPS_MS_60)),
+            strokeWidth = 1f
+        )
+        drawLine(
+            color = FpsBad.copy(alpha = 0.45f),
+            start = Offset(0f, yFor(FPS_MS_30)),
+            end = Offset(w, yFor(FPS_MS_30)),
+            strokeWidth = 1f
+        )
+
+        val barW = w / work.size
+        work.forEachIndexed { i, ms ->
+            val top = yFor(ms)
+            val color = when {
+                ms <= FPS_MS_60 -> FpsGood
+                ms <= FPS_MS_30 -> FpsWarn
+                else -> FpsBad
+            }
+            drawRect(
+                color = color,
+                topLeft = Offset(i * barW, top),
+                size = Size(barW.coerceAtLeast(1f), h - top)
+            )
         }
     }
 }
@@ -20386,6 +20593,7 @@ private fun OptionsSubPage(
                         // hold only the choices a player has a reason to make.
                         item(key = "dev_dimming") { AdaptiveDimmingRow() }
                         item(key = "dev_target_health") { TargetHealthLocationRow() }
+                        item(key = "dev_fps_overlay") { FpsOverlayRow() }
                         item(key = "dev_player_combat") { PlayerCombatRow() }
                         item(key = "dev_game_font") { GameFontRow() }
                         item(key = "dev_inv_tab_style") { InventoryTabStyleRow() }
@@ -21966,6 +22174,39 @@ private fun TargetHealthLocationRow() {
 
 /** The Player-status-in-combat row: an [Off][On] pill selector (default Off). On additionally
  *  shows the player's vitals on the top screen (top-left) while a combat target exists. */
+@Composable
+private fun FpsOverlayRow() {
+    val context = LocalContext.current
+    val enabled by UiPreferences.fpsOverlayFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("FPS counter", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Frame rate and a frametime graph, top right of the game screen. Each bar is one " +
+                "frame, in milliseconds, with guide lines at 60 and 30 FPS. Lower bars are better.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setFpsOverlay(context, false) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setFpsOverlay(context, true) }
+        }
+    }
+}
+
 @Composable
 private fun PlayerCombatRow() {
     val context = LocalContext.current

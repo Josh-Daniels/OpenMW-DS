@@ -827,6 +827,9 @@ object UiPreferences {
     // Persuasion popup location (Bottom / Top — both implemented, unlike the pending service rows).
     private const val PERSUASION_LOCATION = "layout_persuasion"
     private const val PLAYER_COMBAT = "layout_player_combat"
+    // On-screen FPS counter + frametime graph (top right of the game screen). Developer Tools
+    // only, default OFF: it is a diagnostic, and an always-on overlay costs a compositing layer.
+    private const val FPS_OVERLAY = "dev_fps_overlay"
     private const val HUD_ON_PREFIX = "hud_on_"
     // ALPHA3_OVERLAY ("alpha3_overlay") — REMOVED (Aug 2026) with the overlay it gated. The stored
     // key is deliberately NOT migrated or cleaned up: nothing reads it, and leaving it costs one
@@ -1009,6 +1012,7 @@ object UiPreferences {
     // Whether the player's vitals (health/magicka/fatigue) ALSO show on the top screen during
     // combat. Default true (also shown on the top screen).
     private val playerCombatFlow = MutableStateFlow(true)
+    private val fpsOverlayFlow = MutableStateFlow(false)
 
     // HUD elements are always drawn on the bottom screen by the companion; this Boolean toggles
     // whether the NATIVE top-screen version is visible (true = On/visible, false = Off/hidden).
@@ -1269,6 +1273,7 @@ object UiPreferences {
             ?.takeIf { it != PersuasionLocation.TOP }
             ?.let { persuasionLocationFlow.value = it }
         playerCombatFlow.value = p.getBoolean(PLAYER_COMBAT, true)
+        fpsOverlayFlow.value = p.getBoolean(FPS_OVERLAY, false)
         HUD_ELEMENTS.forEach { el ->
             hudFlows.getValue(el.key).value = p.getBoolean(HUD_ON_PREFIX + el.key, hudDefaultOn(el.key))
         }
@@ -1795,6 +1800,15 @@ object UiPreferences {
     fun setPlayerCombat(context: Context, enabled: Boolean) {
         playerCombatFlow.value = enabled
         editor(context).putBoolean(PLAYER_COMBAT, enabled).apply()
+    }
+
+    /** Whether the FPS counter / frametime graph shows on the game screen. */
+    fun fpsOverlayFlow(): StateFlow<Boolean> = fpsOverlayFlow.asStateFlow()
+
+    /** Enable/disable the on-screen FPS overlay and persist. */
+    fun setFpsOverlay(context: Context, enabled: Boolean) {
+        fpsOverlayFlow.value = enabled
+        editor(context).putBoolean(FPS_OVERLAY, enabled).apply()
     }
 
     /** Enable/disable the top-screen game cursor and persist. Mostly independent of [setTouchInput]
