@@ -615,8 +615,10 @@ fun seedConsoleWindowSize() {
  * the per-version `UPDATE_BANNER_DISMISSED_KEY` and the identity marker's `migrationSchemaVersion`.
  *
  * v1 (Sep 1 2026): `small feature culling pixel size = 8.0`, `preload num threads = 3`.
+ * v2 (Sep 9 2026): `[Navigator] min update interval ms = 1000`, `write to navmeshdb = true`,
+ *     `[Water] reflection detail = 1`.
  */
-const val TUNED_PERF_SETTINGS_VERSION = 1
+const val TUNED_PERF_SETTINGS_VERSION = 2
 
 /**
  * Force this build's measured performance defaults into the user's `settings.cfg`.
@@ -648,6 +650,39 @@ const val TUNED_PERF_SETTINGS_VERSION = 1
  *   **46.7 -> 26.5 ms per second**, worst frame 258 -> 225 ms, at a cost of ~3% average fps. No
  *   visual effect at all.
  *
+ * - `[Navigator] min update interval ms = 1000` (engine default 250): the throttle on how often ONE
+ *   tile may be rebuilt for a dynamic change. `World::updateNavigator` (worldimp.cpp) runs every
+ *   frame and dirties the tiles under every animated-collision object that moved plus every door
+ *   mid-swing; in Narsis that posted ~110 jobs/s, 75% of which missed the in-memory tile cache. And
+ *   a ChangeType::update job NEVER consults the navmesh DB - asyncnavmeshupdater.cpp only takes the
+ *   MemoryCacheMiss branch when the type is not `update` - so each miss is a full Recast build. At
+ *   250 ms a tile could be rebuilt 4x a second. MEASURED on device with simpleperf, same Narsis
+ *   spot, 8 s each: the Recast thread fell from 28.6% of app CPU (19.0 Gcyc) to 11.4% (6.5 Gcyc),
+ *   **-66%**, total app CPU -14%, and the OSG draw thread went from losing the 3.19 GHz prime core
+ *   to holding it in 3 of 3 samples. Raising it further trades AI freshness: pathfinding notices
+ *   moved geometry up to this long after the fact.
+ * - `[Navigator] write to navmeshdb = true` (engine default true; this app shipped FALSE, inherited
+ *   from Alpha3 at the fork point). Reads were already on, so the DB was read and never filled:
+ *   measured 520 hits in 772 lookups (67%) during load, and every one of the 252 misses was
+ *   recomputed from scratch again on the next run. Only add/remove jobs read or write the DB, so
+ *   this changes LOADING and cell entry, never the steady-state cost above. Watch the 2 GB
+ *   `max navmeshdb file size` ceiling: orphans are never evicted, and this load order already sits
+ *   at ~1.48 GB. The engine degrades safely, switching its own write flag off at the cap.
+ * - `[Water] reflection detail = 1` (engine default 2). The water reflection RTT camera re-renders
+ *   the scene into a texture, and its cull mask is CUMULATIVE by tier (`water.cpp` calcNodeMask):
+ *   0 sky, 1 +terrain, 2 +statics, 3 +effects/particles/objects, 4 +actors, 5 +groundcover. At the
+ *   default 2 every STATIC is drawn twice per frame - in Bal Foyen that is exactly the alpha-blended
+ *   set (windows, streetlights, flora) that the Aug 31 work identified as the draw-call problem.
+ *   MEASURED standing still, one spot, one facing, Bal Foyen: **35 fps at 2, 49 at 1 (+40%), 53 at
+ *   0 (+51%)** - so tier 1 keeps 78% of the win while still reflecting terrain and sky, which is
+ *   what a player actually notices on open water. Tier 0 is sky-only and looks wrong.
+ *   **The saving does NOT show up as reduced CPU** and looking for that will mislead: the OSG draw
+ *   thread is SATURATED (~100% of one core, and only ever one, since a GL context is bound to a
+ *   single thread), so it burns the same cycles either way - 23.38 Gcyc at tier 2 vs 23.42 at tier
+ *   0 over 8 s. The win is THROUGHPUT: per-frame draw cost fell ~34%. Interiors are unaffected
+ *   (`std::clamp(detail, mInterior ? 2 : 0, 5)`). Water had never been profiled in this project;
+ *   Narsis showed none of this because it is inland, which is why the two test areas disagreed.
+ *
  * Deliberately NOT included: `[Cells] prediction time = 3` measured as noise (26.5 -> 25.4 ms/s,
  * inside route variance) and did not fix what it was aimed at, so shipping it would put an
  * unjustified value in front of every user; `[Terrain] lod factor = 0.5` is a real +9.3% but raises
@@ -661,6 +696,9 @@ fun applyTunedPerformanceSettings() {
     val lines = original.toMutableList()
     setSettingInSection(lines, "[Camera]", "small feature culling pixel size", "8.0")
     setSettingInSection(lines, "[Cells]", "preload num threads", "3")
+    setSettingInSection(lines, "[Navigator]", "min update interval ms", "1000")
+    setSettingInSection(lines, "[Navigator]", "write to navmeshdb", "true")
+    setSettingInSection(lines, "[Water]", "reflection detail", "1")
 
     if (lines != original) {
         file.writeText(lines.joinToString("\n"))

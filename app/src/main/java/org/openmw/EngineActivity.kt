@@ -131,6 +131,7 @@ import org.openmw.ui.controls.VirtualKeyboard
 import org.openmw.ui.overlay.ExpandableCircleButton
 import org.openmw.ui.overlay.GridOverlay
 import org.openmw.ui.overlay.HiddenMenu
+import org.openmw.ui.overlay.OverlayUI
 import org.openmw.ui.view.BackgroundAnimation
 import org.openmw.ui.view.NavmeshScreen
 import org.openmw.ui.view.addCustomLog
@@ -478,6 +479,22 @@ class EngineActivity : SDLActivity() {
         hideSystemBars(this)
         enableScreenStayOn(this)
 
+        // One-shot repair for the removed Alpha3 overlay: anyone left with the legacy on-screen
+        // touch controls stuck on gets them turned back off, once. See
+        // GameFilesPreferences.resetLegacyTouchOverlayOnce for why it is one-shot and why the state
+        // was unrecoverable. Fire-and-forget: a DataStore write, and the visibility flows read it
+        // on their own.
+        //
+        // Here rather than in startCompanionCollectors (where it used to live) because the SINGLE
+        // SCREEN profile skips that function entirely, and it is the profile that needs this most:
+        // it is the one that puts the legacy overlay back on screen, so a device stuck with
+        // ui_hidden_state = true would show the touch buttons and hide the gear cluster carrying
+        // the keyboard — the exact unrecoverable state this one-shot exists to undo.
+        lifecycleScope.launch {
+            runCatching { GameFilesPreferences.resetLegacyTouchOverlayOnce(applicationContext) }
+                .onFailure { Log.w(TAG, "legacy touch-overlay reset failed", it) }
+        }
+
         // OpenMW-DS Second screen
         startCompanionScreen()
 
@@ -516,6 +533,18 @@ class EngineActivity : SDLActivity() {
                     composeViewUI.setContent {
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
+                        // SINGLE SCREEN DEVICE only: whether to draw the legacy Alpha3 overlay, and
+                        // its keyboard preference. The profile cannot change while the game is
+                        // running (it is a launcher setting, applied on the next Play), so it is
+                        // read once from the same cache startCompanionScreen used; the TOGGLE is
+                        // collected as a flow so turning it off takes effect without a restart.
+                        val singleScreen = remember { DisplayRoles.singleScreen(this@EngineActivity) }
+                        val singleScreenOverlay by GameFilesPreferences
+                            .loadSingleScreenOverlay(this@EngineActivity)
+                            .collectAsState(initial = true)
+                        val virtualKeyboard by GameFilesPreferences
+                            .useVirtualKeyboard(this@EngineActivity)
+                            .collectAsState(initial = true)
                         val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
 
                         BackHandler {
@@ -588,13 +617,34 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
-                        // The Alpha3 gear + arrow cluster used to render here. REMOVED (Aug 2026):
-                        // it was the only in-game way to reach the legacy touch-control settings,
-                        // and its own "UI is visible" switch hid it while turning those controls
-                        // ON, which on a device with an attached controller is unrecoverable — see
-                        // GameFilesPreferences.resetLegacyTouchOverlayOnce for the full mechanism.
-                        // The DS keyboard (Developer Tools -> Show Keyboard) replaces the one thing
-                        // it was still useful for: a ` key to reach the game's console.
+                        // The Alpha3 gear + arrow cluster. REMOVED for everyone Aug 2026, and
+                        // brought back Sep 2026 for the SINGLE SCREEN DEVICE profile ONLY, where it
+                        // is the only in-game route to the virtual keyboard (text entry: save,
+                        // spell and enchantment names) and to the console. On a two-screen device
+                        // those live on the companion instead (Developer Tools -> Show Keyboard /
+                        // Open Console) and this must stay gone: that is where its removal bug came
+                        // from.
+                        //
+                        // **Deliberately NOT gated on `isUIHidden` or on `hudVisible`, unlike the
+                        // pre-removal version.** Both gates are wrong here:
+                        //   * `isUIHidden` is exactly what made the old overlay unrecoverable — it
+                        //     hides the gear while SHOWING the legacy touch buttons whenever a
+                        //     controller is attached, so the control that turns them off goes away
+                        //     with them. Nothing left in the app can write that key any more (the
+                        //     Alpha3 settings page is unreachable) and the one-shot in onCreate
+                        //     clears a stored true, but reading it here would put the landmine back
+                        //     for the one profile with no second screen to escape to.
+                        //   * `hudVisible` is pushed by the native log sink, which this profile
+                        //     never installs, so it would be frozen at its initial value.
+                        // The toggle below is the only gate, which is also what makes it a real
+                        // off switch rather than one condition among three.
+                        if (singleScreen && singleScreenOverlay) {
+                            OverlayUI(
+                                context = this@EngineActivity,
+                                virtualKeyboard = virtualKeyboard,
+                                onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
+                            )
+                        }
 
                         Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
 
@@ -1083,6 +1133,27 @@ class EngineActivity : SDLActivity() {
 
     // OpenMW-DS Second screen function.
     private fun startCompanionScreen() {
+        // SINGLE SCREEN DEVICE: there is no second screen, so nothing companion-side is set up at
+        // all — no host window, no log sink, and none of startCompanionCollectors.
+        //
+        // Returning here is what makes the profile mean "full Vanilla", and it does so by NOT
+        // ACTING rather than by forcing anything: every native DS flag (g_companionDs*) defaults to
+        // FALSE = show the native window, and every native HUD flag (g_companionHud*) defaults to
+        // TRUE = show the native element, so an engine that is never told anything renders exactly
+        // vanilla. The per-element DS/Vanilla preferences are therefore not consulted, not
+        // rewritten, and not lost — they are simply never pushed, and come back untouched the
+        // moment a two-screen profile is selected again.
+        //
+        // This is deliberately EARLIER than the "no display available" check below. That check is
+        // the accident case (a dual-screen device whose second panel is missing) and still logs an
+        // error; this is the case the player chose, and it must not read as a fault. It also has to
+        // come before the DisplayManager query, since the point is to stop looking for a screen we
+        // have been told does not exist.
+        if (DisplayRoles.singleScreen(this)) {
+            Log.i(TAG, "Second-screen: SINGLE SCREEN profile — companion not created, full Vanilla")
+            return
+        }
+
         // Which display the companion goes on now follows the device display profile — on the
         // default (AYN Thor) profile this resolves to exactly what it always did, the first
         // presentation-capable display. See DisplayRoles.
@@ -1188,16 +1259,6 @@ class EngineActivity : SDLActivity() {
                 .collect { visible ->
                     if (visible) showPauseOverlay() else hidePauseOverlay()
                 }
-        }
-
-        // One-shot repair for the removed Alpha3 overlay: anyone left with the legacy on-screen
-        // touch controls stuck on gets them turned back off, once. See
-        // GameFilesPreferences.resetLegacyTouchOverlayOnce for why it is one-shot and why the state
-        // was unrecoverable. Fire-and-forget: a DataStore write, and the visibility flows below pick
-        // the new value up on their own.
-        lifecycleScope.launch {
-            runCatching { GameFilesPreferences.resetLegacyTouchOverlayOnce(applicationContext) }
-                .onFailure { Log.w(TAG, "legacy touch-overlay reset failed", it) }
         }
 
         // Hide the options overlay while native text entry is active (e.g. renaming a save file).

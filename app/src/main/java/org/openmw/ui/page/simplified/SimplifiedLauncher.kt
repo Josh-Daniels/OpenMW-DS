@@ -2317,6 +2317,13 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
     // dropdown never shows the wrong device for a frame.
     val displayProfileFlow = remember(context) { GameFilesPreferences.loadDisplayProfile(context) }
     val displayProfile by displayProfileFlow.collectAsState(initial = DisplayRoles.PROFILE_DEFAULT)
+    // Only read while PROFILE_SINGLE is selected, but collected unconditionally so the row it
+    // drives never renders with a stale position on the frame the profile changes. `initial = true`
+    // matches the store's own default. See GameFilesPreferences.SINGLE_SCREEN_OVERLAY_KEY.
+    val singleScreenOverlayFlow = remember(context) {
+        GameFilesPreferences.loadSingleScreenOverlay(context)
+    }
+    val singleScreenOverlay by singleScreenOverlayFlow.collectAsState(initial = true)
     var showResetDialog by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var confirmModOrder by rememberSaveable { mutableStateOf(false) }
@@ -2509,10 +2516,40 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 )
             }
 
+            // The single-screen companion for the Device row: only meaningful while Single Screen
+            // Device is selected, so it appears and disappears with that choice rather than sitting
+            // there greyed out. On the two-screen profiles the same functions live on the companion
+            // screen (Developer Tools -> Show Keyboard / Open Console) and this overlay stays off,
+            // which is what its Aug 2026 removal established.
+            //
+            // A real toggle rather than an implied part of the profile, defaulting ON: it is the
+            // only route to text entry on a single screen, so off is the surprising answer, but a
+            // player with a hardware keyboard has no use for it and should be able to say so.
+            if (displayProfile == DisplayRoles.PROFILE_SINGLE) {
+                SettingRow(
+                    title = stringResource(R.string.launcher_single_screen_overlay),
+                    subtitle = stringResource(R.string.launcher_single_screen_overlay_tip)
+                ) {
+                    Switch(
+                        checked = singleScreenOverlay,
+                        onCheckedChange = {
+                            scope.launch {
+                                GameFilesPreferences.saveSingleScreenOverlay(context, it)
+                            }
+                        }
+                    )
+                }
+            }
+
             // Say so when the selected profile cannot be honoured here, rather than letting it
             // look applied. Only reachable on a device with no second display, since that is the
             // one remaining requirement for the swap. See DisplayRoles.swapSupported.
+            //
+            // Single Screen Device is excluded: it is the one profile that WANTS no second display,
+            // so on the hardware it is meant for this notice would fire on every correct selection
+            // and report the right answer as a failure.
             if (displayProfile != DisplayRoles.PROFILE_DEFAULT &&
+                displayProfile != DisplayRoles.PROFILE_SINGLE &&
                 !DisplayRoles.swapSupported(context)
             ) {
                 Text(
@@ -2876,6 +2913,7 @@ private fun DeviceProfileDropdown(selected: String, onSelected: (String) -> Unit
     val options = listOf(
         DisplayRoles.PROFILE_THOR to stringResource(R.string.launcher_device_thor),
         DisplayRoles.PROFILE_RETROID to stringResource(R.string.launcher_device_retroid),
+        DisplayRoles.PROFILE_SINGLE to stringResource(R.string.launcher_device_single),
     )
     // An unrecognised stored id falls back to showing the id itself rather than silently reading
     // as the default, so a profile removed in a later build is visible instead of looking like a

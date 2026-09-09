@@ -38,6 +38,18 @@ object DisplayRoles {
     /** Retroid dual screen: the two roles exchanged, relative to [PROFILE_THOR]. */
     const val PROFILE_RETROID = "retroid"
 
+    /**
+     * A device with ONE screen. There is no companion role at all: the game takes the only
+     * display and the bottom-screen UI is never created.
+     *
+     * Unlike the other two this is not a role MAPPING but a role REMOVAL, so it is deliberately
+     * not expressed as "the swap that could not be performed" ([swapSupported] already handles
+     * that, and quietly). The distinction matters because the two want opposite handling — a
+     * failed swap should still bring up the companion wherever it can, while this profile must
+     * never try. See [singleScreen] for who reads it and what they skip.
+     */
+    const val PROFILE_SINGLE = "single"
+
     const val PROFILE_DEFAULT = PROFILE_THOR
 
     /**
@@ -120,6 +132,22 @@ object DisplayRoles {
         profile(context) == PROFILE_RETROID && swapSupported(context)
 
     /**
+     * True on [PROFILE_SINGLE]: this device has one screen, so there is no companion at all.
+     *
+     * **This is a PROFILE test, not a hardware test, and that is deliberate.** A device that
+     * happens to report no presentation display already falls back safely everywhere (see
+     * [swapSupported] and [companionDisplay]); what this adds is the player SAYING so, which is
+     * what lets the app skip the second screen up front instead of discovering it is missing --
+     * and, more importantly, what lets it turn on the single-screen replacements for the things
+     * that lived on the bottom screen (see the Alpha3 overlay gate in `EngineActivity`).
+     *
+     * Read by `EngineActivity.startCompanionScreen`, which returns before creating any companion
+     * host, and by the same activity's Compose overlay, which puts the legacy touch overlay back
+     * on the game screen so text entry and the console are still reachable.
+     */
+    fun singleScreen(context: Context): Boolean = profile(context) == PROFILE_SINGLE
+
+    /**
      * The display id `EngineActivity` should be launched on.
      *
      * Falls back to [Display.DEFAULT_DISPLAY] when swapped but there is no second display to swap
@@ -144,5 +172,12 @@ object DisplayRoles {
      * `Presentation`, so this cannot hand back a display that `Presentation.show()` will refuse.
      */
     fun companionDisplay(context: Context): Display? =
-        if (rolesSwapped(context)) defaultDisplay(context) else presentationDisplay(context)
+        when {
+            // Belt and braces. The one caller already returns before asking on this profile, but a
+            // display handed back here is a companion window somewhere, and "there is no companion"
+            // is the whole meaning of the profile.
+            singleScreen(context) -> null
+            rolesSwapped(context) -> defaultDisplay(context)
+            else -> presentationDisplay(context)
+        }
 }
