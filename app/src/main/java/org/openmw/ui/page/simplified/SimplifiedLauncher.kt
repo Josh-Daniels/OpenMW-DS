@@ -1750,10 +1750,18 @@ private fun TamrielRebuiltNotice(onDismiss: () -> Unit, modifier: Modifier = Mod
 /**
  * Home-screen "Tips" box, filling the right-hand column beside the load order.
  *
- * The copy lives ENTIRELY in the `launcher_tips` string-array (`values/strings.xml`), one `<item>`
- * per tip — so tips are added, removed and reworded there with no change to this file, and they
- * are translatable like any other string. An empty array is a supported state and shows the
- * placeholder line instead of an empty card.
+ * **Tips come from the latest GitHub release's `## Tips` section when it has one**, parsed out of
+ * the body the update check already fetched ([UpdateChecker.extractTips]) — no second network call
+ * and no second data source; this reads the same [UpdateChecker.latestRelease] flow the Update
+ * Notes card does. That lets tips be reworded between builds without shipping an APK.
+ *
+ * **The `launcher_tips` string-array (`values/strings.xml`) remains the fallback**, used whenever
+ * the release has no Tips section AND on every launch before the check returns — which is a
+ * routine transient state, not an error, since [UpdateChecker.checkOnLaunch] runs asynchronously
+ * after first paint and cannot complete at all offline. Without a fallback this box would sit
+ * empty for the first second of every cold start and permanently for an offline player, and it
+ * cannot simply be hidden: it is `weight(1f)` inside the right-hand column, so removing it would
+ * leave a visible hole rather than reflowing. The array is also still the translatable copy.
  *
  * The list scrolls inside the card rather than growing it: the card is height-bounded by the row
  * that hosts it, exactly as the load-order panel beside it is, so the home screen itself never
@@ -1765,7 +1773,11 @@ private fun TamrielRebuiltNotice(onDismiss: () -> Unit, modifier: Modifier = Mod
  */
 @Composable
 private fun TipsBox(modifier: Modifier = Modifier) {
-    val tips = stringArrayResource(R.array.launcher_tips)
+    val bundledTips = stringArrayResource(R.array.launcher_tips)
+    val releaseTips = UpdateChecker.latestRelease.collectAsState().value?.tips.orEmpty()
+    // The release's own tips REPLACE the bundled set rather than adding to it, so a release can
+    // retire a stale tip as well as add one. Falls back whole, not per-item.
+    val tips: List<String> = releaseTips.ifEmpty { bundledTips.toList() }
     Column(
         modifier = modifier
             .background(MwFloatStone, RoundedCornerShape(12.dp))

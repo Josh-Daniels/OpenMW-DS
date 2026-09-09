@@ -228,6 +228,7 @@ object UpdateChecker {
                     title = release["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
                     body = rawBody,
                     summary = condenseReleaseNotes(rawBody),
+                    tips = extractTips(rawBody),
                     isNewer = compareVersions(latest, current) > 0,
                 )
 
@@ -492,6 +493,97 @@ object UpdateChecker {
 
         return condensed.ifBlank { raw.trim() }
     }
+
+    /**
+     * The heading that opens the Tips section: any ATX level (`#`..`######`) whose text is exactly
+     * `Tips`, case-insensitively, with an optional trailing colon.
+     *
+     * Deliberately EXACT on the word rather than "starts with Tips", so a `## Tips for modders`
+     * heading is not silently swallowed as if it were the section — the developer gets a
+     * predictable rule to remember. Everything AROUND the word is forgiving: any heading level,
+     * any casing, up to three leading spaces (Markdown's own limit before a heading stops being a
+     * heading), any spacing after the hashes, and an optional `:`.
+     */
+    private val TIPS_HEADING = Regex("""^ {0,3}(#{1,6})\s*tips\s*:?\s*$""", RegexOption.IGNORE_CASE)
+
+    /** Any ATX heading, capturing its hashes so the level can be compared. */
+    private val ANY_HEADING = Regex("""^ {0,3}(#{1,6})\s""")
+
+    /** A bullet (`-`, `*`, `+`) or numbered (`1.`, `1)`) list marker opening a line. */
+    private val LIST_MARKER = Regex("""^\s*(?:[-*+]|\d+[.)])\s+""")
+
+    /**
+     * Pull the tips out of a release body's `## Tips` section, one string per tip.
+     *
+     * Reads the RAW body rather than [condenseReleaseNotes]'s output on purpose: that function
+     * strips heading markers (which would destroy the `## Tips` marker itself) and cuts everything
+     * from the first horizontal rule onward. Reading the raw body means a Tips section placed
+     * BELOW the `---`, down with the README boilerplate, still feeds this box while staying out of
+     * the Update Notes card — which is the recommended placement, since tips are not changelog.
+     *
+     * The section runs from the heading to the next heading of the SAME OR HIGHER level, the next
+     * horizontal rule, or the end of the body — so `## Tips` is ended by a following `## Fixes`
+     * but not by a `### Advanced` nested inside it.
+     *
+     * Within the section, a list marker starts a new tip and an unmarked line continues the
+     * current one (Markdown's own lazy continuation), so a tip may wrap across lines in the source.
+     * A blank line ends the current tip. A section written as plain paragraphs with no bullets at
+     * all still works: each paragraph becomes one tip.
+     *
+     * Returns an empty list when there is no Tips section, or when it is present but empty — the
+     * caller treats both the same way.
+     */
+    fun extractTips(raw: String): List<String> {
+        val lines = raw.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+
+        val startAt = lines.indexOfFirst { TIPS_HEADING.matches(it) }
+        if (startAt < 0) return emptyList()
+
+        val level = TIPS_HEADING.find(lines[startAt])!!.groupValues[1].length
+
+        val tips = mutableListOf<String>()
+        val current = StringBuilder()
+
+        fun flush() {
+            val tip = current.toString()
+                .replace(MARKDOWN_LINK, "$1")
+                .replace(EMPHASIS, "")
+                .trim()
+            if (tip.isNotEmpty()) tips += tip
+            current.setLength(0)
+        }
+
+        for (line in lines.subList(startAt + 1, lines.size)) {
+            if (HORIZONTAL_RULE.matches(line)) break
+            // A heading at the same or a higher level closes the section; a deeper one is treated
+            // as content within it (its marker is stripped so it reads as ordinary text).
+            val heading = ANY_HEADING.find(line)
+            if (heading != null && heading.groupValues[1].length <= level) break
+
+            if (line.isBlank()) {
+                flush()
+                continue
+            }
+            val stripped = line.replace(HEADING_MARKER, "")
+            if (heading != null) {
+                // A DEEPER heading inside the section is a sub-label, not a lazy continuation of
+                // the tip above it — without this flush it would be glued onto the end of that
+                // tip's text.
+                flush()
+                current.append(stripped.trim())
+            } else if (LIST_MARKER.containsMatchIn(stripped)) {
+                flush()
+                current.append(stripped.replaceFirst(LIST_MARKER, ""))
+            } else if (current.isEmpty()) {
+                current.append(stripped.trim())
+            } else {
+                current.append(' ').append(stripped.trim())
+            }
+        }
+        flush()
+
+        return tips
+    }
 }
 
 /**
@@ -516,6 +608,10 @@ data class ReleaseNotes(
     /** [body] reduced to just this release's own changes, ready to display — see
      *  [UpdateChecker.condenseReleaseNotes]. */
     val summary: String,
+    /** The `## Tips` section of [body], one entry per tip, ready to display — see
+     *  [UpdateChecker.extractTips]. Empty when the release has no Tips section, which is the
+     *  normal case for every release published before the section existed. */
+    val tips: List<String> = emptyList(),
     /** Whether this release is newer than the installed build. False means these are (normally)
      *  the notes for the version currently running. */
     val isNewer: Boolean,

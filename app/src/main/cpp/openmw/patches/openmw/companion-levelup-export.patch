@@ -5,8 +5,8 @@
          void onOpen() override;
  
 +#ifdef __ANDROID__
-+        // COMPANION: refuses to close while Level up is in DS mode -- see the .cpp for why the
-+        // native controller swallow cannot cover that case.
++        // COMPANION: allows the close (exactly as the base class does) and drops the DS bridge
++        // pointer on the way out -- see the .cpp for why cancelling here is safe.
 +        bool exit() override;
 +#endif
 +
@@ -90,7 +90,7 @@
              MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Levelup);
          }
      }
-@@ -279,8 +307,110 @@
+@@ -279,8 +307,114 @@
                  mSpentAttributes.push_back(attribute);
          }
          assignCoins();
@@ -98,8 +98,8 @@
 +#ifdef __ANDROID__
 +        companionEmitSelection();
 +#endif
-+    }
-+
+     }
+ 
 +#ifdef __ANDROID__
 +    // COMPANION: the AUTHORITATIVE selection, echoed after every pick (and on open). The bottom
 +    // screen renders from this rather than mirroring the toggle/replace-last rules itself, so the
@@ -138,8 +138,8 @@
 +        if (!it->second.mButton->getEnabled())
 +            return;
 +        onAttributeClicked(it->second.mButton);
-     }
- 
++    }
++
 +    // COMPANION: confirm. Deliberately the SAME entry point as the native OK button, so the
 +    // under-quota case still shows the vanilla "#{sNotifyMessage36}" message box and refuses,
 +    // and the commit runs untouched.
@@ -150,25 +150,29 @@
 +#endif
 +
 +#ifdef __ANDROID__
-+extern "C" bool companionDsLevelUp();
-+
-+    // COMPANION: the no-exit rule, for DS mode only.
++    // COMPANION: cancel-and-defer. This USED to return !companionDsLevelUp(), i.e. refuse to close
++    // in DS mode, on the belief that popping the mode would LOSE the level-up. That belief was
++    // wrong and the refusal is gone.
 +    //
-+    // Vanilla never needs this: LevelupDialog::onControllerButtonEvent returns true for EVERY
-+    // button, so B is swallowed before it can reach exitCurrentGuiMode. But controllermanager only
-+    // calls that handler when `topWin->isVisible()`, and DS mode HIDES this window -- so in DS mode
-+    // B would fall straight through to exit(), whose base implementation returns true, and the
-+    // player would silently lose the level-up. Refusing here restores "B does nothing".
++    // Nothing about levelling is applied until NpcStats::levelUp(), whose ONLY caller anywhere in
++    // the engine is onOkButtonClicked. So popping the mode any other way applies no attributes and
++    // no health, leaves mLevelProgress untouched (still above iLevelUpTotal), and the next sleep
++    // re-triggers the whole screen via WaitDialog::onWaitingFinished. onOpen() clears
++    // mSpentAttributes and resets the coins, so the re-opened window is clean. That is exactly what
++    // vanilla does when the player presses Escape, which has always closed this window.
 +    //
-+    // Returning false normally makes exitCurrentGuiMode fall back to opening the pause menu; that
-+    // escape hatch is suppressed for this case in windowmanagerimp.cpp, so B is a true no-op rather
-+    // than a way to bounce out to the main menu.
++    // We still override rather than inherit WindowBase::exit() so the DS bridge pointer is dropped
++    // on a cancel, the same way onOkButtonClicked drops it on a commit -- otherwise a stray
++    // CMP:levelup_ok arriving after the window closed would reach a live LevelupDialog and could
++    // commit a level-up with no screen open. onOpen() re-publishes it on the next level-up.
 +    //
-+    // VANILLA mode is unaffected: the window is visible, the controller handler still eats B first,
-+    // and this returns true exactly as the base class did.
++    // The bottom screen is NOT left stranded: popGuiMode fires the Lua UiModeChanged event, and
++    // companion.lua's LevelUp close edge emits COMPANION_LEVELUP_CLOSED for every exit that pops
++    // the mode, not just the native commit's removeGuiMode.
 +    bool LevelupDialog::exit()
 +    {
-+        return !companionDsLevelUp();
++        gCompanionLevelupDialog = nullptr;
++        return true;
 +    }
 +#endif
 +
@@ -201,21 +205,27 @@
      std::string_view LevelupDialog::getLevelupClassImage(
          const int combatIncreases, const int magicIncreases, const int stealthIncreases)
      {
---- a/apps/openmw/mwgui/windowmanagerimp.cpp
-+++ b/apps/openmw/mwgui/windowmanagerimp.cpp
-@@ -929,8 +929,14 @@
-                 // companion. DS mode suppresses the window via companionDsConversation()
-                 // independently of mHudEnabled, so both flags must be checked. Start still
-                 // opens the pause menu (separate input path).
-+                // COMPANION: also skip it for a DS LEVEL UP. LevelupDialog::exit() refuses while
-+                // Level up is DS (the native controller swallow cannot fire on a hidden window),
-+                // and without this the refusal would bounce the player out to the pause menu
-+                // instead of doing nothing. Gated on the MODE as well as the element so it only
-+                // affects the level-up screen.
-+                const bool companionDsLevelupModal = getMode() == GM_Levelup && companionDsLevelUp();
-                 if (!MyGUI::InputManager::getInstance().isModalAny() && getMode() != GM_MainMenu
--                    && companionHudEnabled() && !companionDsConversation())
-+                    && companionHudEnabled() && !companionDsConversation() && !companionDsLevelupModal)
-                     pushGuiMode(GM_MainMenu);
-                 return;
-             }
+@@ -389,6 +523,23 @@
+                 onAttributeClicked(mAttributeButtons[mControllerFocus]);
+             MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Item Gold Up"));
+         }
++        else if (arg.button == SDL_CONTROLLER_BUTTON_B)
++        {
++            // COMPANION: cancel-and-defer, matching every sibling service window (travel, training,
++            // repair, spell-buying, wait), each of which maps B to its own Cancel handler and so
++            // ends up here via exitCurrentGuiMode. This window is the only one of that family with
++            // no Cancel widget in its layout, and it was also the only one with no B case -- so B
++            // fell through to the unconditional `return true` below and did nothing at all.
++            //
++            // That gap was only reachable with `controller menus = true`; with the shipped default
++            // of false, controllermanager's own fallthrough already routed B to exitCurrentGuiMode.
++            // Handling it here makes the two configurations agree.
++            //
++            // Safe for the same reason Escape has always been: nothing is applied until
++            // NpcStats::levelUp(), reached only from onOkButtonClicked, so the pop defers the
++            // level-up to the next sleep rather than losing it.
++            MWBase::Environment::get().getWindowManager()->exitCurrentGuiMode();
++        }
+         else if (arg.button == SDL_CONTROLLER_BUTTON_X)
+         {
+             onOkButtonClicked(mOkButton);
