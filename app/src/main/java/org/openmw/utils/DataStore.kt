@@ -129,12 +129,16 @@ object GameFilesPreferences {
     // storage and survives a reinstall, and a user who needed the non-default profile to see the
     // game at all must not silently lose it and be handed a swapped screen again.
     val DISPLAY_PROFILE_KEY = stringPreferencesKey("display_profile")
-    // Whether the legacy Alpha3 touch overlay (the gear + arrow cluster, and the virtual keyboard
-    // and console it carries) is drawn on the game screen. Only consulted on
-    // DisplayRoles.PROFILE_SINGLE, where it is the ONLY way to type into the game or reach the
+    // Whether the standalone on-screen keyboard button is drawn on the game screen. Only consulted
+    // on DisplayRoles.PROFILE_SINGLE, where it is the ONLY way to type into the game or reach the
     // console — the DS keyboard and the Open Console button both live inside the companion screen,
     // which that profile never creates. Absent = TRUE, because a player who has just told the app
     // they have one screen wants the replacement, not a device with no text entry.
+    //
+    // NAME IS HISTORICAL. Until Sep 10 2026 this drew the whole legacy Alpha3 gear + arrow cluster
+    // (OverlayUI) purely to get at its keyboard icon; it now draws SingleScreenKeyboardButton and
+    // nothing else. The key string is kept as-is so the setting survives the change on devices that
+    // already have it stored.
     //
     // In the DataStore alongside DISPLAY_PROFILE_KEY, and for the same reason: it survives a
     // reinstall, so the escape hatch is not lost with the internal preferences.

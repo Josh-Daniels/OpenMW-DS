@@ -170,8 +170,8 @@
     <string name="launcher_device_retroid">Retroid Dual Screen (Experimental)</string>
     <string name="launcher_device_single">Single Screen Device</string>
     <string name="launcher_device_unsupported">No second screen was detected, so this option has no effect here.</string>
-    <string name="launcher_single_screen_overlay">On-screen keyboard overlay</string>
-    <string name="launcher_single_screen_overlay_tip">Adds a small button cluster to the game screen with a virtual keyboard and a key that opens the console. On a single screen device this is the only way to type into the game, for naming spells, enchantments and saved games. Leave this on unless you have another way to type.</string>
+    <string name="launcher_single_screen_overlay">On-screen keyboard button</string>
+    <string name="launcher_single_screen_overlay_tip">Adds a small keyboard button to the corner of the game screen. Tap it to type into the game, for naming spells, enchantments and saved games. The keyboard also carries the key that opens the console. On a single screen device this is the only way to reach either, so leave this on unless you have another way to type.</string>
     <string name="launcher_game_font_tip">Show this launcher in the game\'s font, matching the companion screens. Turn off for the standard system font.</string>
     <string name="simplified_launcher_title">OpenMW-DS</string>
     <string name="simplified_launcher_settings_title">Settings</string>

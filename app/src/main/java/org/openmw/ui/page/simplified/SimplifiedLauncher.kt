@@ -2519,8 +2519,12 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
             // The single-screen companion for the Device row: only meaningful while Single Screen
             // Device is selected, so it appears and disappears with that choice rather than sitting
             // there greyed out. On the two-screen profiles the same functions live on the companion
-            // screen (Developer Tools -> Show Keyboard / Open Console) and this overlay stays off,
-            // which is what its Aug 2026 removal established.
+            // screen (Developer Tools -> Show Keyboard / Open Console) and nothing is drawn on the
+            // game screen, which is what its Aug 2026 removal established.
+            //
+            // Sep 10 2026: this now toggles a lone keyboard button (SingleScreenKeyboardButton),
+            // not the full Alpha3 cluster it originally enabled. The console rides along on that
+            // keyboard's backtick key, so one control still covers both functions.
             //
             // A real toggle rather than an implied part of the profile, defaulting ON: it is the
             // only route to text entry on a single screen, so off is the surprising answer, but a

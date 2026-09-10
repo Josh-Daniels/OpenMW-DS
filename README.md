@@ -213,6 +213,10 @@ handles multiple mod folders, per-plugin enable/disable and load order.
 
 I have tested a number of mods that change animations, add new items, and new landmasses and all have been fine. Mods that edit the actual Morrowind.esm file are often not compatible with OpenMW, so I would suggest a fresh download of Morrowind if you have an issue with a Global Time error.
 
+**There are two other kinds of mods that won't work with the app.**
+- Mods that add their own map
+- Mods that add their own menus, panels or windows.
+
 ---
 ## Credits
 

@@ -3572,10 +3572,29 @@ local function dispatchCommand(command)
         -- a second minimap tap closes it instead of re-opening (mirrors B/Back).
         if interfaces.UI.getMode() == interfaces.UI.MODE.Interface then
             pcall(function() interfaces.UI.removeMode(interfaces.UI.MODE.Interface) end)
-            -- DS map: report the CLOSE edge. Lua owns this toggle, so Lua is the only place that
-            -- reliably knows the map view's open state -- the companion cannot infer it from the
-            -- tap alone, because the same tap both opens and closes.
-            emit("COMPANION_MAPMODE:0")
+            -- DS map: the CLOSE edge is NOT emitted here. It is emitted from onUiModeChanged
+            -- below, which already covers this path -- removeMode goes through
+            -- ui._setUiModeStack, so it fires UiModeChanged exactly like controller B or Escape.
+            -- Lua still owns the edge (Kotlin cannot infer it from the tap, since the same tap
+            -- both opens and closes); this is only about WHEN.
+            --
+            -- WHY IT MOVED (Sep 10 2026, the "map replacer flashes on close" report): emitting
+            -- here beat the event by TWO Lua updates. removeMode's _setUiModeStack is a delayed
+            -- action; the engine's uiModeChanged then lands while mApplyingDelayedActions is set,
+            -- so it is deferred again into mDelayedUiModeChangedArg; and ui.lua's handler
+            -- re-broadcasts it as a sendEvent, delivered on the update after that. Any OTHER
+            -- player script that hides a Lua UI window on UiModeChanged -- which is how every
+            -- OpenMW UI mod does it -- therefore still had its window on the TOP screen for those
+            -- two updates, while our opaque MapDsTopOverlay had already been torn down by this
+            -- emit. That gap IS the reported flash of a third-party map right after closing ours.
+            -- Emitting from the shared handler puts our unmount in the same event batch as their
+            -- hide, and our path is strictly longer (emit -> push channel -> StateFlow ->
+            -- recompose -> removeView), so their window is down first.
+            --
+            -- The OPEN edge below is deliberately NOT symmetric: it still emits immediately, so
+            -- the overlay is up BEFORE the mode exists. That is the anti-flicker fix -- see the
+            -- suppression-flag note in companion-map-export.patch. Early is right on open and
+            -- wrong on close.
         else
             -- Guard: only OPEN the map once the character is created. During character creation the
             -- in-game inventory/map GUI isn't available, and forcing it (AddUiMode Interface) wedges
@@ -3931,10 +3950,15 @@ local function onUiModeChanged(data)
         end
     end)
 
-    -- DS map: the CLOSE edge for every exit that is NOT the minimap tap -- controller B, Escape,
-    -- or anything else that pops the Interface mode. The tap's own two edges are emitted in the
-    -- openmap handler; this is what stops the DS map being left mounted (and the native map
-    -- suppressed) after the player backed out with B.
+    -- DS map: the CLOSE edge for EVERY exit -- the minimap tap's own removeMode, controller B,
+    -- Escape, or anything else that pops the Interface mode. This is what stops the DS map being
+    -- left mounted (and the native map suppressed) after the player backed out with B.
+    --
+    -- Sep 10 2026: the minimap tap used to emit its own close edge inline in the openmap handler,
+    -- two Lua updates ahead of this one. It no longer does -- see the long note there. This is now
+    -- the SINGLE close-edge emitter, which is what keeps our unmount in step with third-party Lua
+    -- UI windows that hide on this same event. Do not re-add an inline emit to a close path.
+    -- (The OPEN edge is still emitted inline, on purpose.)
     pcall(function()
         local IF = interfaces.UI.MODE.Interface
         if data.oldMode == IF and data.newMode ~= IF then

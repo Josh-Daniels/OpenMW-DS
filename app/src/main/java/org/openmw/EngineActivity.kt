@@ -129,9 +129,10 @@ import org.openmw.ui.controls.UIStateManager.soundHaptics
 import org.openmw.ui.controls.UIStateManager.uqmJNI
 import org.openmw.ui.controls.VirtualKeyboard
 import org.openmw.ui.overlay.ExpandableCircleButton
+import org.openmw.ui.overlay.SingleScreenKeyboardButton
+import org.openmw.utils.sendKeyEvent
 import org.openmw.ui.overlay.GridOverlay
 import org.openmw.ui.overlay.HiddenMenu
-import org.openmw.ui.overlay.OverlayUI
 import org.openmw.ui.view.BackgroundAnimation
 import org.openmw.ui.view.NavmeshScreen
 import org.openmw.ui.view.addCustomLog
@@ -495,6 +496,24 @@ class EngineActivity : SDLActivity() {
                 .onFailure { Log.w(TAG, "legacy touch-overlay reset failed", it) }
         }
 
+        // Wire the virtual keyboard's key-event lambda. **The VirtualKeyboard crashes without
+        // this**, and the crash is not obvious from its call site: `sendKeyEvent` is a global
+        // `lateinit var` in QuickConsole.kt whose ONLY assignment used to be a side effect of
+        // composing `OverlayUI` (Overlay.kt). When the SINGLE SCREEN profile stopped composing that
+        // cluster (Sep 10 2026, replaced by SingleScreenKeyboardButton), nothing assigned it and
+        // every non-letter key died with
+        // `UninitializedPropertyAccessException: lateinit property sendKeyEvent has not been
+        // initialized` — backtick/console is just the one that got reported; space, backspace,
+        // enter, tab, the arrows, ESC and F1-F12 all route through it too. Plain letters survived
+        // because they go `onNativeKeyDown` + `nativeCommitText` straight to SDL instead.
+        //
+        // Assigned HERE, in onCreate, rather than from a composable: this is the activity that owns
+        // `handleKeyEvent`, and hanging a global's lifetime off whether some unrelated composable
+        // happens to be in the tree is exactly what broke. Unconditional — on the two-screen
+        // profiles `UIKeyboard.showVKB` is never set (the DS keyboard uses its own CMPTEXT path),
+        // so this simply never fires there.
+        sendKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
+
         // OpenMW-DS Second screen
         startCompanionScreen()
 
@@ -617,13 +636,31 @@ class EngineActivity : SDLActivity() {
                             }
                         }
 
-                        // The Alpha3 gear + arrow cluster. REMOVED for everyone Aug 2026, and
-                        // brought back Sep 2026 for the SINGLE SCREEN DEVICE profile ONLY, where it
-                        // is the only in-game route to the virtual keyboard (text entry: save,
-                        // spell and enchantment names) and to the console. On a two-screen device
-                        // those live on the companion instead (Developer Tools -> Show Keyboard /
-                        // Open Console) and this must stay gone: that is where its removal bug came
-                        // from.
+                        // SINGLE SCREEN DEVICE: a lone keyboard button, NOT the Alpha3 cluster.
+                        //
+                        // This profile briefly enabled the whole Alpha3 gear + arrow overlay
+                        // (Sep 2026) purely to get at one of its icons. Replaced Sep 10 2026 by
+                        // SingleScreenKeyboardButton, which does exactly what that icon did and
+                        // nothing else: the cluster's movement buttons, mouse menu, edit mode,
+                        // button manager and world-map WebView are legacy Alpha3 surface no other
+                        // part of this app still exposes.
+                        //
+                        // The keyboard is the only control needed, because the CONSOLE comes
+                        // through it: the cluster never had a console button either, only the
+                        // virtual keyboard's backtick key (KEYCODE_GRAVE -> the engine's A_Console
+                        // binding). See SingleScreenKeyboardButton's KDoc.
+                        //
+                        // On a two-screen device both live on the companion instead (Developer
+                        // Tools -> Show Keyboard / Open Console) and nothing is drawn here: that is
+                        // where the Aug 2026 removal bug came from.
+                        //
+                        // NOTE: this was OverlayUI's LAST call site. `Alpha3OverlayRow` was deleted
+                        // from Developer Tools in Aug 2026 (see the note where it was, in
+                        // CompanionScreen.kt), so there is no "full legacy overlay" route left
+                        // anywhere in the app and this swap does not take one away. `OverlayUI` is
+                        // left in Overlay.kt uncalled rather than deleted: that file's other
+                        // exports (showKeyboard, DraggableBox, ...) are still used, so removing the
+                        // composable is a separate cleanup with its own blast radius.
                         //
                         // **Deliberately NOT gated on `isUIHidden` or on `hudVisible`, unlike the
                         // pre-removal version.** Both gates are wrong here:
@@ -639,10 +676,9 @@ class EngineActivity : SDLActivity() {
                         // The toggle below is the only gate, which is also what makes it a real
                         // off switch rather than one condition among three.
                         if (singleScreen && singleScreenOverlay) {
-                            OverlayUI(
+                            SingleScreenKeyboardButton(
                                 context = this@EngineActivity,
-                                virtualKeyboard = virtualKeyboard,
-                                onKeyEvent = { keyCode -> handleKeyEvent(keyCode) }
+                                virtualKeyboard = virtualKeyboard
                             )
                         }
 

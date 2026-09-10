@@ -48,9 +48,26 @@ import org.libsdl.app.SDLActivity.nativeCommitText
 import org.openmw.ui.controls.UIStateManager.menuAlpha
 import org.openmw.ui.controls.UIStateManager.menuColor
 
-// Declare a lambda for updating console output and handling key events
-lateinit var updateConsoleOutput: (String) -> Unit
-lateinit var sendKeyEvent: (Int) -> Unit
+// Two global lambdas, assigned by whichever screen is currently able to service them.
+//
+// **NOT `lateinit`, deliberately — that cost a crash on Sep 10 2026.** `sendKeyEvent`'s only
+// assignment used to be a side effect of composing `OverlayUI`; when the Single Screen Device
+// profile stopped composing that cluster, every non-letter key on the VirtualKeyboard (backtick,
+// space, backspace, enter, tab, arrows, ESC, F1-F12) died with
+// `UninitializedPropertyAccessException: lateinit property sendKeyEvent has not been initialized`,
+// which the crash reporter turned into a process kill. A global whose initialisation depends on an
+// unrelated composable being in the tree is a landmine; a no-op default disarms it, so a missing
+// assignment degrades to "that key does nothing" plus a log line instead of killing the game.
+//
+// The real assignments still stand and are what you should fix if you see these warnings:
+// `sendKeyEvent` in `EngineActivity.onCreate`, `updateConsoleOutput` in `MainPage` (and in
+// `OverlayUI`, while that is still composed anywhere).
+var updateConsoleOutput: (String) -> Unit = {
+    Log.w("QuickConsole", "updateConsoleOutput called before any screen assigned it; dropping")
+}
+var sendKeyEvent: (Int) -> Unit = { keyCode ->
+    Log.w("QuickConsole", "sendKeyEvent($keyCode) called before any screen assigned it; dropping")
+}
 
 @Composable
 fun TravelMenuPopup(

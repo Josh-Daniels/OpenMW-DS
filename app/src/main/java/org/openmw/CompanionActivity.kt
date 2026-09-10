@@ -1,8 +1,11 @@
 package org.openmw
 
 import android.app.ActivityManager
+import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
+import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
@@ -35,19 +38,41 @@ import org.openmw.companion.CompanionScreen
  * that display, so the existing sub-window machinery (the pause/options overlay) keeps working
  * there unchanged.
  *
- * **This window is FOCUSABLE, unlike the Presentation's — and that is not an oversight.**
- * It was `FLAG_NOT_FOCUSABLE` at first, copying the Presentation, to stop the companion taking
- * controller input from the game. That caused an ANR (confirmed on device, Sep 2 2026):
- * `ANR ... Reason: Application does not have a focused window`, with
+ * **This window is focusable while it is COMING UP and non-focusable once it is up. Both halves
+ * are load-bearing and neither is safe on its own** — see [dropFocusabilityOnceFocused].
+ *
+ * It was `FLAG_NOT_FOCUSABLE` from `onCreate` at first, copying the Presentation, to stop the
+ * companion taking controller input from the game. That caused an ANR (confirmed on device,
+ * Sep 2 2026): `ANR ... Reason: Application does not have a focused window`, with
  * `mCurrentFocus=null` on the companion's display. A `Presentation` can be non-focusable because
  * it is a window belonging to the game's own focusable activity; an Activity that is the ONLY
  * window of its task cannot, because then the display has a focused app and no focusable window,
  * so the input dispatcher waits five seconds for one to appear and then declares the app hung.
  *
- * Making it focusable is safe here because this hardware has PER-DISPLAY focus: the same dump
- * showed `EngineActivity` holding `mCurrentFocus` on the game's display while the companion's
- * display tracked its own separately. So the companion takes focus on its own screen only, and the
- * game keeps its own. `FLAG_NOT_TOUCH_MODAL` is retained.
+ * It was then permanently focusable, which is what shipped in 1.1.0. The safety argument was that
+ * this hardware has PER-DISPLAY focus, so the companion would take focus on its own screen only.
+ * **That argument is wrong, and a Retroid user reported the consequence (Sep 10 2026): tapping the
+ * companion killed the game's controller input until the game screen was tapped again.**
+ * Per-display focus governs whether two displays can hold focus at the SAME TIME. It does not give
+ * you two key-input destinations: `InputDispatcher` keeps a single focused *display*, and a
+ * controller is not associated with any display, so its key events go to the focused window of
+ * whichever display is focused. Touch routes per-display (which is why the companion itself kept
+ * working); keys do not. `EngineActivity` is an `SDLActivity`, so the engine reads the controller
+ * through that window's key dispatch — lose the focused display and the game goes deaf.
+ *
+ * This was never a first-frame race, which is how it had been read: `startCompanionScreen()` runs
+ * inside `EngineActivity.onCreate`, so on this profile the companion launches AFTER the game and
+ * takes the focused display from it at boot. That is what
+ * `CompanionScreen.SPLASH_NOTICE_SWAPPED_CONTROLS` ("Tap the game screen to enable controls.") was
+ * papering over. **If this fix holds, that notice should become unnecessary** — which is the
+ * cheapest way to confirm the model is right.
+ *
+ * `FLAG_NOT_TOUCH_MODAL` is retained throughout and is unrelated: it governs where touches OUTSIDE
+ * the window go, not focus. A tap inside a focusable window focuses it regardless.
+ *
+ * Dropping focusability cannot break the companion's own input: the companion has no `TextField`
+ * and no IME anywhere, and the Presentation path has always been non-focusable, so the UI cannot
+ * depend on window focus.
  *
  * Nothing about the companion UI itself changes: this hosts the same [CompanionScreen] composable
  * the Presentation does, so every content-role behaviour (`LocalIsTopScreen`, adaptive dimming, the
@@ -55,12 +80,18 @@ import org.openmw.companion.CompanionScreen
  */
 class CompanionActivity : ComponentActivity() {
 
+    /** One-shot guard for [dropFocusabilityOnceFocused], reset per foreground pass by [onStart]. */
+    private var focusabilityDropped = false
+
+    /** The untouchable focus holder for this display. See [addFocusAnchor]. */
+    private var focusAnchorView: View? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // NOT_TOUCH_MODAL only. FLAG_NOT_FOCUSABLE is deliberately NOT set — see the class KDoc:
-        // on an Activity it leaves the display with a focused app and no focusable window, which
-        // ANRs the moment anything is touched.
+        // NOT_TOUCH_MODAL only. FLAG_NOT_FOCUSABLE is deliberately NOT set HERE — setting it at
+        // create time is exactly the configuration that ANRs (see the class KDoc). It is added
+        // later, once this window has actually held focus: dropFocusabilityOnceFocused().
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
 
         instance = this
@@ -97,6 +128,10 @@ class CompanionActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         started = true
+        // Every foreground pass starts focusable again. See restoreFocusability() — a window that
+        // came back from the background already non-focusable is byte-for-byte the create-time
+        // configuration that ANRs.
+        restoreFocusability()
     }
 
     override fun onResume() {
@@ -108,9 +143,113 @@ class CompanionActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        // The standard immersive hook, usable now that this window is focusable.
-        if (hasFocus) applyImmersive()
+        Log.d(TAG, "onWindowFocusChanged hasFocus=$hasFocus ${flagState()}")
+        if (hasFocus) {
+            applyImmersive()
+            dropFocusabilityOnceFocused()
+        }
     }
+
+    /**
+     * Whether `FLAG_NOT_FOCUSABLE` is actually present on the LIVE window attributes, plus the
+     * display this window is on.
+     *
+     * Reads `window.attributes` rather than tracking what we asked for, because the whole question
+     * the logging exists to answer is whether the request STUCK — `addFlags` on a running Activity
+     * window is a relayout request, not a guarantee.
+     */
+    private fun flagState(): String {
+        val flags = runCatching { window.attributes.flags }.getOrDefault(0)
+        val notFocusable = flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE != 0
+        return "notFocusable=$notFocusable display=${runCatching { display?.displayId }.getOrNull()}"
+    }
+
+    /**
+     * Make this window focusable again for a fresh foreground pass.
+     *
+     * Called from [onStart], not [onCreate], because this activity is `singleInstance`: after
+     * `moveTaskToBack` (the per-display home gesture) and the `ensureCompanionForeground` relaunch,
+     * the SAME instance comes back and `onCreate` never runs again. Without this the window would
+     * return already carrying `FLAG_NOT_FOCUSABLE`, i.e. the create-time configuration that ANRs.
+     *
+     * Clearing a flag that is not set is a no-op, so the first pass costs nothing.
+     */
+    private fun restoreFocusability() {
+        focusabilityDropped = false
+        runCatching { window.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) }
+        Log.d(TAG, "restoreFocusability -> ${flagState()}")
+    }
+
+    /**
+     * Hand focus back as soon as this window no longer needs it. **This is the fix for "tapping the
+     * companion kills the game's controller input"** (reported Sep 10 2026); the reasoning is in the
+     * class KDoc.
+     *
+     * The two failure modes are at opposite ends of the window's life, which is why the answer is
+     * the same flag at a different TIME rather than a different flag:
+     * - focusable at create time is REQUIRED, or the display has a focused app and no focusable
+     *   window and the dispatcher ANRs after 5s;
+     * - focusable afterwards is HARMFUL, because every tap makes this the focused display and the
+     *   controller follows it off the game.
+     *
+     * Waiting for a real `onWindowFocusChanged(true)` is what separates them: by then the window
+     * has been added and focused, so the dispatcher has had its focusable window and the ANR
+     * condition is behind us.
+     *
+     * **MEASURED ON DEVICE Sep 10 2026, and it settles a question this comment used to leave open.**
+     * It said WindowManager "should then move the top focused display to the game's". **It does
+     * not.** With the main window non-focusable, logcat gave:
+     * ```
+     * W InputDispatcher: Focused display #0 does not have a focused window.
+     * E InputDispatcher: Dropping MOTION event because there is no focused window
+     * I WindowManager: ANR in ActivityRecord{...CompanionActivity} Reason: Application does not
+     *                  have a focused window
+     * E InputDispatcher: But another display has a focused window
+     * ```
+     * That last line is the whole finding: display 0 stays the focused display, still has
+     * `CompanionActivity` as its focused APP, and now has no focusable WINDOW — which is the
+     * Sep 2 2026 ANR exactly, just deferred to whenever input next arrives. It surfaced as the
+     * OS declaring the app hung during a long modded load, survivable only by tapping the screen
+     * every few seconds to reset the dispatcher's 5s timer.
+     *
+     * **Hence [addFocusAnchor], and the ORDER here is the fix.** Display 0 is given a focused
+     * window that cannot be tapped, and only then is the main window made non-focusable. The
+     * anchor absorbs the dispatcher's requirement; the main window keeps the property that makes
+     * a companion tap harmless.
+     *
+     * **Fails SAFE:** if the anchor cannot be added, focusability is NOT dropped. A failure
+     * therefore regresses to the old focus bug (annoying, recoverable by tapping the game screen)
+     * rather than to an ANR (the OS offering to kill the game mid-load). Never reorder these two.
+     *
+     * Posted rather than applied inline so the flag change is not made from inside the focus
+     * callback itself, and one-shot per foreground pass because once it lands this window cannot
+     * take focus again to re-run it.
+     */
+    private fun dropFocusabilityOnceFocused() {
+        if (focusabilityDropped) return
+        focusabilityDropped = true
+        window.decorView.post {
+            // ORDER IS LOAD-BEARING: anchor first, and bail out entirely if it did not land.
+            if (!addFocusAnchor()) {
+                focusabilityDropped = false
+                Log.e(TAG, "no focus anchor, staying focusable rather than risking an ANR")
+                return@post
+            }
+            runCatching {
+                window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+                // onWindowFocusChanged is dead from here (a non-focusable window never gets focus),
+                // so its immersive re-hide has to happen once more on the way past. The insets
+                // listener in onCreate and the onResume call are what keep the bars down after
+                // this, and both are independent of focus.
+                applyImmersive()
+                Log.d(TAG, "dropFocusability applied -> ${flagState()}")
+            }.onFailure {
+                focusabilityDropped = false
+                Log.e(TAG, "dropFocusability FAILED, staying focusable", it)
+            }
+        }
+    }
+
 
     private fun applyImmersive() {
         runCatching {
@@ -128,6 +267,70 @@ class CompanionActivity : ComponentActivity() {
                     or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 )
         }
+    }
+
+
+    /**
+     * Give this display a focused window that nothing can tap: a 1x1, invisible, untouchable but
+     * FOCUSABLE sub-window of this activity.
+     *
+     * **Why it has to exist.** On this profile the companion is a real Activity on display 0, so
+     * that display always has a focused *app*. Android then wants a focused *window* there, and
+     * measurement (see [dropFocusabilityOnceFocused]) showed it will NOT go looking on another
+     * display when there isn't one — it drops the event and ANRs the app. So display 0 needs a
+     * focused window. The bug is that the obvious candidate, the companion's own content window,
+     * is the thing the player taps, and a tap on a focusable window makes its display the focused
+     * one, which is what takes the controller off the game.
+     *
+     * Splitting the two roles across two windows satisfies both at once:
+     * - `FLAG_NOT_TOUCHABLE` means this window never receives a touch, so it can never be the
+     *   window a tap focuses. It is 1x1 as well, but the flag is what actually guarantees it.
+     * - No `FLAG_NOT_FOCUSABLE`, so it is a valid focus target for the dispatcher and the ANR
+     *   condition cannot arise.
+     * - `FLAG_NOT_TOUCH_MODAL` so touches outside its one pixel reach the companion below.
+     *
+     * `TYPE_APPLICATION_PANEL` with the decor's `windowToken`, i.e. the same sub-window mechanism
+     * `EngineActivity.showPauseOverlay` already uses successfully on this display. Being a panel
+     * it also sits ABOVE the main window in z-order, which is what lets it take focus from it.
+     *
+     * **This does not make the game focusable at boot, and is not meant to.** While display 0 is
+     * the focused display the controller talks to this anchor, which swallows it — the same state
+     * 1.1.0 shipped, covered by `SPLASH_NOTICE_SWAPPED_CONTROLS` ("Tap the game screen to enable
+     * controls."). What it removes is the ANR, and what [dropFocusabilityOnceFocused] removes is
+     * the tap-to-steal. After that one tap the arrangement is stable for the session.
+     *
+     * @return true if the anchor is in place; the caller MUST NOT drop focusability otherwise.
+     */
+    private fun addFocusAnchor(): Boolean {
+        focusAnchorView?.let { return true }
+        val token = window.decorView.windowToken ?: run {
+            Log.w(TAG, "focus anchor: no window token yet")
+            return false
+        }
+        val lp = WindowManager.LayoutParams(
+            1, 1,
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSPARENT
+        ).apply {
+            this.token = token
+            gravity = Gravity.TOP or Gravity.START
+        }
+        val view = View(this)
+        return runCatching { windowManager.addView(view, lp) }
+            .onSuccess {
+                focusAnchorView = view
+                Log.d(TAG, "focus anchor added")
+            }
+            .onFailure { Log.e(TAG, "focus anchor addView failed", it) }
+            .isSuccess
+    }
+
+    private fun removeFocusAnchor() {
+        val view = focusAnchorView ?: return
+        runCatching { windowManager.removeView(view) }
+        focusAnchorView = null
     }
 
     /**
@@ -180,10 +383,14 @@ class CompanionActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        removeFocusAnchor()
         if (instance === this) instance = null
     }
 
     companion object {
+
+        private const val TAG = "CompanionActivity"
+
         /**
          * The live instance, so `EngineActivity` can reach this window's `WindowManager` for the
          * pause/options overlay — the one piece of the companion that is a separate window rather
