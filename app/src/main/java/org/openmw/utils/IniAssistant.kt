@@ -2,6 +2,7 @@ package org.openmw.utils
 
 import android.annotation.SuppressLint
 import android.os.Build
+import androidx.annotation.StringRes
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -40,9 +41,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import org.openmw.R
 import androidx.compose.ui.unit.dp
 import org.openmw.Constants
 import org.openmw.ui.controls.UIStateManager.darkGray
@@ -310,6 +313,7 @@ fun IniSectionCard(
                 Column(modifier = Modifier.padding(8.dp)) {
                     sectionSettings.forEachIndexed { index, (key, value, comment) ->
                         IniSettingItem(
+                            section = section,
                             propertyKey = key,
                             value = value,
                             comment = comment,
@@ -329,8 +333,68 @@ fun IniSectionCard(
     }
 }
 
+/**
+ * Keys this editor shows but does not let you EDIT, because something else owns them.
+ *
+ * `[Video] resolution x/y` is written authoritatively on every launcher start by
+ * `applyGameScreenResolution()`, from the live game display's real size and the player's Resolution
+ * tier. Any edit made here is therefore silently reverted at the next launch, which is worse than
+ * not offering it: the row looks like the live control and is not.
+ *
+ * **Shown-but-locked rather than hidden, deliberately.** These rows are not a hand-placed option
+ * that could simply be deleted — this editor enumerates every key in `settings.cfg`, so hiding them
+ * would mean teaching a generic editor to lie about the file's contents. The value is real and
+ * worth seeing; only the illusion of control is removed. Use the Resolution setting in the
+ * launcher's Settings instead.
+ */
+/**
+ * Normalise a section name for matching.
+ *
+ * **`readIniValues` stores sections with the BRACKETS STRIPPED** (`"Video"`, not `"[Video]"`) — see
+ * the `substring(1, length - 1)` where it parses a `[Section]` header. Matching against `"[Video]"`
+ * silently matches nothing, which is exactly how the first cut of these notes shipped invisible.
+ * Accept either spelling so the trap cannot be re-sprung by whichever form a caller has to hand.
+ */
+private fun normalisedSection(section: String): String =
+    section.trim().removePrefix("[").removeSuffix("]").trim().lowercase()
+
+private fun isManagedByResolutionSetting(section: String, propertyKey: String): Boolean {
+    val key = propertyKey.substringAfterLast('.').trim().lowercase()
+    val sec = normalisedSection(section)
+    return (sec == "video" && (key == "resolution x" || key == "resolution y")) ||
+        // Owned by the tier too, and for a reason that is not obvious from the key: MyGUI lays out
+        // on a logical canvas of `resolution / scaling factor`, so a tier that cut the resolution
+        // without cutting this would shrink that canvas and vanilla windows would stop FITTING.
+        // `applyGuiScalingForTier` derives it from a base kept in the DataStore. An edit here would
+        // be reverted on the next launcher start, exactly like the resolution rows.
+        (sec == "gui" && key == "scaling factor")
+}
+
+/**
+ * An advisory note for a key this project has MEASURED a best value for.
+ *
+ * Not a lock: these stay fully editable. The point is that a value chosen from profiling looks
+ * exactly like an arbitrary default once it is a number in a generic list, so someone tuning by
+ * hand has no way to know they are about to undo a measured result. The note carries the number and
+ * the evidence, so changing it is an informed decision rather than an accidental one.
+ *
+ * Keep these in step with `applyTunedPerformanceSettings` in `UITools.kt`, which is what actually
+ * writes them (once per version, so the player owns the key afterwards) and where the full
+ * measurement record lives.
+ */
+@StringRes
+private fun iniSettingHint(section: String, propertyKey: String): Int? {
+    val key = propertyKey.substringAfterLast('.').trim().lowercase()
+    return when {
+        normalisedSection(section) == "water" && key == "reflection detail" ->
+            R.string.ini_hint_water_reflection
+        else -> null
+    }
+}
+
 @Composable
 fun IniSettingItem(
+    section: String,
     propertyKey: String,
     value: Any,
     comment: String?,
@@ -339,6 +403,8 @@ fun IniSettingItem(
 ) {
     val context = LocalContext.current
     val extractedKey = propertyKey.substringAfterLast('.')
+    val managedElsewhere = isManagedByResolutionSetting(section, propertyKey)
+    val hint = iniSettingHint(section, propertyKey)
     
     var translatedKey by remember { mutableStateOf(extractedKey) }
     var translatedComment by remember { mutableStateOf(comment ?: "") }
@@ -371,6 +437,22 @@ fun IniSettingItem(
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
+                if (managedElsewhere) {
+                    Text(
+                        text = stringResource(R.string.ini_managed_by_resolution),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Cyan,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+                if (hint != null) {
+                    Text(
+                        text = stringResource(hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFD9A441),
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(8.dp))
@@ -389,10 +471,16 @@ fun IniSettingItem(
                 is Int, is Float -> {
                     var textValue by remember(value) { mutableStateOf(value.toString()) }
                     val focusManager = LocalFocusManager.current
-                    
+
                     OutlinedTextField(
                         value = textValue,
-                        onValueChange = { 
+                        // readOnly rather than enabled=false: the value stays legible at full
+                        // contrast (it is real, and worth reading) while the field refuses edits
+                        // and never raises a keyboard. A disabled field greys the number out, which
+                        // reads as "no value" rather than "not yours to set".
+                        readOnly = managedElsewhere,
+                        onValueChange = {
+                            if (managedElsewhere) return@OutlinedTextField
                             textValue = it
                             if (value is Int) {
                                 it.toIntOrNull()?.let { onValueChange(it) }

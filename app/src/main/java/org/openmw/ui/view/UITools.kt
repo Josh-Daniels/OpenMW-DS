@@ -119,6 +119,7 @@ import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.stringRes
 import java.io.BufferedReader
 import java.io.File
+import java.util.Locale
 import java.io.InputStreamReader
 import kotlin.math.cos
 import kotlin.math.ln
@@ -636,6 +637,14 @@ const val TUNED_PERF_SETTINGS_VERSION = 2
  * unfixable without an uninstall. So the caller gates this on [TUNED_PERF_SETTINGS_VERSION] and the
  * player owns these keys from then on.
  *
+ * **The full list of keys this app OWNS (authoritative every launch, player edits reverted) is
+ * exactly three:** `[Video] resolution x`, `[Video] resolution y` and `[GUI] scaling factor` — the
+ * first two from the Resolution tier and the display profile, the third derived from them by
+ * [applyGuiScalingForTier] because the vanilla menus stop fitting otherwise. All three are locked
+ * and annotated in `IniSettings` so the editor does not present them as live controls. Everything
+ * else in `settings.cfg`, including every value below, belongs to the player. Adding a fourth is a
+ * decision, not a detail.
+ *
  * The guard lives in the DataStore (EXTERNAL storage, beside `settings.cfg`) rather than in
  * SharedPreferences, so the guard and the thing it guards share a lifetime: SharedPreferences is
  * wiped by a reinstall while `/OpenMW-DS/` survives, which would re-fire this and stomp a
@@ -782,11 +791,189 @@ private fun setSettingInSection(
 suspend fun Context.applyGameScreenResolution() {
     // Measured on the caller's thread (the display query is cheap and is what MainActivity has
     // always done); only the file write moves to IO.
-    val (width, height) = gameScreenRealSize()
+    val (nativeWidth, nativeHeight) = gameScreenRealSize()
     withContext(Dispatchers.IO) {
         val avoidInsertion = GameFilesPreferences.readResolutionInsertion(this@applyGameScreenResolution).first()
-        if (!avoidInsertion) updateResolutionInConfig(width, height)
+        if (avoidInsertion) return@withContext
+        // The tier is applied HERE rather than at either call site, so both of them (MainActivity's
+        // once-per-launch pass and the Device dropdown's on-change pass) pick it up by construction
+        // and cannot drift apart. Read fresh every time: the point of storing a target HEIGHT is
+        // that the width is re-derived from whatever display currently holds the game role.
+        val tierHeight = GameFilesPreferences.loadResolutionTier(this@applyGameScreenResolution).first()
+        val (width, height) = resolveTieredGameResolution(nativeWidth, nativeHeight, tierHeight)
+        updateResolutionInConfig(width, height)
+        applyGuiScalingForTier(this@applyGameScreenResolution, height, minOf(nativeWidth, nativeHeight))
     }
+}
+
+/**
+ * Fallback base GUI scaling, used only when `settings.cfg` has no `[GUI] scaling factor` to seed
+ * from. Matches the value this app ships.
+ */
+private const val GUI_SCALING_FALLBACK_BASE = 2.0f
+
+/** The engine's own sanitizer range for `[GUI] scaling factor` (`components/settings/categories/gui.hpp`). */
+private const val GUI_SCALING_MIN = 0.5f
+private const val GUI_SCALING_MAX = 8.0f
+
+/**
+ * Keep the vanilla menus the same size on screen when a Resolution tier downscales the render.
+ *
+ * **Why this is required, not cosmetic.** MyGUI lays out on a LOGICAL canvas of
+ * `resolution / scaling factor`. This app ships `scaling factor = 2.0`, so at 1080p the canvas is
+ * 960x540 logical units, which is what every vanilla window is designed against. Drop the render to
+ * 720p and leave the scaling alone and the canvas becomes 640x360 — a third smaller — at which point
+ * windows do not merely look big, they **do not fit on the screen**. Reported at 720p on Sep 10
+ * 2026. OpenMW 0.52 has no render-scale that leaves the GUI at full resolution (`[Video]` has no
+ * such key), so `setFixedSize` scales everything or nothing, and the GUI has to be compensated.
+ *
+ * `scaling = base * appliedHeight / nativeHeight` holds the logical canvas EXACTLY constant:
+ * 2.0 * 720/1080 = 1.333, and 1280/1.333 x 720/1.333 = 960x540, the native canvas to the pixel. The
+ * menus therefore occupy the same fraction of the screen as they always did; they are simply drawn
+ * with fewer pixels, which is the honest cost of the tier.
+ *
+ * **THE BASE COMES FROM THE DATASTORE, NEVER FROM THE FILE WE JUST WROTE.** Unlike the resolution
+ * write this is not a fixed point — feeding the derived value back in would compound every launch
+ * (2.0 -> 1.333 -> 0.889 -> ...). The base is seeded ONCE from `settings.cfg` (so an existing
+ * customisation survives, and a future change to the shipped default is picked up) and is output
+ * only thereafter. See [GameFilesPreferences.GUI_SCALING_BASE_KEY] for why losing that store cannot
+ * corrupt the base.
+ *
+ * At Native, `appliedHeight == nativeHeight`, so this writes the base straight back and today's
+ * behaviour is unchanged on every device.
+ *
+ * Consequence, and it is deliberate: `[GUI] scaling factor` is now OWNED by the Resolution setting.
+ * Its row in the `settings.cfg` editor is locked and annotated for the same reason the resolution
+ * rows are, because an edit there would be reverted on the next launcher start.
+ */
+private suspend fun applyGuiScalingForTier(context: Context, appliedHeight: Int, nativeHeight: Int) {
+    if (appliedHeight <= 0 || nativeHeight <= 0) return
+
+    val stored = GameFilesPreferences.loadGuiScalingBase(context).first()
+    val base = stored ?: (readGuiScalingFromConfig() ?: GUI_SCALING_FALLBACK_BASE).also {
+        GameFilesPreferences.saveGuiScalingBase(context, it)
+    }
+
+    val scaling = (base * appliedHeight / nativeHeight)
+        .coerceIn(GUI_SCALING_MIN, GUI_SCALING_MAX)
+
+    val file = File(Constants.SETTINGS_FILE)
+    if (!file.exists()) return
+    val original = file.readLines()
+    val lines = original.toMutableList()
+    // Trailing zeros trimmed to keep the file tidy; the engine parses either form.
+    val text = if (scaling == scaling.toInt().toFloat()) "${scaling.toInt()}.0"
+    else String.format(Locale.US, "%.4f", scaling).trimEnd('0')
+    setSettingInSection(lines, "[GUI]", "scaling factor", text)
+    if (lines != original) {
+        file.writeText(lines.joinToString("\n"))
+        Log.d("UITools", "GUI scaling for tier: base=$base applied=$appliedHeight/$nativeHeight -> $text")
+    }
+}
+
+/** Current `[GUI] scaling factor` in `settings.cfg`, or null if absent/unparseable. Seeding only. */
+private fun readGuiScalingFromConfig(): Float? {
+    val file = File(Constants.SETTINGS_FILE)
+    if (!file.exists()) return null
+    var value: Float? = null
+    runCatching {
+        var inGui = false
+        file.forEachLine { line ->
+            val t = line.trim()
+            when {
+                t.startsWith("[") && t.endsWith("]") -> inGui = t.equals("[GUI]", ignoreCase = true)
+                inGui && !t.startsWith("#") &&
+                    t.substringBefore('=', "").trim().equals("scaling factor", ignoreCase = true) ->
+                    value = t.substringAfter('=', "").trim().toFloatOrNull()
+            }
+        }
+    }.onFailure { return null }
+    return value?.takeIf { it > 0f }
+}
+
+/**
+ * Read `[Video] resolution x/y` straight out of `settings.cfg`.
+ *
+ * **Exists because the FileObserver path is not trustworthy for this.** `ConfigFileObserver`
+ * (`FileBrowser.kt`) reads these values into `EngineActivity`'s statics, but only its CONSTRUCTOR
+ * runs reliably: `MainActivity` holds it in a local `val` inside a coroutine, so once that block
+ * ends nothing references it and Android is free to collect it, after which MODIFY events silently
+ * stop (the documented FileObserver footgun). The statics therefore held the value as of LAUNCHER
+ * START, and a Resolution tier changed after that did not reach `SDLSurface.setFixedSize` until the
+ * launcher was closed and reopened. Reported Sep 10 2026 as "I set 720p but it only applied after a
+ * restart"; the strong reference in `MainActivity` is now held as well, but correctness here must
+ * not depend on a GC decision, so `EngineActivity` reads the file itself.
+ *
+ * Cheap and synchronous on purpose: it runs once, on the caller's thread, before
+ * `SDLActivity.onCreate` builds the surface, and the file is a few KB.
+ *
+ * @return width to height in landscape order, or null if the file or the keys are unreadable, in
+ *   which case the caller should leave whatever it already had.
+ */
+fun readGameResolutionFromConfig(): Pair<Int, Int>? {
+    val file = File(Constants.SETTINGS_FILE)
+    if (!file.exists()) return null
+    var x = 0
+    var y = 0
+    runCatching {
+        file.forEachLine { line ->
+            val trimmed = line.trimStart()
+            when {
+                trimmed.startsWith("resolution x") ->
+                    x = trimmed.substringAfter('=', "").trim().toIntOrNull() ?: x
+                trimmed.startsWith("resolution y") ->
+                    y = trimmed.substringAfter('=', "").trim().toIntOrNull() ?: y
+            }
+        }
+    }.onFailure { return null }
+    if (x <= 0 || y <= 0) return null
+    return Pair(maxOf(x, y), minOf(x, y))
+}
+
+/** Target height of the Native tier, i.e. "do not downscale". Stored value, not a resolution. */
+const val RESOLUTION_TIER_NATIVE = 0
+
+/**
+ * Resolve a stored resolution tier against a display's REAL size.
+ *
+ * The tier is a target HEIGHT; the width is computed from the live display's own aspect ratio, so
+ * the same stored tier stays correct across a Device-profile change or different hardware. **Never
+ * assume 16:9** — measured on this device, the game display is 1920x1080 (16:9) on the Thor profile
+ * but the companion panel the Retroid profile moves the game to is 1240x1080, roughly 1.148:1. A
+ * hardcoded 16:9 would letterbox or stretch there.
+ *
+ * Orientation-normalised before anything else (long side = width), so it does not matter whether
+ * the caller's display query reports landscape or portrait order; the tier always names the SHORT
+ * side, which is what "720p" means.
+ *
+ * Rules, both deliberate:
+ * - **Round the width to an EVEN number.** Odd render widths are a reliable source of trouble in
+ *   video/GL paths (chroma subsampling, some scalers), cost nothing to avoid, and half a pixel of
+ *   aspect error is invisible.
+ * - **Never upscale.** A tier at or above the native short side falls back to native rather than
+ *   asking the engine to render more pixels than the panel has, which would cost performance to
+ *   produce a softer image. This is also what makes "720p" safe on a hypothetical 720p-or-smaller
+ *   panel instead of a silent 1:1 no-op with a misleading label.
+ *
+ * @param tierHeight target height in pixels, or [RESOLUTION_TIER_NATIVE] for no downscale.
+ * @return the width/height to write to `settings.cfg`, in the same landscape order.
+ */
+fun resolveTieredGameResolution(
+    nativeWidth: Int,
+    nativeHeight: Int,
+    tierHeight: Int
+): Pair<Int, Int> {
+    val longSide = maxOf(nativeWidth, nativeHeight)
+    val shortSide = minOf(nativeWidth, nativeHeight)
+
+    // Native, an unset/garbage tier, an unmeasurable display, or any tier that would upscale.
+    if (tierHeight <= 0 || shortSide <= 0 || longSide <= 0 || tierHeight >= shortSide) {
+        return Pair(longSide, shortSide)
+    }
+
+    val exactWidth = tierHeight.toDouble() * longSide / shortSide
+    val width = (Math.round(exactWidth / 2.0) * 2).toInt().coerceAtLeast(2)
+    return Pair(width, tierHeight)
 }
 
 fun Context.gameScreenRealSize(): Pair<Int, Int> {

@@ -85,8 +85,6 @@ object GameFilesPreferences {
     val LEGACY_OVERLAY_RESET_KEY = booleanPreferencesKey("alpha3_overlay_reset_done")
     val VIBRATION_STATE_KEY = stringPreferencesKey("vibration_state")
     val MATCH_ICON_COLOR_KEY = stringPreferencesKey("match_icon_color")
-    val RESOLUTION_X_KEY = intPreferencesKey("resolution_x")
-    val RESOLUTION_Y_KEY = intPreferencesKey("resolution_y")
     val ICON_GLOW_KEY = booleanPreferencesKey("icon_glow")
     val ARG_LINE_KEY = stringPreferencesKey("argLine")
     val ENV_LINE_KEY = stringPreferencesKey("envLine")
@@ -129,6 +127,38 @@ object GameFilesPreferences {
     // storage and survives a reinstall, and a user who needed the non-default profile to see the
     // game at all must not silently lose it and be handed a swapped screen again.
     val DISPLAY_PROFILE_KEY = stringPreferencesKey("display_profile")
+
+    // Render-resolution tier, stored as a TARGET HEIGHT in pixels (0 = Native).
+    //
+    // **A HEIGHT, never a width x height pair, and that is the whole safety property.** The width
+    // is recomputed from the live game display's real aspect ratio on every
+    // `applyGameScreenResolution()` (see `resolveTieredGameResolution`), so `settings.cfg` stays a
+    // DERIVED artifact and never becomes the source of truth. A stored absolute would go stale the
+    // moment the Device profile or the hardware changed, which is exactly the stuck-resolution
+    // failure this system exists to prevent: `updateResolutionInConfig` stays authoritative every
+    // launch, and this only changes what it is authoritative ABOUT.
+    //
+    // In the DataStore beside DISPLAY_PROFILE_KEY, and for the same reason: the two are one
+    // subject (which display holds the game role, and how many pixels render on it), and both must
+    // survive a reinstall alongside the `settings.cfg` they derive.
+    val RESOLUTION_TIER_KEY = intPreferencesKey("resolution_tier_height")
+
+    // The player's `[GUI] scaling factor` AS IT APPLIES AT NATIVE resolution, i.e. the base the
+    // Resolution tier scales down from.
+    //
+    // **Needed because the derived value must never be read back as its own input.** MyGUI lays out
+    // on a logical canvas of `resolution / scaling factor`, so a tier that cuts the resolution
+    // without cutting the scaling shrinks that canvas and vanilla windows stop fitting (reported at
+    // 720p, Sep 10 2026). The fix writes `scaling = base * appliedHeight / nativeHeight`, which
+    // holds the logical canvas exactly constant — but unlike the resolution write that is NOT a
+    // fixed point: re-deriving from the file's current value would compound every launch
+    // (2.0 -> 1.333 -> 0.889 -> ...). So the base lives here, and `settings.cfg` is output only.
+    //
+    // SEEDED ONCE from `settings.cfg`, not hardcoded, so an existing customisation survives the
+    // change and a future change to the shipped default is picked up. Losing this store cannot
+    // corrupt the base: the tier lives in the SAME store, so they are lost together, and a lost
+    // tier means Native, at which point the file's value IS the base again.
+    val GUI_SCALING_BASE_KEY = floatPreferencesKey("gui_scaling_base")
     // Whether the standalone on-screen keyboard button is drawn on the game screen. Only consulted
     // on DisplayRoles.PROFILE_SINGLE, where it is the ONLY way to type into the game or reach the
     // console — the DS keyboard and the Open Console button both live inside the companion screen,
@@ -384,18 +414,6 @@ object GameFilesPreferences {
         }
     }
 
-    suspend fun saveResolutionX(context: Context, resolutionX: Int) {
-        context.dataStore.edit { preferences ->
-            preferences[RESOLUTION_X_KEY] = resolutionX
-        }
-    }
-
-    suspend fun saveResolutionY(context: Context, resolutionY: Int) {
-        context.dataStore.edit { preferences ->
-            preferences[RESOLUTION_Y_KEY] = resolutionY
-        }
-    }
-
     suspend fun saveUIState(context: Context, isHidden: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[UI_HIDDEN_STATE_KEY] = isHidden.toString()
@@ -598,6 +616,31 @@ object GameFilesPreferences {
     fun loadDisplayProfile(context: Context): Flow<String> {
         return context.prefsData.map { preferences ->
             preferences[DISPLAY_PROFILE_KEY] ?: DisplayRoles.PROFILE_DEFAULT
+        }
+    }
+
+    /** Render-resolution tier as a target height in pixels; 0 = Native (no downscale). */
+    fun loadResolutionTier(context: Context): Flow<Int> {
+        return context.prefsData.map { preferences ->
+            preferences[RESOLUTION_TIER_KEY] ?: 0
+        }
+    }
+
+    suspend fun saveResolutionTier(context: Context, targetHeight: Int) {
+        context.dataStore.edit { preferences ->
+            preferences[RESOLUTION_TIER_KEY] = targetHeight
+        }
+    }
+
+    /** The GUI scaling factor as it applies at Native, or null if never seeded. See
+     *  [GUI_SCALING_BASE_KEY]. */
+    fun loadGuiScalingBase(context: Context): Flow<Float?> {
+        return context.prefsData.map { preferences -> preferences[GUI_SCALING_BASE_KEY] }
+    }
+
+    suspend fun saveGuiScalingBase(context: Context, base: Float) {
+        context.dataStore.edit { preferences ->
+            preferences[GUI_SCALING_BASE_KEY] = base
         }
     }
 

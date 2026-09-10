@@ -49,6 +49,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -344,6 +345,24 @@ suspend fun attemptLaunchGame(
  * simplified launcher's settings screen runs exactly this, rather than a second implementation
  * that could drift from it.
  *
+ * **The tuned performance defaults SURVIVE a reset, and not by accident:** all five live in
+ * `settings.fallback.cfg`, which is the file being copied here, so a reset lands on them rather
+ * than on the engine's defaults. `applyTunedPerformanceSettings()` is NOT re-run and must not be
+ * relied on for this — it is version-stamped and would have already fired, so a reset that depended
+ * on it would silently drop the tuning. Keep the fallback file and that function in step; see the
+ * note in its KDoc.
+ *
+ * **The three app-OWNED keys do NOT survive it, which is why this re-applies them.** The shipped
+ * file carries `resolution x/y = 0` (the sentinel) and the BASE `[GUI] scaling factor`, so straight
+ * after a reset the derived values are gone. Waiting for the next launcher start would leave a
+ * player who resets and immediately presses Play running at the sentinel resolution and, on a
+ * non-Native tier, with vanilla menus too big to fit — the exact bug that fix was for.
+ * [applyGameScreenResolution] rewrites both from the live display and the stored tier.
+ *
+ * Fire-and-forget on IO rather than made `suspend`: every caller is a Composable click handler, and
+ * the same pattern `MToast` already uses here. The write is a few KB and races nothing — the engine
+ * is not running, which is the precondition [applyGameScreenResolution] documents.
+ *
  * Returns whether a settings file was actually found and reset (the old call site used that to
  * close its dropdown).
  */
@@ -355,6 +374,12 @@ fun resetUserSettingsFile(context: Context): Boolean {
         Log.d("ManageAssets", "Deleted existing file: $SETTINGS_FILE")
         // Copy over settings.cfg
         UserManageAssets(context).resetUserConfig()
+    }
+    if (existed) {
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { context.applyGameScreenResolution() }
+                .onFailure { Log.w("ManageAssets", "re-apply resolution after reset failed", it) }
+        }
     }
     MToast(stringRes(R.string.settings_file_reset))
     return existed

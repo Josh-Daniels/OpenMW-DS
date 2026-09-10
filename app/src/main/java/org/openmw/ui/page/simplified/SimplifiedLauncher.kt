@@ -137,7 +137,9 @@ import org.openmw.ui.page.mod.isTamrielData
 import org.openmw.ui.page.mod.readModValues
 import org.openmw.ui.page.mod.sortedByDefaultLoadOrder
 import org.openmw.ui.page.setting.SettingRow
+import org.openmw.ui.view.RESOLUTION_TIER_NATIVE
 import org.openmw.ui.view.applyGameScreenResolution
+import org.openmw.ui.view.gameScreenRealSize
 import org.openmw.ui.theme.MwBone
 import org.openmw.ui.theme.MwBoneBright
 import org.openmw.ui.theme.MwBoneDim
@@ -1755,13 +1757,20 @@ private fun TamrielRebuiltNotice(onDismiss: () -> Unit, modifier: Modifier = Mod
  * and no second data source; this reads the same [UpdateChecker.latestRelease] flow the Update
  * Notes card does. That lets tips be reworded between builds without shipping an APK.
  *
- * **The `launcher_tips` string-array (`values/strings.xml`) remains the fallback**, used whenever
- * the release has no Tips section AND on every launch before the check returns — which is a
- * routine transient state, not an error, since [UpdateChecker.checkOnLaunch] runs asynchronously
- * after first paint and cannot complete at all offline. Without a fallback this box would sit
- * empty for the first second of every cold start and permanently for an offline player, and it
- * cannot simply be hidden: it is `weight(1f)` inside the right-hand column, so removing it would
- * leave a visible hole rather than reflowing. The array is also still the translatable copy.
+ * **The `launcher_tips` string-array (`values/strings.xml`) remains the fallback**, but ONLY once
+ * the check has actually resolved — it is what an offline player and a release with no Tips section
+ * both get. It cannot simply be hidden: this box is `weight(1f)` inside the right-hand column, so
+ * removing it would leave a visible hole rather than reflowing. The array is also still the
+ * translatable copy.
+ *
+ * **While the check is still in flight the box shows a LOADING line, not the bundled tips**
+ * (Sep 10 2026). It used to show them immediately and then swap, which read as a flash of the wrong
+ * content on every cold start: the bundled entries are visibly different text, so the eye catches
+ * the replacement. Keyed on [UpdateChecker.state] being `Idle`/`Checking` rather than on
+ * "tips are empty", and that distinction is the whole fix — "empty" cannot tell "not asked yet"
+ * from "asked, and there are none", so keying on it would leave an OFFLINE player staring at
+ * "Loading tips..." forever instead of falling back. Every terminal state (`UpToDate`, `Available`,
+ * `Failed`) resolves the box, and `check()` always reaches one, including on a network error.
  *
  * The list scrolls inside the card rather than growing it: the card is height-bounded by the row
  * that hosts it, exactly as the load-order panel beside it is, so the home screen itself never
@@ -1775,9 +1784,18 @@ private fun TamrielRebuiltNotice(onDismiss: () -> Unit, modifier: Modifier = Mod
 private fun TipsBox(modifier: Modifier = Modifier) {
     val bundledTips = stringArrayResource(R.array.launcher_tips)
     val releaseTips = UpdateChecker.latestRelease.collectAsState().value?.tips.orEmpty()
+    val updateState = UpdateChecker.state.collectAsState().value
+    // "Has the check resolved yet", NOT "are there tips yet". See the KDoc: the two are only the
+    // same until you are offline, and then they differ permanently.
+    val checkPending = updateState is UpdateState.Idle || updateState is UpdateState.Checking
     // The release's own tips REPLACE the bundled set rather than adding to it, so a release can
-    // retire a stale tip as well as add one. Falls back whole, not per-item.
-    val tips: List<String> = releaseTips.ifEmpty { bundledTips.toList() }
+    // retire a stale tip as well as add one. Falls back whole, not per-item — and not at all until
+    // the check has resolved, so the bundled set never flashes past on the way to the real one.
+    val tips: List<String> = when {
+        releaseTips.isNotEmpty() -> releaseTips
+        checkPending -> emptyList()
+        else -> bundledTips.toList()
+    }
     Column(
         modifier = modifier
             .background(MwFloatStone, RoundedCornerShape(12.dp))
@@ -1801,7 +1819,10 @@ private fun TipsBox(modifier: Modifier = Modifier) {
         val lineHeight = with(LocalDensity.current) { TIP_LINE_HEIGHT.toDp() }
         if (tips.isEmpty()) {
             Text(
-                text = stringResource(R.string.simplified_tips_empty),
+                text = stringResource(
+                    if (checkPending) R.string.simplified_tips_loading
+                    else R.string.simplified_tips_empty
+                ),
                 color = MwBoneDim,
                 fontSize = 12.sp,
                 textAlign = TextAlign.Center,
@@ -2320,6 +2341,10 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
     // Only read while PROFILE_SINGLE is selected, but collected unconditionally so the row it
     // drives never renders with a stale position on the frame the profile changes. `initial = true`
     // matches the store's own default. See GameFilesPreferences.SINGLE_SCREEN_OVERLAY_KEY.
+    val resolutionTierFlow = remember(context) {
+        GameFilesPreferences.loadResolutionTier(context)
+    }
+    val resolutionTier by resolutionTierFlow.collectAsState(initial = RESOLUTION_TIER_NATIVE)
     val singleScreenOverlayFlow = remember(context) {
         GameFilesPreferences.loadSingleScreenOverlay(context)
     }
@@ -2510,6 +2535,39 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                             // resolution stays one launch behind the setting: switch profile, press
                             // Play, and the game renders on the new panel at the old panel's size.
                             // It only corrected itself after closing and reopening the launcher.
+                            context.applyGameScreenResolution()
+                        }
+                    }
+                )
+            }
+
+            // Render resolution, directly under Device because the two are one subject and share
+            // one resolver: Device picks WHICH display holds the game role, this picks HOW MANY
+            // PIXELS are drawn on it. Splitting them across two screens would hide that.
+            //
+            // Main Settings rather than Dev Tools deliberately: this is a supported, legible
+            // performance control of the kind every console game ships, not a "not really
+            // supported" one. Defaulting to Native means it costs nothing to anyone who never
+            // opens it.
+            //
+            // The stored value is a target HEIGHT, never a width x height pair — the width is
+            // recomputed from the live display's real aspect ratio inside
+            // applyGameScreenResolution, so this stays correct across a profile change. See
+            // resolveTieredGameResolution and RESOLUTION_TIER_KEY.
+            SettingRow(
+                title = stringResource(R.string.launcher_resolution),
+                subtitle = stringResource(R.string.launcher_resolution_tip)
+            ) {
+                ResolutionTierDropdown(
+                    selected = resolutionTier,
+                    onSelected = { height ->
+                        scope.launch {
+                            GameFilesPreferences.saveResolutionTier(context, height)
+                            // Same reason the Device row re-pins: MainActivity's once-per-launch
+                            // pass has already happened, so without this the tier would not reach
+                            // settings.cfg until the launcher was closed and reopened. The engine
+                            // still only READS settings.cfg at startup, so this makes the change
+                            // land on the next Play rather than the launch after it.
                             context.applyGameScreenResolution()
                         }
                     }
@@ -2911,6 +2969,94 @@ private fun ColumnScope.NavmeshCard() {
  * profile can be added to [DisplayRoles] and appear here without the control changing shape or the
  * stored value needing a migration.
  */
+/**
+ * Render-resolution tier picker. Values are TARGET HEIGHTS in pixels, [RESOLUTION_TIER_NATIVE] (0)
+ * meaning no downscale.
+ *
+ * Named tiers rather than a percentage on purpose: 1080p and 720p are quantities people already
+ * have intuitions about, whereas 75% of a 1080p panel is 1440x810, an arbitrary in-between value
+ * with no track record for "looks acceptable". The heights are the setting; the widths are derived
+ * per display, so the same "720p" is 1280x720 on the Thor's 16:9 game panel and 826x720 on the
+ * 1240x1080 panel the Retroid profile moves the game to.
+ *
+ * The list is FILTERED to tiers below the game display's own short side, so it adapts when the
+ * game moves to a bigger screen (a dock, or a Device-profile change) instead of listing choices
+ * that clamp straight back to Native. Native itself carries the measured size, which is how you
+ * tell at a glance whether the dock really did come up at 4K.
+ *
+ * An unrecognised or currently-unlisted stored height shows as "<n>p" rather than silently reading
+ * as Native, so a tier picked while docked is visible on the handheld instead of looking like a
+ * spontaneous reset. Same reasoning as [DeviceProfileDropdown]'s unknown-id fallback.
+ */
+@Composable
+private fun ResolutionTierDropdown(selected: Int, onSelected: (Int) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Measured per composition, NOT remembered: the game display can change under this screen
+    // (a Device-profile switch, or a dock plugged in), and the whole point of the filter below is
+    // that it describes the screen actually in use right now.
+    val nativeShortSide = runCatching { context.gameScreenRealSize() }
+        .map { (w, h) -> minOf(w, h) }
+        .getOrDefault(0)
+
+    val allTiers = listOf(
+        2160 to R.string.launcher_resolution_2160p,
+        1440 to R.string.launcher_resolution_1440p,
+        1080 to R.string.launcher_resolution_1080p,
+        900 to R.string.launcher_resolution_900p,
+        720 to R.string.launcher_resolution_720p,
+    )
+    // Only tiers that would actually DO something. A tier at or above the native short side is
+    // clamped to Native by resolveTieredGameResolution (never upscale), so listing it would offer
+    // a choice that silently does nothing — on the Thor's 1080p panel that is 2160p, 1440p and
+    // 1080p, all three identical to Native. Docked to a 4K TV the same list grows to offer 1440p
+    // and 1080p, which is the point of having them.
+    //
+    // A failed measurement (0) falls through to showing everything rather than hiding the control's
+    // whole purpose; every entry is still clamped safely at apply time, so the worst case is an
+    // option that turns out to be a no-op, not a broken resolution.
+    val tiers = allTiers.filter { nativeShortSide <= 0 || it.first < nativeShortSide }
+
+    val nativeLabel = if (nativeShortSide > 0) {
+        val (w, h) = runCatching { context.gameScreenRealSize() }.getOrDefault(Pair(0, 0))
+        stringResource(R.string.launcher_resolution_native_size, maxOf(w, h), minOf(w, h))
+    } else {
+        stringResource(R.string.launcher_resolution_native)
+    }
+
+    val options = buildList {
+        add(RESOLUTION_TIER_NATIVE to nativeLabel)
+        tiers.forEach { (height, res) -> add(height to stringResource(res)) }
+    }
+    // A stored tier that is not in the CURRENT list is still shown by name (e.g. "1440p" chosen
+    // while docked, read back on the handheld), so it reads as a real stored choice rather than
+    // looking like a spontaneous reset. It resolves to Native at apply time, which is correct.
+    val label = options.firstOrNull { it.first == selected }?.second
+        ?: if (selected == RESOLUTION_TIER_NATIVE) nativeLabel else "${selected}p"
+
+    Box {
+        OutlinedButton(onClick = { expanded = true }) {
+            Text(label)
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { (height, text) ->
+                DropdownMenuItem(
+                    text = { Text(text) },
+                    onClick = {
+                        expanded = false
+                        if (height != selected) onSelected(height)
+                    }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun DeviceProfileDropdown(selected: String, onSelected: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }

@@ -130,6 +130,7 @@ import org.openmw.ui.controls.UIStateManager.uqmJNI
 import org.openmw.ui.controls.VirtualKeyboard
 import org.openmw.ui.overlay.ExpandableCircleButton
 import org.openmw.ui.overlay.SingleScreenKeyboardButton
+import org.openmw.ui.view.readGameResolutionFromConfig
 import org.openmw.utils.sendKeyEvent
 import org.openmw.ui.overlay.GridOverlay
 import org.openmw.ui.overlay.HiddenMenu
@@ -459,6 +460,28 @@ class EngineActivity : SDLActivity() {
         }.onFailure {
             Log.e(TAG, "initAlpha3: ", it)
         }
+
+        // Pin the render size BEFORE super.onCreate(), which is where SDLActivity builds the
+        // SDLSurface — and SDLSurface's CONSTRUCTOR is what reads these statics and calls
+        // getHolder().setFixedSize(). Set them any later and the surface has already been sized.
+        //
+        // Read from settings.cfg here rather than trusting ConfigFileObserver's statics. That
+        // observer is held in a local `val` inside a coroutine in MainActivity, so after the block
+        // ends nothing references it and Android may collect it, at which point MODIFY events stop
+        // arriving without a word — the classic FileObserver footgun. Its constructor still runs,
+        // so the statics held the value as of LAUNCHER START, which is why a Resolution tier
+        // changed afterwards only took effect once the launcher had been closed and reopened
+        // (reported Sep 10 2026). A strong reference is now kept there too, but this path must not
+        // depend on a GC decision.
+        //
+        // Leaves the existing values alone if the file cannot be read, so a missing or malformed
+        // settings.cfg degrades to "whatever the observer managed" rather than to a 0x0 surface.
+        readGameResolutionFromConfig()?.let { (w, h) ->
+            resolutionX = w
+            resolutionY = h
+            Log.d(TAG, "Render resolution from settings.cfg: ${w}x$h")
+        }
+
         super.onCreate(savedInstanceState)
 
         launchedActivity = true

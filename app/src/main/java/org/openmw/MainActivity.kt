@@ -68,6 +68,10 @@ class MainActivity : ComponentActivity() {
     @Suppress("RECEIVER_NULLABILITY_MISMATCH_BASED_ON_JAVA_ANNOTATIONS")
     @OptIn(DelicateCoroutinesApi::class)
     @ExperimentalFoundationApi
+    /** Kept alive for the process: see the note at its assignment. A collected FileObserver stops
+     *  reporting without error. */
+    private var configFileObserver: ConfigFileObserver? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -220,9 +224,16 @@ class MainActivity : ComponentActivity() {
                         LaunchedEffect(Unit) {
                             scope.launch(Dispatchers.IO) {
                                 startObservingCodeGroup(this@MainActivity, uiScope)
-                                val configFilePath = Constants.SETTINGS_FILE
-                                val configFileObserver = ConfigFileObserver(configFilePath)
-                                configFileObserver.startWatching()
+                                // Held in a FIELD, not a local. A FileObserver with no strong
+                                // reference is collectable, and once collected it stops delivering
+                                // events silently — the documented Android footgun, and why a
+                                // Resolution tier changed in this session did not reach the
+                                // engine's statics until the launcher was restarted. EngineActivity
+                                // no longer depends on this path (it reads settings.cfg itself
+                                // before building the surface), but an observer that quietly dies
+                                // is worth not having either way.
+                                configFileObserver = ConfigFileObserver(Constants.SETTINGS_FILE)
+                                    .also { it.startWatching() }
                             }
                             // Automatic update check. Deliberately here and NOT in
                             // onFirstLaunch()/IdentityMarker's spot — that runs inside a

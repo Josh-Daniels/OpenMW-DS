@@ -810,8 +810,6 @@ fun DataStoreContentPopup(context: Context, onDismiss: () -> Unit) {
                                     GameFilesPreferences.GAME_FILES_URI_KEY.name -> GameFilesPreferences.storeGameFilesPath(context, value)
                                     GameFilesPreferences.UI_HIDDEN_STATE_KEY.name -> GameFilesPreferences.saveUIState(context, value.toBoolean())
                                     GameFilesPreferences.MATCH_ICON_COLOR_KEY.name -> GameFilesPreferences.saveMatchIconColorState(context, value.toBoolean())
-                                    GameFilesPreferences.RESOLUTION_X_KEY.name -> GameFilesPreferences.saveResolutionX(context, value.toInt())
-                                    GameFilesPreferences.RESOLUTION_Y_KEY.name -> GameFilesPreferences.saveResolutionY(context, value.toInt())
                                     GameFilesPreferences.ICON_GLOW_KEY.name -> saveIconGlow(context, value.toBoolean())
                                     GameFilesPreferences.ARG_LINE_KEY.name -> GameFilesPreferences.saveARGLine(context, value)
                                     GameFilesPreferences.ENV_LINE_KEY.name -> GameFilesPreferences.saveENVLine(context, value)
