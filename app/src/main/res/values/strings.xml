@@ -152,11 +152,13 @@
       The entries below are placeholders describing existing behaviour; replace them freely.
     -->
     <string-array name="launcher_tips">
-        <item>On a Retroid dual screen device, is the game on the wrong panel? Open Settings with the gear button above, then set Device to Retroid Dual Screen. The launcher always stays on this screen, so you can change it back.</item>
+        <item>On a Retroid with the Dual Screen Add-On and the game is on the wrong screen? Open Settings with the gear icon above, then set Device to Retroid Dual Screen. The launcher always stays on the top screen, so you can change it back.</item>
+        <item>Only have one screen? Set Device to Single Screen Device. Every game menu goes back to the original style on the one screen, and a keyboard button appears in the corner for naming spells, enchantments and saves. The backtick key on that keyboard opens the console.</item>
+        <item>Struggling in a heavy area? Settings has a Resolution option just below Device. 720p draws less than half the pixels and the screen stretches the picture back out, which can help a lot for a little sharpness. The second screen menus stay sharp whatever you pick.</item>
         <item>Poor performance in large modded cities? The game is CPU heavy, so if you have the ClusterTune app running, switch it to stock. Capping the CPU makes the frame rate noticeably choppier.</item>
         <item>Drag a mod by its handle to change the load order. The checkbox next to it turns the mod on or off.</item>
         <item>Reset order puts the list back to the default: Morrowind, Tribunal and Bloodmoon first, then Tamriel Rebuilt, then everything else.</item>
-        <item>Generating the navmesh cache in Settings makes pathfinding smoother, at the cost of a long one-off build.</item>
+        <item>Generating a NavMesh Cache in Settings makes pathfinding smoother, at the cost of a long one-off build.</item>
     </string-array>
     <string name="simplified_tips_empty">No tips yet.</string>
     <string name="simplified_tips_loading">Loading tips...</string>
