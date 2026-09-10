@@ -1,6 +1,6 @@
 --- a/apps/openmw/mwgui/windowmanagerimp.cpp
 +++ b/apps/openmw/mwgui/windowmanagerimp.cpp
-@@ -827,7 +827,14 @@
+@@ -827,7 +827,15 @@
  
              if (Settings::gui().mControllerMenus)
              {
@@ -11,12 +11,13 @@
 +                // left the console sitting there with nothing saying how to dismiss it. The console
 +                // is deliberately NOT a GUI mode, so it survives this transition and its hint must
 +                // too. Every other reason the bar could be showing here is genuinely finished, hence
-+                // the narrow test rather than skipping the hide outright.
-+                if (mControllerButtonsOverlay && !isConsoleMode())
++                // the narrow test rather than skipping the hide outright. The post-processing menu
++                // is not a GUI mode either and carries the same kind of hint, so it is exempt too.
++                if (mControllerButtonsOverlay && !isConsoleMode() && !isPostProcessorHudVisible())
                      mControllerButtonsOverlay->setVisible(false);
                  if (mInventoryTabsOverlay)
                      mInventoryTabsOverlay->setVisible(false);
-@@ -2850,6 +2857,16 @@
+@@ -2844,6 +2852,16 @@
              mKeyboardNavigation->restoreFocus(mGuiModes.back());
  
          updateVisible();
@@ -33,7 +34,22 @@
      }
  
      void WindowManager::toggleDebugWindow()
-@@ -3213,6 +3230,46 @@
+@@ -2870,6 +2888,14 @@
+             mKeyboardNavigation->restoreFocus(mGuiModes.back());
+ 
+         updateVisible();
++
++#ifdef __ANDROID__
++        // COMPANION: refresh the button-hint bar so the post-processing menu's "Close" hint appears
++        // and disappears with it, for the same reason as in toggleConsole(): PostProcessorHud is a
++        // plain WindowBase, so nothing else here updates the bar. This is the sole toggle path (F2
++        // and Start both come through it).
++        updateControllerButtonsOverlay();
++#endif
+     }
+ 
+     void WindowManager::toggleSettingsWindow()
+@@ -3207,6 +3233,67 @@
      void WindowManager::updateControllerButtonsOverlay()
      {
  #ifdef __ANDROID__
@@ -72,6 +88,27 @@
 +                return buttons;
 +            }();
 +            mControllerButtonsOverlay->setButtons(&sConsoleButtons);
++            if (mInventoryTabsOverlay)
++                mInventoryTabsOverlay->setVisible(false);
++            return;
++        }
++
++        // COMPANION: the same pinned, unswitchable hint for OpenMW's post-processing menu (F2,
++        // A_TogglePostProcessorHUD), for the same reasons. It has no controller support either (not
++        // a GuiMode window, so getActiveControllerWindow never returns it, and no
++        // onControllerButtonEvent), it is also opened from the BOTTOM screen (Developer Tools, or the
++        // DS keyboard's F2), and Start closes it too: toggleMainMenu tests
++        // isPostProcessorHudVisible() right after the console and toggles it off. The console is
++        // tested first above, so with both open the hint names the one Start will close first.
++        if (isPostProcessorHudVisible() && mControllerButtonsOverlay)
++        {
++            static ControllerButtons sPostProcessorButtons = [] {
++                ControllerButtons buttons;
++                // mView = START (see the console branch above).
++                buttons.mView = "Press Start to Close Post Processing";
++                return buttons;
++            }();
++            mControllerButtonsOverlay->setButtons(&sPostProcessorButtons);
 +            if (mInventoryTabsOverlay)
 +                mInventoryTabsOverlay->setVisible(false);
 +            return;

@@ -20676,6 +20676,7 @@ private fun OptionsSubPage(
                         // the one entry here that is a general-purpose tool rather than a specific
                         // cheat or a tuning knob.
                         item(key = "dev_console") { OpenConsoleRow() }
+                        item(key = "dev_postprocessing") { OpenPostProcessingRow() }
                         // Directly under the console because it is the other half of the same
                         // job: the console needs typing, and this is what types into it.
                         item(key = "dev_keyboard") { ShowKeyboardRow() }
@@ -22582,14 +22583,48 @@ private fun openNativeConsole() = injectNativeKey(KeyEvent.KEYCODE_GRAVE)
  *  gate, which made the gate look partial). The console is not a mild exception to the cheat warning
  *  — it is the most powerful cheat surface in the app, since it accepts any command at all. */
 @Composable
-private fun OpenConsoleRow() {
+private fun OpenConsoleRow() = NativeKeyActionRow(
+    title = "Console",
+    description = "Opens the game's console on the top screen, same as pressing ` on a keyboard.",
+    buttonLabel = "Open Console",
+    onPress = ::openNativeConsole
+)
+
+/** Developer Tools action: open OpenMW's own post-processing menu on the top screen.
+ *
+ *  Injects F2, the default key for `A_TogglePostProcessorHUD`, exactly as [OpenConsoleRow] injects
+ *  `, so it is also a TOGGLE and a rebind in the game's controls menu breaks it. The menu is vanilla
+ *  and mouse-driven, with no controller support, so it is used by top-screen touch; Start closes it
+ *  (`ActionManager::toggleMainMenu` tests it right after the console), and
+ *  `companion-console-hint.patch` puts a "Press Start to Close Post Processing" hint in the button
+ *  bar while it is open. The engine refuses with a message box of its own if `[Post Processing]
+ *  enabled` is false; we ship true. */
+@Composable
+private fun OpenPostProcessingRow() = NativeKeyActionRow(
+    title = "Post Processing",
+    description = "Opens the game's post-processing menu on the top screen, same as pressing F2 on " +
+        "a keyboard. Tap the top screen to use it, and press Start to close it.",
+    buttonLabel = "Open Post Processing",
+    onPress = { injectNativeKey(KeyEvent.KEYCODE_F2) }
+)
+
+/** A Developer Tools row whose one full-width button presses a key in the game: title, a line of
+ *  explanation, then the button. Shared by the console and post-processing rows. */
+@Composable
+private fun NativeKeyActionRow(
+    title: String,
+    description: String,
+    buttonLabel: String,
+    onPress: () -> Unit
+) {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text("Console", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(title, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Opens the game's console on the top screen, same as pressing ` on a keyboard.",
+            description,
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
+            lineHeight = 13.sp,
             modifier = Modifier.padding(top = 1.dp)
         )
         Spacer(Modifier.height(6.dp))
@@ -22599,14 +22634,14 @@ private fun OpenConsoleRow() {
                 .clip(RoundedCornerShape(4.dp))
                 .background(PillActiveBg.copy(alpha = 0.94f))
                 .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-                // The one Developer Tools button that is not a DevActionButton, so it needs the
-                // cue and the flash wired by hand to match its neighbours.
-                .tapFlash { UiSounds.play(UiSounds.Cue.ACTION); openNativeConsole() }
+                // Not DevActionButtons, so these need the cue and the flash wired by hand to match
+                // their neighbours.
+                .tapFlash { UiSounds.play(UiSounds.Cue.ACTION); onPress() }
                 .padding(vertical = 9.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
-                "Open Console",
+                buttonLabel,
                 color = BronzeLight,
                 fontSize = 14.sp,
                 fontFamily = MwDisplay,
