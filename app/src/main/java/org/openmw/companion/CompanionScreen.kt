@@ -6477,6 +6477,28 @@ private val KB_SYMBOLS_2 = listOf(
     listOf("=", "|", "~", "`"),
 )
 
+/**
+ * The function-key row, shown only on a keyboard the PLAYER raised (Developer Tools -> Show
+ * Keyboard): the same scope as the ` key, and for the same reason. Each one injects a real key press
+ * rather than typing anything, and a keyboard the game raised is there to fill in a field.
+ *
+ * Added for F2, the engine's post-processing menu (`A_TogglePostProcessorHUD`), which a dual-screen
+ * player had no way to press once the Alpha3 overlay keyboard (ESC + F1-F12) was removed. The rest
+ * come along because they are just as unreachable otherwise and cost nothing. Vanilla binds F1 quick
+ * keys menu, F5 quicksave, F9 quickload, F10 debug window, F11 HUD toggle (a no-op here, the
+ * companion disables `A_ToggleHUD`) and F12 screenshot; mods can bind any of them via `openmw.input`.
+ *
+ * Injected through [injectNativeKey], the path a physical key takes, so they hit the player's own
+ * bindings: a rebind in the game's controls menu is honoured, and a key nothing is bound to does
+ * nothing.
+ */
+private val KB_FUNCTION_KEYS = listOf(
+    "F1" to KeyEvent.KEYCODE_F1, "F2" to KeyEvent.KEYCODE_F2, "F3" to KeyEvent.KEYCODE_F3,
+    "F4" to KeyEvent.KEYCODE_F4, "F5" to KeyEvent.KEYCODE_F5, "F6" to KeyEvent.KEYCODE_F6,
+    "F7" to KeyEvent.KEYCODE_F7, "F8" to KeyEvent.KEYCODE_F8, "F9" to KeyEvent.KEYCODE_F9,
+    "F10" to KeyEvent.KEYCODE_F10, "F11" to KeyEvent.KEYCODE_F11, "F12" to KeyEvent.KEYCODE_F12,
+)
+
 // Which page the keyboard is showing. An Int rather than a Boolean because there are now three.
 private const val KB_PAGE_LETTERS = 0
 private const val KB_PAGE_SYMBOLS = 1
@@ -6525,9 +6547,10 @@ private fun TextInputOverlay(
     onTextChange: ((String) -> Unit)? = null,
     /**
      * Non-null marks this as a keyboard the PLAYER asked for (Developer Tools -> Show Keyboard),
-     * which adds two keys to the bottom row: ` (toggles the game's console) and Hide (calls this).
+     * which adds two keys to the bottom row: ` (toggles the game's console) and Hide (calls this),
+     * plus the F1-F12 row above the letters ([KB_FUNCTION_KEYS]).
      *
-     * Scoped to that session on purpose, and BOTH keys are. A keyboard the GAME raised is sitting on
+     * Scoped to that session on purpose, and ALL of them are. A keyboard the GAME raised is sitting on
      * a focused field: Hide would strand the player with a focused field and no way to type into it
      * (the native path deliberately has no escape — see [onCancel]), and ` would toggle the console
      * on top of the very field being filled in. Neither key is wrong here only because here the
@@ -6708,6 +6731,17 @@ private fun TextInputOverlay(
                 )
             }
             Spacer(Modifier.height(10.dp))
+
+            if (onHide != null) {
+                // Function keys, player-raised session only (see [KB_FUNCTION_KEYS]). Twelve keys in
+                // a ten-unit row, so they come out a little narrower than the letters, which also
+                // sets them apart from the typing keys. The row belongs to the session, not a page,
+                // so the keyboard still never changes shape while it is on screen.
+                KbRow {
+                    KB_FUNCTION_KEYS.forEach { (label, code) -> KbKey(label) { injectNativeKey(code) } }
+                }
+                Spacer(Modifier.height(6.dp))
+            }
 
             val rows = when (page) {
                 KB_PAGE_SYMBOLS -> KB_SYMBOLS
@@ -22528,12 +22562,19 @@ private fun readConsoleHistory(): List<String> = runCatching {
     emptyList()
 }
 
-private fun openNativeConsole() {
+/**
+ * Presses and releases one key through SDL, the same path a physical key takes
+ * (`SDLActivity.dispatchKeyEvent` calls these very functions), so the engine sees an ordinary key
+ * and applies the player's own bindings to it.
+ */
+private fun injectNativeKey(keyCode: Int) {
     runCatching {
-        SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_GRAVE)
-        SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_GRAVE)
-    }.onFailure { Log.w("CompanionScreen", "could not inject console key", it) }
+        SDLActivity.onNativeKeyDown(keyCode)
+        SDLActivity.onNativeKeyUp(keyCode)
+    }.onFailure { Log.w("CompanionScreen", "could not inject key $keyCode", it) }
 }
+
+private fun openNativeConsole() = injectNativeKey(KeyEvent.KEYCODE_GRAVE)
 
 /** Developer Tools action: open the native console for manual testing. Full-width tappable row.
  *
@@ -22592,8 +22633,9 @@ private fun ShowKeyboardRow() {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         Text("Keyboard", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Text(
-            "Puts the on-screen keyboard on this screen so you can type into the game. It gains a " +
-                "` key, which opens and closes the console, and a Hide key to put it away.",
+            "Puts the on-screen keyboard on this screen so you can type into the game. It gains " +
+                "F1 to F12 (F2 opens the post-processing menu), a ` key, which opens and closes " +
+                "the console, and a Hide key to put it away.",
             color = BoneDim,
             fontSize = 10.sp,
             fontFamily = MwBody,
