@@ -159,20 +159,9 @@ object GameFilesPreferences {
     // corrupt the base: the tier lives in the SAME store, so they are lost together, and a lost
     // tier means Native, at which point the file's value IS the base again.
     val GUI_SCALING_BASE_KEY = floatPreferencesKey("gui_scaling_base")
-    // Whether the standalone on-screen keyboard button is drawn on the game screen. Only consulted
-    // on DisplayRoles.PROFILE_SINGLE, where it is the ONLY way to type into the game or reach the
-    // console — the DS keyboard and the Open Console button both live inside the companion screen,
-    // which that profile never creates. Absent = TRUE, because a player who has just told the app
-    // they have one screen wants the replacement, not a device with no text entry.
-    //
-    // NAME IS HISTORICAL. Until Sep 10 2026 this drew the whole legacy Alpha3 gear + arrow cluster
-    // (OverlayUI) purely to get at its keyboard icon; it now draws SingleScreenKeyboardButton and
-    // nothing else. The key string is kept as-is so the setting survives the change on devices that
-    // already have it stored.
-    //
-    // In the DataStore alongside DISPLAY_PROFILE_KEY, and for the same reason: it survives a
-    // reinstall, so the escape hatch is not lost with the internal preferences.
-    val SINGLE_SCREEN_OVERLAY_KEY = booleanPreferencesKey("single_screen_overlay")
+    // (SINGLE_SCREEN_OVERLAY_KEY, "single_screen_overlay", was here: the Single Screen Device
+    // keyboard on/off switch. Removed Sep 10 2026, the keyboard button is now always on for that
+    // profile. A value already stored under that name is inert and nothing reads it.)
     private val _gameFilesUri = MutableStateFlow<String?>(null)
     val BACKGROUND_ANIMATION_KEY = stringPreferencesKey("background_animation")
     val LANGUAGE_KEY = stringPreferencesKey("language")
@@ -641,22 +630,6 @@ object GameFilesPreferences {
     suspend fun saveGuiScalingBase(context: Context, base: Float) {
         context.dataStore.edit { preferences ->
             preferences[GUI_SCALING_BASE_KEY] = base
-        }
-    }
-
-    /** Persist the single-screen Alpha3-overlay toggle. See [SINGLE_SCREEN_OVERLAY_KEY]. */
-    suspend fun saveSingleScreenOverlay(context: Context, enabled: Boolean) {
-        context.dataStore.edit { preferences ->
-            preferences[SINGLE_SCREEN_OVERLAY_KEY] = enabled
-        }
-    }
-
-    /** The single-screen Alpha3-overlay toggle, defaulting to ON. Keep every `collectAsState`
-     *  initial value in step with this fallback so an unset preference never shows the wrong
-     *  position for a frame. */
-    fun loadSingleScreenOverlay(context: Context): Flow<Boolean> {
-        return context.prefsData.map { preferences ->
-            preferences[SINGLE_SCREEN_OVERLAY_KEY] ?: true
         }
     }
 

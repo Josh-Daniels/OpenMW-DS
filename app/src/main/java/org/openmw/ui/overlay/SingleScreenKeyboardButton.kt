@@ -15,12 +15,16 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import org.openmw.R
 import org.openmw.ui.controls.UIKeyboard
 import org.openmw.utils.GameFilesPreferences
+
+/** Opacity of the whole keyboard button. Developer's call, Sep 10 2026: faint rather than HUD-like. */
+private const val KEYBOARD_BUTTON_ALPHA = 0.25f
 
 /**
  * SINGLE SCREEN DEVICE only: a lone keyboard button on the game screen.
@@ -50,7 +54,8 @@ import org.openmw.utils.GameFilesPreferences
  * `EngineActivity` spells out at length: `isUIHidden` is what made the old overlay unrecoverable
  * (it hides the control while showing what the control turns off), and `hudVisible` is pushed by a
  * native log sink this profile never installs, so it would be frozen at its initial value. The
- * launcher toggle is the only gate, which is what makes it a real off switch.
+ * PROFILE is the only gate: there was a launcher on/off switch until Sep 10 2026, removed because
+ * this is the only text entry and console route on that profile, so "off" was never useful.
  *
  * Placed on the same [GameFilesPreferences.getMenuCorner] the cluster used, so it appears where the
  * gear used to and inherits a corner the player had already chosen. Note that with the cluster gone
@@ -85,6 +90,11 @@ fun SingleScreenKeyboardButton(
             modifier = Modifier
                 .align(alignment)
                 .padding(8.dp)
+                // The WHOLE button, disc and glyph together, at a fixed low opacity: it sits over
+                // the game view for the entire session on this profile, so it should read as
+                // "there if you look for it" rather than as HUD. Applied as one layer rather than
+                // by lowering each colour, so the disc and glyph cannot drift apart visually.
+                .alpha(KEYBOARD_BUTTON_ALPHA)
                 // Its own backdrop rather than the cluster's icon-glow/tint preferences: those are
                 // Alpha3 theming this profile no longer surfaces a way to set. A translucent disc
                 // keeps the glyph readable over both a bright exterior and a black cave, which a

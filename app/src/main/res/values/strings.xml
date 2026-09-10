@@ -171,7 +171,7 @@
     <string name="launcher_device_tip">Which screen the game runs on. Change this only if the game and the second screen appear on the wrong panels, or pick Single Screen Device if this device has just one screen, which turns off the second screen menus and shows every game menu the original way. The launcher itself always stays on this screen, so you can change it back.</string>
     <string name="launcher_device_thor">AYN Thor</string>
     <string name="launcher_resolution">Resolution</string>
-    <string name="launcher_resolution_tip">How many pixels the 3D world is drawn with. Lower settings draw fewer pixels and the screen stretches the picture back out, which can help a lot in busy areas at the cost of some sharpness. The second screen menus stay sharp whatever you pick, because they are drawn separately. Only sizes smaller than the screen you are playing on are offered, so the list grows if you dock to a larger TV. The original game menus keep their size and position, they are just drawn with fewer pixels like everything else. A change only takes effect the next time you start the game.</string>
+    <string name="launcher_resolution_tip">The resolution the game screen is drawn at. The second screen is not affected, and the game menus are scaled to match. Applies the next time you start the game.</string>
     <string name="launcher_resolution_native">Native</string>
     <!-- Native, with the measured size of whichever screen the game is using, so "am I actually at
          4K in the dock?" is answerable without opening settings.cfg. -->
@@ -186,8 +186,6 @@
     <string name="launcher_device_retroid">Retroid Dual Screen (Experimental)</string>
     <string name="launcher_device_single">Single Screen Device</string>
     <string name="launcher_device_unsupported">No second screen was detected, so this option has no effect here.</string>
-    <string name="launcher_single_screen_overlay">On-screen keyboard button</string>
-    <string name="launcher_single_screen_overlay_tip">Adds a small keyboard button to the corner of the game screen. Tap it to type into the game, for naming spells, enchantments and saved games. The keyboard also carries the key that opens the console. On a single screen device this is the only way to reach either, so leave this on unless you have another way to type.</string>
     <string name="launcher_game_font_tip">Show this launcher in the game\'s font, matching the companion screens. Turn off for the standard system font.</string>
     <string name="simplified_launcher_title">OpenMW-DS</string>
     <string name="simplified_launcher_settings_title">Settings</string>

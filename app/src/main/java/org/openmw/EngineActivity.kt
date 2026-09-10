@@ -575,15 +575,11 @@ class EngineActivity : SDLActivity() {
                     composeViewUI.setContent {
                         val isUIHidden by GameFilesPreferences.loadUIState(this@EngineActivity).collectAsState(initial = false)
                         val autoMouseMode by loadAutoMouseMode(this@EngineActivity).collectAsState(initial = "Hybrid")
-                        // SINGLE SCREEN DEVICE only: whether to draw the legacy Alpha3 overlay, and
-                        // its keyboard preference. The profile cannot change while the game is
-                        // running (it is a launcher setting, applied on the next Play), so it is
-                        // read once from the same cache startCompanionScreen used; the TOGGLE is
-                        // collected as a flow so turning it off takes effect without a restart.
+                        // SINGLE SCREEN DEVICE only: whether to draw the keyboard button, and its
+                        // keyboard preference. The profile cannot change while the game is running
+                        // (it is a launcher setting, applied on the next Play), so it is read once
+                        // from the same cache startCompanionScreen used.
                         val singleScreen = remember { DisplayRoles.singleScreen(this@EngineActivity) }
-                        val singleScreenOverlay by GameFilesPreferences
-                            .loadSingleScreenOverlay(this@EngineActivity)
-                            .collectAsState(initial = true)
                         val virtualKeyboard by GameFilesPreferences
                             .useVirtualKeyboard(this@EngineActivity)
                             .collectAsState(initial = true)
@@ -696,9 +692,10 @@ class EngineActivity : SDLActivity() {
                         //     for the one profile with no second screen to escape to.
                         //   * `hudVisible` is pushed by the native log sink, which this profile
                         //     never installs, so it would be frozen at its initial value.
-                        // The toggle below is the only gate, which is also what makes it a real
-                        // off switch rather than one condition among three.
-                        if (singleScreen && singleScreenOverlay) {
+                        // The PROFILE is the only gate. It had its own launcher on/off switch until
+                        // Sep 10 2026; removed because this keyboard is the only text entry and
+                        // console route on that profile, so "off" was never a useful answer.
+                        if (singleScreen) {
                             SingleScreenKeyboardButton(
                                 context = this@EngineActivity,
                                 virtualKeyboard = virtualKeyboard

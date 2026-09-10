@@ -2338,17 +2338,10 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
     // dropdown never shows the wrong device for a frame.
     val displayProfileFlow = remember(context) { GameFilesPreferences.loadDisplayProfile(context) }
     val displayProfile by displayProfileFlow.collectAsState(initial = DisplayRoles.PROFILE_DEFAULT)
-    // Only read while PROFILE_SINGLE is selected, but collected unconditionally so the row it
-    // drives never renders with a stale position on the frame the profile changes. `initial = true`
-    // matches the store's own default. See GameFilesPreferences.SINGLE_SCREEN_OVERLAY_KEY.
     val resolutionTierFlow = remember(context) {
         GameFilesPreferences.loadResolutionTier(context)
     }
     val resolutionTier by resolutionTierFlow.collectAsState(initial = RESOLUTION_TIER_NATIVE)
-    val singleScreenOverlayFlow = remember(context) {
-        GameFilesPreferences.loadSingleScreenOverlay(context)
-    }
-    val singleScreenOverlay by singleScreenOverlayFlow.collectAsState(initial = true)
     var showResetDialog by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var confirmModOrder by rememberSaveable { mutableStateOf(false) }
@@ -2574,34 +2567,11 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 )
             }
 
-            // The single-screen companion for the Device row: only meaningful while Single Screen
-            // Device is selected, so it appears and disappears with that choice rather than sitting
-            // there greyed out. On the two-screen profiles the same functions live on the companion
-            // screen (Developer Tools -> Show Keyboard / Open Console) and nothing is drawn on the
-            // game screen, which is what its Aug 2026 removal established.
-            //
-            // Sep 10 2026: this now toggles a lone keyboard button (SingleScreenKeyboardButton),
-            // not the full Alpha3 cluster it originally enabled. The console rides along on that
-            // keyboard's backtick key, so one control still covers both functions.
-            //
-            // A real toggle rather than an implied part of the profile, defaulting ON: it is the
-            // only route to text entry on a single screen, so off is the surprising answer, but a
-            // player with a hardware keyboard has no use for it and should be able to say so.
-            if (displayProfile == DisplayRoles.PROFILE_SINGLE) {
-                SettingRow(
-                    title = stringResource(R.string.launcher_single_screen_overlay),
-                    subtitle = stringResource(R.string.launcher_single_screen_overlay_tip)
-                ) {
-                    Switch(
-                        checked = singleScreenOverlay,
-                        onCheckedChange = {
-                            scope.launch {
-                                GameFilesPreferences.saveSingleScreenOverlay(context, it)
-                            }
-                        }
-                    )
-                }
-            }
+            // There used to be a single-screen "On-screen keyboard button" switch here, shown only
+            // under Single Screen Device. REMOVED Sep 10 2026 at the developer's call: that keyboard
+            // is the ONLY route to text entry and the console on a device with no companion screen,
+            // so the button is simply part of the profile now and cannot be turned off. See
+            // SingleScreenKeyboardButton.
 
             // Say so when the selected profile cannot be honoured here, rather than letting it
             // look applied. Only reachable on a device with no second display, since that is the
