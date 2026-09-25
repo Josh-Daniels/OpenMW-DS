@@ -37,6 +37,174 @@ data class InventoryItem(
     val enchant: ItemEnchant? = null
 )
 
+// ---- Item classification (tap/long-press behaviour), keyed off the coarse category Lua's
+// itemCategory() emits. THE single source of truth: these category-level predicates back the
+// InventoryItem extensions in CompanionScreen.kt (isUsable/isReadable/isEquippable) AND
+// FavouritesRepository, which only ever has a stored category string to go on. Three independent
+// copies of this rule had drifted apart before Sep 2026 — one had no `usable` branch at all, so a
+// favourited potion was classed equippable and its tap silently no-opped in the engine. Add a new
+// category in ONE place here, never inline at a call site.
+
+/**
+ * Categories whose primary action is the native use() action (`CMP:use`) rather than equipping:
+ * potion = drink, ingredient = eat, apparatus = alchemy menu, repair = repair menu. NONE of them
+ * are ever worn, and the first two are consumed on use — which is why a favourite holding one of
+ * these keeps its slot assignment when the stack runs out (see FavouritesRepository.reconcile).
+ */
+val USABLE_ITEM_CATEGORIES = setOf("potion", "ingredient", "apparatus", "repair")
+
+/** True for an item whose tap opens the book/scroll reader (`CMP:read`). */
+fun isReadableCategory(category: String) = category == "book" || category == "scroll"
+
+/** True for an item whose tap is `CMP:use`. See [USABLE_ITEM_CATEGORIES]. */
+fun isUsableCategory(category: String) = category in USABLE_ITEM_CATEGORIES
+
+/**
+ * Categories with NO primary action at all: a tap does nothing and no menu offers Equip.
+ *
+ * "key" joined "misc" here in Sep 2026. Keys are `Miscellaneous` records that the export splits out
+ * of misc for sorting (they accumulate all game and swamp the misc list), and because the rule below
+ * is written as "everything that is not usable, readable or literally misc", that split silently
+ * made every key look equippable. The engine always refused — Lua's `slotForItem` has no case for a
+ * Miscellaneous record, so `CMP:equip` returned "no slot for:" and the tap died there — so the only
+ * visible effect was a dead "Equip" row in the long-press menu and a tap that did nothing.
+ */
+private val INERT_ITEM_CATEGORIES = setOf("misc", "key")
+
+/**
+ * True for worn gear toggled via `CMP:equip` / `CMP:unequip` — weapons, armor, clothing,
+ * lockpick/probe and lights/torches (carried_left). Deliberately the leftovers: anything that is
+ * neither usable, nor readable, nor inert (see [INERT_ITEM_CATEGORIES]).
+ */
+fun isEquippableCategory(category: String) =
+    !isUsableCategory(category) && !isReadableCategory(category) && category !in INERT_ITEM_CATEGORIES
+
+// ---- Name shortening for the HUD favourite quick-slots ----------------------------------------
+//
+// SCOPE: the favourite pills ONLY. Every list in the app (Inventory, loot, barter) and the
+// favourite slot's own long-press menu keep the full name, and FavouritesRepository keeps STORING
+// the full name — this is a render-time transform applied by FavSlotView and nowhere else, so the
+// rules below can change at any time without migrating a single stored favourite.
+//
+// WHY: the pill gives a name ~95dp once the count chip is present. Measured against the real
+// MysticCards metrics over the 626 potion names in a Morrowind + Tribunal + Bloodmoon + Tamriel
+// Rebuilt load order, only 17% fitted, and what the player actually saw was "Standard Poti…" /
+// "Exclusive Poti…" — the tier and the word "Potion" survived while the EFFECT, the only part that
+// distinguishes one pill from another, was always the part that got cut.
+//
+// The naming is very regular: 64% of those names open with one of the eight quality words below,
+// and the remainder is then one of exactly three shapes (bare effect, "Potion of <E>", "<E>
+// Potion"). Stripping both classes of noise raises the fit rate to 88%.
+
+/**
+ * Alchemy quality tiers, as they appear at the START of a potion's name.
+ *
+ * Dropped outright from the pill (a deliberate product decision, Sep 2026): a favourite slot holds
+ * one specific record that the player chose, and the ×N chip already answers "how many", so the
+ * tier costs ~40% of the available width to restate something the player picked. The cost is that
+ * favouriting a Bargain and an Exclusive Restore Health into two slots gives two pills reading
+ * "Restore Health" — accepted, because the alternative (a leading initial) did not fit at 132dp.
+ */
+private val POTION_QUALITY_WORDS = setOf(
+    "Bargain", "Cheap", "Standard", "Quality", "Exclusive", "Spoiled", "Vintage", "Distilled", "Fresh"
+)
+
+/**
+ * Stage 1, applied unconditionally to POTIONS: strip the quality tier and the word "Potion".
+ *
+ * Handles all three observed shapes — "Exclusive Potion of Fire Shield" → "Fire Shield",
+ * "Quality Restore Magicka Potion" → "Restore Magicka", "Potion of Waterwalking" →
+ * "Waterwalking". Never empties the string: a potion named exactly "Potion", or a one-word name
+ * that happens to be a tier word, is returned untouched.
+ *
+ * Gated on the category by the caller so it cannot touch gear. That gate is the reason
+ * [FavSlot.category] is stored at all beyond reconcile's needs.
+ */
+fun potionCoreName(name: String): String {
+    var s = name.trim()
+    val cut = s.indexOf(' ')
+    if (cut > 0 && s.substring(0, cut) in POTION_QUALITY_WORDS) {
+        val rest = s.substring(cut + 1).trim()
+        if (rest.isNotEmpty()) s = rest
+    }
+    if (s.startsWith("Potion of ")) {
+        val rest = s.removePrefix("Potion of ").trim()
+        if (rest.isNotEmpty()) s = rest
+    } else if (s.endsWith(" Potion")) {
+        val rest = s.removeSuffix(" Potion").trim()
+        if (rest.isNotEmpty()) s = rest
+    }
+    return s
+}
+
+/** A leading possessive: "Grandmaster's ", "Faruna's ", "Saccus' ". */
+private val LEADING_POSSESSIVE = Regex("""^\p{Lu}[\p{L}'\-]*(?:'s|s')\s+""")
+
+/**
+ * Stage 2, applied ONLY when stage 1 still overflows: drop leading possessives and contract "and".
+ *
+ * This is what rescues the alchemy and repair kit, whose names are all `<rank or maker>'s <tool>`:
+ * "Grandmaster's Mortar and Pestle" (186dp) → "Mortar & Pestle" (fits). It is deliberately
+ * CONDITIONAL, never unconditional, because the same shape carries real identity elsewhere —
+ * "Lord's Mail" must not become "Mail". The two-word floor is the guard: a possessive is only
+ * dropped while three or more words remain, so a two-word artifact name is never touched.
+ */
+fun dropLeadingPossessive(name: String): String {
+    var s = name
+    while (s.count { it == ' ' } >= 2) {
+        val m = LEADING_POSSESSIVE.find(s) ?: break
+        s = s.substring(m.value.length)
+    }
+    return s.replace(" and ", " & ")
+}
+
+/**
+ * Stage 3, the last resort before an ellipsis: abbreviate the recurring effect and attribute
+ * vocabulary. Ordered longest-match-first where two entries share a prefix.
+ *
+ * Only ever reached by a name that overflows after stages 1 and 2, so the player sees "Fort. Int."
+ * exactly where the alternative was "Fortify Intelli…" — strictly more information in the same
+ * space, never a gratuitous abbreviation of something that already fitted.
+ */
+private val EFFECT_ABBREVIATIONS = listOf(
+    "Fortify " to "Fort. ", "Restore " to "Rest. ", "Damage " to "Dmg ", "Absorb " to "Abs. ",
+    " Resistance" to " Res.", "Resistance" to "Res.", "Resist " to "Res. ",
+    "Intelligence" to "Int.", "Personality" to "Pers.", "Endurance" to "End.",
+    "Willpower" to "Will.", "Strength" to "Str.", "Agility" to "Agi.",
+    "Magicka" to "Mag.", "Fatigue" to "Fat.", "Attribute" to "Attr.",
+    // Cure/Detect vocabulary. Each of these rescues a staple that was still being cut:
+    // "Cure Blight Disease", "Cure Paralyzation" and "Detect Enchantments" all fit once
+    // abbreviated. "Enchantments" must precede "Enchantment" or the plural becomes "Ench.s".
+    // " Disease" carries a LEADING SPACE on purpose so a name that merely starts with the word
+    // ("Disease Resistance") is left alone — only the trailing "… Disease" is noise.
+    "Enchantments" to "Ench.", "Enchantment" to "Ench.",
+    "Paralyzation" to "Paralysis", " Disease" to " Dis."
+)
+
+fun abbreviateEffectWords(name: String): String {
+    var s = name
+    for ((long, short) in EFFECT_ABBREVIATIONS) s = s.replace(long, short)
+    return s
+}
+
+/**
+ * The favourite pill's label: the least-lossy form of [name] that [fits], falling back to the most
+ * compressed form (which the caller then ellipsizes).
+ *
+ * Progressive by design. A name that already fits is returned untouched, so "Sujamma", "Trueflame"
+ * and "Daedric Dagger" are never rewritten; only a name that would otherwise be cut gives anything
+ * up, and it gives up the least valuable part first. [category] is the stored FavSlot category:
+ * "potion" enables stage 1, "" (spell slots, or a legacy slot whose category reconcile has not
+ * learned yet) simply skips it.
+ */
+fun favouriteSlotLabel(name: String, category: String, fits: (String) -> Boolean): String {
+    val stage1 = if (category == "potion") potionCoreName(name) else name
+    if (fits(stage1)) return stage1
+    val stage2 = dropLeadingPossessive(stage1)
+    if (fits(stage2)) return stage2
+    return abbreviateEffectWords(stage2)
+}
+
 /** One enchantment effect line for the item info popup (from the streamed item exports). */
 data class ItemEnchantEffect(
     val id: String = "", val name: String = "", val mag: String = "",

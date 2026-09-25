@@ -796,6 +796,7 @@ object UiPreferences {
     private const val INTERIOR_BRIGHTNESS = "minimum_interior_brightness"
     private const val FAV_GEAR_SLOTS = "fav_gear_slots"
     private const val FAV_MAGIC_SLOTS = "fav_magic_slots"
+    private const val FAV_MIXED = "fav_mixed"
     private const val VANILLA_FONT = "vanilla_font"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
@@ -965,6 +966,7 @@ object UiPreferences {
         DAY_FLOOR_WEATHERS.associate { it.weather to MutableStateFlow(DAY_BRIGHTNESS_DEFAULT) }
     private val favGearSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
     private val favMagicSlotsFlow = MutableStateFlow(FAV_SLOTS_DEFAULT)
+    private val favMixedFlow = MutableStateFlow(false)
 
     // Whether the companion + DS overlays render in the game's own typeface instead of the Android
     // system serif/monospace. The face is MysticCards.ttf — OpenMW's SIL-OFL replacement for
@@ -1218,6 +1220,7 @@ object UiPreferences {
             p.getInt(FAV_GEAR_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
         favMagicSlotsFlow.value =
             p.getInt(FAV_MAGIC_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
+        favMixedFlow.value = p.getBoolean(FAV_MIXED, false)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         // Looting / bartering offer exactly [Native][DS] as of Aug 21 2026, where DS *is* the
@@ -1634,6 +1637,47 @@ object UiPreferences {
         val v = value.coerceIn(0, FAV_SLOTS_MAX)
         favMagicSlotsFlow.value = v
         editor(context).putInt(FAV_MAGIC_SLOTS, v).apply()
+    }
+
+    // ---- Side-oriented aliases ------------------------------------------------------------
+    //
+    // The two count preferences are named by CONTENT ("gear", "magic") because that is what the
+    // groups held when they were written, but they have always really been per-SIDE counts: the
+    // magic count sizes the bottom-LEFT group and the gear count the bottom-RIGHT one. Mixed mode
+    // decouples content from side, so the HUD and the options row address them positionally
+    // through these aliases. The storage keys are deliberately NOT renamed — that would orphan
+    // every existing player's setting for no benefit.
+
+    /** Visible slot count for the bottom-LEFT group. Same value as [favMagicSlotsFlow]. */
+    fun favLeftSlotsFlow(): StateFlow<Int> = favMagicSlotsFlow.asStateFlow()
+
+    /** Visible slot count for the bottom-RIGHT group. Same value as [favGearSlotsFlow]. */
+    fun favRightSlotsFlow(): StateFlow<Int> = favGearSlotsFlow.asStateFlow()
+
+    fun setFavSlots(context: Context, side: FavSide, value: Int) =
+        if (side == FavSide.LEFT) setFavMagicSlots(context, value) else setFavGearSlots(context, value)
+
+    fun favSlotsFlow(side: FavSide): StateFlow<Int> =
+        if (side == FavSide.LEFT) favLeftSlotsFlow() else favRightSlotsFlow()
+
+    /**
+     * Whether the HUD favourite groups accept BOTH spells and items (opt-in; default off).
+     *
+     * Off (the shipped default) each side is single-purpose exactly as it always was: spells
+     * bottom-left, gear bottom-right, and the long-press menu puts a favourite in its own group
+     * without asking. On, either side takes either kind and the menu asks which side to use, so a
+     * player who wants 2 spells and 6 items can have that inside the same 4 + 4 slots.
+     *
+     * Turning it off again hides nothing and deletes nothing: the assignments keep their stored
+     * side and kind, so a spell sitting in the right-hand group stays there and keeps working. It
+     * is only the ASSIGNMENT flow that reverts to the old no-questions behaviour.
+     */
+    fun favMixedFlow(): StateFlow<Boolean> = favMixedFlow.asStateFlow()
+
+    /** Enable or disable mixed favourite slots and persist. */
+    fun setFavMixed(context: Context, enabled: Boolean) {
+        favMixedFlow.value = enabled
+        editor(context).putBoolean(FAV_MIXED, enabled).apply()
     }
 
     /** Whether the journal's chronological view uses the spine-hinged page-turn animation. */

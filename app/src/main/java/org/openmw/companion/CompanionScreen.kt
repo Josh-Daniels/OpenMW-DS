@@ -556,6 +556,16 @@ private val FAV_SLOT_HIT_EXTEND = 8.dp
 //  A — extra tap-catch margin around each fav group; taps here (and in the label / inter-slot gap)
 //      become no-ops instead of falling through to the map canvas and opening the world map.
 private val FAV_GROUP_MARGIN = 6.dp
+//  Side padding for the slot's name text.
+private val FAV_SLOT_TEXT_PAD = 6.dp
+//  Gap between the ×N chip's right edge and the slot border.
+private val FAV_SLOT_CHIP_INSET = 4.dp
+//  Everything the ×N chip occupies BESIDES its measured text: its own 5dp horizontal padding on
+//  each side, its 1dp border on each side, the inset above and a 3dp breathing gap before the
+//  name. The chip's text width is measured at runtime rather than guessed, because a worst-case
+//  constant (~40dp for "×250") would permanently cost the name the ~12dp that a one-digit count
+//  does not need, and one-digit counts are the overwhelming majority.
+private val FAV_SLOT_CHIP_PAD = 5.dp * 2 + 1.dp * 2 + FAV_SLOT_CHIP_INSET + 3.dp
 
 private enum class Tab(val label: String) {
     INVENTORY("Inventory"), MAGIC("Spells"), HUD("HUD"), STATS("Stats"), JOURNAL("Journal")
@@ -811,17 +821,19 @@ private fun ScrollMoreHint(state: LazyListState, modifier: Modifier = Modifier) 
 private val SCROLL_HINT_HEIGHT = 14.dp
 
 // How a tap / long-press acts on an inventory item. Mutually exclusive, keyed off
-// the coarse category from Lua's itemCategory(). Kept in one place so the two
-// inventory list call sites (grouped + single-category) stay in agreement.
+// the coarse category from Lua's itemCategory(). Thin wrappers over the category-level
+// predicates in GameState.kt, which are the single source of truth — FavouritesRepository
+// needs the same rule with only a stored category string to go on, so the sets cannot live
+// here. Do NOT re-spell any of these inline at a call site (that is exactly how the HUD
+// favourite slot and the loot/barter menu drifted into offering a dead "Equip" on a potion).
 //   readable   → open the book/scroll reader (CMP:read)
 //   usable     → native use() action (CMP:use): potion=drink, ingredient=eat,
 //                apparatus=alchemy menu, repair=repair menu — NONE are worn
 //   equippable → worn gear toggled via CMP:equip / CMP:unequip (weapons, armor,
 //                clothing, lockpick/probe, and lights/torches → carried_left)
-private fun InventoryItem.isReadable() = category == "book" || category == "scroll"
-private fun InventoryItem.isUsable() =
-    category == "potion" || category == "ingredient" || category == "apparatus" || category == "repair"
-private fun InventoryItem.isEquippable() = !isUsable() && !isReadable() && category != "misc"
+private fun InventoryItem.isReadable() = isReadableCategory(category)
+private fun InventoryItem.isUsable() = isUsableCategory(category)
+private fun InventoryItem.isEquippable() = isEquippableCategory(category)
 
 // Long-press / tap verb for a usable item: potion→Drink, food→Eat, tool→Use.
 private fun InventoryItem.useVerb() = when (category) {
@@ -1198,10 +1210,13 @@ private fun CompanionScreenContent() {
     // Keep the favourites repository's visible slot counts in step with the options. Truncation
     // happens inside the repository so the HUD groups, the star indicators and the long-press
     // favourite menu can never disagree about whether a hidden slot counts.
-    val favGearSlots by UiPreferences.favGearSlotsFlow().collectAsState()
-    val favMagicSlots by UiPreferences.favMagicSlotsFlow().collectAsState()
-    LaunchedEffect(favGearSlots, favMagicSlots) {
-        FavouritesRepository.setVisibleCounts(favGearSlots, favMagicSlots)
+    // NOTE the order: setVisibleCounts takes (LEFT, RIGHT), and the left group is the one the
+    // "magic" preference has always sized. Passing these the other way round would silently swap
+    // the two groups' capacities.
+    val favLeftCount by UiPreferences.favLeftSlotsFlow().collectAsState()
+    val favRightCount by UiPreferences.favRightSlotsFlow().collectAsState()
+    LaunchedEffect(favLeftCount, favRightCount) {
+        FavouritesRepository.setVisibleCounts(favLeftCount, favRightCount)
     }
 
     LaunchedEffect(state.character.name, state.inventory, state.spells) {
@@ -1210,7 +1225,12 @@ private fun CompanionScreenContent() {
             FavouritesRepository.setCharacter(context, name)
             FavouritesRepository.reconcile(
                 context,
-                inventoryIds = state.inventory.takeIf { it.isNotEmpty() }?.map { it.id }?.toSet(),
+                // id → category, not a bare id set: reconcile needs the category both to spare
+                // consumable favourites from pruning and to back-fill slots stored before the
+                // field existed. Duplicate ids across stacks collapse harmlessly — every stack of
+                // one record id has the same category.
+                inventoryCats = state.inventory.takeIf { it.isNotEmpty() }
+                    ?.associate { it.id to it.category },
                 spellIds = state.spells.takeIf { it.isNotEmpty() }?.map { it.id }?.toSet()
             )
         }
@@ -5413,7 +5433,7 @@ private fun LootRow(
     val label = item.displayName()
     val sid = item.stackId.ifEmpty { item.id }
     val favs by FavouritesRepository.state.collectAsState()
-    val isFav = isPlayerSide && favs.gear.any { it?.id == item.id }
+    val isFav = isPlayerSide && favs.contains(item.id)
     val confirmLabel = if (isPlayerSide) "Put" else "Take"
 
     // The tap action (put or take), prompting for a quantity when the stack > 1. The picker opens
@@ -5531,7 +5551,12 @@ private fun LootRow(
             // Equip. Player side equips in place; container side takes the whole
             // stack then equips it by record id (the taken instance re-stacks, so we
             // can't target its new stackId — equipItem finds the first matching record).
-            val equippable = item.category !in setOf("misc", "potion", "ingredient", "book", "scroll")
+            // Was an inline category set that listed potion/ingredient/book/scroll/misc but MISSED
+            // apparatus and repair, so a mortar or a repair hammer was offered an "Equip" that the
+            // Lua side then refused (slotForItem has no case for them → silent no-op). Both sides
+            // of this overlay carry Lua's fine itemCategory(), so the shared predicate applies
+            // verbatim — the coarse engine categories are the BARTER overlay's, not this one's.
+            val equippable = item.isEquippable()
             if (equippable) {
                 DropdownMenuItem(
                     text = { Text("Equip", fontFamily = MwBody, fontSize = 13.sp) },
@@ -5558,9 +5583,9 @@ private fun LootRow(
             if (isPlayerSide) {
                 FavouriteMenuItems(
                     context = context,
-                    isGear = true,
+                    kind = FavKind.GEAR,
                     itemId = item.id,
-                    makeSlot = { FavSlot(item.id, label) },
+                    makeSlot = { FavSlot(item.id, label, item.category, FavKind.GEAR) },
                     onDone = { menuOpen = false; DropdownState.closeAll() }
                 )
             }
@@ -6157,9 +6182,9 @@ private fun LootGridCell(
             if (isPlayerSide) {
                 FavouriteMenuItems(
                     context = context,
-                    isGear = true,
+                    kind = FavKind.GEAR,
                     itemId = item.id,
-                    makeSlot = { FavSlot(item.id, label) },
+                    makeSlot = { FavSlot(item.id, label, item.category, FavKind.GEAR) },
                     onDone = { menuOpen = false; DropdownState.closeAll() }
                 )
             }
@@ -13988,8 +14013,11 @@ private fun MapPanel(
 
     // How many favourite slots each group shows (0..FAV_SLOTS_MAX). These drive the LAYOUT only —
     // the repository has already truncated `favs` to the same counts, so the two cannot disagree.
-    val favGearSlots by UiPreferences.favGearSlotsFlow().collectAsState()
-    val favMagicSlots by UiPreferences.favMagicSlotsFlow().collectAsState()
+    // Read by SIDE: the underlying preferences are still named by content for storage compatibility
+    // (see the alias note in UiPreferences), but position is what the HUD lays out.
+    val favLeftSlots by UiPreferences.favLeftSlotsFlow().collectAsState()
+    val favRightSlots by UiPreferences.favRightSlotsFlow().collectAsState()
+    val favMixed by UiPreferences.favMixedFlow().collectAsState()
 
     // Native sneak indicator (sneaking && undetected). Drives the stealth icon below.
     val sneakVisible by GameStateRepository.sneakVisible.collectAsState()
@@ -14369,184 +14397,30 @@ private fun MapPanel(
             )
         }
 
-        // Gear favourites — bottom-right, stacked vertically. Wrapped in a tap-catcher (A) whose
-        // FAV_GROUP_MARGIN extends the swallow area a few dp around the group (the outer 2dp + the 6dp
-        // margin keeps the visible group at its original 8dp from the corner). Un-handled taps here —
-        // the label, the inter-slot gap, and just around/below the slots — become no-ops instead of
-        // falling through to the map canvas below and opening the world map.
+        // Favourite quick-slots — one group per screen corner, bottom-left and bottom-right.
         //
-        // At a count of 0 the whole group -- label, slots AND its tap-catcher -- is skipped, so the
-        // screen space is genuinely freed and taps there fall through to the map as they would if
-        // the group had never existed. Slots stack in a Column, so 1..4 needs no layout maths.
-        if (favGearSlots > 0) {
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 2.dp, bottom = 2.dp)
-                .pointerInput(Unit) { detectTapGestures {} }
-                .padding(FAV_GROUP_MARGIN)
-        ) {
-        Column(
-            horizontalAlignment = Alignment.End
-        ) {
-            Text(
-                "FAV. GEAR",
-                color = BoneDim,
-                fontSize = 10.sp,
-                fontFamily = MwDisplay,
-                letterSpacing = 1.sp
-            )
-            Spacer(Modifier.height(FAV_LABEL_GAP))
-            repeat(favGearSlots) { idx ->
-                if (idx > 0) Spacer(Modifier.height(FAV_SLOT_SPACING))
-                val slot = favs.gear.getOrNull(idx)
-                val slotItem = slot?.let { s -> state.inventory.find { it.id == s.id } }
-                val slotWorn = slot != null && (
-                    if (slotItem?.stackId?.isNotEmpty() == true)
-                        state.equipment.values.contains(slotItem.stackId)
-                    else
-                        state.equipment.values.contains(slot.id)
-                )
-                FavSlotView(
-                    slot = slot,
-                    borderColor = BronzeLight,
-                    equipped = slotWorn,
-                    // C: extend the tap target outward only — top slot (idx 0) up, bottom slot down.
-                    hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
-                    // LAST slot, not "slot 1" — the group is 1..4 tall now, and hardcoding index 1
-                    // would have left the bottom slot without its downward tap extension at any
-                    // count above 2 (and given it to a middle slot).
-                    hitPadBottom = if (idx == favGearSlots - 1) FAV_SLOT_HIT_EXTEND else 0.dp,
-                    onEmptyTap = {
-                        onSelectTab(Tab.INVENTORY)
-                        HintToastState.show(FAV_GEAR_HINT)
-                    },
-                    menuItems = { s, dismiss ->
-                        val item = state.inventory.find { it.id == s.id }
-                        val readable = item?.category == "book" || item?.category == "scroll"
-                        val equippable = item != null && item.category != "misc" && !readable
-                        val target = item?.stackId?.takeIf { it.isNotEmpty() } ?: s.id
-                        val worn = if (item?.stackId?.isNotEmpty() == true)
-                            state.equipment.values.contains(item.stackId)
-                        else
-                            state.equipment.values.contains(s.id)
-                        val colors = MenuDefaults.itemColors(textColor = Bone)
-                        if (equippable) {
-                            DropdownMenuItem(
-                                text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
-                                onClick = {
-                                    dismiss()
-                                    if (worn) CompanionActions.unequipItem(target)
-                                    else CompanionActions.equipItem(target)
-                                },
-                                colors = colors
-                            )
-                        }
-                        if (readable) {
-                            DropdownMenuItem(
-                                text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
-                                onClick = { dismiss(); CompanionActions.readItem(s.id) },
-                                colors = colors
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
-                            onClick = {
-                                dismiss()
-                                val count = item?.count ?: 1
-                                // Map tab (favourites slot) — a plain TAB, no controller nav routed
-                                // here, so no "[Y]" hint. Same reasoning as the inventory Drop.
-                                QuantityRequestState.requestOrRun(
-                                    s.name, count, "Drop", showControllerHint = false
-                                ) { n ->
-                                    CompanionActions.dropItem(s.id, n)
-                                }
-                            },
-                            colors = colors
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Unfavourite", fontFamily = MwBody, fontSize = 13.sp) },
-                            onClick = { dismiss(); FavouritesRepository.clearGear(context, idx) },
-                            colors = colors
-                        )
-                    }
-                ) {
-                    val s = slot ?: return@FavSlotView
-                    val item = state.inventory.find { it.id == s.id }
-                    val readable = item?.category == "book" || item?.category == "scroll"
-                    val equippable = item != null && item.category != "misc" && !readable
-                    // Use per-stack instance id when available; fall back to recordId.
-                    val target = item?.stackId?.takeIf { it.isNotEmpty() } ?: s.id
-                    val worn = if (item?.stackId?.isNotEmpty() == true)
-                        state.equipment.values.contains(item.stackId)
-                    else
-                        state.equipment.values.contains(s.id)
-                    when {
-                        readable    -> CompanionActions.readItem(s.id)
-                        equippable && worn -> CompanionActions.unequipItem(target)
-                        equippable  -> CompanionActions.equipItem(target)
-                    }
-                }
-            }
-        }
-        }
-        }
-
-        // Magic favourites — bottom-left, stacked vertically. Wrapped in the same tap-catcher (A)
-        // + margin so near-miss taps around the group don't open the map. See the gear group above,
-        // including why a count of 0 skips the tap-catcher too.
-        if (favMagicSlots > 0) {
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 2.dp, bottom = 2.dp)
-                .pointerInput(Unit) { detectTapGestures {} }
-                .padding(FAV_GROUP_MARGIN)
-        ) {
-        Column {
-            Text(
-                "FAV. SPELLS",
-                color = BoneDim,
-                fontSize = 10.sp,
-                fontFamily = MwDisplay,
-                letterSpacing = 1.sp
-            )
-            Spacer(Modifier.height(FAV_LABEL_GAP))
-            repeat(favMagicSlots) { idx ->
-                if (idx > 0) Spacer(Modifier.height(FAV_SLOT_SPACING))
-                val slot = favs.magic.getOrNull(idx)
-                val slotSelected = slot != null && state.selectedSpell == slot.id
-                FavSlotView(
-                    slot = slot,
-                    borderColor = BronzeLight,
-                    equipped = slotSelected,
-                    // C: extend the tap target outward only — top slot (idx 0) up, LAST slot down.
-                    hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
-                    hitPadBottom = if (idx == favMagicSlots - 1) FAV_SLOT_HIT_EXTEND else 0.dp,
-                    onEmptyTap = {
-                        onSelectTab(Tab.MAGIC)
-                        HintToastState.show(FAV_SPELL_HINT)
-                    },
-                    menuItems = { s, dismiss ->
-                        val colors = MenuDefaults.itemColors(textColor = Bone)
-                        DropdownMenuItem(
-                            text = { Text("Set as active spell", fontFamily = MwBody, fontSize = 13.sp) },
-                            onClick = { dismiss(); CompanionActions.selectSpell(s.id) },
-                            colors = colors
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Unfavourite", fontFamily = MwBody, fontSize = 13.sp) },
-                            onClick = { dismiss(); FavouritesRepository.clearMagic(context, idx) },
-                            colors = colors
-                        )
-                    }
-                ) {
-                    slot?.let { CompanionActions.selectSpell(it.id) }
-                }
-            }
-        }
-        }
-        }
+        // ONE composable renders both. They used to be two ~110-line blocks that had drifted apart
+        // (the right-hand one classified a potion as equippable and its tap silently no-opped for
+        // months), and mixed mode would have doubled the divergence rather than halved it, since
+        // each side must now handle both kinds. See FavGroup.
+        FavGroup(
+            side = FavSide.LEFT,
+            slots = favs.left,
+            visibleCount = favLeftSlots,
+            mixed = favMixed,
+            state = state,
+            context = context,
+            onSelectTab = onSelectTab
+        )
+        FavGroup(
+            side = FavSide.RIGHT,
+            slots = favs.right,
+            visibleCount = favRightSlots,
+            mixed = favMixed,
+            state = state,
+            context = context,
+            onSelectTab = onSelectTab
+        )
 
         // Combat target — top-centre, in the gap between the WEAPON and SPELL
         // pills. Only present while a target exists (during combat), and only when the
@@ -14636,6 +14510,10 @@ private const val QUEST_STATUS_POLL_MS = 10_000L
  */
 private const val FAV_GEAR_HINT = "Long-press an item here to make it a favourite"
 private const val FAV_SPELL_HINT = "Long-press a spell here to make it a favourite"
+// Mixed mode: a side is no longer tied to one kind, so the hint names both. The tap still
+// navigates by SIDE (left to Spells, right to Inventory) rather than picking arbitrarily — that
+// keeps the muscle memory the default layout builds, and either tab is one tap from the other.
+private const val FAV_MIXED_HINT = "Long-press an item or spell to make it a favourite"
 private const val TRACKED_QUEST_HINT = "Long-press a quest here to track it"
 
 /** Heading over the HUD's tracked-quest slot, shared by the followed and empty states so the two
@@ -15107,80 +14985,362 @@ private fun FavStar() {
 }
 
 /**
- * Favourites section for an item/spell long-press dropdown (rendered inside a
- * DropdownMenu's ColumnScope). Shows "Unfavourite" when the record already
- * occupies a slot; otherwise "Add to favourites" when a slot is free, or an
- * explicit slot picker when they are ALL full — the old auto-pick always
- * clobbered slot 1, so slot 2 could never be replaced. `isGear` selects the
- * gear vs magic slot list; `makeSlot` builds the FavSlot with the live name.
+ * Favourites section for an item/spell long-press dropdown (rendered inside a DropdownMenu's
+ * ColumnScope). Shows "Unfavourite" when the record already occupies a slot; otherwise it offers
+ * the free slots, or an explicit picker when they are all full — the old auto-pick always
+ * clobbered slot 1, so slot 2 could never be replaced. `makeSlot` builds the FavSlot with the live
+ * name, and [kind] both stamps the assignment and, in the default layout, picks its side.
  *
- * Works at any configured slot count without change: it reads the repository's already-truncated
- * list and indexes into it, so 1..FAV_SLOTS_MAX all behave identically and only the number of
- * "Slot N" rows in the replace picker differs. A count of 0 renders nothing.
+ * TWO MODES, from [UiPreferences.favMixedFlow]:
+ *
+ *  - DEFAULT: unchanged behaviour. A spell can only go to the left group and an item only to the
+ *    right, so no side is offered and the menu is exactly as many rows as it always was.
+ *  - MIXED: either side takes either kind, so the player is asked which. One row per side while
+ *    that side has a free slot; a full side falls back to naming its slots, which is the same
+ *    picker the old all-full branch used.
+ *
+ * Works at any configured slot count: it reads the repository's already-truncated lists, so
+ * 1..FAV_SLOTS_MAX behave identically and only the number of rows differs. A side showing 0 slots
+ * offers nothing for that side; both at 0 renders nothing at all.
  */
 @Composable
 private fun ColumnScope.FavouriteMenuItems(
     context: Context,
-    isGear: Boolean,
+    kind: FavKind,
     itemId: String,
     makeSlot: () -> FavSlot,
     onDone: () -> Unit
 ) {
     val favs by FavouritesRepository.state.collectAsState()
-    // Already truncated to the configured visible count by the repository, so this section scales
-    // to 1..FAV_SLOTS_MAX with no arithmetic of its own.
-    val slots = if (isGear) favs.gear else favs.magic
-    // Count 0 = the category's HUD group is off, so offer nothing at all. Without this the
-    // "both slots full" branch below would render its "Replace favourite…" header over an empty
-    // slot list — a heading with no options under it.
-    if (slots.isEmpty()) return
+    val mixed by UiPreferences.favMixedFlow().collectAsState()
     val colors = MenuDefaults.itemColors(textColor = Bone)
-    val favIdx = slots.indexOfFirst { it?.id == itemId }
 
-    fun assign(index: Int) {
+    // The side this kind belongs to when mixing is off. Also the side a single-side offer defaults
+    // to, so the default layout's behaviour is bit-for-bit what it was.
+    val homeSide = if (kind == FavKind.MAGIC) FavSide.LEFT else FavSide.RIGHT
+    val sides = if (mixed) listOf(FavSide.LEFT, FavSide.RIGHT) else listOf(homeSide)
+    // Count 0 = that group is off, so it can hold nothing. Without this the full-side branch would
+    // render a "Replace" heading over an empty list — a heading with no options under it.
+    val usable = sides.filter { favs.side(it).isNotEmpty() }
+    if (usable.isEmpty()) return
+
+    fun assign(side: FavSide, index: Int) {
         onDone()
-        if (isGear) FavouritesRepository.assignGear(context, makeSlot(), index)
-        else FavouritesRepository.assignMagic(context, makeSlot(), index)
+        FavouritesRepository.assign(context, side, makeSlot(), index)
     }
 
-    if (favIdx >= 0) {
+    // Already favourited? Offer to remove it, wherever it sits. Searched across BOTH sides even in
+    // default mode: a favourite assigned while mixing was on keeps its side when mixing is turned
+    // back off, and an Unfavourite that could not see it would be a one-way trap.
+    // Derived from the COLLECTED state, not read off the repository, so every row this menu shows
+    // comes from the same snapshot that drove the recomposition.
+    val existing = FavSide.entries.firstNotNullOfOrNull { side ->
+        favs.side(side).indexOfFirst { it?.id == itemId }.takeIf { it >= 0 }?.let { side to it }
+    }
+    if (existing != null) {
         DropdownMenuItem(
             text = { Text("Unfavourite", fontFamily = MwBody, fontSize = 13.sp) },
-            onClick = {
-                onDone()
-                if (isGear) FavouritesRepository.clearGear(context, favIdx)
-                else FavouritesRepository.clearMagic(context, favIdx)
-            },
+            onClick = { onDone(); FavouritesRepository.clear(context, existing.first, existing.second) },
             colors = colors
         )
-    } else {
-        val emptyIdx = slots.indexOfFirst { it == null }
-        if (emptyIdx >= 0) {
+        return
+    }
+
+    val sideLabel = { s: FavSide -> if (s == FavSide.LEFT) "Left" else "Right" }
+    val free = usable.associateWith { side -> favs.side(side).indexOfFirst { it == null } }
+    val anyFree = free.values.any { it >= 0 }
+
+    // Does this section render a HEADING, or is it a single plain action row?
+    //
+    // Mixed mode always heads its rows (it has to name the sides), and so does any replace picker.
+    // Those cases can run to six or eight rows that, in the menu's one uniform row style, sat
+    // directly under Equip / Info / Drop and read as more of the same list. They now get a rule
+    // above them, a brighter heading and indented rows, so the block is visibly one section
+    // ABOUT favourites rather than four more verbs.
+    //
+    // A lone "Add to favourites" (default mode, slot free) is deliberately left undecorated: it IS
+    // a plain action, exactly like Equip, and a rule plus heading over a single row would be
+    // heavier than the thing it labels.
+    val sectioned = (mixed && anyFree) || free.values.any { it < 0 }
+    if (sectioned) {
+        Box(Modifier.fillMaxWidth().padding(top = 4.dp).height(1.dp).background(BronzeDark))
+    }
+
+    if (anyFree) {
+        if (mixed) {
+            FavMenuHeading("Add to favourites")
+            usable.filter { free.getValue(it) >= 0 }.forEach { side ->
+                DropdownMenuItem(
+                    text = { Text(sideLabel(side), fontFamily = MwBody, fontSize = 13.sp) },
+                    onClick = { assign(side, free.getValue(side)) },
+                    colors = colors,
+                    contentPadding = FAV_MENU_ROW_PADDING
+                )
+            }
+        } else {
             DropdownMenuItem(
                 text = { Text("Add to favourites", fontFamily = MwBody, fontSize = 13.sp) },
-                onClick = { assign(emptyIdx) },
+                onClick = { assign(homeSide, free.getValue(homeSide)) },
                 colors = colors
             )
-        } else {
-            // Every visible slot is full — let the user choose which one to overwrite.
-            Text(
-                "Replace favourite…",
-                color = BoneDim, fontSize = 10.sp, fontFamily = MwDisplay,
-                letterSpacing = 0.5.sp,
-                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 2.dp)
+        }
+    }
+
+    // Any side with no free slot gets its occupants listed so one can be overwritten. In default
+    // mode that is the old "Replace favourite…" picker verbatim; in mixed mode it sits under the
+    // free-side rows, so a player whose right group is full can still fill the left in one tap and
+    // only reads the longer list when they actually need it.
+    usable.filter { free.getValue(it) < 0 }.forEach { side ->
+        FavMenuHeading(if (mixed) "Replace on ${sideLabel(side).lowercase()}…" else "Replace favourite…")
+        favs.side(side).forEachIndexed { i, occupant ->
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        "Slot ${i + 1}: ${occupant?.name ?: "(none)"}",
+                        fontFamily = MwBody, fontSize = 13.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                },
+                onClick = { assign(side, i) },
+                colors = colors,
+                contentPadding = FAV_MENU_ROW_PADDING
             )
-            slots.forEachIndexed { i, s ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            "Slot ${i + 1}: ${s?.name ?: "—"}",
-                            fontFamily = MwBody, fontSize = 13.sp,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis
+        }
+    }
+}
+
+/** Indent for rows that belong to a headed favourites section, so they read as sitting UNDER the
+ *  heading rather than continuing the menu's top-level verb list. The 12dp end matches
+ *  `MenuDefaults.DropdownMenuItemContentPadding`, which every other row in these menus uses. */
+private val FAV_MENU_ROW_PADDING = PaddingValues(start = 24.dp, end = 12.dp)
+
+/**
+ * A heading inside the favourites section of a long-press menu.
+ *
+ * BronzeLight + bold, i.e. the menu's OWN title treatment one size down, rather than the BoneDim
+ * 10sp caption this replaced: at BoneDim it was dimmer than the rows beneath it, so it read as a
+ * disabled entry instead of a label for them.
+ */
+@Composable
+private fun FavMenuHeading(text: String) {
+    Text(
+        text,
+        color = BronzeLight,
+        fontSize = 10.sp,
+        fontFamily = MwDisplay,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 3.dp)
+    )
+}
+
+/**
+ * One HUD favourite group: the caption, the stacked pills, and the tap-catcher around them.
+ *
+ * Renders BOTH corners. Before Sep 2026 the two were separate ~110-line blocks, which is how the
+ * right-hand one ended up with its own stale copy of the item classification (a favourited potion
+ * was treated as equippable, so tapping it silently no-opped in the engine). Mixed mode makes each
+ * side handle both kinds, so keeping them apart would have doubled that hazard instead of removing
+ * it. Everything that differs between the corners is a parameter:
+ *
+ *  - [side] picks the alignment (BottomStart / BottomEnd), the caption, and which tab an empty-slot
+ *    tap navigates to.
+ *  - [mixed] drops the caption entirely and switches the empty-tap hint, because a side no longer
+ *    classifies what it holds.
+ *
+ * Per-SLOT behaviour follows each assignment's own [FavSlot.kind], never the side, so a spell in
+ * the right-hand group behaves exactly like a spell in the left one.
+ *
+ * Mis-tap hardening (A + B + C, Jul 2026) is preserved verbatim: the empty `pointerInput` tap
+ * catcher plus FAV_GROUP_MARGIN (A) so near-misses around the group do not fall through to the map
+ * canvas and open the world map; FAV_SLOT_SPACING between pills (B); and the outward-only
+ * hit-extension on the first and last pill (C). At a count of 0 the whole group, tap-catcher
+ * included, is skipped so the corner behaves as if the group never existed.
+ */
+@Composable
+private fun BoxScope.FavGroup(
+    side: FavSide,
+    slots: List<FavSlot?>,
+    visibleCount: Int,
+    mixed: Boolean,
+    state: GameState,
+    context: Context,
+    onSelectTab: (Tab) -> Unit
+) {
+    if (visibleCount <= 0) return
+    val isLeft = side == FavSide.LEFT
+    Box(
+        modifier = Modifier
+            .align(if (isLeft) Alignment.BottomStart else Alignment.BottomEnd)
+            .padding(start = if (isLeft) 2.dp else 0.dp, end = if (isLeft) 0.dp else 2.dp, bottom = 2.dp)
+            .pointerInput(Unit) { detectTapGestures {} }
+            .padding(FAV_GROUP_MARGIN)
+    ) {
+        Column(horizontalAlignment = if (isLeft) Alignment.Start else Alignment.End) {
+            // Caption. Mixed mode drops it: "FAV. SPELLS" over a group holding a warhammer would be
+            // a lie, and no honest caption is worth the 18dp when the pills already read as a set.
+            if (!mixed) {
+                Text(
+                    if (isLeft) "FAV. SPELLS" else "FAV. GEAR",
+                    color = BoneDim,
+                    fontSize = 10.sp,
+                    fontFamily = MwDisplay,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(FAV_LABEL_GAP))
+            }
+            repeat(visibleCount) { idx ->
+                if (idx > 0) Spacer(Modifier.height(FAV_SLOT_SPACING))
+                val slot = slots.getOrNull(idx)
+                val isSpell = slot?.kind == FavKind.MAGIC
+                val slotItem =
+                    if (isSpell) null else slot?.let { s -> state.inventory.find { it.id == s.id } }
+
+                // Highlight: a spell is "active" when it is the selected spell; an item when it is
+                // worn. Both mirror the inventory/spell list styling.
+                val highlighted = when {
+                    slot == null -> false
+                    isSpell -> state.selectedSpell == slot.id
+                    slotItem?.stackId?.isNotEmpty() == true ->
+                        state.equipment.values.contains(slotItem.stackId)
+                    else -> state.equipment.values.contains(slot.id)
+                }
+
+                // A CONSUMABLE favourite outlives its stack: reconcile no longer prunes it when the
+                // last potion is drunk, so the assignment can legitimately name an item that is not
+                // in the inventory right now. Render that as the ordinary empty slot (dashed, dim,
+                // same onEmptyTap) WITHOUT clearing it — the lookup above starts resolving again by
+                // itself the moment the player picks another one up, and the slot refills.
+                // Deliberately gated on the stored category rather than on "item == null" alone:
+                // during the save-load window the inventory export is briefly empty and every gear
+                // favourite would otherwise flash Empty. Spells are never out of stock.
+                val outOfStock = slot != null && !isSpell && slotItem == null &&
+                    isUsableCategory(slot.category)
+
+                FavSlotView(
+                    slot = slot,
+                    borderColor = BronzeLight,
+                    equipped = highlighted,
+                    outOfStock = outOfStock,
+                    // Stock counter for a consumable favourite, so "how many Restore Health have I
+                    // left" is answerable without opening the Inventory tab. Gear and spells pass
+                    // null: they do not stack the same way and already read their state from the
+                    // equipped highlight.
+                    count = slotItem?.count?.takeIf { isUsableCategory(slotItem.category) },
+                    // C: extend the tap target outward only — top slot (idx 0) up, LAST slot down.
+                    hitPadTop = if (idx == 0) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    hitPadBottom = if (idx == visibleCount - 1) FAV_SLOT_HIT_EXTEND else 0.dp,
+                    onEmptyTap = {
+                        onSelectTab(if (isLeft) Tab.MAGIC else Tab.INVENTORY)
+                        HintToastState.show(
+                            when {
+                                mixed -> FAV_MIXED_HINT
+                                isLeft -> FAV_SPELL_HINT
+                                else -> FAV_GEAR_HINT
+                            }
                         )
                     },
-                    onClick = { assign(i) },
-                    colors = colors
-                )
+                    menuItems = { s, dismiss ->
+                        val colors = MenuDefaults.itemColors(textColor = Bone)
+                        if (s.kind == FavKind.MAGIC) {
+                            DropdownMenuItem(
+                                text = { Text("Set as active spell", fontFamily = MwBody, fontSize = 13.sp) },
+                                onClick = { dismiss(); CompanionActions.selectSpell(s.id) },
+                                colors = colors
+                            )
+                        } else {
+                            // Same classification the Inventory tab's ItemContextMenu uses, via the
+                            // shared predicates. This menu used to re-spell the rule inline with no
+                            // `usable` branch, so a potion was classed equippable and offered a dead
+                            // "Equip" with no Drink row at all.
+                            val item = state.inventory.find { it.id == s.id }
+                            val readable = item?.isReadable() == true
+                            // Held as the ITEM, not a Boolean, so the row below can read its use
+                            // verb (Drink / Eat / Use) without a null assertion.
+                            val usableItem = item?.takeIf { it.isUsable() }
+                            val equippable = item?.isEquippable() == true
+                            val target = item?.stackId?.takeIf { it.isNotEmpty() } ?: s.id
+                            val worn = if (item?.stackId?.isNotEmpty() == true)
+                                state.equipment.values.contains(item.stackId)
+                            else
+                                state.equipment.values.contains(s.id)
+                            if (equippable) {
+                                DropdownMenuItem(
+                                    text = { Text(if (worn) "Unequip" else "Equip", fontFamily = MwBody, fontSize = 13.sp) },
+                                    onClick = {
+                                        dismiss()
+                                        if (worn) CompanionActions.unequipItem(target)
+                                        else CompanionActions.equipItem(target)
+                                    },
+                                    colors = colors
+                                )
+                            }
+                            if (readable) {
+                                DropdownMenuItem(
+                                    text = { Text("Read", fontFamily = MwBody, fontSize = 13.sp) },
+                                    onClick = { dismiss(); CompanionActions.readItem(s.id) },
+                                    colors = colors
+                                )
+                            }
+                            if (usableItem != null) {
+                                DropdownMenuItem(
+                                    text = { Text(usableItem.useVerb(), fontFamily = MwBody, fontSize = 13.sp) },
+                                    onClick = { dismiss(); CompanionActions.useItem(s.id) },
+                                    colors = colors
+                                )
+                            }
+                            // Drop needs the item in hand. An out-of-stock consumable favourite
+                            // keeps its assignment, so this menu can open for an item the player
+                            // does not currently carry.
+                            if (item != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Drop", fontFamily = MwBody, fontSize = 13.sp) },
+                                    onClick = {
+                                        dismiss()
+                                        // A plain TAB, no controller nav routed here, so no "[Y]"
+                                        // hint. Same reasoning as the inventory Drop.
+                                        QuantityRequestState.requestOrRun(
+                                            s.name, item.count, "Drop", showControllerHint = false
+                                        ) { n -> CompanionActions.dropItem(s.id, n) }
+                                    },
+                                    colors = colors
+                                )
+                            }
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Unfavourite", fontFamily = MwBody, fontSize = 13.sp) },
+                            onClick = { dismiss(); FavouritesRepository.clear(context, side, idx) },
+                            colors = colors
+                        )
+                    }
+                ) {
+                    val s = slot ?: return@FavSlotView
+                    if (s.kind == FavKind.MAGIC) {
+                        CompanionActions.selectSpell(s.id)
+                        return@FavSlotView
+                    }
+                    val item = state.inventory.find { it.id == s.id } ?: return@FavSlotView
+                    // itemPrimaryAction picks the target id itself (per-stack instance id for
+                    // equip/unequip, record id for use/read), so there is no local `target` here
+                    // any more — that choice now lives in exactly one place too.
+                    val worn = if (item.stackId.isNotEmpty())
+                        state.equipment.values.contains(item.stackId)
+                    else
+                        state.equipment.values.contains(s.id)
+                    // One shared dispatcher with the Inventory tab's List and Cards rows, so a
+                    // favourited potion drinks here exactly as it does there. The inline copy this
+                    // replaced had no `usable` branch: it sent CMP:equip, slotForItem returned nil
+                    // and the tap died in the engine with "equip - no slot for:".
+                    itemPrimaryAction(
+                        item,
+                        worn = worn,
+                        equippable = item.isEquippable(),
+                        usable = item.isUsable(),
+                        readable = item.isReadable()
+                    )
+                }
             }
         }
     }
@@ -15198,6 +15358,15 @@ private fun FavSlotView(
     // (used by the top slot), hitPadBottom downward (bottom slot). The visual box is unchanged.
     hitPadTop: Dp = 0.dp,
     hitPadBottom: Dp = 0.dp,
+    // A consumable favourite whose stack is currently exhausted: the ASSIGNMENT is still stored
+    // (reconcile spares consumables), there is just nothing to drink right now. Renders exactly
+    // like an unassigned slot and taps like one, but LONG-PRESS stays live — otherwise, once you
+    // ran out, the slot could not be unfavourited from anywhere: the item's own list row (the only
+    // other place the Unfavourite entry appears) is gone from the inventory too.
+    outOfStock: Boolean = false,
+    // Stock count for a filled consumable slot, rendered as a ×N chip. null = no chip, which is
+    // every gear and spell favourite.
+    count: Int? = null,
     menuItems: (@Composable ColumnScope.(slot: FavSlot, dismiss: () -> Unit) -> Unit)? = null,
     // Tap on an EMPTY slot. Until Aug 21 2026 an empty slot was not clickable at all, so the tap
     // fell through to whatever was behind it and the slot read as broken. It now takes the player
@@ -15206,13 +15375,45 @@ private fun FavSlotView(
     onEmptyTap: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
-    val isEmpty = slot == null
+    // "Empty" is a VISUAL state, not an assignment state: an out-of-stock consumable looks and taps
+    // like an empty slot while keeping its stored assignment (and its long-press menu, below).
+    val isEmpty = slot == null || outOfStock
     val alpha   = if (isEmpty) 0.4f else 1f
     // Mirror the inventory worn/unworn styling: equipped favourites get the
     // bronze-tinted fill + bright border/name, non-equipped ones stay dim.
     val bgColor    = if (equipped) SlotWorn else Color(0xC0151210)
     val slotBorder = if (equipped) borderColor else BronzeDark
     val textColor  = if (equipped) BoneBright else BoneMuted
+
+    // ---- Label fitting. The pill is FAV_SLOT_WIDTH wide and most item names are wider than the
+    // room left once the count chip is in, so the label is measured and progressively shortened
+    // (see favouriteSlotLabel). This is the ONLY place any name is shortened: the lists, and this
+    // slot's own long-press menu below, all render slot.name untouched.
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val nameStyle = TextStyle(fontSize = 11.sp, fontFamily = MwBody)
+    val countStyle = TextStyle(fontSize = 10.sp, fontFamily = MwData)
+    val showCount = count != null && !(slot == null || outOfStock)
+    // Reserve the chip's MEASURED width rather than a worst-case constant: a "×3" chip is ~28dp
+    // against ~40dp for "×250", and handing the name those 12dp back is worth more here than the
+    // simplicity of a fixed number. CHIP_PAD covers the chip's own horizontal padding, its border
+    // and the gap to the name.
+    val chipReserve = if (!showCount) 0.dp else with(density) {
+        measurer.measure(AnnotatedString("×$count"), countStyle).size.width.toDp()
+    } + FAV_SLOT_CHIP_PAD
+    val nameEndPad = if (showCount) chipReserve else FAV_SLOT_TEXT_PAD
+    val labelBudgetPx = with(density) {
+        (FAV_SLOT_WIDTH - FAV_SLOT_TEXT_PAD - nameEndPad).toPx()
+    }
+    // Keyed on the whole slot: FavSlot is a data class, so this re-fits only when the assignment
+    // actually changes, not on every recomposition the HUD's stat ticks cause.
+    val label = remember(slot, labelBudgetPx, nameStyle) {
+        slot?.let { s ->
+            favouriteSlotLabel(s.name, s.category) { candidate ->
+                measurer.measure(AnnotatedString(candidate), nameStyle).size.width <= labelBudgetPx
+            }
+        }
+    }
 
     var menuOpen by remember { mutableStateOf(false) }
     // Snapshot the slot the menu was opened for. The menu renders from this, NOT
@@ -15260,15 +15461,45 @@ private fun FavSlotView(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = slot?.name ?: "Empty",
+                    // Already fitted by favouriteSlotLabel above; the ellipsis below is the final
+                    // backstop for the handful of names (proper-noun wines, long TR ingredients)
+                    // that no stage can compress enough.
+                    text = label ?: "Empty",
                     color = textColor.copy(alpha = alpha),
                     fontSize = 11.sp,
                     fontFamily = MwBody,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 6.dp)
+                    // Asymmetric end padding when a chip is present reserves the chip's corner and
+                    // shifts the centred name off it, so a long name ellipsizes instead of running
+                    // underneath the count. The slot box itself stays exactly FAV_SLOT_WIDTH x
+                    // FAV_SLOT_HEIGHT — the tuned inter-slot spacing and the outward hit-extension
+                    // are measured against that and must not move.
+                    modifier = Modifier.padding(start = FAV_SLOT_TEXT_PAD, end = nameEndPad)
                 )
+                // Stock count for a consumable favourite. Same chip idiom as EquippedCornerIcon's
+                // ammo counter (SlotBg fill, 1dp BronzeDark, 2dp radius, MwData 10sp Bone, and the
+                // × is one of the few decorative glyphs MysticCards actually carries — see the
+                // glyph note before using any other mark). The POSITION differs deliberately: the
+                // ammo chip sits below its icon box because that Column is free to grow downward,
+                // whereas this one must stay inside the fixed 132x34 slot.
+                if (showCount) {
+                    Text(
+                        "×$count",
+                        color = Bone,
+                        fontSize = 10.sp,
+                        fontFamily = MwData,
+                        maxLines = 1,
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = FAV_SLOT_CHIP_INSET)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(SlotBg)
+                            .border(1.dp, BronzeDark, RoundedCornerShape(2.dp))
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    )
+                }
                 // Dashed border for empty slots drawn as Canvas overlay (avoids clip-halving issue)
                 if (isEmpty) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
@@ -15756,7 +15987,7 @@ private fun InventoryItemList(
 
     // Favourited (gear) record ids — favourites float to the TOP of their category section.
     val favs by FavouritesRepository.state.collectAsState()
-    val favIds = remember(favs) { favs.gear.mapNotNull { it?.id }.toSet() }
+    val favIds = remember(favs) { favs.idsOf(FavKind.GEAR) }
 
     // DEFAULT is the canonical three-tier order: category rank, then favourite-first, then name.
     //
@@ -16391,9 +16622,9 @@ private fun ItemContextMenu(
         // Add to favourites / Unfavourite / replace-slot picker.
         FavouriteMenuItems(
             context = context,
-            isGear = true,
+            kind = FavKind.GEAR,
             itemId = item.id,
-            makeSlot = { FavSlot(item.id, label) },
+            makeSlot = { FavSlot(item.id, label, item.category, FavKind.GEAR) },
             onDone = { onDismiss() }
         )
     }
@@ -16419,7 +16650,7 @@ private fun ItemRow(
     }
     val label = item.displayName()
     val favs by FavouritesRepository.state.collectAsState()
-    val isFav = favs.gear.any { it?.id == item.id }
+    val isFav = favs.contains(item.id)
 
     Box(modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }) {
         Column {
@@ -16565,7 +16796,7 @@ private fun ItemCard(
         if (DropdownState.closeRequest > 0) menuOpen = false
     }
     val favs by FavouritesRepository.state.collectAsState()
-    val isFav = favs.gear.any { it?.id == item.id }
+    val isFav = favs.contains(item.id)
 
     BoxWithConstraints(
         modifier = Modifier.onGloballyPositioned { ItemInfoPopupState.reportAnchor(item.id, it.boundsInRoot()) }
@@ -16932,7 +17163,7 @@ private fun SpellRow(
         if (DropdownState.closeRequest > 0) menuOpen = false
     }
     val favs by FavouritesRepository.state.collectAsState()
-    val isFav = favs.magic.any { it?.id == spellId }
+    val isFav = favs.contains(spellId)
     // Compact spell-list sizing is the only version now (smaller icon + shorter rows so more spells
     // fit). The former "Standard" values are kept in comments in case the toggle is ever restored.
     val iconSize = 30.dp        // Standard: 40.dp
@@ -17093,9 +17324,9 @@ private fun SpellRow(
             // Add to favourites / Unfavourite / replace-slot picker (magic slots).
             FavouriteMenuItems(
                 context = context,
-                isGear = false,
+                kind = FavKind.MAGIC,
                 itemId = spellId,
-                makeSlot = { FavSlot(spellId, title) },
+                makeSlot = { FavSlot(spellId, title, "", FavKind.MAGIC) },
                 onDone = { menuOpen = false; DropdownState.closeAll() }
             )
             // Delete, LAST: it is destructive, and last is furthest from where the menu opens under
@@ -20646,8 +20877,11 @@ private fun OptionsSubPage(
                     item { OptionsSubLabel("Inventory tab") }
                     item { EquippedInListRow() }
                     item { OptionsSubLabel("HUD favourites") }
-                    item { FavSlotCountRow(isGear = false) }
-                    item { FavSlotCountRow(isGear = true) }
+                    // Mixing leads: it renames the two rows under it, so reading it first is what
+                    // makes "Left slots"/"Right slots" mean anything.
+                    item { FavMixedRow() }
+                    item { FavSlotCountRow(FavSide.LEFT) }
+                    item { FavSlotCountRow(FavSide.RIGHT) }
                 }
 
                 // CONTROLS: how the game is driven from the two screens.
@@ -21916,10 +22150,14 @@ private fun AdaptiveDimmingRow() {
  * raising either floor automatically reports a brighter scene and the companion dims itself LESS.
  */
 /**
- * How many HUD favourite quick-slots one category shows (0..[FAV_SLOTS_MAX]).
+ * How many HUD favourite quick-slots one SIDE shows (0..[FAV_SLOTS_MAX]).
  *
  * A pill per count rather than a slider: the range is five discrete values, and the pill row is the
  * options menu's existing idiom for a small closed set.
+ *
+ * Addressed by side rather than by category since Sep 2026, because mixed mode unties the two. The
+ * underlying preference is unchanged in both name and storage (the left group has always been sized
+ * by the "magic" count and the right by "gear"), so nobody's setting moves.
  *
  * **Lowering the count HIDES favourites, it does not delete them** — [FAV_SLOTS_MAX] slots are
  * always persisted and raising the count again brings the same ones back. The subtitle says so,
@@ -21927,20 +22165,25 @@ private fun AdaptiveDimmingRow() {
  * to try the setting.
  */
 @Composable
-private fun FavSlotCountRow(isGear: Boolean) {
+private fun FavSlotCountRow(side: FavSide) {
     val context = LocalContext.current
-    val count by (if (isGear) UiPreferences.favGearSlotsFlow() else UiPreferences.favMagicSlotsFlow())
-        .collectAsState()
+    val count by UiPreferences.favSlotsFlow(side).collectAsState()
+    val mixed by UiPreferences.favMixedFlow().collectAsState()
+    val isLeft = side == FavSide.LEFT
+    // The row is named by what the group HOLDS while each side is single-purpose, and by WHERE it
+    // is once mixing makes that untrue. Same preference either way — only the wording moves.
+    val title = when {
+        mixed -> if (isLeft) "Left slots" else "Right slots"
+        isLeft -> "Favourite spell slots"
+        else -> "Favourite gear slots"
+    }
 
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
-        Text(
-            if (isGear) "Favourite gear slots" else "Favourite spell slots",
-            color = Bone, fontSize = 14.sp, fontFamily = MwBody
-        )
+        Text(title, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
         Spacer(Modifier.height(2.dp))
         Text(
             if (count == 0) "Hidden. The group is removed from the HUD, freeing the space."
-            else "Shown bottom-${if (isGear) "right" else "left"} on the HUD. " +
+            else "Shown bottom-${if (isLeft) "left" else "right"} on the HUD. " +
                 "Lowering this hides extra favourites rather than clearing them.",
             color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
         )
@@ -21952,10 +22195,48 @@ private fun FavSlotCountRow(isGear: Boolean) {
                     label = n.toString(),
                     active = count == n,
                     enabled = true
-                ) {
-                    if (isGear) UiPreferences.setFavGearSlots(context, n)
-                    else UiPreferences.setFavMagicSlots(context, n)
-                }
+                ) { UiPreferences.setFavSlots(context, side, n) }
+            }
+        }
+    }
+}
+
+/**
+ * Whether the two HUD favourite groups each accept both spells and items.
+ *
+ * Off is the shipped default and the layout everyone already knows: spells bottom-left, gear
+ * bottom-right, and a long-press files a favourite into its own group without asking. On, either
+ * group takes either, and the long-press menu gains a Left/Right choice — which is the whole point,
+ * since a player who wants six items and two spells can then have that inside the same eight slots.
+ *
+ * Turning it back off deletes nothing and moves nothing: assignments keep the side they were given,
+ * so a spell parked on the right keeps sitting and working there. Only the ASSIGNMENT flow reverts.
+ * The subtitle says so, because the alternative reading (that switching back throws the layout away)
+ * would make people afraid to try it.
+ */
+@Composable
+private fun FavMixedRow() {
+    val context = LocalContext.current
+    val mixed by UiPreferences.favMixedFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Mixed favourite slots", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            if (mixed)
+                "Either side holds spells or gear, and long-press asks which side to use. " +
+                    "Switching back keeps every favourite where it is."
+            else
+                "Spells on the left, gear on the right. Turn on to put either kind on either side.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(Modifier.weight(1f), label = "Separate", active = !mixed, enabled = true) {
+                UiPreferences.setFavMixed(context, false)
+            }
+            OptionPill(Modifier.weight(1f), label = "Mixed", active = mixed, enabled = true) {
+                UiPreferences.setFavMixed(context, true)
             }
         }
     }
