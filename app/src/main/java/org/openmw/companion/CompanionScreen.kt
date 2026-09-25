@@ -15046,7 +15046,12 @@ private fun ColumnScope.FavouriteMenuItems(
         return
     }
 
-    val sideLabel = { s: FavSide -> if (s == FavSide.LEFT) "Left" else "Right" }
+    // Two forms, because the row and the heading are different parts of speech. "Left" on its own
+    // was too bare: under an "Add to favourites" heading it reads as a direction rather than as a
+    // destination, and the player's question is WHICH GROUP, not which way. The row names the group
+    // ("Left side"); the heading takes the phrase that reads as a sentence ("Replace on the left…").
+    val sideRow = { s: FavSide -> if (s == FavSide.LEFT) "Left side" else "Right side" }
+    val sidePhrase = { s: FavSide -> if (s == FavSide.LEFT) "the left" else "the right" }
     val free = usable.associateWith { side -> favs.side(side).indexOfFirst { it == null } }
     val anyFree = free.values.any { it >= 0 }
 
@@ -15071,7 +15076,7 @@ private fun ColumnScope.FavouriteMenuItems(
             FavMenuHeading("Add to favourites")
             usable.filter { free.getValue(it) >= 0 }.forEach { side ->
                 DropdownMenuItem(
-                    text = { Text(sideLabel(side), fontFamily = MwBody, fontSize = 13.sp) },
+                    text = { Text(sideRow(side), fontFamily = MwBody, fontSize = 13.sp) },
                     onClick = { assign(side, free.getValue(side)) },
                     colors = colors,
                     contentPadding = FAV_MENU_ROW_PADDING
@@ -15091,7 +15096,7 @@ private fun ColumnScope.FavouriteMenuItems(
     // free-side rows, so a player whose right group is full can still fill the left in one tap and
     // only reads the longer list when they actually need it.
     usable.filter { free.getValue(it) < 0 }.forEach { side ->
-        FavMenuHeading(if (mixed) "Replace on ${sideLabel(side).lowercase()}…" else "Replace favourite…")
+        FavMenuHeading(if (mixed) "Replace on ${sidePhrase(side)}…" else "Replace favourite…")
         favs.side(side).forEachIndexed { i, occupant ->
             DropdownMenuItem(
                 text = {
