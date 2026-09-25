@@ -23076,20 +23076,27 @@ private fun DeveloperActionsPanel() {
                 "Press again to keep raising them past the usual limit.",
             button = "Add 100 to All Attributes"
         ) { CompanionActions.devAddAttributes() }
+        DevSetStatRow(
+            title = "Set one attribute",
+            description = "Pick an attribute and set it to exactly the number below, clearing " +
+                "any damage to it. Strength and Endurance do not change your maximum health.",
+            skills = false
+        )
         DevActionButton(
             title = "Skills",
             description = "Adds 100 to all 27 skills and clears any damage to them. " +
                 "Press again to keep raising them past the usual limit.",
             button = "Add 100 to All Skills"
         ) { CompanionActions.devAddSkills() }
+        DevSetStatRow(
+            title = "Set one skill",
+            description = "Pick a skill and set it to exactly the number below, clearing any " +
+                "damage to it. Does not count towards your next level.",
+            skills = true
+        )
         // Two deliberately different level buttons — the difference is the whole point of having
         // both, so each description says plainly what it skips or shows.
-        DevActionButton(
-            title = "Level",
-            description = "Jumps straight to level 20. Skips the level-up screen, so you get no " +
-                "attribute increases from it.",
-            button = "Set Level 20"
-        ) { CompanionActions.devSetLevel20() }
+        DevSetLevelRow()
         DevActionButton(
             title = "Level up",
             description = "Fills the level-up bar and opens the level-up screen",
@@ -23097,10 +23104,22 @@ private fun DeveloperActionsPanel() {
         ) { CompanionActions.devTriggerLevelUp() }
 
         DevSectionLabel("Items")
-        // Two gold amounts, titled by the amount rather than both being "Gold" — the same reason
+        // Four gold amounts, titled by the amount rather than all being "Gold" — the same reason
         // the Daytime/Night-time pair below is titled that way, so the rows are told apart by
-        // their heading and not only by their button text. Smaller first: it is the one that
-        // leaves prices and merchant gold limits meaningful, so it is the usual choice.
+        // their heading and not only by their button text. Smallest first: the small ones leave
+        // prices and merchant gold limits meaningful, so they are the usual choice.
+        DevActionButton(
+            title = "1,000 gold",
+            description = "Puts 1,000 gold in your inventory. An early-game purse, enough for a " +
+                "few purchases or a training session.",
+            button = "Add 1,000 Gold"
+        ) { CompanionActions.devAddGold1k() }
+        DevActionButton(
+            title = "5,000 gold",
+            description = "Puts 5,000 gold in your inventory. Enough for a good weapon or " +
+                "several training sessions.",
+            button = "Add 5,000 Gold"
+        ) { CompanionActions.devAddGold5k() }
         DevActionButton(
             title = "10,000 gold",
             description = "Puts 10,000 gold in your inventory. Enough to buy and train freely " +
@@ -23277,28 +23296,202 @@ private fun DevActionButton(
             modifier = Modifier.padding(top = 1.dp)
         )
         Spacer(Modifier.height(6.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(4.dp))
-                .background(PillActiveBg.copy(alpha = 0.94f))
-                .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
-                // Cue.ACTION — the heaviest of the four, and the reason this feature exists: a
-                // cheat button changes state somewhere off-screen, so without a sound there is no
-                // evidence at all that the tap landed. [tapFlash] gives the same tap a visible
-                // acknowledgement, which matters most here for exactly the same reason.
-                .tapFlash { UiSounds.play(UiSounds.Cue.ACTION); onClick() }
-                .padding(vertical = 9.dp),
-            contentAlignment = Alignment.Center
-        ) {
+        DevButton(button, onClick)
+    }
+}
+
+/** The full-width bronze action button of [DevActionButton], on its own so the set-to-a-number
+ *  rows ([DevSetStatRow], [DevSetLevelRow]) end in exactly the same button. */
+@Composable
+private fun DevButton(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            .background(PillActiveBg.copy(alpha = 0.94f))
+            .border(1.dp, BronzeLight, RoundedCornerShape(4.dp))
+            // Cue.ACTION — the heaviest of the four, and the reason this feature exists: a
+            // cheat button changes state somewhere off-screen, so without a sound there is no
+            // evidence at all that the tap landed. [tapFlash] gives the same tap a visible
+            // acknowledgement, which matters most here for exactly the same reason.
+            .tapFlash { UiSounds.play(UiSounds.Cue.ACTION); onClick() }
+            .padding(vertical = 9.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = BronzeLight,
+            fontSize = 14.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+    }
+}
+
+/**
+ * Developer Tools "set to a number" stepper: -10 / -1 / value / +1 / +10, then a row of presets.
+ * Floored at 1 with no ceiling (DEV_SET_MIN in companion.lua). A stepper rather than a text field:
+ * typing would mean the Android IME on the secondary display, which is not worth it for a cheat.
+ * Presets only change the number; nothing is sent until the row's Set button.
+ */
+@Composable
+private fun DevNumberStepper(value: Int, presets: List<Int>, onChange: (Int) -> Unit) {
+    fun step(d: Int) = onChange((value.toLong() + d).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt())
+    Row(
+        Modifier.fillMaxWidth().padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OptionPill(Modifier.weight(1f), label = "-10", active = false, enabled = value > 1) { step(-10) }
+        OptionPill(Modifier.weight(1f), label = "-1", active = false, enabled = value > 1) { step(-1) }
+        Text(
+            "%,d".format(value),
+            color = BronzeLight,
+            fontSize = 16.sp,
+            fontFamily = MwDisplay,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            modifier = Modifier.weight(1.4f)
+        )
+        OptionPill(Modifier.weight(1f), label = "+1", active = false, enabled = true) { step(1) }
+        OptionPill(Modifier.weight(1f), label = "+10", active = false, enabled = true) { step(10) }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        presets.forEach { p ->
+            OptionPill(Modifier.weight(1f), label = p.toString(), active = p == value, enabled = true) {
+                onChange(p)
+            }
+        }
+    }
+}
+
+/**
+ * Developer Tools: set the character's level to a chosen number (replaced the fixed "Set Level 20"
+ * button, Sep 25 2026). The Lua side also recomputes max health with vanilla's formula, since a
+ * bare level write leaves health at the old level's value; see the `setlevel_` branch there.
+ *
+ * The number shown tracks the LIVE level until the stepper is touched ([picked] null), so the row
+ * opens on the real value rather than a stale one.
+ */
+@Composable
+private fun DevSetLevelRow() {
+    val levelFlow = remember { GameStateRepository.state.map { it.character.level }.distinctUntilChanged() }
+    val live by levelFlow.collectAsState(initial = 0)
+    var picked by remember { mutableStateOf<Int?>(null) }
+    val value = picked ?: live.coerceAtLeast(1)
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Level", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "Sets your level to exactly the number below and recalculates your maximum health " +
+                "to match. Skips the level-up screen, so you get no attribute increases from it.",
+            color = BoneDim, fontSize = 10.sp, fontFamily = MwBody, lineHeight = 14.sp,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Text(
+            "Now: level $live",
+            color = BronzeLight, fontSize = 11.sp, fontFamily = MwBody,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        DevNumberStepper(value, DEV_LEVEL_PRESETS) { picked = it }
+        Spacer(Modifier.height(6.dp))
+        DevButton("Set Level $value") { CompanionActions.devSetLevel(value) }
+    }
+}
+
+private val DEV_LEVEL_PRESETS = listOf(1, 10, 20, 30, 50, 100)
+private val DEV_STAT_PRESETS = listOf(25, 50, 75, 100, 200, 500)
+
+/**
+ * Developer Tools: set ONE attribute or ONE skill to a chosen number. A pill per stat, then the
+ * shared stepper, then Set. The ids and names come from the live COMPANION_CHARACTER export, so
+ * the pills are exactly the stats the Stats tab shows. Skills are grouped by specialization (from
+ * the streamed CHARDETAIL batch) when it has landed, and shown as one block until then.
+ *
+ * Changing the pill clears [picked], so the number jumps to the newly chosen stat's live value.
+ * Skills only export their MODIFIED value, so a fortified skill opens on its fortified number; the
+ * Set still writes the base.
+ */
+@Composable
+private fun DevSetStatRow(title: String, description: String, skills: Boolean) {
+    data class Opt(val id: String, val name: String, val value: Int, val group: String)
+    val optsFlow = remember(skills) {
+        GameStateRepository.state.map { st ->
+            if (skills) st.character.skills.map {
+                Opt(it.id, it.name, it.value.roundToInt(), it.specialization)
+            } else st.character.attributes.map {
+                Opt(it.id, it.name, it.base.roundToInt(), "")
+            }
+        }.distinctUntilChanged()
+    }
+    val opts by optsFlow.collectAsState(initial = emptyList())
+    var selectedId by remember { mutableStateOf<String?>(null) }
+    var picked by remember { mutableStateOf<Int?>(null) }
+    val selected = opts.firstOrNull { it.id == selectedId } ?: opts.firstOrNull()
+    val value = picked ?: (selected?.value ?: 1).coerceAtLeast(1)
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text(title, color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            description,
+            color = BoneDim, fontSize = 10.sp, fontFamily = MwBody, lineHeight = 14.sp,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        if (selected == null) {
             Text(
-                button,
-                color = BronzeLight,
-                fontSize = 14.sp,
-                fontFamily = MwDisplay,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp
+                "Load a game first.",
+                color = BronzeLight, fontSize = 11.sp, fontFamily = MwBody,
+                modifier = Modifier.padding(top = 4.dp)
             )
+            return@Column
+        }
+        // Attributes four to a row (eight fit in two); skills three to a row, because names like
+        // "Medium Armor" and "Hand-to-hand" would clip at four.
+        val perRow = if (skills) 3 else 4
+        val groups = if (skills && opts.all { it.group.isNotEmpty() })
+            // Vanilla's own order (the class screen lists Combat, Magic, Stealth), not the
+            // alphabetical order the ids arrive in, which would put Stealth first.
+            opts.groupBy { it.group }.toList().sortedBy { (g, _) ->
+                listOf("combat", "magic", "stealth").indexOf(g.lowercase()).let { if (it < 0) 3 else it }
+            } else listOf("" to opts)
+        groups.forEach { (group, members) ->
+            if (group.isNotEmpty()) {
+                Text(
+                    group, color = BoneDim, fontSize = 10.sp, fontFamily = MwBody,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            members.chunked(perRow).forEach { row ->
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    row.forEach { o ->
+                        OptionPill(
+                            Modifier.weight(1f), label = o.name,
+                            active = o.id == selected.id, enabled = true
+                        ) { selectedId = o.id; picked = null }
+                    }
+                    // Keep a short last row's pills the same width as the rows above.
+                    repeat(perRow - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
+        Text(
+            "Now: ${selected.name} ${selected.value}",
+            color = BronzeLight, fontSize = 11.sp, fontFamily = MwBody,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+        DevNumberStepper(value, DEV_STAT_PRESETS) { picked = it }
+        Spacer(Modifier.height(6.dp))
+        DevButton("Set ${selected.name} to $value") {
+            if (skills) CompanionActions.devSetSkill(selected.id, value)
+            else CompanionActions.devSetAttribute(selected.id, value)
         }
     }
 }

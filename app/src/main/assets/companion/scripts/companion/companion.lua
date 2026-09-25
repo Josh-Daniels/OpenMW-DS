@@ -2538,8 +2538,9 @@ end
 -- wealthy-player purse (merchant gold limits still bite, prices still mean something), while
 -- 100,000 exists to push six-digit values through the gold display, barter and encumbrance.
 -- Both are additive per press, like every other dev give.
-local DEV_GOLD_SMALL = 10000
-local DEV_GOLD_LARGE = 100000
+-- 1,000 and 5,000 (Sep 25 2026) are early-game purses: enough for a few purchases or a training
+-- session without making money meaningless.
+local DEV_GOLD_AMOUNTS = { gold1k = 1000, gold5k = 5000, gold10k = 10000, gold = 100000 }
 local DEV_MAX_VITAL = 99999
 -- How much the attribute / skill buttons ADD per press. Deliberately additive rather than a set-to
 -- ceiling: pressing repeatedly keeps stacking, which is what makes the buttons useful for pushing a
@@ -2548,7 +2549,11 @@ local DEV_MAX_VITAL = 99999
 -- Nothing clamps this — MWMechanics::AttributeValue::setBase is a plain assignment and the Lua
 -- binding calls it directly — so values well above 100 stick.
 local DEV_STAT_INCREMENT = 100
-local DEV_SET_LEVEL = 20
+-- Floor for the three set-to-a-number cheats (level, one attribute, one skill). 1 rather than 0: a
+-- level of 0 breaks every level formula, and an attribute or skill of 0 is not a state the game can
+-- reach. There is deliberately NO ceiling, for the same reason DEV_STAT_INCREMENT stacks without
+-- one -- testing how the UI copes with values far past vanilla's limits is half the point.
+local DEV_SET_MIN = 1
 -- NpcStats::getLevelupAttributeMultiplier does min(10, count) to pick iLevelUp<NN>Mult, so 10 is
 -- the top tier (x5 in vanilla). Without this every attribute on the level-up screen reads x1.
 local DEV_SKILL_INCREASES = 10
@@ -3050,12 +3055,11 @@ local function devDispatch(action)
         if not ok then emit("COMPANION_DEBUG: dev weather failed") end
         return
 
-    elseif action == "gold" or action == "gold10k" then
+    elseif DEV_GOLD_AMOUNTS[action] then
         -- createObject lowercases ESM3 ids, so 'gold_001' is the canonical form of Gold_001.
-        -- One branch for both amounts, mirroring the day/night pair below: the only difference is
+        -- One branch for every amount, mirroring the day/night pair below: the only difference is
         -- the count, so splitting them would duplicate the id comment and the give call.
-        local amount = (action == "gold10k") and DEV_GOLD_SMALL or DEV_GOLD_LARGE
-        devGiveItems({ { id = 'gold_001', count = amount } })
+        devGiveItems({ { id = 'gold_001', count = DEV_GOLD_AMOUNTS[action] } })
 
     elseif action == "maxhealth" or action == "maxmagicka" or action == "maxfatigue" then
         -- One button per vital (health / magicka / fatigue are independently useful when testing).
@@ -3111,12 +3115,64 @@ local function devDispatch(action)
             emit("COMPANION_DEBUG: dev noclip toggled")
         end
 
-    elseif action == "setlevel20" then
-        -- Raw level jump — identical to the console's SetLevel (both only call
-        -- CreatureStats::setLevel), so it deliberately SKIPS the level-up screen and the
-        -- attribute gains that come with it. Use dev_levelup to exercise that flow instead.
-        pcall(function() types.Actor.stats.level(self).current = DEV_SET_LEVEL end)
-        emit("COMPANION_DEBUG: dev set level " .. DEV_SET_LEVEL)
+    elseif string.sub(action, 1, 9) == "setlevel_" then
+        -- dev_setlevel_<n>. The value rides in the ACTION NAME, like dev_weather_*, so it stays
+        -- inside the no-arg `dev_` grammar.
+        --
+        -- The level write alone is the console's SetLevel (both only call CreatureStats::setLevel),
+        -- which leaves max health where it was: health only grows inside NpcStats::levelUp, by
+        -- Endurance x fLevelUpHealthEndMult per level. So health is RECOMPUTED here with vanilla's
+        -- own formula, as if every level-up had happened at today's Endurance:
+        --   floor((Strength + Endurance) / 2)        -- NpcStats::updateHealth, the chargen value
+        --   + (level - 1) * Endurance * fLevelUpHealthEndMult
+        -- BASE attributes, as both engine functions use. Current health is filled to the new max.
+        -- Like the old Set Level 20 it SKIPS the level-up screen and its attribute increases.
+        local n = tonumber(string.sub(action, 10))
+        if not n then
+            emit("COMPANION_DEBUG: dev set level: bad value " .. tostring(action))
+            return
+        end
+        local level = math.max(DEV_SET_MIN, math.floor(n))
+        pcall(function() types.Actor.stats.level(self).current = level end)
+        local ok = pcall(function()
+            local str = types.Actor.stats.attributes.strength(self).base
+            local endu = types.Actor.stats.attributes.endurance(self).base
+            local mult = 0.1
+            pcall(function() mult = core.getGMST("fLevelUpHealthEndMult") end)
+            local health = math.floor(0.5 * (str + endu)) + (level - 1) * endu * mult
+            local stat = types.Actor.stats.dynamic.health(self)
+            stat.base = health
+            stat.current = health
+        end)
+        emit("COMPANION_DEBUG: dev set level " .. level .. (ok and "" or " (health recompute failed)"))
+
+    elseif string.sub(action, 1, 8) == "setattr_" or string.sub(action, 1, 9) == "setskill_" then
+        -- dev_setattr_<id>_<n> / dev_setskill_<id>_<n>: set ONE stat's base to exactly <n>, and
+        -- clear its damage so the new value is what the Stats screen reads. No attribute or skill
+        -- id contains an underscore, so the last `_` separates the id from the value.
+        --
+        -- Deliberately raw: a skill set this way does NOT fill the level bar (only
+        -- I.SkillProgression.skillLevelUp does, one point and one message box at a time), and
+        -- Strength/Endurance do NOT change max health (NpcStats::updateHealth runs only at
+        -- chargen). Intelligence is the exception the engine makes itself: setting it rescales
+        -- max magicka at once (CreatureStats::setAttribute -> recalculateMagicka).
+        local isSkill = string.sub(action, 1, 9) == "setskill_"
+        local id, n = string.match(action, "^set%a+_(%a+)_(%d+)$")
+        local ids = isSkill and SKILL_IDS or ATTR_IDS
+        local known = false
+        for _, k in ipairs(ids) do if k == id then known = true break end end
+        if not known or not tonumber(n) then
+            emit("COMPANION_DEBUG: dev set stat: bad action " .. tostring(action))
+            return
+        end
+        local value = math.max(DEV_SET_MIN, math.floor(tonumber(n)))
+        local ok = pcall(function()
+            local stat = isSkill and types.NPC.stats.skills[id](self)
+                or types.Actor.stats.attributes[id](self)
+            stat.base = value
+            stat.damage = 0
+        end)
+        emit("COMPANION_DEBUG: dev set " .. id .. " " .. value .. (ok and "" or " FAILED"))
 
     elseif action == "levelup" then
         -- Fill the level-up bar, then open the real screen. Normally the dialog is pushed by

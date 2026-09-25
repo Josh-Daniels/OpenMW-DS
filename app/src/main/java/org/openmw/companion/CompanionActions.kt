@@ -345,7 +345,9 @@ object CompanionActions {
     // a Lua binding) was removed Aug 11 2026, so drainCompanionCommands now has no CMP:dev_ branch.
     private fun dev(action: String) = runCommand("CMP:dev_$action")
 
-    // Two amounts for different test needs — see DEV_GOLD_SMALL/DEV_GOLD_LARGE in companion.lua.
+    // Four amounts for different test needs — see DEV_GOLD_AMOUNTS in companion.lua.
+    fun devAddGold1k() = dev("gold1k")
+    fun devAddGold5k() = dev("gold5k")
     fun devAddGold() = dev("gold")
     fun devAddGold10k() = dev("gold10k")
 
@@ -360,7 +362,13 @@ object CompanionActions {
     fun devAddSkills() = dev("addskills")
     fun devToggleGodMode() = dev("god")
     fun devToggleNoclip() = dev("noclip")
-    fun devSetLevel20() = dev("setlevel20")
+    // Set-to-a-number cheats. The value (and, for the stat pair, the attribute/skill id) rides in
+    // the ACTION name, like devSetWeather, so they stay inside the no-arg `dev_` grammar. Floored
+    // at 1 here as well as in Lua (DEV_SET_MIN); there is deliberately no ceiling. Setting a level
+    // also recomputes max health there; the stat pair is a raw set (see devDispatch).
+    fun devSetLevel(level: Int) = dev("setlevel_${level.coerceAtLeast(1)}")
+    fun devSetAttribute(id: String, value: Int) = dev("setattr_${id.lowercase()}_${value.coerceAtLeast(1)}")
+    fun devSetSkill(id: String, value: Int) = dev("setskill_${id.lowercase()}_${value.coerceAtLeast(1)}")
     fun devTriggerLevelUp() = dev("levelup")
     fun devAddSpellKit() = dev("spellkit")
     fun devStackEffects() = dev("stackeffects")
