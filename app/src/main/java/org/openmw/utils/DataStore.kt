@@ -127,6 +127,12 @@ object GameFilesPreferences {
     // storage and survives a reinstall, and a user who needed the non-default profile to see the
     // game at all must not silently lose it and be handed a swapped screen again.
     val DISPLAY_PROFILE_KEY = stringPreferencesKey("display_profile")
+    // The two screens chosen under the Custom display profile (DisplayRoles.PROFILE_CUSTOM), as
+    // DisplayRoles screen DESCRIPTORS ("<id>|<name>|<w>x<h>"), not bare ids, so a choice can still
+    // be found if the OS numbers a secondary display differently next boot. The companion one may
+    // be DisplayRoles.CUSTOM_NONE. Absent = not chosen yet; read ONLY by the Custom profile.
+    val CUSTOM_GAME_DISPLAY_KEY = stringPreferencesKey("custom_game_display")
+    val CUSTOM_COMPANION_DISPLAY_KEY = stringPreferencesKey("custom_companion_display")
 
     // Render-resolution tier, stored as a TARGET HEIGHT in pixels (0 = Native).
     //
@@ -607,6 +613,20 @@ object GameFilesPreferences {
             preferences[DISPLAY_PROFILE_KEY] ?: DisplayRoles.PROFILE_DEFAULT
         }
     }
+
+    /** The Custom profile's two screen choices (descriptors, or null when never chosen). */
+    suspend fun saveCustomDisplays(context: Context, game: String, companion: String) {
+        context.dataStore.edit { preferences ->
+            preferences[CUSTOM_GAME_DISPLAY_KEY] = game
+            preferences[CUSTOM_COMPANION_DISPLAY_KEY] = companion
+        }
+    }
+
+    fun loadCustomGameDisplay(context: Context): Flow<String?> =
+        context.prefsData.map { it[CUSTOM_GAME_DISPLAY_KEY] }
+
+    fun loadCustomCompanionDisplay(context: Context): Flow<String?> =
+        context.prefsData.map { it[CUSTOM_COMPANION_DISPLAY_KEY] }
 
     /** Render-resolution tier as a target height in pixels; 0 = Native (no downscale). */
     fun loadResolutionTier(context: Context): Flow<Int> {

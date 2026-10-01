@@ -3,6 +3,8 @@ package org.openmw.ui.page.simplified
 import android.database.sqlite.SQLiteDatabase
 import android.system.Os
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -91,7 +93,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.layout.onPlaced
@@ -125,6 +131,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openmw.BuildConfig
 import org.openmw.Constants
+import org.openmw.IdentifyScreenActivity
 import org.openmw.R
 import org.openmw.fragments.USER_CFG_DEFAULT_LINE
 import org.openmw.ui.controls.UIStateManager
@@ -157,6 +164,7 @@ import org.openmw.ui.view.attemptLaunchGame
 import org.openmw.ui.view.resetUserSettingsFile
 import org.openmw.utils.AlphaMigration
 import org.openmw.utils.ApkInstaller
+import org.openmw.utils.BugReport
 import org.openmw.utils.DisplayRoles
 import org.openmw.utils.FileBrowserMode
 import org.openmw.utils.InstallResult
@@ -165,6 +173,7 @@ import org.openmw.utils.GameFilesPreferences
 import org.openmw.utils.GameFilesPreferences.readCodeGroup
 import org.openmw.utils.IniSettings
 import org.openmw.utils.MToast
+import org.openmw.utils.ModSetupCheck
 import org.openmw.utils.OpenMWConfigUtils
 import org.openmw.utils.ReleaseNotes
 import org.openmw.utils.UpdateChecker
@@ -379,10 +388,9 @@ private fun pluginFileNamesIn(dir: String): Set<String> =
  * correctness boundary, not a filter for tidiness.
  *
  * Deliberately NARROWER than [MOD_PLUGIN_EXTENSIONS], which mirrors what `modPathSelection` WRITES:
- *  - `.bsa` is excluded. That function files archives as `content=` lines, which the engine cannot
- *    load; archives belong on `fallback-archive=` (the global cfg already lists the three base ones).
- *    Auto-adding one would break launching, so this never does — even though a removal still cleans
- *    up such a line if `modPathSelection` created one.
+ *  - `.bsa` is excluded. Archives belong on `fallback-archive=`, never `content=` (the engine cannot
+ *    load one as content). `modPathSelection` used to write them as content; since Oct 1 2026 it
+ *    registers them as archives, and a removal still cleans up an old content line if one exists.
  *  - `.esl` is excluded for the same reason: this engine registers no loader for it.
  *  - `.project` is excluded on judgement rather than necessity — it loads, but it is an OpenMW-CS
  *    working file and enabling one automatically is not what dropping it in a folder means.
@@ -414,8 +422,12 @@ private val ENGINE_CONTENT_EXTENSIONS =
  *    an endless write loop.
  */
 private fun unregisteredContent(all: List<ModValue>): List<ModValue> {
+    // GROUNDCOVER COUNTS AS KNOWN. A grass mod is registered on a `groundcover=` line, by design
+    // never `content=`; counting only content entries made every grass plugin look unregistered, so
+    // it was appended a SECOND time as enabled content, loading the grass as ordinary objects (a
+    // large performance cost, and exactly what the mod's instructions say not to do). Fixed Oct 1 2026.
     val known = all.asSequence()
-        .filter { it.category == "content" }
+        .filter { it.category == "content" || it.category == "groundcover" }
         .mapTo(mutableSetOf()) { it.value.trim().lowercase() }
 
     val folders = all.asSequence()
@@ -574,6 +586,11 @@ private suspend fun applyModFolderRemoval(
         targetCategory = OpenMWConfigUtils.ConfigKeyType.Data.key,
     ) { ok = it }
     if (!ok) return false
+
+    // Add Mods registers a folder's .bsa files as `fallback-archive=` lines, so removing the folder
+    // has to take them too: an archive line whose file is gone is a launch failure of its own.
+    // After the data write, so "is it still somewhere" is judged against the folders that remain.
+    withContext(Dispatchers.IO) { ModSetupCheck.pruneOrphanedArchives() }
 
     // Removing the last folder leaves `saveOpenMWConfig` writing a ZERO-BYTE file, which is not a
     // state the rest of the app recognises: `updateUserConfig` decides whether a game-files selection
@@ -761,8 +778,9 @@ private suspend fun importAlpha3ModOrder(viewModel: ModAssistantViewModel) {
  * The "Manage folders" list: every registered `data=` folder the player owns — the game files folder
  * and any mod folders added on top — each with a Remove action.
  *
- * Read-plus-remove only. Adding stays on the buttons that open this, and nothing here edits the load
- * order — that is the load-order panel's job.
+ * List, remove, and (since Oct 1 2026) an Add Mod Folder button, which is now THE way to add a
+ * second folder: the Data Files button opens this dialog once anything is registered. Same browser
+ * and writer (`modPathSelection`) as that button's first-time tap. Nothing here edits the load order; that is the load-order panel's job.
  *
  * The game files row is TAGGED rather than hidden or disabled. Removing it is a legitimate way to
  * unregister everything and get back to an empty configuration, so the design makes it visible and
@@ -775,6 +793,7 @@ private suspend fun importAlpha3ModOrder(viewModel: ModAssistantViewModel) {
 private fun ManageModFoldersDialog(
     folders: List<ManagedFolder>,
     onRemoveRequested: (ManagedFolder) -> Unit,
+    onAddRequested: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -837,6 +856,14 @@ private fun ManageModFoldersDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        },
+        // Add sits beside the list it adds to, so "Manage folders" covers both directions. Same
+        // browser and writer as the home button's tap (modPathSelection); the dialog closes first so
+        // the two never stack.
+        dismissButton = {
+            TextButton(onClick = onAddRequested) {
+                Text(stringResource(R.string.simplified_manage_folders_add))
+            }
         },
     )
 }
@@ -1237,62 +1264,54 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                     customCFG = true
                     mainVm.selectMorrowWindFolder(context)
                 },
-                // Same entry point as the Add Mods button's, on the same shared dialog. Both buttons
-                // carry it because the dialog spans both concerns — the game files folder and the mod
-                // folders are all just registered `data=` entries — and this is the only route to
-                // unregistering the game files folder and getting back to an empty configuration.
-                secondaryText = stringResource(R.string.simplified_manage_folders)
-                    .takeIf { manageable.isNotEmpty() },
-                onSecondaryClick = { showManageFolders = true },
+                // No Manage folders link here since Oct 1 2026. The dialog now also ADDS folders, and
+                // adding belongs to the mod side, not the game files side (there is only ever one
+                // game folder; tapping this button REPLACES it). The dialog still lists the game files
+                // row, so unregistering it remains possible from the Data Files button.
             )
             LauncherActionButton(
                 modifier = Modifier.weight(1f),
-                // Unlike game files there is no single "selected" path to echo back — every tap
-                // APPENDS another data folder to openmw.cfg — so the feedback is a running count of
-                // what has been added. A path would have to pick one of several arbitrarily, and
-                // would silently stop changing on every add after the first.
+                // The Data Files / mod folders button. Reworked Oct 1 2026 with the developer:
                 //
-                // THREE states, not two. Zero added folders means two completely different things,
-                // and collapsing them was misleading for anyone who merges their mods straight into
-                // the base Data Files folder: that is a perfectly valid setup with mods installed and
-                // showing in the load-order panel, yet the button kept saying "select Data Files" as
-                // though no setup had happened. So the prompt is shown ONLY while the game folder is
-                // genuinely unset; once it is set, the button ECHOES THE DATA FILES PATH IN USE, in
-                // the same "<label>: <path>" shape as the game-files button beside it, so a merged
-                // setup reads as configured rather than as unfinished.
+                // LABEL. Once the game's Data Files folder is registered the button ECHOES ITS PATH,
+                // as a sign the setup is done (same "<label>: <path>" shape as the game files button).
+                // The path comes from the CFG (`gameFilesRow`, the Manage list), never the stored
+                // game-files preference, so it cannot advertise a folder with no `data=` line. Before
+                // that, it reads "Add Mod Folder (select Data Files)". The odd third case, folders
+                // added but no game Data Files line, names the count.
                 //
-                // The count still wins when there ARE separate folders, because that is exactly the
-                // state where one path cannot represent the setup — there are several, and picking
-                // one to display would be arbitrary and would stop changing after the first add.
+                // TAP. While nothing is registered, a tap opens the folder browser (the add path,
+                // `modPathSelection`). Once anything is, a tap opens Manage folders instead, and
+                // ADDING another folder lives there ("Add folder"). The developer asked for the
+                // add-on-tap to go once a folder is chosen, since a path label does not read as
+                // "tap to add"; it opens Manage rather than doing nothing because a dead button on
+                // this sparse screen reads as broken (the same reason Play is disabled, not inert).
+                // Removal stays two taps and a confirmation away, so this is not a mis-tap risk.
                 //
-                // The path comes from the CFG (the Manage list), NOT from the stored game-files path.
-                // Deriving it from the stored path let the button advertise a Data Files folder that
-                // had no `data=` line at all: after a full removal, re-selecting game files restored
-                // the preference while the cfg stayed empty, so the button read correctly while the
-                // load order below it was empty. Reading the same source the load order reads means
-                // the two cannot disagree.
+                // The count of extra folders moved to the link underneath, so the path can stay.
                 text = when {
-                    addedModFolderCount > 0 -> pluralStringResource(
-                        R.plurals.simplified_mods_added, addedModFolderCount, addedModFolderCount
-                    )
                     gameFilesRow != null -> stringResource(R.string.simplified_data_files_label) +
                         normPath(gameFilesRow.entry.value)
+                    addedModFolderCount > 0 -> pluralStringResource(
+                        R.plurals.simplified_mod_folders_count, addedModFolderCount, addedModFolderCount
+                    )
                     else -> stringResource(R.string.select_data_files)
                 },
                 onClick = {
-                    showModsBrowser = true
-                    MToast(stringRes(R.string.add_mod))
+                    if (manageable.isNotEmpty()) {
+                        showManageFolders = true
+                    } else {
+                        showModsBrowser = true
+                        MToast(stringRes(R.string.add_mod))
+                    }
                 },
-                // The way in to removing a folder. Gated on the MANAGE list, not on the button's own
-                // count: with only the game files folder registered the count is 0, but there is
-                // still a folder to unregister — and gating on the count is what previously made a
-                // merged setup unable to reach the Manage dialog at all.
-                //
-                // Its own tap target inside the button rather than a second action bound to the whole
-                // button: the primary tap must stay ADD, and a mis-tap that removed a folder instead
-                // of opening a browser would be a genuinely bad outcome.
-                secondaryText = stringResource(R.string.simplified_manage_folders)
-                    .takeIf { manageable.isNotEmpty() },
+                secondaryText = when {
+                    manageable.isEmpty() -> null
+                    addedModFolderCount > 0 -> pluralStringResource(
+                        R.plurals.simplified_manage_folders_count, addedModFolderCount, addedModFolderCount
+                    )
+                    else -> stringResource(R.string.simplified_manage_folders)
+                },
                 onSecondaryClick = { showManageFolders = true },
             )
             // Settings, with an update dot overlaid. The dot tracks update availability DIRECTLY
@@ -1345,6 +1364,17 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
             allModValues.any { it.category == "content" && it.isChecked && isTamrielData(it.value) }
         }
 
+        // 1c. Mod setup errors (see ModSetupCheck). Keyed on the same `allModValues`, so it re-runs
+        //     after every settled read, including the one auto-registration triggers. Reads plugin
+        //     headers, hence IO.
+        var modSetupErrors by remember { mutableStateOf(0) }
+        LaunchedEffect(allModValues) {
+            if (allModValues.isEmpty()) { modSetupErrors = 0; return@LaunchedEffect }
+            modSetupErrors = withContext(Dispatchers.IO) {
+                runCatching { ModSetupCheck.run().errorCount }.getOrDefault(0)
+            }
+        }
+
         // 2. The main body: load order on the LEFT, notices and Tips on the RIGHT.
         //
         //    weight(1f) on the Row bounds both columns so their content scrolls INSIDE them and the
@@ -1383,6 +1413,16 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
                 // Both notices sit ABOVE the Tips box and share its width, so the right-hand
                 // column reads as one stack. Neither is weighted — each sizes to its content and
                 // simply takes a little height from the Tips box below.
+                // First: the only one of the three that means "Play will fail".
+                if (modSetupErrors > 0) {
+                    ModSetupNotice(
+                        errorCount = modSetupErrors,
+                        onReview = onOpenSettings,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
                 if (showUpdateBanner && offeredUpdate != null) {
                     UpdateBanner(
                         version = offeredUpdate.version,
@@ -1594,6 +1634,10 @@ private fun SimplifiedLauncherHome(onOpenSettings: () -> Unit) {
         ManageModFoldersDialog(
             folders = manageable,
             onRemoveRequested = { folderPendingPlan = it },
+            onAddRequested = {
+                showManageFolders = false
+                showModsBrowser = true
+            },
             onDismiss = { showManageFolders = false },
         )
     }
@@ -1884,9 +1928,13 @@ private fun TipsBox(modifier: Modifier = Modifier) {
 private fun ColumnScope.LauncherCollapsibleCard(
     title: String,
     widthFraction: Float,
+    // Opens the card when it turns true (e.g. a check found something), without forcing it to stay
+    // open: a collapse after that sticks until the value changes again.
+    autoExpand: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     var expanded by rememberSaveable(title) { mutableStateOf(false) }
+    LaunchedEffect(autoExpand) { if (autoExpand) expanded = true }
     Column(
         modifier = Modifier
             .fillMaxWidth(widthFraction)
@@ -2411,11 +2459,23 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
             UpdatesSection()
             Spacer(Modifier.height(14.dp))
 
+            // Where the mod list lives, which folders are registered, and a check for the setups
+            // the engine will refuse to start. Near the top because the home screen's mod-problem
+            // notice sends the player here.
+            ModSetupCard()
+            Spacer(Modifier.height(14.dp))
+
             // Navmesh pre-generation. Sits with the other occasional maintenance actions rather
             // than on the home screen: it is a long, deliberate, load-order-scoped operation that
             // takes over the app while it runs, so it wants a confirm step and no chance of a
             // stray tap from the Play screen.
             NavmeshCard()
+            Spacer(Modifier.height(14.dp))
+
+            // Bug reports. With the other maintenance cards, and in the LAUNCHER rather than the
+            // companion on purpose: the players who most need it are the ones whose game does not
+            // start, or whose second screen never appears.
+            ReportProblemCard()
             Spacer(Modifier.height(14.dp))
 
             // Settings.cfg editor in its own bordered card, same family as the Transfer card above
@@ -2534,6 +2594,12 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
                 )
             }
 
+            // Custom profile: the player picks both screens. Shown ONLY while Custom is selected,
+            // so nothing about the preset rows changes for anyone else.
+            if (displayProfile == DisplayRoles.PROFILE_CUSTOM) {
+                CustomScreensPanel()
+            }
+
             // Render resolution, directly under Device because the two are one subject and share
             // one resolver: Device picks WHICH display holds the game role, this picks HOW MANY
             // PIXELS are drawn on it. Splitting them across two screens would hide that.
@@ -2582,6 +2648,9 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
             // and report the right answer as a failure.
             if (displayProfile != DisplayRoles.PROFILE_DEFAULT &&
                 displayProfile != DisplayRoles.PROFILE_SINGLE &&
+                // Custom is excluded: swapSupported() asks about the PRESENTATION category, which
+                // Custom does not depend on, and its own panel lists what it found instead.
+                displayProfile != DisplayRoles.PROFILE_CUSTOM &&
                 !DisplayRoles.swapSupported(context)
             ) {
                 Text(
@@ -2932,6 +3001,379 @@ private fun ColumnScope.NavmeshCard() {
     }
 }
 
+private val SeverityError = Color(0xFFC75C5C)
+
+/**
+ * Mod Setup: where `openmw.cfg` is, which data folders are registered, how mods are installed, and
+ * the [ModSetupCheck] results with a one-tap fix where one is safe.
+ *
+ * The check runs when this card is first composed (not only when it is expanded), so the card can
+ * open itself when there is an error. That is the screen the home-screen notice sends people to.
+ */
+@Composable
+private fun ColumnScope.ModSetupCard() {
+    val scope = rememberCoroutineScope()
+    var result by remember { mutableStateOf<ModSetupCheck.Result?>(null) }
+    var runKey by remember { mutableStateOf(0) }
+    LaunchedEffect(runKey) {
+        result = withContext(Dispatchers.IO) { runCatching { ModSetupCheck.run() }.getOrNull() }
+    }
+    val current = result
+
+    LauncherCollapsibleCard(
+        title = when {
+            current == null || current.errorCount == 0 -> "Mod Setup"
+            current.errorCount == 1 -> "Mod Setup (1 problem)"
+            else -> "Mod Setup (${current.errorCount} problems)"
+        },
+        widthFraction = SETTINGS_SECTION_WIDTH_FRACTION,
+        autoExpand = (current?.errorCount ?: 0) > 0,
+    ) {
+        Text(
+            text = "Your mod list is stored in this file:",
+            color = MwBoneDim,
+            fontSize = 12.sp,
+            textAlign = TextAlign.Center,
+        )
+        // Selectable so it can be copied into a file manager or a forum post.
+        SelectionContainer {
+            Text(
+                text = Constants.USER_OPENMW_CFG,
+                color = MwBone,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+            )
+        }
+        // Every sentence here was checked against the code that makes it true (Oct 1 2026); see
+        // "Mod Setup card" in CLAUDE_LAUNCHER.md before rewording, and re-check if any of those
+        // behaviours change: auto-registration (unregisteredContent), the Add Mods writer
+        // (modPathSelection), and what the cfg writers keep.
+        ModSetupHowTo(
+            "Into Data Files:",
+            "Copy the mod's contents into your Data Files folder, so its plugin (.esp, .esm, " +
+                ".omwaddon or .omwscripts) sits directly inside it and its Meshes and Textures " +
+                "folders merge with the ones already there. This is the simplest way, but a " +
+                "merged mod is hard to remove later.",
+        )
+        ModSetupHowTo(
+            "In its own folder:",
+            "Put the mod in a folder of its own. On the home screen, tap the Data Files button, " +
+                "then Add Mod Folder, and choose the folder that directly contains the plugin or " +
+                "the Meshes and Textures folders. If the download has numbered option folders " +
+                "(00 Core, 01 Option...), add each one you want, in order: later folders " +
+                "override earlier ones. Its archives (.bsa) are registered for you. Remove it " +
+                "again with Manage folders.",
+        )
+        ModSetupHowTo(
+            "Editing openmw.cfg:",
+            "Some mods ask you to edit the file above. Use full device paths in quotes, for " +
+                "example data=\"/storage/emulated/0/Mods/MyMod\" (a memory card starts " +
+                "/storage/XXXX-XXXX). Your lines are kept, though the launcher may reorder them " +
+                "when it saves. Grass mods go on groundcover= lines, not content=. Reopen the " +
+                "launcher afterwards.",
+        )
+        Text(
+            text = "New plugins found in any registered folder are added to the end of the load " +
+                "order the next time the launcher opens; drag them to reorder. Archives copied " +
+                "in by hand are not registered automatically: the check below offers to do it.",
+            color = MwBoneDim,
+            fontSize = 11.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+        )
+
+        if (current == null) {
+            Text("Checking...", color = MwBoneDim, fontSize = 12.sp)
+            return@LauncherCollapsibleCard
+        }
+
+        Text(
+            text = "Data folders, in load order:",
+            color = MwBronzeLight,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 2.dp)
+        )
+        if (current.dataFolders.isEmpty()) {
+            Text("(none registered)", color = MwBoneDim, fontSize = 11.sp)
+        }
+        current.dataFolders.forEach { (path, exists) ->
+            Text(
+                text = path.removePrefix("/storage/emulated/0/") + if (exists) "" else "  (not found)",
+                color = if (exists) MwBone else SeverityError,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "Check",
+            color = MwBronzeLight,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        if (current.findings.isEmpty()) {
+            Text(
+                text = "No problems found.",
+                color = MwBone,
+                fontSize = 12.sp,
+            )
+        }
+        current.findings.forEach { finding ->
+            ModSetupFindingRow(
+                finding = finding,
+                onFix = { fix ->
+                    scope.launch {
+                        val ok = withContext(Dispatchers.IO) { ModSetupCheck.apply(fix) }
+                        MToast(if (ok) "Done: ${fix.label}" else "Could not apply the fix. Check again.")
+                        runKey++
+                    }
+                },
+            )
+        }
+        Text(
+            text = "Check again",
+            color = MwBronzeLight,
+            fontSize = 12.sp,
+            textDecoration = TextDecoration.Underline,
+            modifier = Modifier
+                .padding(top = 10.dp)
+                .clickable { result = null; runKey++ }
+                .padding(4.dp)
+        )
+    }
+}
+
+/** One labelled paragraph of the Mod Setup how-to. */
+@Composable
+private fun ModSetupHowTo(label: String, body: String) {
+    Text(
+        text = buildAnnotatedString {
+            withStyle(SpanStyle(color = MwBronzeLight, fontWeight = FontWeight.Bold)) {
+                append(label)
+            }
+            append(" ")
+            append(body)
+        },
+        color = MwBoneDim,
+        fontSize = 11.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp)
+    )
+}
+
+@Composable
+private fun ModSetupFindingRow(
+    finding: ModSetupCheck.Finding,
+    onFix: (ModSetupCheck.Fix) -> Unit,
+) {
+    val (dot, label) = when (finding.severity) {
+        ModSetupCheck.Severity.ERROR -> SeverityError to "Problem"
+        ModSetupCheck.Severity.WARNING -> MwBronzeLight to "Warning"
+        ModSetupCheck.Severity.INFO -> MwBoneDim to "Note"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 5.dp)
+                .size(8.dp)
+                .background(dot, CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            // The severity is spelled out as well as coloured, so the colour is never the only cue.
+            Text(
+                text = "$label: ${finding.message}",
+                color = MwBone,
+                fontSize = 12.sp,
+            )
+            finding.fix?.let { fix ->
+                Text(
+                    text = fix.label,
+                    color = MwBronzeLight,
+                    fontSize = 12.sp,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clickable { onFix(fix) }
+                        .padding(vertical = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Home-screen notice: the mod setup has problems that will stop the game starting. Not dismissible,
+ * unlike its neighbours, because it is not information but a launch blocker; it disappears when the
+ * problems are fixed. Tapping it opens Settings, where the Mod Setup card has opened itself.
+ */
+@Composable
+private fun ModSetupNotice(errorCount: Int, onReview: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .background(MwFloatStone, RoundedCornerShape(10.dp))
+            .border(1.dp, SeverityError, RoundedCornerShape(10.dp))
+            .clickable { onReview() }
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(SeverityError, CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = if (errorCount == 1) {
+                "1 problem in your mod setup will stop the game from starting."
+            } else {
+                "$errorCount problems in your mod setup will stop the game from starting."
+            },
+            color = MwBone,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "Review",
+            color = MwBronzeLight,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            textDecoration = TextDecoration.Underline,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+        )
+    }
+}
+
+/**
+ * Report a problem: copy the display details to the clipboard, or write a bug-report zip.
+ *
+ * All the gathering lives in [BugReport]; this card is only the two buttons and their results.
+ * The zip is SAVED rather than shared because the app has no FileProvider, and adding one is a
+ * manifest change for a feature that works fine without it: the card names the folder and the
+ * player attaches the file from a file manager.
+ */
+@Composable
+private fun ColumnScope.ReportProblemCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var working by remember { mutableStateOf(false) }
+    // The file the last tap wrote, so the card can say exactly where it went.
+    var lastReport by remember { mutableStateOf<String?>(null) }
+
+    fun launcherDisplayId(): Int? = context.findActivity()?.let { activity ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            activity.display?.displayId
+        } else {
+            @Suppress("DEPRECATION")
+            activity.windowManager?.defaultDisplay?.displayId
+        }
+    }
+
+    LauncherCollapsibleCard(
+        title = "Report a Problem",
+        widthFraction = SETTINGS_SECTION_WIDTH_FRACTION,
+    ) {
+        Text(
+            text = "Creates a file with your logs, your config files and details about your " +
+                "device and its screens, to attach to a GitHub issue. It includes the paths of " +
+                "your mod folders, but no saves or game files.",
+            color = MwBoneDim,
+            fontSize = 12.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            LauncherActionButton(
+                text = if (working) "Creating report..." else "Create bug report",
+                onClick = {
+                    if (working) return@LauncherActionButton
+                    working = true
+                    val displayId = launcherDisplayId()
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                BugReport.writeBugReport(
+                                    context = context,
+                                    launcherDisplayId = displayId,
+                                    extraSections = mapOf(
+                                        "Mod setup check" to ModSetupCheck.reportText(),
+                                    ),
+                                )
+                            }
+                        }
+                        working = false
+                        result.onSuccess {
+                            lastReport = it.absolutePath
+                            MToast("Report saved to ${it.absolutePath}", isLong = true)
+                        }.onFailure {
+                            MToast("Could not create the report: ${it.message}", isLong = true)
+                        }
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            )
+            LauncherActionButton(
+                text = "Copy display info",
+                onClick = {
+                    val text = BugReport.displayReport(context, launcherDisplayId())
+                    val clipboard =
+                        context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("OpenMW-DS display info", text))
+                        MToast("Display info copied. Paste it into your issue.")
+                    } else {
+                        MToast("Clipboard unavailable")
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            )
+            // Same folder as the bug reports. The clipboard alone left no way to KEEP the text,
+            // e.g. to attach it from a file manager instead of pasting it.
+            LauncherActionButton(
+                text = "Save display info",
+                onClick = {
+                    val displayId = launcherDisplayId()
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { BugReport.saveDisplayReport(context, displayId) }
+                        }
+                        result.onSuccess {
+                            lastReport = it.absolutePath
+                            MToast("Display info saved to ${it.absolutePath}", isLong = true)
+                        }.onFailure {
+                            MToast("Could not save display info: ${it.message}", isLong = true)
+                        }
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            text = lastReport?.let { "Saved: $it" }
+                ?: "Reports and display info are saved to ${BugReport.reportsDir().absolutePath}. " +
+                    "The newest five of each are kept.",
+            color = MwBoneDim,
+            fontSize = 11.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
+}
+
 /**
  * Device display-profile picker: which physical screen plays the GAME role.
  *
@@ -3027,6 +3469,170 @@ private fun ResolutionTierDropdown(selected: Int, onSelected: (Int) -> Unit) {
     }
 }
 
+/**
+ * The Custom display profile's two pickers plus "Identify screens". See [DisplayRoles.PROFILE_CUSTOM].
+ *
+ * Effective values are shown even before anything is chosen (main display for the game, first other
+ * display for the companion), so selecting Custom alone changes nothing and the panel says so.
+ * Choosing the game screen that the companion is on SWAPS them rather than leaving both on one
+ * screen. Every change saves, updates [DisplayRoles]' cache for the very next Play, and re-pins the
+ * render resolution, the same three steps the Device row takes.
+ */
+@Composable
+private fun CustomScreensPanel() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var screens by remember { mutableStateOf(DisplayRoles.screens(context)) }
+    var game by remember {
+        mutableStateOf(DisplayRoles.customGameDisplay(context)?.let { DisplayRoles.descriptorOf(it) })
+    }
+    var companion by remember {
+        mutableStateOf(
+            if (DisplayRoles.customChoiceDescriptors(context).second == DisplayRoles.CUSTOM_NONE) {
+                DisplayRoles.CUSTOM_NONE
+            } else {
+                DisplayRoles.customCompanionDisplay(context)?.let { DisplayRoles.descriptorOf(it) }
+                    ?: DisplayRoles.CUSTOM_NONE
+            }
+        )
+    }
+    var identifying by remember { mutableStateOf(false) }
+    var identifyResult by remember { mutableStateOf(IdentifyScreenActivity.lastResultText()) }
+
+    // Descriptors compare by name and size, not id, matching how DisplayRoles resolves them.
+    fun sameScreen(a: String?, b: String?): Boolean =
+        a != null && b != null && a.substringAfter('|') == b.substringAfter('|')
+    fun labelFor(descriptor: String?): String = when {
+        descriptor == null -> "(none found)"
+        descriptor == DisplayRoles.CUSTOM_NONE -> "None (single screen)"
+        else -> screens.firstOrNull { sameScreen(it.descriptor, descriptor) }?.label
+            ?: "Not connected: ${descriptor.split('|').getOrNull(1) ?: descriptor}"
+    }
+
+    fun save(newGame: String, newCompanion: String) {
+        game = newGame
+        companion = newCompanion
+        DisplayRoles.onCustomDisplaysChanged(newGame, newCompanion)
+        scope.launch {
+            GameFilesPreferences.saveCustomDisplays(context, newGame, newCompanion)
+            context.applyGameScreenResolution()
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, bottom = 8.dp)
+    ) {
+        Text(
+            text = "Choose which screen shows the game and which shows the second-screen menus. " +
+                "Use Identify screens to see which is which. If the second screen stays blank, " +
+                "create a bug report from Report a Problem and attach it to your issue.",
+            color = MwBoneDim,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        if (screens.isEmpty()) {
+            Text("No screens were reported by this device.", color = UpdateAccent, fontSize = 12.sp)
+        }
+        ScreenPickerRow(
+            title = "Game screen",
+            current = labelFor(game),
+            options = screens.map { it.descriptor to it.label },
+            onSelected = { picked ->
+                val g = game
+                // Picking the companion's screen for the game swaps the two.
+                val newCompanion = if (sameScreen(picked, companion) && g != null) g else companion
+                save(picked, newCompanion)
+            },
+        )
+        ScreenPickerRow(
+            title = "Second screen",
+            current = labelFor(companion),
+            options = screens.filterNot { sameScreen(it.descriptor, game) }.map { it.descriptor to it.label } +
+                (DisplayRoles.CUSTOM_NONE to "None (single screen)"),
+            onSelected = { picked -> game?.let { save(it, picked) } },
+        )
+        companion.takeIf { it != DisplayRoles.CUSTOM_NONE }?.let { c ->
+            val target = screens.firstOrNull { sameScreen(it.descriptor, c) }
+            if (target != null) {
+                Text(
+                    text = if (target.presentationFlag) {
+                        "The second screen will be shown as an overlay window on ${target.name}."
+                    } else {
+                        "The second screen will run as its own app window on ${target.name}. You " +
+                            "may need to tap the game screen once after it starts for the " +
+                            "controller to work."
+                    },
+                    color = MwBoneDim,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(
+                enabled = !identifying,
+                onClick = {
+                    identifying = true
+                    IdentifyScreenActivity.identifyAll(context)
+                    scope.launch {
+                        delay(IdentifyScreenActivity.SHOW_MS + 500)
+                        identifyResult = IdentifyScreenActivity.lastResultText()
+                        screens = DisplayRoles.screens(context)
+                        identifying = false
+                    }
+                },
+            ) { Text(if (identifying) "Identifying..." else "Identify screens") }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = { screens = DisplayRoles.screens(context) }) { Text("Refresh") }
+        }
+        identifyResult?.let {
+            Text(
+                text = it,
+                color = MwBone,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScreenPickerRow(
+    title: String,
+    current: String,
+    options: List<Pair<String, String>>,
+    onSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, color = MwBone, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Box {
+            OutlinedButton(onClick = { expanded = true }) {
+                Text(current)
+                Icon(imageVector = Icons.Default.KeyboardArrowDown, contentDescription = null)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { (value, text) ->
+                    DropdownMenuItem(
+                        text = { Text(text) },
+                        onClick = {
+                            expanded = false
+                            onSelected(value)
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun DeviceProfileDropdown(selected: String, onSelected: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
@@ -3034,6 +3640,7 @@ private fun DeviceProfileDropdown(selected: String, onSelected: (String) -> Unit
         DisplayRoles.PROFILE_THOR to stringResource(R.string.launcher_device_thor),
         DisplayRoles.PROFILE_RETROID to stringResource(R.string.launcher_device_retroid),
         DisplayRoles.PROFILE_SINGLE to stringResource(R.string.launcher_device_single),
+        DisplayRoles.PROFILE_CUSTOM to stringResource(R.string.launcher_device_custom),
     )
     // An unrecognised stored id falls back to showing the id itself rather than silently reading
     // as the default, so a profile removed in a later build is visible instead of looking like a

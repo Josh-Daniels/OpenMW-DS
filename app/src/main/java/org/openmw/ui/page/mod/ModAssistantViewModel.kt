@@ -181,7 +181,10 @@ class ModAssistantViewModel @Inject constructor(
         try {
             CoroutineScope(Dispatchers.IO).launch {
                 val ignoreList = listOf("Morrowind.bsa", "Tribunal.bsa", "Bloodmoon.bsa")
-                val extensions = arrayOf("bsa", "esm", "esp", "esl", "omwaddon", "omwgame", "omwscripts")
+                // No "esl": the engine registers no loader for it, so a content= line for one is a
+                // launch failure ("Cannot load file"). Same boundary as the simplified launcher's
+                // ENGINE_CONTENT_EXTENSIONS.
+                val extensions = arrayOf("bsa", "esm", "esp", "omwaddon", "omwgame", "omwscripts")
                 val selectedDirectory = DocumentFile.fromFile(directory)
                 val files = findFilesWithExtensions(selectedDirectory, extensions)
                 val modPath = directory.absolutePath
@@ -203,7 +206,15 @@ class ModAssistantViewModel @Inject constructor(
                     // Bethesda's official plugins register DISABLED, as vanilla has them. Same rule
                     // as the simplified launcher's auto-registration, so it cannot matter which of
                     // the two routes a folder was added by.
-                    ModValue(index + 1, "content", value, isChecked = defaultEnabledFor(value))
+                    // A .bsa is an ARCHIVE, registered with fallback-archive=, never content=. As
+                    // content it is a hard launch failure ("Cannot load file"), which is what this
+                    // writer produced until Oct 2026. Archives are always registered enabled: unlike
+                    // a plugin they cannot conflict with a load order, only supply files to it.
+                    if (extension.equals("bsa", ignoreCase = true)) {
+                        ModValue(index + 1, "fallback-archive", value, isChecked = true)
+                    } else {
+                        ModValue(index + 1, "content", value, isChecked = defaultEnabledFor(value))
+                    }
                 }.toMutableList().filter { it.value !in ignoreList }.toMutableList()
 
                 newModValues.add(ModValue(newModValues.size + 1, "data", modPath, isChecked = true))
@@ -230,6 +241,18 @@ class ModAssistantViewModel @Inject constructor(
                     .distinctBy { it.value.trim().lowercase() }
                     .sortedByDefaultLoadOrder { it.value }
                     .map { if (it.isChecked) "content=${it.value}" else ";content=${it.value}" }
+
+                val existingArchives = existingLines.mapNotNull { line ->
+                    val body = line.trim().removePrefix(";").trimStart()
+                    if (body.startsWith("fallback-archive=")) {
+                        body.removePrefix("fallback-archive=").trim().lowercase()
+                    } else null
+                }.toSet()
+                val newArchiveLines = newModValues
+                    .filter { it.category == "fallback-archive" }
+                    .filterNot { it.value.trim().lowercase() in existingArchives }
+                    .distinctBy { it.value.trim().lowercase() }
+                    .map { "fallback-archive=${it.value}" }
 
                 val newDataLines = newModValues
                     .filter { it.category == "data" }
@@ -284,6 +307,17 @@ class ModAssistantViewModel @Inject constructor(
                             }
                         }
                     }
+                }
+
+                // Archives after the last existing archive line, else at the end. Their position
+                // only matters relative to each other (a later archive overrides an earlier one),
+                // and appending keeps any existing ones ahead of the folder just added.
+                if (newArchiveLines.isNotEmpty()) {
+                    val lastArchiveIndex = updatedLines.indexOfLast {
+                        it.trim().removePrefix(";").trimStart().startsWith("fallback-archive=")
+                    }
+                    val at = if (lastArchiveIndex != -1) lastArchiveIndex + 1 else updatedLines.size
+                    updatedLines.addAll(at, newArchiveLines)
                 }
 
                 // Write the updated lines back to the file

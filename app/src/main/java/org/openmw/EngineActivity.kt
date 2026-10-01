@@ -1238,7 +1238,19 @@ class EngineActivity : SDLActivity() {
         // on the default display. So when swapped the companion is an Activity on that display
         // instead — see CompanionActivity for the full reasoning. Everything after this point is
         // shared, because the difference is only which window the same UI lives in.
-        if (DisplayRoles.rolesSwapped(this)) {
+        //
+        // companionUsesActivity() IS rolesSwapped() for every preset profile (Thor, Retroid,
+        // Single); only the Custom profile decides differently, from the target display's
+        // FLAG_PRESENTATION. See DisplayRoles.PROFILE_CUSTOM.
+        if (DisplayRoles.isCustom(this)) {
+            Log.d(
+                TAG,
+                "Second-screen: CUSTOM game=${DisplayRoles.gameDisplayId(this)} " +
+                    "companion=${companionDisplay.displayId} " +
+                    "host=${if (DisplayRoles.companionUsesActivity(this)) "activity" else "presentation"}"
+            )
+        }
+        if (DisplayRoles.companionUsesActivity(this)) {
             startCompanionActivity(companionDisplay.displayId)
         } else {
             startCompanionPresentation(companionDisplay)

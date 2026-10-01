@@ -50,6 +50,28 @@ object DisplayRoles {
      */
     const val PROFILE_SINGLE = "single"
 
+    /**
+     * The player picks the game screen and the companion screen themselves (Oct 1 2026), for
+     * dual-screen hardware none of the presets fit (the AYANEO Pocket DS report: its MAIN display
+     * is the bottom panel).
+     *
+     * **ISOLATION RULE: every Custom behaviour sits behind an `isCustom` test, and the code each
+     * other profile runs is unchanged below it.** The Thor and Retroid paths were working and were
+     * deliberately not refactored to share this one. If you generalise later, do it as a separate,
+     * measured change.
+     *
+     * Two differences from the presets, both needed for unknown hardware:
+     * - it can use ANY public display, not only those Android lists in the PRESENTATION category
+     *   (the presets find "the other screen" through that category alone, which is the likeliest
+     *   reason the Pocket DS found none);
+     * - the companion's host is chosen from the TARGET display ([companionUsesActivity]): a
+     *   Presentation where `FLAG_PRESENTATION` allows one, otherwise [org.openmw.CompanionActivity].
+     */
+    const val PROFILE_CUSTOM = "custom"
+
+    /** Stored as the Custom companion choice to mean "no companion": the single-screen behaviour. */
+    const val CUSTOM_NONE = "none"
+
     const val PROFILE_DEFAULT = PROFILE_THOR
 
     /**
@@ -63,11 +85,34 @@ object DisplayRoles {
     @Volatile
     private var cached: String? = null
 
+    /** The Custom profile's choices, as descriptors. Null = never chosen (use the defaults). */
+    @Volatile
+    private var cachedCustomGame: String? = null
+    @Volatile
+    private var cachedCustomCompanion: String? = null
+    @Volatile
+    private var customPrimed = false
+
     /** Read the stored profile into the cache. Call early, from a coroutine. */
     suspend fun prime(context: Context) {
         cached = runCatching { GameFilesPreferences.loadDisplayProfile(context).first() }
             .getOrDefault(PROFILE_DEFAULT)
+        primeCustom(context)
         Log.d(TAG, "primed profile=$cached")
+    }
+
+    private suspend fun primeCustom(context: Context) {
+        cachedCustomGame = runCatching { GameFilesPreferences.loadCustomGameDisplay(context).first() }.getOrNull()
+        cachedCustomCompanion = runCatching { GameFilesPreferences.loadCustomCompanionDisplay(context).first() }.getOrNull()
+        customPrimed = true
+    }
+
+    /** Keep the Custom cache in step with the settings screen, like [onProfileChanged]. */
+    fun onCustomDisplaysChanged(game: String, companion: String) {
+        cachedCustomGame = game
+        cachedCustomCompanion = companion
+        customPrimed = true
+        Log.d(TAG, "custom displays changed: game=$game companion=$companion")
     }
 
     /** Keep the cache in step when the setting is changed, so it takes effect on the next Play
@@ -145,7 +190,11 @@ object DisplayRoles {
      * host, and by the same activity's Compose overlay, which puts the legacy touch overlay back
      * on the game screen so text entry and the console are still reachable.
      */
-    fun singleScreen(context: Context): Boolean = profile(context) == PROFILE_SINGLE
+    fun singleScreen(context: Context): Boolean =
+        profile(context) == PROFILE_SINGLE ||
+            // Custom with the companion set to None behaves as single screen (keyboard button,
+            // full Vanilla). Unreachable for the presets: their profile is never PROFILE_CUSTOM.
+            (profile(context) == PROFILE_CUSTOM && customChoices(context).second == CUSTOM_NONE)
 
     /**
      * The display id `EngineActivity` should be launched on.
@@ -155,6 +204,7 @@ object DisplayRoles {
      * with the game launched at an id that does not exist.
      */
     fun gameDisplayId(context: Context): Int {
+        if (isCustom(context)) return customGameDisplay(context)?.displayId ?: Display.DEFAULT_DISPLAY
         if (!rolesSwapped(context)) return Display.DEFAULT_DISPLAY
         val presentation = presentationDisplay(context)
         if (presentation == null) {
@@ -177,7 +227,142 @@ object DisplayRoles {
             // display handed back here is a companion window somewhere, and "there is no companion"
             // is the whole meaning of the profile.
             singleScreen(context) -> null
+            isCustom(context) -> customCompanionDisplay(context)
             rolesSwapped(context) -> defaultDisplay(context)
             else -> presentationDisplay(context)
         }
+
+    // ------------------------------------------------------------------------------------------
+    // Custom profile. Nothing below is reached by the Thor, Retroid or Single Screen profiles.
+    // ------------------------------------------------------------------------------------------
+
+    fun isCustom(context: Context): Boolean = profile(context) == PROFILE_CUSTOM
+
+    /** One display as the settings screen and the bug report describe it. */
+    data class ScreenInfo(
+        val id: Int,
+        val name: String,
+        val width: Int,
+        val height: Int,
+        val isDefault: Boolean,
+        val presentationFlag: Boolean,
+        val descriptor: String,
+    ) {
+        /** e.g. "Screen 4: Screen-2 (1240 x 1080)", plus "main" for the default display. */
+        val label: String
+            get() = "Screen $id: $name ($width x $height)" + if (isDefault) ", main" else ""
+    }
+
+    /**
+     * Every display an app may put a window on. `FLAG_PRIVATE` displays (another app's virtual
+     * display, e.g. a screen recorder) are excluded: only their owner can show anything there.
+     */
+    fun screens(context: Context): List<ScreenInfo> {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return emptyList()
+        return dm.displays
+            .filter { it.flags and Display.FLAG_PRIVATE == 0 }
+            .map { d ->
+                val (w, h) = landscapeSize(d)
+                ScreenInfo(
+                    id = d.displayId,
+                    name = d.name ?: "Display ${d.displayId}",
+                    width = w,
+                    height = h,
+                    isDefault = d.displayId == Display.DEFAULT_DISPLAY,
+                    presentationFlag = d.flags and Display.FLAG_PRESENTATION != 0,
+                    descriptor = descriptorOf(d),
+                )
+            }
+            .sortedBy { it.id }
+    }
+
+    /** Physical mode size, long side first, so rotation never changes a descriptor. */
+    private fun landscapeSize(d: Display): Pair<Int, Int> {
+        val m = d.mode
+        val a = m.physicalWidth
+        val b = m.physicalHeight
+        return if (a >= b) a to b else b to a
+    }
+
+    /**
+     * "<id>|<name>|<w>x<h>". Matched by NAME AND SIZE first, with the id only as a tiebreaker:
+     * secondary display ids are not guaranteed stable across boots, but a panel's name and size are.
+     */
+    fun descriptorOf(d: Display): String {
+        val (w, h) = landscapeSize(d)
+        return "${d.displayId}|${d.name}|${w}x$h"
+    }
+
+    private fun resolveDescriptor(context: Context, descriptor: String?): Display? {
+        if (descriptor.isNullOrBlank() || descriptor == CUSTOM_NONE) return null
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return null
+        val parts = descriptor.split("|")
+        if (parts.size < 3) return null
+        val id = parts[0].toIntOrNull()
+        val name = parts[1]
+        val size = parts[2]
+        val candidates = dm.displays.filter { it.flags and Display.FLAG_PRIVATE == 0 }
+        val byNameAndSize = candidates.filter {
+            val (w, h) = landscapeSize(it)
+            it.name == name && "${w}x$h" == size
+        }
+        return byNameAndSize.firstOrNull { it.displayId == id }
+            ?: byNameAndSize.firstOrNull()
+            ?: candidates.firstOrNull { it.displayId == id }.also {
+                if (it != null) Log.w(TAG, "custom: '$descriptor' matched by id only (${descriptorOf(it)})")
+            }
+    }
+
+    private fun customChoices(context: Context): Pair<String?, String?> {
+        if (!customPrimed) {
+            runCatching { runBlocking { primeCustom(context) } }
+            Log.d(TAG, "custom: cold read game=$cachedCustomGame companion=$cachedCustomCompanion")
+        }
+        return cachedCustomGame to cachedCustomCompanion
+    }
+
+    /** Custom game display: the chosen one if it is present, else the default display. */
+    fun customGameDisplay(context: Context): Display? {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        val chosen = resolveDescriptor(context, customChoices(context).first)
+        if (chosen == null && customChoices(context).first != null) {
+            Log.w(TAG, "custom: game screen '${customChoices(context).first}' not found; using the main display")
+        }
+        return chosen ?: dm?.getDisplay(Display.DEFAULT_DISPLAY)
+    }
+
+    /**
+     * Custom companion display, or null for "none" (single screen), for a chosen screen that is
+     * not present, or for one that is the game's own screen (they cannot share).
+     * Never chosen = the first other public display, so picking Custom alone mirrors today.
+     */
+    fun customCompanionDisplay(context: Context): Display? {
+        val choice = customChoices(context).second
+        if (choice == CUSTOM_NONE) return null
+        val gameId = customGameDisplay(context)?.displayId ?: Display.DEFAULT_DISPLAY
+        val d = if (choice == null) {
+            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            dm?.displays?.firstOrNull { it.flags and Display.FLAG_PRIVATE == 0 && it.displayId != gameId }
+        } else {
+            resolveDescriptor(context, choice).also {
+                if (it == null) Log.w(TAG, "custom: companion screen '$choice' not found; no companion")
+            }
+        }
+        return d?.takeIf { it.displayId != gameId }
+    }
+
+    /** The stored Custom choices, for the settings screen (null = never chosen). */
+    fun customChoiceDescriptors(context: Context): Pair<String?, String?> = customChoices(context)
+
+    /**
+     * Whether the companion must be hosted by [org.openmw.CompanionActivity] rather than a
+     * Presentation. **For every preset this is exactly [rolesSwapped]**, the test
+     * `EngineActivity` and the splash used before Custom existed. Custom decides from the target
+     * display instead: Android only allows a Presentation on a display with `FLAG_PRESENTATION`.
+     */
+    fun companionUsesActivity(context: Context): Boolean {
+        if (!isCustom(context)) return rolesSwapped(context)
+        val d = companionDisplay(context) ?: return false
+        return d.flags and Display.FLAG_PRESENTATION == 0
+    }
 }

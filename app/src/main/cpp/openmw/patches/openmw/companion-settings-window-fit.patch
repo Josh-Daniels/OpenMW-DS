@@ -1,0 +1,111 @@
+--- a/apps/openmw/mwgui/settingswindow.hpp
++++ b/apps/openmw/mwgui/settingswindow.hpp
+@@ -122,6 +122,9 @@
+         void renderScriptSettings();
+ 
+         void computeMinimumWindowSize();
++#ifdef __ANDROID__
++        void companionFitToScreen();
++#endif
+ 
+     private:
+         void resetScrollbars();
+--- a/apps/openmw/mwgui/settingswindow.cpp
++++ b/apps/openmw/mwgui/settingswindow.cpp
+@@ -1,5 +1,6 @@
+ #include "settingswindow.hpp"
+ 
++#include <algorithm>
+ #include <array>
+ 
+ #include <unicode/locid.h>
+@@ -7,6 +8,7 @@
+ #include <MyGUI_ComboBox.h>
+ #include <MyGUI_Gui.h>
+ #include <MyGUI_LanguageManager.h>
++#include <MyGUI_RenderManager.h>
+ #include <MyGUI_ScrollBar.h>
+ #include <MyGUI_ScrollView.h>
+ #include <MyGUI_TabControl.h>
+@@ -149,6 +151,59 @@
+ 
+ namespace MWGui
+ {
++#ifdef __ANDROID__
++    // COMPANION: the controller button-hint bar's on/off state (the "Controller tooltips" HUD
++    // toggle), owned by androidmain.cpp. At namespace scope because block-scope extern "C" does not
++    // compile.
++    extern "C" bool companionHudControllerTooltips();
++
++    // Height of ControllerButtonsOverlay, from openmw_controllerbuttons.layout. A constant rather
++    // than a query because the overlay is private to WindowManager and this file is otherwise
++    // untouched by any patch.
++    static constexpr int sCompanionControllerBarHeight = 48;
++
++    // COMPANION: force the window to fit the screen. The layout's MinSize is 640x550, but this app
++    // holds the MyGUI canvas at 960x540 (see applyGuiScalingForTier), so the window could never be
++    // shorter than the screen and its bottom (the OK button included) ran off the edge. Upstream's
++    // WindowBase::clampWindowCoordinates cannot rescue it either: it returns early whenever the
++    // MINIMUM size exceeds the view, which is exactly this case. So lower the minimum to what the
++    // screen can hold, then clamp size and position, leaving room for the controller hint bar when
++    // it is showing (it is drawn over the bottom of the screen and would hide the OK button).
++    void SettingsWindow::companionFitToScreen()
++    {
++        auto* window = mMainWidget->castType<MyGUI::Window>();
++        MyGUI::IntSize viewSize = MyGUI::RenderManager::getInstance().getViewSize();
++        if (window->getLayer())
++            viewSize = window->getLayer()->getSize();
++
++        int availableHeight = viewSize.height;
++        if (Settings::gui().mControllerMenus && companionHudControllerTooltips())
++            availableHeight -= sCompanionControllerBarHeight;
++        if (viewSize.width <= 0 || availableHeight <= 0)
++            return;
++
++        MyGUI::IntSize minSize = window->getMinSize();
++        minSize.width = std::min(minSize.width, viewSize.width);
++        minSize.height = std::min(minSize.height, availableHeight);
++        window->setMinSize(minSize);
++
++        const MyGUI::IntCoord current = window->getCoord();
++        MyGUI::IntCoord fitted = current;
++        fitted.width = std::min(fitted.width, viewSize.width);
++        fitted.height = std::min(fitted.height, availableHeight);
++        fitted.left = std::clamp(fitted.left, 0, viewSize.width - fitted.width);
++        fitted.top = std::clamp(fitted.top, 0, availableHeight - fitted.height);
++        if (fitted == current)
++            return;
++
++        window->setCoord(fitted);
++        // setCoord does not raise this event (only a drag does). Raising it re-lays the controls
++        // tab (onWindowResize) and lets WindowManager save the corrected geometry to settings.cfg,
++        // so the next session starts on screen too.
++        window->eventWindowChangeCoord(window);
++    }
++#endif
++
+     void SettingsWindow::configureWidgets(MyGUI::Widget* widget, bool init)
+     {
+         MyGUI::EnumeratorWidgetPtr widgets = widget->getEnumerator();
+@@ -719,6 +774,9 @@
+     void SettingsWindow::onResChange(int /*width*/, int /*height*/)
+     {
+         center();
++#ifdef __ANDROID__
++        companionFitToScreen();
++#endif
+         highlightCurrentResolution();
+     }
+ 
+@@ -1056,6 +1114,11 @@
+ 
+     void SettingsWindow::onOpen()
+     {
++#ifdef __ANDROID__
++        // Every open, not once: the controller hint bar can be toggled from the bottom screen
++        // while the game runs, which changes how much height is available.
++        companionFitToScreen();
++#endif
+         highlightCurrentResolution();
+         updateControlsBox();
+         updateLightSettings();

@@ -13679,7 +13679,9 @@ private fun SplashPanel() {
     LaunchedEffect(Unit) {
         notice = withContext(Dispatchers.IO) {
             when {
-                DisplayRoles.rolesSwapped(context) -> SPLASH_NOTICE_SWAPPED_CONTROLS
+                // = rolesSwapped() for every preset; the Custom profile also needs it whenever its
+                // companion is an Activity, which is what causes the boot-time controller steal.
+                DisplayRoles.companionUsesActivity(context) -> SPLASH_NOTICE_SWAPPED_CONTROLS
                 tamrielDataEnabledInConfig(File(Constants.USER_OPENMW_CFG)) ->
                     SPLASH_NOTICE_TAMRIEL_REBUILT
                 else -> null

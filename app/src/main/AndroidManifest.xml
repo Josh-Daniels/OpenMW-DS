@@ -134,6 +134,19 @@
             android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
             tools:ignore="DiscouragedApi" />
 
+        <!-- "Identify screens" for the Custom display profile: a short-lived label shown on one
+             display per instance (own task each, so several can be up at once). See
+             IdentifyScreenActivity. -->
+        <activity
+            android:name="org.openmw.IdentifyScreenActivity"
+            android:exported="false"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
+            tools:ignore="DiscouragedApi" />
+
         <activity
             android:name="org.openmw.EngineActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density"

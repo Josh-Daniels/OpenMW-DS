@@ -18,7 +18,7 @@
     <string name="error">Error</string>
     <string name="failed_to_process_config_file">"Failed to process config file: "</string>
     <string name="select_games_files">Select Games Files</string>
-    <string name="select_data_files">Add Mods (select Data Files)</string>
+    <string name="select_data_files">Add Mod Folder (select Data Files)</string>
     <string name="game_files">"Game Files: "</string>
     <string name="please_select_a_folder_with_morrowind_ini_and_data_files">Please select a folder with Morrowind.ini and Data Files.</string>
     <string name="selected_folder">"Selected Folder: "</string>
@@ -168,7 +168,7 @@
     <string name="use_simplified_launcher_tip">Switch to the streamlined OpenMW-DS launcher. You can switch back from its settings screen at any time.</string>
     <string name="launcher_game_font">Use game font</string>
     <string name="launcher_device">Device</string>
-    <string name="launcher_device_tip">Which screen the game runs on. Change this only if the game and the second screen appear on the wrong panels, or pick Single Screen Device if this device has just one screen, which turns off the second screen menus and shows every game menu the original way. The launcher itself always stays on this screen, so you can change it back.</string>
+    <string name="launcher_device_tip">Which screen the game runs on. Change this only if the game and the second screen appear on the wrong panels, or pick Single Screen Device if this device has just one screen, which turns off the second screen menus and shows every game menu the original way. On other dual-screen devices, pick Custom to choose the screens yourself. The launcher itself always stays on this screen, so you can change it back.</string>
     <string name="launcher_device_thor">AYN Thor</string>
     <string name="launcher_resolution">Resolution</string>
     <string name="launcher_resolution_tip">The resolution the game screen is drawn at. The second screen is not affected, and the game menus are scaled to match. Applies the next time you start the game.</string>
@@ -185,20 +185,30 @@
     <string name="ini_hint_water_reflection">Recommended: 1. Measured on this device in Bal Foyen, 35 fps at 2 and 49 at 1, a 40 percent gain, while still reflecting terrain and sky. 0 is faster again but reflects only the sky, which looks wrong. Interiors are not affected.</string>
     <string name="launcher_device_retroid">Retroid Dual Screen (Experimental)</string>
     <string name="launcher_device_single">Single Screen Device</string>
+    <string name="launcher_device_custom">Custom (Experimental)</string>
     <string name="launcher_device_unsupported">No second screen was detected, so this option has no effect here.</string>
     <string name="launcher_game_font_tip">Show this launcher in the game\'s font, matching the companion screens. Turn off for the standard system font.</string>
     <string name="simplified_launcher_title">OpenMW-DS</string>
     <string name="simplified_launcher_settings_title">Settings</string>
     <string name="simplified_launcher_more_coming">More settings are coming to this screen.</string>
-    <string name="simplified_no_content_files">No content files yet. Use “Add Mods” to add a Data Files folder.</string>
+    <string name="simplified_no_content_files">No content files yet. Use “Add Mod Folder” to add a Data Files folder.</string>
     <plurals name="simplified_mods_added">
         <item quantity="one">Add Mods (%1$d folder added)</item>
         <item quantity="other">Add Mods (%1$d folders added)</item>
     </plurals>
     <string name="simplified_data_files_label">"Data Files: "</string>
     <string name="simplified_manage_folders">Manage folders</string>
+    <plurals name="simplified_manage_folders_count">
+        <item quantity="one">Manage folders (%1$d mod folder)</item>
+        <item quantity="other">Manage folders (%1$d mod folders)</item>
+    </plurals>
+    <plurals name="simplified_mod_folders_count">
+        <item quantity="one">Mod Folders (%1$d added)</item>
+        <item quantity="other">Mod Folders (%1$d added)</item>
+    </plurals>
+    <string name="simplified_manage_folders_add">Add Mod Folder</string>
     <string name="simplified_manage_folders_title">Manage folders</string>
-    <string name="simplified_manage_folders_intro">Folders registered in your configuration. Removing one takes it out of the game\'s setup. Nothing is deleted from your device.</string>
+    <string name="simplified_manage_folders_intro">Folders registered in your configuration. Add Mod Folder registers another one. Removing one takes it out of the game\'s setup. Nothing is deleted from your device.</string>
     <string name="simplified_manage_folders_empty">No folders are registered.</string>
     <string name="simplified_manage_folders_game_tag">Game files folder</string>
     <string name="simplified_remove_game_files_warning">This is your game files folder. Removing it leaves no game to run: Play will be disabled and you will need to select game files again.</string>
