@@ -702,6 +702,20 @@ private fun Context.findActivity(): Activity? {
  * onto display 0 — so inheriting the caller's display puts the browser on the screen the user just
  * tapped, which is the correct behaviour rather than an oversight.
  */
+private const val KOFI_URL = "https://ko-fi.com/joshd0"
+
+/** Open [url] in the default browser. Same launch rules as [openReleaseNotes]. */
+private fun openExternalLink(context: Context, url: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        if (context.findActivity() == null) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(intent) }
+        .onFailure {
+            Log.w("SimplifiedLauncher", "could not open $url", it)
+            MToast("Could not open a browser. The link is $url")
+        }
+}
+
 private fun openReleaseNotes(context: Context, tag: String?) {
     val url = if (tag.isNullOrBlank()) RELEASES_PAGE_URL else "$RELEASES_PAGE_URL/tag/$tag"
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
@@ -2478,6 +2492,11 @@ private fun SimplifiedSettingsScreen(onBack: () -> Unit) {
             ReportProblemCard()
             Spacer(Modifier.height(14.dp))
 
+            // Ko-fi. Always visible (not collapsible: it is one sentence and one button), and
+            // below the maintenance cards so it is never between a player and what they came for.
+            SupportCard()
+            Spacer(Modifier.height(14.dp))
+
             // Settings.cfg editor in its own bordered card, same family as the Transfer card above
             // but wider. Deliberately NO fixed height and no weight(): the Column wraps its content,
             // so the box grows and shrinks as the section drop-downs expand, and the surrounding
@@ -3251,6 +3270,46 @@ private fun ModSetupNotice(errorCount: Int, onReview: () -> Unit, modifier: Modi
             fontWeight = FontWeight.Bold,
             textDecoration = TextDecoration.Underline,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+        )
+    }
+}
+
+/**
+ * Ko-fi support link (Oct 1 2026, the developer's own wording). Opens in the default browser via
+ * [openExternalLink]. Kept free of "Morrowind" (trademark rule) like all app text.
+ */
+@Composable
+private fun ColumnScope.SupportCard() {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth(SETTINGS_SECTION_WIDTH_FRACTION)
+            .align(Alignment.CenterHorizontally)
+            .background(MwFloatStone, RoundedCornerShape(12.dp))
+            .border(2.dp, MwBronze, RoundedCornerShape(12.dp))
+            .padding(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Support OpenMW-DS",
+            color = MwBronzeLight,
+            fontSize = 16.sp,
+            fontFamily = LauncherSerif,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        Text(
+            text = "OpenMW-DS will always be free, but if you've enjoyed it and want to shout me " +
+                "a hot chocolate, it's much appreciated.",
+            color = MwBone,
+            fontSize = 13.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        LauncherActionButton(
+            text = "Support on Ko-fi",
+            onClick = { openExternalLink(context, KOFI_URL) },
+            modifier = Modifier.fillMaxWidth(0.5f),
         )
     }
 }

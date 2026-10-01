@@ -20,6 +20,8 @@ If you don't have a Thor, or don't care about dual-screen Morrowind, you probabl
 ![Image of the HUD tab in game](outputs/OpenMW-DS%20Thumnail.jpg)
 > Image is more blurry than in real life.
 
+> OpenMW-DS will always be free, but if you've enjoyed it and want to shout me a hot chocolate, it's much appreciated: [ko-fi.com/joshd0](https://ko-fi.com/joshd0)
+
 ---
 ## Features
 
@@ -226,6 +228,12 @@ I have tested a number of mods that change animations, add new items, and new la
 **There are two other kinds of mods that won't work with the app.**
 - Mods that add their own map
 - Mods that add their own menus, panels or windows.
+
+---
+## Support
+
+OpenMW-DS will always be free, but if you've enjoyed it and want to shout me a hot chocolate, it's much appreciated:
+[ko-fi.com/joshd0](https://ko-fi.com/joshd0). There is also a Support on Ko-fi button in the launcher's Settings.
 
 ---
 ## Credits
