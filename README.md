@@ -20,7 +20,7 @@ If you don't have a Thor, or don't care about dual-screen Morrowind, you probabl
 ![Image of the HUD tab in game](outputs/OpenMW-DS%20Thumnail.jpg)
 > Image is more blurry than in real life.
 
-> OpenMW-DS will always be free, but if you've enjoyed it and want to shout me a hot chocolate, it's much appreciated: [ko-fi.com/joshd0](https://ko-fi.com/joshd0)
+OpenMW-DS will always be free, but if you've enjoyed it and want to shout me a hot chocolate, it's much appreciated: [ko-fi.com/joshd0](https://ko-fi.com/joshd0)
 
 ---
 ## Features
