@@ -5,10 +5,12 @@ carries the character sheet, inventory, magic, journal and map. It also offers o
 the game's own menus (conversation, bartering, looting, alchemy, enchanting, spellmaking, level up, the world map and
 more), several of which use both screens at once. There is full touch and controller support. 
 
-The current build has an experimental option for Retroid Devices using a Dual Screen Add-On. In the launcher go to Settings > 
-scroll to the bottom and choose "Retroid Dual Screen (Experimental)". It is experimental so use at your own risk. Known issues 
-where touching the screen takes focus away from the main screen for controller. Tap the top screen again as a temp fix. Will 
-be patched in next update.
+**Other dual-screen devices.** In the launcher, go to Settings > Device. Choose **Retroid Dual Screen (Experimental)** for
+Retroid devices with the Dual Screen add-on, or **Custom (Experimental)** to choose the game screen and the second screen
+yourself on any other dual-screen device. Custom has an **Identify screens** button to show which screen is which. On these
+options you may need to tap the game screen once after it starts for the controller to work. Devices with only one screen
+can choose **Single Screen Device**, which plays with the game's original menus. If something goes wrong, Settings >
+Report a Problem creates a file you can attach to a GitHub issue.
 
 This project is a fork of **[Alpha3](#credits)**, a multi-engine Android launcher that can handle OpenMW,
 which is itself a fork of the **[openmw-android](#credits)** project, which builds on **[OpenMW](#credits)**, the open-source Morrowind engine.
@@ -40,7 +42,8 @@ Five tabs, live-updating while you play.
   with the real in-game date and saved per playthrough. Topic names inside entry text are tappable links. It's also animated!
 
 **Favourites**: up to four gear and four magic slots on the HUD (two of each by default) for fast weapon and spell
-swapping without opening a menu.
+swapping without opening a menu. Turn on **Mixed favourite slots** (Bottom Display Settings) to let either side hold
+spells or gear.
 
 ### DS game menus
 
@@ -112,7 +115,9 @@ and go back just as easily.
 ### The launcher
 
 - **Mod load order**: drag to reorder, with a checkbox per plugin to enable or disable it without removing it.
-- **Add and remove mod folders**, with a confirmation that names every plugin a removal would take with it.
+- **Mod folders**: your Data Files folder is set up automatically. To keep a mod in its own folder, tap the Data Files button, then **Add Mod Folder**. Remove folders the same way; removing one only takes it out of the game's setup, nothing is deleted from your device.
+- **Mod Setup** (in Settings): shows where your openmw.cfg is, explains the ways to install a mod, and checks your setup for problems that would stop the game from starting, with one-tap fixes. A warning appears on the home screen if there is one.
+- **Report a Problem** (in Settings): creates a bug report file with your logs, config files and screen details to attach to a GitHub issue, and can copy or save a description of your device's screens.
 - **Import your load order from Alpha3**, if you were using it before.
 - **Copy your saves and settings across from Alpha3.**
 - **In-app updates**: the launcher checks GitHub for new releases, and downloads and installs them for you. It will only download if you say so though.
@@ -134,6 +139,8 @@ If you are opposed to AI usage in programming then I strongly advise you avoid t
 
 - AYN Thor handheld.
   - https://www.ayntec.com/products/ayn-thor
+  - Retroid dual-screen and other dual-screen devices are supported experimentally; single-screen devices can use
+    Single Screen Device.
 - Morrowind data files (you must own a copy of Morrowind)
   - https://store.steampowered.com/app/22320/The_Elder_Scrolls_III_Morrowind_Game_of_the_Year_Edition/ or
   - https://www.gog.com/en/game/the_elder_scrolls_iii_morrowind_goty_edition
@@ -172,9 +179,9 @@ your saves and settings across.
   - It will say "Morrowind.esm Not Found", tap yes.
   - Navigate to your Morrowind folder **(NOT DATA FILES)**, then tap "Use this Folder".
   - Your Data Files folder will also be selected automatically.
-- If you have .omwscript mods kept outside the Data Files folder, click the "Manage Folders" link on the top right to select the location of your other folders.
+- If you keep mods outside the Data Files folder, tap the Data Files button on the home screen, then **Add Mod Folder**, and choose the folder that directly contains the mod's plugin or its Meshes and Textures folders.
 - Check the home page to see if your esm files are in the load order. It can take a moment to appear after selecting a
-  folder. If the list is still empty, try selecting the Data Files folder again.
+  folder. If the list is still empty, try selecting the Data Files folder again. Settings > Mod Setup will also tell you what's wrong.
 - You can now run the game by pressing the Play Game button.
 
 ---
@@ -188,13 +195,12 @@ app, with its own files, not on top of Alpha3.
 
 ### Settings
 - The **Settings icon** in the button row on the home screen opens the launcher settings, including the Settings.cfg
-  editor. (If you've switched to the Alpha3 launcher layout, it's the left-side menu there instead.)
+  editor.
 - Have a look through Settings.cfg to enable or disable anything you like.
 - I have already enabled controller support by default.
 - I have disabled haptics by default because I found it to vibrate at random even when standing still.
 - I have changed some in-game controller inputs for a better in-game experience. You can change them back in game.
 - To disable "toggle sneak" go to the in-game Settings > Scripts > OpenMW Controls > Toggle Sneak.
-- I haven't changed any graphical settings from default, but I like to turn on shadows (runs fine on Thor Max).
 - The bottom screen has its own settings, separate from these. Press Start in game, or use the DS Settings button on the
   title screen.
 
@@ -210,6 +216,10 @@ Most mods should work. Item icons are pulled through the engine's own virtual fi
 companion screen can draw too, including icons that came from a mod. The minimap is the engine's own map render streamed
 across rather than a reimplementation, so it covers modded landmasses the same way it covers the base game. The launcher
 handles multiple mod folders, per-plugin enable/disable and load order.
+
+Your mod list is stored in `/storage/emulated/0/OpenMW-DS/config/openmw.cfg`, for mods whose instructions ask you to edit
+it. Settings > Mod Setup in the launcher explains the ways to install a mod and checks your setup for problems. If you
+add a grass mod to openmw.cfg yourself, it goes on a `groundcover=` line, not `content=`.
 
 I have tested a number of mods that change animations, add new items, and new landmasses and all have been fine. Mods that edit the actual Morrowind.esm file are often not compatible with OpenMW, so I would suggest a fresh download of Morrowind if you have an issue with a Global Time error.
 
