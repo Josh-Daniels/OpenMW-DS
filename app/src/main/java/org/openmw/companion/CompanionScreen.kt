@@ -71,12 +71,16 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.zIndex
 import androidx.compose.runtime.Composable
@@ -447,28 +451,25 @@ private val LocalGameFont = compositionLocalOf<FontFamily?> { null }
 @Composable
 private fun ProvideCompanionFont(content: @Composable () -> Unit) {
     val vanillaFont by UiPreferences.vanillaFontFlow().collectAsState()
+    val textSize by UiPreferences.textSizeFlow().collectAsState()
     val context = LocalContext.current
     // Only touched when the option is on, so the default install never reads the asset. A single
     // CompositionLocal read per text site is also far cheaper than collecting the pref flow at
     // each of the ~320 of them.
     val family = if (vanillaFont) remember(context) { loadGameFont(context) } else null
 
-    if (family == null) {
-        // Off (or the asset failed to load): provide nothing but the null font, so sizing is
-        // byte-for-byte what it was before this option existed.
-        CompositionLocalProvider(LocalGameFont provides family, content = content)
-        return
-    }
-
-    // Scale every `.sp` in one place via the density's fontScale — see [GAME_FONT_SIZE_SCALE].
-    // fontScale is the right lever precisely because it is text-only: `.dp` conversions read
-    // `density`, which is left untouched, so panels, icons and paddings keep their exact sizes and
-    // only the glyphs grow. `lineHeight` is also in sp, so line spacing scales with the text
-    // instead of leaving it cramped.
+    // Scale every `.sp` in one place via the density's fontScale: the game font's own correction
+    // (see [GAME_FONT_SIZE_SCALE]) times the player's Text size setting. fontScale is the right
+    // lever precisely because it is text-only: `.dp` conversions read `density`, which is left
+    // untouched, so panels, icons and paddings keep their exact sizes and only the glyphs grow.
+    // `lineHeight` is also in sp, so line spacing scales with the text instead of leaving it
+    // cramped. With the game font off and Text size at 100% this is 1.0, so sizing is
+    // byte-for-byte what it was before either option existed.
+    val scale = (if (family != null) GAME_FONT_SIZE_SCALE else 1f) * textSize
     val density = LocalDensity.current
     CompositionLocalProvider(
         LocalGameFont provides family,
-        LocalDensity provides Density(density.density, density.fontScale * GAME_FONT_SIZE_SCALE),
+        LocalDensity provides Density(density.density, density.fontScale * scale),
         content = content
     )
 }
@@ -530,8 +531,9 @@ private val ICON_CACHE_DIR by lazy {
     File("${Constants.USER_FILE_STORAGE}/companion_icons").also { it.mkdirs() }
 }
 
-// Fraction of a single cell segment visible across the short canvas axis.
-// 0.25 = tight zoom (25% of cell visible); increase toward 1.0 to zoom out.
+// Fraction of a single cell segment visible across the short canvas axis, at pinch zoom 1.0.
+// 0.25 = tight zoom (25% of cell visible). The player's pinch multiplies this (MINIMAP_ZOOM_RANGE);
+// the DS map's local default zoom is derived from this constant, NOT from the pinch.
 private const val MINIMAP_CROP_FRACTION = 0.25f
 
 // How long a tapped door-marker's name bubble stays before auto-dismissing (ms). Tweakable;
@@ -1175,6 +1177,11 @@ fun CompanionScreen() {
 @Composable
 private fun CompanionScreenContent() {
     val state by GameStateRepository.state.collectAsState()
+    // Forget the minimap's interior zoom the moment the player is anywhere else. Done HERE, at the
+    // root, rather than in MapPanel: MapPanel is only composed on the HUD tab, so a door taken
+    // while another tab is showing would go unseen there. See [MinimapInteriorZoom].
+    val currentInterior = if (state.cellIsExterior) null else state.cell
+    LaunchedEffect(currentInterior) { MinimapInteriorZoom.forgetUnless(currentInterior) }
     var tab by remember { mutableStateOf(Tab.HUD) }
     // Dismiss the item info popup when the tab changes so it never lingers over another screen.
     LaunchedEffect(tab) { ItemInfoPopupState.close() }
@@ -13999,6 +14006,32 @@ private fun MapPanel(
     // Map panel size in px, captured from the Box (== the fillMaxSize Canvas) so the name-bubble
     // overlay can run the same markerScreenPos transform the Canvas draw uses.
     var mapBoxSize by remember { mutableStateOf(IntSize.Zero) }
+    // Pinch zoom (a multiplier on MINIMAP_CROP_FRACTION's view). EXTERIOR and INTERIOR are kept
+    // apart: outdoors uses the persisted pref; indoors uses [MinimapInteriorZoom], which starts at
+    // the default in every newly entered interior (interiors range from a shack to a dungeon, so a
+    // zoom chosen in one rarely suits the next, and a wide outdoor zoom carried inside showed a
+    // tiny room lost in black). Either way the live pinch value wins while a gesture is under way;
+    // the result is stored once when the fingers lift, not per frame.
+    val savedMapZoom by UiPreferences.minimapZoomFlow().collectAsState()
+    val interiorCell = if (state.cellIsExterior) null else state.cell
+    val baseMapZoom = when {
+        interiorCell == null -> savedMapZoom
+        MinimapInteriorZoom.cell == interiorCell -> MinimapInteriorZoom.zoom
+        else -> MINIMAP_ZOOM_DEFAULT
+    }
+    var pinchMapZoom by remember { mutableStateOf<Float?>(null) }
+    val mapZoom = pinchMapZoom ?: baseMapZoom
+    // The pinch detector is keyed on Unit, so it reads these through updated-state holders.
+    val currentBaseMapZoom by rememberUpdatedState(baseMapZoom)
+    val currentInteriorCell by rememberUpdatedState(interiorCell)
+    // Two-finger pan, in CELLS (screen shift of the map content = mapPan * cellPx), so zooming keeps
+    // the same spot in view. Clamped by [clampMinimapPan] to the map data the engine has loaded.
+    // Session-only, not persisted: the map is a player-centred HUD, so leaving the HUD tab or
+    // changing interior recentres it rather than keeping the player off-centre indefinitely.
+    var mapPan by remember { mutableStateOf(Offset.Zero) }
+    LaunchedEffect(state.cellIsExterior, if (state.cellIsExterior) "" else state.cell) {
+        mapPan = Offset.Zero
+    }
     // Auto-dismiss the door-marker name bubble after DOOR_MARKER_POPUP_MS. Keyed on selectedMarker,
     // so tapping a DIFFERENT marker restarts the timer for it, and closing it (tap-elsewhere / re-tap)
     // cancels the pending dismiss (the null-key branch does nothing). Same LaunchedEffect+delay pattern
@@ -14111,7 +14144,7 @@ private fun MapPanel(
         Canvas(
             Modifier
                 .fillMaxSize()
-                .pointerInput(doorMarkers, state.pos, markerAngle, markerCX, markerCY, splashVisible, mapReady) {
+                .pointerInput(doorMarkers, state.pos, markerAngle, markerCX, markerCY, splashVisible, mapReady, mapZoom, mapPan) {
                     detectTapGestures { tap ->
                         if (splashVisible) return@detectTapGestures
                         val w = size.width.toFloat(); val h = size.height.toFloat()
@@ -14120,7 +14153,7 @@ private fun MapPanel(
                         val hit = doorMarkers
                             .map { m ->
                                 m to markerScreenPos(m.worldX, m.worldY, state.pos.x, state.pos.y,
-                                    markerAngle, markerCX, markerCY, w, h)
+                                    markerAngle, markerCX, markerCY, w, h, mapZoom, mapPan)
                             }
                             .filter { (_, p) -> (p - tap).getDistance() <= hitR }
                             .minByOrNull { (_, p) -> (p - tap).getDistance() }
@@ -14140,10 +14173,77 @@ private fun MapPanel(
                         // rather than opening the map, which would wedge the game during char-gen.
                     }
                 }
+                // PINCH ZOOM + TWO-FINGER PAN. Its own detector, keyed on Unit: the tap detector above restarts
+                // whenever state.pos changes (several times a second while walking), which would
+                // cut a pinch off mid-gesture if the two shared one.
+                //
+                // The tap conflict is settled by CONSUMPTION, on the Initial pass so it lands before
+                // the tap detector's Main pass whatever their order in this chain: the moment a
+                // second finger is down every change is consumed, and detectTapGestures cancels on a
+                // consumed change. So a pinch can never end as a tap and open the world map, while a
+                // one-finger tap never meets this handler's consume and behaves exactly as before.
+                //
+                // A TWO-FINGER TAP (two fingers down, neither moved past touch slop, all up within
+                // the long-press timeout) resets the view: recentred and back to the default zoom.
+                // Zoom and pan only start once a finger has moved past slop, which is what lets a
+                // tap be told apart from the start of a pinch, and keeps a still pinch from jittering.
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val firstDown = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        val downPositions = mutableMapOf(firstDown.id to firstDown.position)
+                        var maxPointers = 1
+                        var moved = false
+                        var lastUptime = firstDown.uptimeMillis
+                        var zoom: Float? = null
+                        do {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            event.changes.forEach { c ->
+                                if (c.changedToDownIgnoreConsumed()) downPositions[c.id] = c.position
+                                val start = downPositions[c.id]
+                                if (start != null && (c.position - start).getDistance() > viewConfiguration.touchSlop)
+                                    moved = true
+                                lastUptime = maxOf(lastUptime, c.uptimeMillis)
+                            }
+                            val pressed = event.changes.count { it.pressed }
+                            maxPointers = maxOf(maxPointers, pressed)
+                            if (pressed >= 2) {
+                                if (moved) {
+                                    val start = zoom ?: currentBaseMapZoom
+                                    val z = (start * event.calculateZoom()).coerceIn(MINIMAP_ZOOM_RANGE)
+                                    zoom = z
+                                    pinchMapZoom = z
+                                    // Pan is applied after the zoom and re-clamped every frame, so
+                                    // zooming OUT also pulls an off-centre view back inside the data.
+                                    val w = size.width.toFloat(); val h = size.height.toFloat()
+                                    val cellPx = minOf(w, h) / MINIMAP_CROP_FRACTION * z
+                                    mapPan = clampMinimapPan(mapPan + event.calculatePan() / cellPx, w, h, z)
+                                }
+                                event.changes.forEach { it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+
+                        val twoFingerTap = maxPointers == 2 && !moved &&
+                            lastUptime - firstDown.uptimeMillis < viewConfiguration.longPressTimeoutMillis
+                        val cell = currentInteriorCell
+                        val result = if (twoFingerTap) MINIMAP_ZOOM_DEFAULT else zoom
+                        if (twoFingerTap) mapPan = Offset.Zero
+                        result?.let { z ->
+                            if (cell == null) {
+                                UiPreferences.setMinimapZoom(context, z)
+                            } else {
+                                MinimapInteriorZoom.cell = cell
+                                MinimapInteriorZoom.zoom = z
+                            }
+                        }
+                        pinchMapZoom = null
+                    }
+                }
         ) {
-            val cx = size.width / 2f
-            val cy = size.height / 2f
-            val cellPx = size.minDimension / MINIMAP_CROP_FRACTION
+            val cellPx = size.minDimension / MINIMAP_CROP_FRACTION * mapZoom
+            // The player's screen position: the panel centre, shifted by the two-finger pan. The
+            // map, arrow and markers all hang off this, so they move together.
+            val cx = size.width / 2f + mapPan.x * cellPx
+            val cy = size.height / 2f + mapPan.y * cellPx
             // Interior maps are rendered rotated by the cell's NorthMarker angle, so the interior
             // branch adds that angle below; exterior maps are world-aligned (angle 0).
             var arrowDeg = state.rotZ * (180f / Math.PI.toFloat())
@@ -14156,7 +14256,7 @@ private fun MapPanel(
                 val originX = cx - playerU * cellPx
                 val originY = cy - playerV * cellPx
 
-                val reach = (maxOf(size.width, size.height) / cellPx).toInt() + 1
+                val reach = (maxOf(size.width, size.height) / cellPx).toInt() + 2
                 for (dy in -reach..reach) {
                     for (dx in -reach..reach) {
                         val bmp = exteriorMaps[Pair(state.cellGridX + dx, state.cellGridY + dy)] ?: continue
@@ -14208,7 +14308,7 @@ private fun MapPanel(
                 val originX = cx - playerU * cellPx
                 val originY = cy - playerV * cellPx
 
-                val reach = (maxOf(size.width, size.height) / cellPx).toInt() + 1
+                val reach = (maxOf(size.width, size.height) / cellPx).toInt() + 2
                 for (dy in -reach..reach) {
                     for (dx in -reach..reach) {
                         val seg = interiorMaps[Pair(playerSegX + dx, playerSegY + dy)] ?: continue
@@ -14231,7 +14331,7 @@ private fun MapPanel(
                 val half = size.minDimension * 0.028f
                 doorMarkers.forEach { m ->
                     val p = markerScreenPos(m.worldX, m.worldY, state.pos.x, state.pos.y,
-                        markerAngle, markerCX, markerCY, size.width, size.height)
+                        markerAngle, markerCX, markerCY, size.width, size.height, mapZoom, mapPan)
                     if (p.x < -half || p.x > size.width + half || p.y < -half || p.y > size.height + half)
                         return@forEach
                     val sel = selectedMarker == m
@@ -14279,7 +14379,7 @@ private fun MapPanel(
             val pos = markerScreenPos(
                 marker.worldX, marker.worldY, state.pos.x, state.pos.y,
                 markerAngle, markerCX, markerCY,
-                mapBoxSize.width.toFloat(), mapBoxSize.height.toFloat()
+                mapBoxSize.width.toFloat(), mapBoxSize.height.toFloat(), mapZoom, mapPan
             )
             Box(
                 Modifier
@@ -14921,18 +15021,55 @@ private fun EquippedDisplayPill(value: String) {
 // Screen position (px, within a wxh canvas) of a world point on the companion minimap, using the
 // SAME transform as the player arrow: player centered, exterior world-aligned or interior rotated by
 // `angle` about (centerX,centerY). angle=0 (with center 0,0) → the identity used for exterior. Shared
-// by the door-marker draw and the tap hit-test so they can never diverge.
+// by the door-marker draw and the tap hit-test so they can never diverge. `zoom` and `pan` are the
+// pinch zoom and two-finger pan, which every caller MUST pass, or markers drift off their doors.
 private fun markerScreenPos(
     worldX: Float, worldY: Float, playerX: Float, playerY: Float,
-    angle: Float, centerX: Float, centerY: Float, w: Float, h: Float
+    angle: Float, centerX: Float, centerY: Float, w: Float, h: Float, zoom: Float, pan: Offset
 ): Offset {
-    val cellPx = minOf(w, h) / MINIMAP_CROP_FRACTION
+    val cellPx = minOf(w, h) / MINIMAP_CROP_FRACTION * zoom
     val ca = cos(angle); val sa = sin(angle)
     val rmx = ca * (worldX - centerX) - sa * (worldY - centerY) + centerX
     val rmy = sa * (worldX - centerX) + ca * (worldY - centerY) + centerY
     val rpx = ca * (playerX - centerX) - sa * (playerY - centerY) + centerX
     val rpy = sa * (playerX - centerX) + ca * (playerY - centerY) + centerY
-    return Offset(w / 2f + (rmx - rpx) / 8192f * cellPx, h / 2f - (rmy - rpy) / 8192f * cellPx)
+    return Offset(
+        w / 2f + pan.x * cellPx + (rmx - rpx) / 8192f * cellPx,
+        h / 2f + pan.y * cellPx - (rmy - rpy) / 8192f * cellPx
+    )
+}
+
+// The minimap's INTERIOR zoom: the interior it was set in, and the zoom. Process-level (not inside
+// MapPanel) so it survives switching tabs, and deliberately NOT persisted. It lasts only while the
+// player stays in that interior: [forgetUnless] runs on every cell change, so leaving and coming
+// BACK starts at the default too. (Matching on the cell alone, without forgetting, restored the old
+// zoom on return, which read as the reset having failed.)
+private object MinimapInteriorZoom {
+    var cell by mutableStateOf<String?>(null)
+    var zoom by mutableStateOf(MINIMAP_ZOOM_DEFAULT)
+
+    fun forgetUnless(currentCell: String?) {
+        if (cell != null && cell != currentCell) {
+            cell = null
+            zoom = MINIMAP_ZOOM_DEFAULT
+        }
+    }
+}
+
+// How far from the player the minimap is guaranteed to have map data, in cells. The engine keeps
+// the 3x3 grid around the player's cell loaded, so even standing on a cell border there is at least
+// one full cell beyond it in every direction.
+private const val MINIMAP_PAN_REACH_CELLS = 1f
+
+// Clamp the two-finger pan (in cells) so the panel's edge never passes [MINIMAP_PAN_REACH_CELLS]
+// from the player, i.e. never runs off the loaded map into black. The allowance is what the view's
+// own half-width leaves of that reach, so it shrinks as you zoom out and reaches 0 on any axis the
+// view already spans in full.
+private fun clampMinimapPan(pan: Offset, w: Float, h: Float, zoom: Float): Offset {
+    val cellPx = minOf(w, h) / MINIMAP_CROP_FRACTION * zoom
+    val maxX = (MINIMAP_PAN_REACH_CELLS - w / 2f / cellPx).coerceAtLeast(0f)
+    val maxY = (MINIMAP_PAN_REACH_CELLS - h / 2f / cellPx).coerceAtLeast(0f)
+    return Offset(pan.x.coerceIn(-maxX, maxX), pan.y.coerceIn(-maxY, maxY))
 }
 
 private fun DrawScope.drawArrow(cx: Float, cy: Float, r: Float, degrees: Float) {
@@ -20495,6 +20632,11 @@ private val DS_CONTROL_GROUPS = listOf(
             ControlEntry("Tap", "The Effects label to see active effects"),
             ControlEntry("Tap", "The map to open the full map"),
             ControlEntry("Tap", "A door marker to see where it leads"),
+            ControlEntry("Pinch", "The map to zoom in or out"),
+            // "Two fingers" rather than "Two-finger drag/tap": ControlChip only has a MIN width, so a
+            // longer label would widen its chip and push that row's text out of the column.
+            ControlEntry("Two fingers", "Drag the map to look around"),
+            ControlEntry("Two fingers", "Tap the map to recentre it and reset the zoom"),
             ControlEntry("Tap", "The Spell or Weapon icon to show its name"),
             ControlEntry("Tap", "A favourite slot to use it"),
             ControlEntry("Long press", "A favourite slot to see more options"),
@@ -20880,6 +21022,7 @@ private fun OptionsSubPage(
 
                 // BOTTOM DISPLAY SETTINGS: how the companion screen itself looks.
                 OptionsPage.BOTTOM_DISPLAY -> {
+                    item { TextSizeRow() }
                     item { UiSoundsRow() }
                     item { OptionsSubLabel("Inventory tab") }
                     item { EquippedInListRow() }
@@ -20900,6 +21043,7 @@ private fun OptionsSubPage(
                     item { ControlsReferenceRow(onOpen = onOpenControls) }
                     item { TouchInputRow() }
                     item { GameCursorRow() }
+                    item { TopKeyboardButtonRow() }
                     item { InputPairNote() }
                 }
 
@@ -22249,6 +22393,82 @@ private fun FavMixedRow() {
     }
 }
 
+/**
+ * Text size for everything the companion draws: the bottom screen, the DS overlays on the top
+ * screen and this menu. Applied as a fontScale multiplier in [ProvideCompanionFont], so ONLY text
+ * changes size; panels, icons and spacing stay exactly as laid out (the player's choice, Oct 2026,
+ * over scaling the whole UI, which the fixed 1240x1080 layouts cannot absorb).
+ *
+ * The value is COMMITTED ON RELEASE, not per drag frame. This menu is itself scaled by the setting,
+ * so applying it live would grow the text above the slider and move the slider out from under the
+ * finger mid-drag. The percentage readout follows the drag so the player still sees the number.
+ * Unrelated to OpenMW's own `[GUI] font size`, which sizes the engine's menus and is left alone.
+ */
+@Composable
+private fun TextSizeRow() {
+    val context = LocalContext.current
+    val saved by UiPreferences.textSizeFlow().collectAsState()
+    var dragging by remember { mutableStateOf<Float?>(null) }
+    val shown = dragging ?: saved
+    val ticker = remember { SliderTickThrottle(steps = TEXT_SIZE_SLIDER_STEPS + 1) }
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Text size", color = Bone, fontSize = 14.sp, fontFamily = MwBody,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "${(shown * 100).roundToInt()}%",
+                color = BronzeLight, fontSize = 12.sp, fontFamily = MwData
+            )
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Size of all OpenMW-DS text, on both screens and in this menu. Applies when you let " +
+                "go. Very large sizes can cut off text in tight spots.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${(TEXT_SIZE_RANGE.start * 100).roundToInt()}%",
+                color = BoneDim, fontSize = 11.sp, fontFamily = MwData
+            )
+            Slider(
+                value = shown,
+                onValueChange = { ticker.onValue(it, TEXT_SIZE_RANGE); dragging = it },
+                onValueChangeFinished = {
+                    dragging?.let { UiPreferences.setTextSize(context, it) }
+                    dragging = null
+                },
+                valueRange = TEXT_SIZE_RANGE,
+                steps = TEXT_SIZE_SLIDER_STEPS,
+                colors = SliderDefaults.colors(
+                    thumbColor = BronzeLight,
+                    activeTrackColor = BronzeLight,
+                    inactiveTrackColor = BronzeDark,
+                    activeTickColor = Color.Transparent,
+                    inactiveTickColor = Color.Transparent
+                ),
+                modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+            )
+            Text(
+                "${(TEXT_SIZE_RANGE.endInclusive * 100).roundToInt()}%",
+                color = BoneDim, fontSize = 11.sp, fontFamily = MwData
+            )
+        }
+        ScopedResetButton("Reset text size") {
+            UiPreferences.setTextSize(context, TEXT_SIZE_DEFAULT)
+        }
+    }
+}
+
+/** Interior notches on the Text size slider: 85% to 125% in 5% steps is 8 intervals, 7 notches. */
+private const val TEXT_SIZE_SLIDER_STEPS = 7
+
 @Composable
 private fun GameBrightnessRow() {
     val context = LocalContext.current
@@ -23560,6 +23780,47 @@ private fun TouchInputRow() {
                 active = !enabled,
                 enabled = true
             ) { UiPreferences.setTouchInput(context, false) }
+        }
+    }
+}
+
+/** Input row: draw a keyboard button on the top screen ([On][Off], default Off). Tapping it raises
+ *  (or hides) the same bottom-screen keyboard as Developer Tools -> Show Keyboard, so the console
+ *  and F-keys are reachable without Developer mode or the pause menu. See [TopScreenKeyboardButton].
+ *
+ *  Not shown on the Single Screen profile: that profile ALWAYS draws its own keyboard button (it is
+ *  its only text entry), so a switch here would control nothing. */
+@Composable
+private fun TopKeyboardButtonRow() {
+    val context = LocalContext.current
+    if (remember(context) { DisplayRoles.singleScreen(context) }) return
+    val enabled by UiPreferences.topKeyboardButtonFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Keyboard button", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "A small keyboard button in the corner of the top screen. Tap it to bring up the " +
+                "keyboard on this screen, with the ` key for the console and F1 to F12. Tap again " +
+                "to put it away.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setTopKeyboardButton(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setTopKeyboardButton(context, false) }
         }
     }
 }

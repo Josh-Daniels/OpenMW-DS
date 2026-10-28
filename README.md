@@ -30,8 +30,9 @@ OpenMW-DS will always be free, but if you've enjoyed it and want to shout me a h
 Five tabs, live-updating while you play.
 
 - **HUD**: a live, player-centred minimap of the current cell, rendered by the engine itself and streamed across (the
-  same system the in-game minimap uses). Around it sit health, magicka and fatigue, active effects, your equipped weapon
-  and spell, a sneak indicator, the tracked quest, and a combat target's health.
+  same system the in-game minimap uses). Pinch to zoom in or out, drag with two fingers to look around, and tap with two fingers to recentre; a tap still opens the full map. Around it sit health,
+  magicka and fatigue, active effects, your equipped weapon and spell, a sneak indicator, the tracked quest, and a
+  combat target's health.
 - **Inventory**: the full item list with tap to equip, use or read, and long press for info, drop or favourite. Sortable
   and filterable by category, showing per-item weight, condition and enchantment charge.
 - **Spells**: spells, powers, scrolls and enchanted items. Tap to select, long press for info, add to favourites, delete spell. Learned
@@ -82,6 +83,8 @@ as the original does, quirks included.
   not.
 - An on-screen keyboard for anywhere the game asks you to type (character and class names, save names, potion and spell
   names), so you don't need a hardware keyboard.
+- An optional **keyboard button** on the top screen (Settings > Controls) that brings up the keyboard whenever you want
+  it, with the console key and F1 to F12.
 - A built-in **DS UI Controls** reference page listing every non-obvious control, in Settings > Controls.
 - Sensible controller defaults are already applied for the Thor, and can be changed back in the game's own settings.
 
@@ -93,6 +96,7 @@ as the original does, quirks included.
   lift, and per-weather daytime floors, with **Normal / Bright / Blinding** presets. Normal is exact vanilla; the rest
   are there for playing outside on a sunny day.
 - **Panel opacity** for the DS overlays drawn over the game view.
+- **Text size**: make all OpenMW-DS text larger or smaller, from 85% to 125%, on both screens and in the settings menu.
 - **Game font**: the companion screens, the DS overlays and the launcher all render in the game's own typeface
   (MysticCards, OpenMW's open-source Morrowind lookalike). On by default, switchable off.
 - **Interface sounds** with a volume slider, using the game's own UI sound effects.
@@ -107,8 +111,8 @@ Reachable from the pause menu in game and from the title screen, organised into 
 |---|---|
 | **Game Menus** | The Native/DS switch for each of the 15 menus above |
 | **Top Display** | Game brightness, the game's own HUD elements, DS overlay opacity |
-| **Bottom Display** | Interface sounds, inventory options, HUD favourite slot counts |
-| **Controls** | The DS UI Controls reference, touch input, game cursor |
+| **Bottom Display** | Text size, interface sounds, inventory options, HUD favourite slot counts |
+| **Controls** | The DS UI Controls reference, touch input, game cursor, top-screen keyboard button |
 | **Developer Tools** | Screen dimming, the console, and test tools (god mode, noclip, stat and gold cheats, level-up and weather triggers) |
 
 Three presets sit above them: **All DS**, **Custom** and **All Native**, so you can try the whole DS layout in one tap

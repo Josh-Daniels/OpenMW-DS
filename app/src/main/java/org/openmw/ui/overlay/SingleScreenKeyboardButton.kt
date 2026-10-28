@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import org.openmw.R
+import org.openmw.companion.GameStateRepository
 import org.openmw.ui.controls.UIKeyboard
 import org.openmw.utils.GameFilesPreferences
 
@@ -69,6 +70,41 @@ fun SingleScreenKeyboardButton(
     context: Context,
     virtualKeyboard: Boolean,
 ) {
+    KeyboardCornerButton(context) {
+        if (virtualKeyboard) {
+            UIKeyboard.showVKB = !UIKeyboard.showVKB
+        } else {
+            (context as? Activity)?.let { showKeyboard(it) }
+        }
+    }
+}
+
+/**
+ * TWO-SCREEN profiles, opt-in (`UiPreferences.topKeyboardButton`, DS Settings -> Controls): the same
+ * button, but it raises the COMPANION's keyboard on the bottom screen rather than drawing one over
+ * the game. That is the keyboard every other text entry on these profiles already uses, and it is
+ * the one Developer Tools -> Show Keyboard raises, so it carries the same ` key (console) and
+ * F1-F12 row: this button is simply a way to reach that session without opening the pause menu.
+ *
+ * It TOGGLES. Hiding does exactly what the keyboard's own Hide key does, clearing both the
+ * session and any native text-input request, for the reason documented at that key: ending the
+ * session alone leaves the keyboard up whenever the console still holds focus.
+ */
+@Composable
+fun TopScreenKeyboardButton(context: Context) {
+    KeyboardCornerButton(context) {
+        if (GameStateRepository.devKeyboardVisible.value) {
+            GameStateRepository.hideDevKeyboard()
+            GameStateRepository.dismissTextInput()
+        } else {
+            GameStateRepository.showDevKeyboard()
+        }
+    }
+}
+
+/** The look and placement both keyboard buttons share; only the press differs. */
+@Composable
+private fun KeyboardCornerButton(context: Context, onClick: () -> Unit) {
     val menuCorner by GameFilesPreferences.getMenuCorner(context).collectAsState(initial = 1)
     val alignment = when (menuCorner) {
         0 -> Alignment.TopEnd
@@ -80,13 +116,7 @@ fun SingleScreenKeyboardButton(
 
     Box(modifier = Modifier.fillMaxSize()) {
         IconButton(
-            onClick = {
-                if (virtualKeyboard) {
-                    UIKeyboard.showVKB = !UIKeyboard.showVKB
-                } else {
-                    (context as? Activity)?.let { showKeyboard(it) }
-                }
-            },
+            onClick = onClick,
             modifier = Modifier
                 .align(alignment)
                 .padding(8.dp)

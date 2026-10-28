@@ -763,6 +763,23 @@ const val FAV_SLOTS_MAX = 4
  *  count became configurable, so a fresh install looks exactly as it always did. */
 const val FAV_SLOTS_DEFAULT = 2
 
+/** Companion text size, a multiplier on fontScale (TEXT only; dp is never scaled). 1.0 is the size
+ *  every layout was designed at. The ceiling is where the fixed-height rows (top stat bar, tab
+ *  labels, split dialogue rows) start to clip: at 1.30 the "Inventory" tab label wraps to two lines,
+ *  at 1.25 it does not (device-checked Oct 29 2026); the floor is the smallest that stays legible on this
+ *  3.9" panel. */
+val TEXT_SIZE_RANGE = 0.85f..1.25f
+const val TEXT_SIZE_DEFAULT = 1.0f
+
+/** HUD minimap pinch zoom, a multiplier on the minimap's fixed crop (`MINIMAP_CROP_FRACTION`) (1.0 = unchanged).
+ *
+ *  FLOOR 0.25 shows one whole cell across the panel's short side. Further out would run past the
+ *  map data: the engine only streams the cells around the player, so a wider view goes black at
+ *  the edges as soon as the player stands near a cell border. CEILING 1.5: the cell textures are
+ *  already magnified ~7x at 1.0, so closer only gets blurrier, not more detailed. */
+val MINIMAP_ZOOM_RANGE = 0.25f..1.5f
+const val MINIMAP_ZOOM_DEFAULT = 1.0f
+
 object UiPreferences {
     private const val PREFS = "companion_ui_settings"
     private const val GAME_UI_PREFIX = "" // keys already carry the "game_ui_" prefix
@@ -798,6 +815,9 @@ object UiPreferences {
     private const val FAV_MAGIC_SLOTS = "fav_magic_slots"
     private const val FAV_MIXED = "fav_mixed"
     private const val VANILLA_FONT = "vanilla_font"
+    private const val TEXT_SIZE = "text_size"
+    private const val MINIMAP_ZOOM = "minimap_zoom"
+    private const val TOP_KEYBOARD_BUTTON = "top_keyboard_button"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
@@ -978,6 +998,20 @@ object UiPreferences {
     // the game's own typeface is the intended look, so it is on out of the box and the switch
     // exists to turn it OFF.
     private val vanillaFontFlow = MutableStateFlow(true)
+
+    // The player's text size for everything the companion draws, as a multiplier on fontScale. It
+    // scales TEXT only: layouts were built for this one 1240x1080 panel, so scaling dp as well
+    // would stop screens fitting well before the text got usefully larger. The range is the price
+    // of text-only: past 1.25 the fixed-height rows (stat bar, tab labels, split rows) clip.
+    private val textSizeFlow = MutableStateFlow(TEXT_SIZE_DEFAULT)
+
+    // The HUD minimap's pinch zoom, as a multiplier on its fixed crop (1.0 = the original view).
+    private val minimapZoomFlow = MutableStateFlow(MINIMAP_ZOOM_DEFAULT)
+
+    // Whether the TWO-screen profiles also draw the top-screen keyboard button the Single Screen
+    // profile always has. Default off: the companion already has Show Keyboard, and this puts a
+    // permanent control over the game view, so it is opt-in.
+    private val topKeyboardButtonFlow = MutableStateFlow(false)
 
     // Whether the Developer Tools action panel (add gold, max stats, god mode, …) is shown. These
     // are cheats and can change a save in ways normal play cannot, so this gates them behind a
@@ -1222,6 +1256,9 @@ object UiPreferences {
             p.getInt(FAV_MAGIC_SLOTS, FAV_SLOTS_DEFAULT).coerceIn(0, FAV_SLOTS_MAX)
         favMixedFlow.value = p.getBoolean(FAV_MIXED, false)
         vanillaFontFlow.value = p.getBoolean(VANILLA_FONT, true)
+        textSizeFlow.value = p.getFloat(TEXT_SIZE, TEXT_SIZE_DEFAULT).coerceIn(TEXT_SIZE_RANGE)
+        minimapZoomFlow.value = p.getFloat(MINIMAP_ZOOM, MINIMAP_ZOOM_DEFAULT).coerceIn(MINIMAP_ZOOM_RANGE)
+        topKeyboardButtonFlow.value = p.getBoolean(TOP_KEYBOARD_BUTTON, false)
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         // Looting / bartering offer exactly [Native][DS] as of Aug 21 2026, where DS *is* the
         // split layout — so SPLIT is now the only value either can legitimately hold. Anything else
@@ -1708,6 +1745,36 @@ object UiPreferences {
     fun setVanillaFont(context: Context, enabled: Boolean) {
         vanillaFontFlow.value = enabled
         editor(context).putBoolean(VANILLA_FONT, enabled).apply()
+    }
+
+    /** Text size multiplier for everything the companion draws (fontScale only, never dp). */
+    fun textSizeFlow(): StateFlow<Float> = textSizeFlow.asStateFlow()
+
+    /** Set the companion text size and persist. Clamped to [TEXT_SIZE_RANGE]. */
+    fun setTextSize(context: Context, scale: Float) {
+        val v = scale.coerceIn(TEXT_SIZE_RANGE)
+        textSizeFlow.value = v
+        editor(context).putFloat(TEXT_SIZE, v).apply()
+    }
+
+    /** The HUD minimap's zoom multiplier (1.0 = the original fixed view). */
+    fun minimapZoomFlow(): StateFlow<Float> = minimapZoomFlow.asStateFlow()
+
+    /** Set the HUD minimap zoom and persist. Clamped to [MINIMAP_ZOOM_RANGE]. Called once when a
+     *  pinch ends, not per frame: the live value during the gesture is held by the minimap itself. */
+    fun setMinimapZoom(context: Context, zoom: Float) {
+        val v = zoom.coerceIn(MINIMAP_ZOOM_RANGE)
+        minimapZoomFlow.value = v
+        editor(context).putFloat(MINIMAP_ZOOM, v).apply()
+    }
+
+    /** Whether a two-screen profile also draws the top-screen keyboard button. */
+    fun topKeyboardButtonFlow(): StateFlow<Boolean> = topKeyboardButtonFlow.asStateFlow()
+
+    /** Set whether the top-screen keyboard button is drawn on a two-screen profile, and persist. */
+    fun setTopKeyboardButton(context: Context, enabled: Boolean) {
+        topKeyboardButtonFlow.value = enabled
+        editor(context).putBoolean(TOP_KEYBOARD_BUTTON, enabled).apply()
     }
 
     /** Whether the Developer Tools action panel (cheats / test helpers) is shown. */

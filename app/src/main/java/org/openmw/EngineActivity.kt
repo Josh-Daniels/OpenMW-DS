@@ -130,6 +130,7 @@ import org.openmw.ui.controls.UIStateManager.uqmJNI
 import org.openmw.ui.controls.VirtualKeyboard
 import org.openmw.ui.overlay.ExpandableCircleButton
 import org.openmw.ui.overlay.SingleScreenKeyboardButton
+import org.openmw.ui.overlay.TopScreenKeyboardButton
 import org.openmw.ui.view.readGameResolutionFromConfig
 import org.openmw.utils.sendKeyEvent
 import org.openmw.ui.overlay.GridOverlay
@@ -583,6 +584,7 @@ class EngineActivity : SDLActivity() {
                         val virtualKeyboard by GameFilesPreferences
                             .useVirtualKeyboard(this@EngineActivity)
                             .collectAsState(initial = true)
+                        val topKeyboardButton by UiPreferences.topKeyboardButtonFlow().collectAsState()
                         val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
 
                         BackHandler {
@@ -700,6 +702,11 @@ class EngineActivity : SDLActivity() {
                                 context = this@EngineActivity,
                                 virtualKeyboard = virtualKeyboard
                             )
+                        } else if (topKeyboardButton) {
+                            // TWO-SCREEN, opt-in (DS Settings -> Controls): the same button in the
+                            // same corner, but it raises the companion's keyboard on the bottom
+                            // screen. Same gating reasoning as above: the pref is the only gate.
+                            TopScreenKeyboardButton(context = this@EngineActivity)
                         }
 
                         Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
