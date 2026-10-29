@@ -15,6 +15,7 @@ import org.openmw.companion.BarterTopOverlay
 import org.openmw.companion.CombatTargetTopOverlay
 import org.openmw.companion.CompanionScreen
 import org.openmw.companion.ConversationHistoryOverlay
+import org.openmw.companion.TopScreenQuickSlots
 import org.openmw.companion.GameStateRepository
 import org.openmw.companion.OptionsMenuOverlay
 import org.openmw.companion.UiSounds
@@ -585,6 +586,7 @@ class EngineActivity : SDLActivity() {
                             .useVirtualKeyboard(this@EngineActivity)
                             .collectAsState(initial = true)
                         val topKeyboardButton by UiPreferences.topKeyboardButtonFlow().collectAsState()
+                        val topQuickSlotsButton by UiPreferences.topQuickSlotsButtonFlow().collectAsState()
                         val isVibrationOn by GameFilesPreferences.loadVibrationState(this@EngineActivity).collectAsState(initial = true)
 
                         BackHandler {
@@ -702,11 +704,23 @@ class EngineActivity : SDLActivity() {
                                 context = this@EngineActivity,
                                 virtualKeyboard = virtualKeyboard
                             )
-                        } else if (topKeyboardButton) {
-                            // TWO-SCREEN, opt-in (DS Settings -> Controls): the same button in the
-                            // same corner, but it raises the companion's keyboard on the bottom
-                            // screen. Same gating reasoning as above: the pref is the only gate.
-                            TopScreenKeyboardButton(context = this@EngineActivity)
+                            // Issue #15: the quick slot row, its button beside the keyboard button.
+                            TopScreenQuickSlots(context = this@EngineActivity, buttonSlot = 1)
+                        } else {
+                            // TWO-SCREEN, both opt-in (DS Settings -> Controls), the pref the only
+                            // gate for the same reasons as above. The keyboard button raises the
+                            // companion's keyboard on the bottom screen; the quick slot button is
+                            // the Single Screen one unchanged, and takes the corner itself when the
+                            // keyboard button is off rather than leaving a gap beside it.
+                            if (topKeyboardButton) {
+                                TopScreenKeyboardButton(context = this@EngineActivity)
+                            }
+                            if (topQuickSlotsButton) {
+                                TopScreenQuickSlots(
+                                    context = this@EngineActivity,
+                                    buttonSlot = if (topKeyboardButton) 1 else 0
+                                )
+                            }
                         }
 
                         Buttons(context = this@EngineActivity, containerWidth = containerWidth, containerHeight = containerHeight)
@@ -1093,6 +1107,13 @@ class EngineActivity : SDLActivity() {
          * limiter's own duration is pinned to the cap and cannot show headroom).
          */
         @JvmStatic external fun getCompanionFrameTimes(): FloatArray?
+
+        /**
+         * The 10 quick slots as text, one "index|type|name|icon" line each, for the Single Screen
+         * quick slot bar. PULLED when the bar opens: that profile has no companion line sink. Built
+         * natively by companion-quickkeys-snapshot.patch; empty before a game is loaded.
+         */
+        @JvmStatic external fun getCompanionQuickKeys(): String?
 
         @JvmStatic external fun setCompanionHudHms(on: Boolean)
         @JvmStatic external fun setCompanionHudEquipped(on: Boolean)

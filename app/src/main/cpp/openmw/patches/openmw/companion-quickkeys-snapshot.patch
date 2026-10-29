@@ -1,0 +1,161 @@
+--- a/apps/openmw/mwgui/quickkeysmenu.cpp
++++ b/apps/openmw/mwgui/quickkeysmenu.cpp
+@@ -1,5 +1,8 @@
+ #include "quickkeysmenu.hpp"
+ 
++#include <algorithm>
++#include <mutex>
++
+ #include <MyGUI_Button.h>
+ #include <MyGUI_EditBox.h>
+ #include <MyGUI_Gui.h>
+@@ -34,6 +37,23 @@
+ 
+ namespace MWGui
+ {
++    // OpenMW-DS: a snapshot of the 10 quick slots for the Single Screen quick slot bar, rebuilt on
++    // the engine thread whenever a slot changes and copied out by the UI thread on demand
++    // (companionQuickKeysSnapshot, read by androidmain.cpp's getCompanionQuickKeys JNI). PULLED
++    // rather than pushed as a COMPANION_ line because the Single Screen profile installs no
++    // companion line sink, and the bar only needs it at the moment it opens.
++    namespace
++    {
++        std::mutex gCompanionQuickKeysMutex;
++        std::string gCompanionQuickKeys;
++    }
++
++    std::string companionQuickKeysSnapshot()
++    {
++        std::lock_guard<std::mutex> lock(gCompanionQuickKeysMutex);
++        return gCompanionQuickKeys;
++    }
++
+ 
+     QuickKeysMenu::QuickKeysMenu()
+         : WindowBase("openmw_quickkeys_menu.layout")
+@@ -137,6 +157,59 @@ namespace MWGui
+             mMagicSelectionDialog->setVisible(false);
+     }
+ 
++    // OpenMW-DS: rebuild the quick slot snapshot. One line per slot, "index|type|name|icon", where
++    // type is ESM::QuickKeys::Type as a number and icon is a VFS path (empty when there is none).
++    // Called at the end of every path that changes a slot.
++    void QuickKeysMenu::companionUpdateSnapshot()
++    {
++        const VFS::Manager& vfs = *MWBase::Environment::get().getResourceSystem()->getVFS();
++        const MWWorld::ESMStore& esmStore = *MWBase::Environment::get().getESMStore();
++        std::string out;
++        for (const keyData& key : mKey)
++        {
++            std::string icon;
++            switch (key.type)
++            {
++                case ESM::QuickKeys::Type::Item:
++                case ESM::QuickKeys::Type::MagicItem:
++                {
++                    const MWWorld::Ptr* item = key.button->getUserData<MWWorld::Ptr>(false);
++                    if (item != nullptr && !item->isEmpty())
++                        icon = Misc::ResourceHelpers::correctIconPath(
++                            VFS::Path::toNormalized(item->getClass().getInventoryIcon(*item)), vfs)
++                                   .value();
++                    break;
++                }
++                case ESM::QuickKeys::Type::Magic:
++                {
++                    const ESM::Spell* spell = esmStore.get<ESM::Spell>().search(key.id);
++                    if (spell != nullptr && !spell->mEffects.mList.empty())
++                    {
++                        const ESM::MagicEffect* effect = esmStore.get<ESM::MagicEffect>().search(
++                            spell->mEffects.mList.front().mData.mEffectID);
++                        if (effect != nullptr)
++                            icon = Misc::ResourceHelpers::correctIconPath(
++                                VFS::Path::toNormalized(effect->mIcon), vfs)
++                                       .value();
++                    }
++                    break;
++                }
++                case ESM::QuickKeys::Type::HandToHand:
++                    icon = "icons/k/stealth_handtohand.dds";
++                    break;
++                case ESM::QuickKeys::Type::Unassigned:
++                    break;
++            }
++            std::string name = key.name;
++            std::replace(name.begin(), name.end(), '|', ' ');
++            std::replace(name.begin(), name.end(), '\n', ' ');
++            out += std::to_string(key.index) + '|' + std::to_string(static_cast<int>(key.type)) + '|' + name + '|'
++                + icon + '\n';
++        }
++        std::lock_guard<std::mutex> lock(gCompanionQuickKeysMutex);
++        gCompanionQuickKeys = std::move(out);
++    }
++
+     void QuickKeysMenu::unassign(keyData* key)
+     {
+         key->button->clearUserStrings();
+@@ -168,6 +241,8 @@ namespace MWGui
+             textBox->setCaption(MyGUI::utility::toString(key->index));
+             textBox->setNeedMouseFocus(false);
+         }
++
++        companionUpdateSnapshot();
+     }
+ 
+     void QuickKeysMenu::onQuickKeyButtonClicked(MyGUI::Widget* sender)
+@@ -261,6 +336,8 @@ namespace MWGui
+ 
+         if (mItemSelectionDialog)
+             mItemSelectionDialog->setVisible(false);
++
++        companionUpdateSnapshot();
+     }
+ 
+     void QuickKeysMenu::onAssignItem(MWWorld::Ptr item)
+@@ -300,6 +377,8 @@ namespace MWGui
+ 
+         if (mMagicSelectionDialog)
+             mMagicSelectionDialog->setVisible(false);
++
++        companionUpdateSnapshot();
+     }
+ 
+     void QuickKeysMenu::onAssignMagic(const ESM::RefId& spellId)
+@@ -338,6 +417,8 @@ namespace MWGui
+ 
+         if (mMagicSelectionDialog)
+             mMagicSelectionDialog->setVisible(false);
++
++        companionUpdateSnapshot();
+     }
+ 
+     void QuickKeysMenu::onAssignMagicCancel()
+--- a/apps/openmw/mwgui/quickkeysmenu.hpp
++++ b/apps/openmw/mwgui/quickkeysmenu.hpp
+@@ -1,6 +1,7 @@
+ #ifndef MWGUI_QUICKKEYS_H
+ #define MWGUI_QUICKKEYS_H
+ 
++#include <string>
+ #include <memory>
+ 
+ #include "components/esm3/quickkeys.hpp"
+@@ -13,6 +14,10 @@
+ 
+ namespace MWGui
+ {
++    // OpenMW-DS: the current quick slots as text, for the Single Screen quick slot bar. Thread-safe;
++    // called from the UI thread via JNI. See QuickKeysMenu::companionUpdateSnapshot.
++    std::string companionQuickKeysSnapshot();
++
+ 
+     class QuickKeysMenuAssign;
+     class MagicSelectionDialog;
+@@ -75,6 +80,8 @@ namespace MWGui
+         // Check if quick key is still valid
+         inline void validate(int index);
+         void unassign(keyData* key);
++        // OpenMW-DS: rebuild the snapshot read by companionQuickKeysSnapshot().
++        void companionUpdateSnapshot();
+         void assignItem(MWWorld::Ptr item);
+ 
+         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;

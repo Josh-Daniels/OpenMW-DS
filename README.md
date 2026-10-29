@@ -9,7 +9,8 @@ more), several of which use both screens at once. There is full touch and contro
 Retroid devices with the Dual Screen add-on, or **Custom (Experimental)** to choose the game screen and the second screen
 yourself on any other dual-screen device. Custom has an **Identify screens** button to show which screen is which. On these
 options you may need to tap the game screen once after it starts for the controller to work. Devices with only one screen
-can choose **Single Screen Device**, which plays with the game's original menus. If something goes wrong, Settings >
+can choose **Single Screen Device**, which plays with the game's original menus and adds a keyboard button and a
+quick slot button to the corner of the screen. If something goes wrong, Settings >
 Report a Problem creates a file you can attach to a GitHub issue.
 
 This project is a fork of **[Alpha3](#credits)**, a multi-engine Android launcher that can handle OpenMW,
@@ -59,6 +60,10 @@ in per menu, or use the `[All DS]` preset to switch the lot and `[All Native]` t
 Several use both screens at once. Bartering and looting put the two inventories on separate screens, while alchemy,
 enchanting and spellmaking keep the live readout up top while you work on the bottom.
 
+When the conversation is shown on the top screen, you can **move and resize it** like the original game's windows: drag
+its name bar to move it and its bottom-right corner to resize it, for example to keep it beside the person you're
+talking to. Its position is remembered for every conversation, and Settings > Top Display can reset it.
+
 **The game's rules are untouched.** Every DS screen forwards to the engine's own window: the alchemy success roll and
 its apparatus quality maths, the enchantment validations and self-enchant roll, spellmaking's order-dependent magicka
 cost, the level-up commit and its Endurance-dependent health gain, the pickpocket catch roll, merchant-adjusted travel
@@ -85,6 +90,8 @@ as the original does, quirks included.
   names), so you don't need a hardware keyboard.
 - An optional **keyboard button** on the top screen (Settings > Controls) that brings up the keyboard whenever you want
   it, with the console key and F1 to F12.
+- An optional **quick slot button** on the top screen (Settings > Controls) that shows your 10 quick slots in a row
+  along the bottom of the screen. Tap a slot to use it, or Edit to assign them. Single Screen Device always has it.
 - A built-in **DS UI Controls** reference page listing every non-obvious control, in Settings > Controls.
 - Sensible controller defaults are already applied for the Thor, and can be changed back in the game's own settings.
 
@@ -110,9 +117,9 @@ Reachable from the pause menu in game and from the title screen, organised into 
 | Category | What's in it |
 |---|---|
 | **Game Menus** | The Native/DS switch for each of the 15 menus above |
-| **Top Display** | Game brightness, the game's own HUD elements, DS overlay opacity |
+| **Top Display** | Game brightness, the game's own HUD elements, DS overlay opacity, conversation window reset |
 | **Bottom Display** | Text size, interface sounds, inventory options, HUD favourite slot counts |
-| **Controls** | The DS UI Controls reference, touch input, game cursor, top-screen keyboard button |
+| **Controls** | The DS UI Controls reference, touch input, game cursor, top-screen keyboard and quick slot buttons |
 | **Developer Tools** | Screen dimming, the console, and test tools (god mode, noclip, stat and gold cheats, level-up and weather triggers) |
 
 Three presets sit above them: **All DS**, **Custom** and **All Native**, so you can try the whole DS layout in one tap

@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -102,9 +103,36 @@ fun TopScreenKeyboardButton(context: Context) {
     }
 }
 
-/** The look and placement both keyboard buttons share; only the press differs. */
+/** The keyboard button's look and placement; only the press differs between the two profiles. */
 @Composable
 private fun KeyboardCornerButton(context: Context, onClick: () -> Unit) {
+    CornerOverlayButton(
+        context = context,
+        iconRes = R.drawable.keyboard_24dp_e8eaed_fill0_wght400_grad0_opsz24,
+        contentDescription = "Show keyboard",
+        onClick = onClick
+    )
+}
+
+/** Width of one corner button plus the gap to the next, so [CornerOverlayButton]s line up. */
+private val CORNER_BUTTON_STEP = 52.dp
+
+/**
+ * A faint round button in the player's menu corner, over the game view. Shared by the keyboard
+ * button and the Single Screen quick slot button so they look identical and sit side by side.
+ *
+ * [slot] 0 is the corner itself; slot 1 sits one button further along the top or bottom edge,
+ * towards the middle of the screen, so a second button never covers the first whichever corner the
+ * player picked.
+ */
+@Composable
+internal fun CornerOverlayButton(
+    context: Context,
+    iconRes: Int,
+    contentDescription: String,
+    slot: Int = 0,
+    onClick: () -> Unit
+) {
     val menuCorner by GameFilesPreferences.getMenuCorner(context).collectAsState(initial = 1)
     val alignment = when (menuCorner) {
         0 -> Alignment.TopEnd
@@ -113,12 +141,16 @@ private fun KeyboardCornerButton(context: Context, onClick: () -> Unit) {
         3 -> Alignment.BottomStart
         else -> Alignment.TopStart
     }
+    // Step inwards from the corner: right from a left corner, left from a right one.
+    val fromEnd = alignment == Alignment.TopEnd || alignment == Alignment.BottomEnd
+    val step = CORNER_BUTTON_STEP * slot
 
     Box(modifier = Modifier.fillMaxSize()) {
         IconButton(
             onClick = onClick,
             modifier = Modifier
                 .align(alignment)
+                .offset(x = if (fromEnd) -step else step)
                 .padding(8.dp)
                 // The WHOLE button, disc and glyph together, at a fixed low opacity: it sits over
                 // the game view for the entire session on this profile, so it should read as
@@ -133,10 +165,8 @@ private fun KeyboardCornerButton(context: Context, onClick: () -> Unit) {
                 .size(44.dp)
         ) {
             Icon(
-                painter = painterResource(
-                    R.drawable.keyboard_24dp_e8eaed_fill0_wght400_grad0_opsz24
-                ),
-                contentDescription = "Show keyboard",
+                painter = painterResource(iconRes),
+                contentDescription = contentDescription,
                 tint = Color.White.copy(alpha = 0.9f),
                 modifier = Modifier.size(26.dp)
             )

@@ -67,6 +67,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -167,6 +168,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openmw.utils.DisplayRoles
+import org.openmw.ui.overlay.CornerOverlayButton
+import org.openmw.ui.view.readGuiScalingFromConfig
+import org.openmw.ui.view.readGameResolutionFromConfig
 import org.openmw.utils.GameFilesPreferences
 import java.io.File
 import java.nio.ByteBuffer
@@ -1931,7 +1935,10 @@ private fun DialogueConversationOverlay(
     // TOP mode: put the disposition bar in the name title bar (right side, ~aligned with the
     // right column below) and shrink the Goodbye button, freeing vertical room in the shorter
     // panel. false (BOTTOM) keeps the original layout (disposition at the top of the right column).
-    compactLayout: Boolean = false
+    compactLayout: Boolean = false,
+    // Applied to the NPC name title bar. The top-screen host passes the [MovableTopPanel] drag
+    // handle here, so the title bar is what moves the window, as in vanilla.
+    titleBarModifier: Modifier = Modifier
 ) {
     // Persuasion popup open-state is a shared repo flow (the popup is hosted separately by its own
     // Screen Layout location). While open, the topic/service list here is dimmed + inert.
@@ -1954,7 +1961,8 @@ private fun DialogueConversationOverlay(
                     // Name on the left; disposition bar on the right (~35% width so it sits roughly
                     // above the right column, same horizontal location it occupied there before).
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                        modifier = Modifier.fillMaxWidth().then(titleBarModifier)
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
@@ -1977,7 +1985,8 @@ private fun DialogueConversationOverlay(
                         npcName,
                         color = BronzeLight, fontSize = 14.sp,
                         fontFamily = MwDisplay, fontWeight = FontWeight.Bold,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
+                        modifier = Modifier.fillMaxWidth().then(titleBarModifier)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
                 Box(Modifier.fillMaxWidth().height(2.dp).background(Bronze))
@@ -2013,6 +2022,129 @@ private fun DialogueConversationOverlay(
     }
 }
 
+/** Default height of the TOP-layout conversation panel, as a fraction of the screen above its inset. */
+private const val CONVERSATION_TOP_HEIGHT = 0.48f
+/** Default height of the SPLIT-layout history box, as a fraction of the screen above its inset. */
+private const val CONVERSATION_SPLIT_HEIGHT = 0.51f
+/** Smallest a movable top-screen panel can be resized to: about the width of a few topics and the
+ *  height of the title bar plus three lines of history, so it can never shrink to nothing. */
+private val MOVABLE_PANEL_MIN_WIDTH = 220.dp
+private val MOVABLE_PANEL_MIN_HEIGHT = 110.dp
+/** The resize grip's touch size. It is centred ON the panel's bottom-right corner, so only a
+ *  quarter of it overlaps the panel and it stays clear of the Goodbye button in that corner. */
+private val MOVABLE_PANEL_GRIP = 34.dp
+
+/** The fixed layout the top-screen conversation panels always had, as a [PanelRect]: full width
+ *  inside [insetPx], bottom-anchored, [heightFraction] of the height above the bottom inset. */
+private fun defaultBottomPanelRect(w: Float, h: Float, insetPx: Float, heightFraction: Float): PanelRect {
+    val panelW = w - 2f * insetPx
+    val panelH = (h - insetPx) * heightFraction
+    return PanelRect(insetPx / w, (h - insetPx - panelH) / h, panelW / w, panelH / h)
+}
+
+/**
+ * A top-screen panel the player can MOVE (drag the title bar, which [content] attaches the given
+ * modifier to) and RESIZE (drag the grip on its bottom-right corner), like vanilla Morrowind's
+ * windows. Issue #16: players wanted the conversation beside the NPC rather than across them.
+ *
+ * Until the player moves it the panel sits at [defaultRect], so an untouched install looks exactly
+ * as it did before this existed. The layout is saved per [location] when a drag ENDS (not per
+ * frame), as fractions of the window, and reset from DS Settings > Top Display.
+ *
+ * Every rect is clamped on the way in, saved ones included, so a layout saved on a different
+ * resolution or before the minimum size changed can never put the panel off screen.
+ * Touch only: controller players keep the default or whatever was set by touch, as in vanilla,
+ * where moving a window needs the mouse.
+ */
+@Composable
+private fun MovableTopPanel(
+    location: ConversationLocation,
+    defaultRect: (w: Float, h: Float) -> PanelRect,
+    content: @Composable (titleDrag: Modifier) -> Unit
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val saved by UiPreferences.conversationRectFlow(location).collectAsState()
+    // The rect while a drag is under way; null otherwise.
+    var live by remember { mutableStateOf<PanelRect?>(null) }
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val w = constraints.maxWidth.toFloat()
+        val h = constraints.maxHeight.toFloat()
+        if (w <= 0f || h <= 0f) return@BoxWithConstraints
+        val minW = (with(density) { MOVABLE_PANEL_MIN_WIDTH.toPx() } / w).coerceAtMost(1f)
+        val minH = (with(density) { MOVABLE_PANEL_MIN_HEIGHT.toPx() } / h).coerceAtMost(1f)
+
+        // Moving keeps the size and slides the panel back inside; resizing keeps the top-left
+        // corner and caps the size at the screen edge.
+        fun clampMove(r: PanelRect): PanelRect {
+            val rw = r.w.coerceIn(minW, 1f)
+            val rh = r.h.coerceIn(minH, 1f)
+            return PanelRect(r.x.coerceIn(0f, 1f - rw), r.y.coerceIn(0f, 1f - rh), rw, rh)
+        }
+        fun clampResize(r: PanelRect): PanelRect =
+            r.copy(w = r.w.coerceIn(minW, maxOf(minW, 1f - r.x)), h = r.h.coerceIn(minH, maxOf(minH, 1f - r.y)))
+
+        val rect = live ?: clampMove(saved ?: defaultRect(w, h))
+        val current by rememberUpdatedState(rect)
+        val commit: () -> Unit = {
+            live?.let { UiPreferences.setConversationRect(context, location, it) }
+            live = null
+        }
+
+        val titleDrag = Modifier.pointerInput(w, h) {
+            detectDragGestures(onDragEnd = commit, onDragCancel = commit) { change, drag ->
+                change.consume()
+                val r = current
+                live = clampMove(r.copy(x = r.x + drag.x / w, y = r.y + drag.y / h))
+            }
+        }
+
+        Box(
+            Modifier
+                .offset { IntOffset((rect.x * w).roundToInt(), (rect.y * h).roundToInt()) }
+                .size(with(density) { (rect.w * w).toDp() }, with(density) { (rect.h * h).toDp() })
+        ) {
+            content(titleDrag)
+        }
+
+        // The resize grip, centred on the bottom-right corner. Declared after the panel so it is
+        // on top and takes the touch where the two overlap.
+        val gripPx = with(density) { MOVABLE_PANEL_GRIP.toPx() }
+        Box(
+            Modifier
+                .offset {
+                    IntOffset(
+                        ((rect.x + rect.w) * w - gripPx / 2f).roundToInt(),
+                        ((rect.y + rect.h) * h - gripPx / 2f).roundToInt()
+                    )
+                }
+                .size(MOVABLE_PANEL_GRIP)
+                .pointerInput(w, h) {
+                    detectDragGestures(onDragEnd = commit, onDragCancel = commit) { change, drag ->
+                        change.consume()
+                        val r = current
+                        live = clampResize(r.copy(w = r.w + drag.x / w, h = r.h + drag.y / h))
+                    }
+                }
+        ) {
+            // Three short diagonal strokes in the quarter that overlaps the panel: the usual
+            // "drag this corner" mark, in the panel's own bronze so it reads as part of the frame.
+            Canvas(Modifier.fillMaxSize()) {
+                val c = size.width / 2f
+                val stroke = 2.dp.toPx()
+                listOf(0.18f, 0.32f, 0.46f).forEach { f ->
+                    val d = size.width * f
+                    // The panel is up and to the left of the corner (the grip's centre), so the
+                    // strokes run across that quarter, parallel to the corner's diagonal.
+                    val inset = 4.dp.toPx()
+                    drawLine(BronzeLight, Offset(c - d, c - inset), Offset(c - inset, c - d), stroke)
+                }
+            }
+        }
+    }
+}
+
 /**
  * TOP-screen conversation overlay (Display 0). Hosted by [org.openmw.EngineActivity] in a
  * WindowManager panel window while a conversation is active AND the Conversation location is
@@ -2031,6 +2163,8 @@ fun ConversationHistoryOverlay() {
     // Collected here (not just in the TOP branch) so the SPLIT read-only history below
     // can also retroactively highlight newly-introduced topics.
     val topics by GameStateRepository.dialogueTopics.collectAsState()
+    // The 12dp inset both layouts' default positions keep from the screen edges.
+    val insetPx = with(LocalDensity.current) { 12.dp.toPx() }
 
     if (location == ConversationLocation.TOP) {
         // Full interactive conversation on the top screen (bottom screen is scrim-only).
@@ -2039,20 +2173,26 @@ fun ConversationHistoryOverlay() {
         val disposition by GameStateRepository.dialogueDisposition.collectAsState()
         val persuadeAvailable by GameStateRepository.dialoguePersuadeAvailable.collectAsState()
 
-        Box(Modifier.fillMaxSize()) {
+        // Movable and resizable (issue #16). Its DEFAULT, used until the player moves it, is the
+        // fixed layout it always had: full width inside a 12dp inset, bottom-anchored, 48% height
+        // (~60% of the old 0.70, then +15% to fit more topics).
+        MovableTopPanel(
+            location = ConversationLocation.TOP,
+            defaultRect = { w, h -> defaultBottomPanelRect(w, h, insetPx, CONVERSATION_TOP_HEIGHT) }
+        ) { titleDrag ->
             DialogueConversationOverlay(
                 npcName = npcName, history = history, topics = topics, services = services,
                 choices = choices, disposition = disposition,
                 persuadeAvailable = persuadeAvailable,
-                panelAlignment = Alignment.BottomCenter,
-                // Full width within the 12dp padding → sides sit the same 12dp from the screen edge
-                // as the bottom does (null = fillMaxWidth, no centred fraction).
+                // The panel fills the MovableTopPanel box, which does the sizing and placement.
+                panelAlignment = Alignment.TopStart,
                 panelWidthFraction = null,
-                panelHeightFraction = 0.48f,  // ~60% of the old 0.70, then +15% to fit more topics
-                panelPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                panelHeightFraction = null,
+                panelPadding = PaddingValues(0.dp),
                 // TOP compact layout: disposition moves into the name bar and the Goodbye button
                 // shrinks, reclaiming vertical space for topics in the shorter panel.
-                compactLayout = true
+                compactLayout = true,
+                titleBarModifier = titleDrag
             )
         }
         return
@@ -2062,19 +2202,17 @@ fun ConversationHistoryOverlay() {
     // choice question renders inline here (with the conversation), controller-navigable — the
     // controls live on the bottom screen but the choices live with the text, matching vanilla.
     val choices by GameStateRepository.dialogueChoices.collectAsState()
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-        contentAlignment = Alignment.BottomCenter
-    ) {
+    // Movable and resizable (issue #16), saved separately from TOP. Its DEFAULT is the fixed layout
+    // it always had: full width inside the 12dp inset (the SAME width TOP uses, so switching
+    // Conversation location doesn't resize it; was 0.75 until Aug 20 2026), bottom-anchored, 51%
+    // height (~10% taller than the previous 0.46).
+    MovableTopPanel(
+        location = ConversationLocation.SPLIT,
+        defaultRect = { w, h -> defaultBottomPanelRect(w, h, insetPx, CONVERSATION_SPLIT_HEIGHT) }
+    ) { titleDrag ->
         Column(
             modifier = Modifier
-                // Full width inside the 12dp inset — the SAME width TOP mode uses (which passes
-                // panelWidthFraction = null), so switching Conversation location doesn't resize the
-                // history box. Was 0.75f (~25% narrower) until Aug 20 2026.
-                .fillMaxWidth()
-                .fillMaxHeight(0.51f)            // ~10% taller than the previous 0.46
+                .fillMaxSize()
                 .adaptiveDimTint()
                 .clip(RoundedCornerShape(3.dp))
                 // Hand-rolled rather than mwPanel() (different width/height), so it must apply the
@@ -2085,7 +2223,8 @@ fun ConversationHistoryOverlay() {
         ) {
             if (npcName.isNotEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.fillMaxWidth().then(titleDrag)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -2110,6 +2249,175 @@ fun ConversationHistoryOverlay() {
                 choicesHorizontal = true
             )
         }
+    }
+}
+
+/** ESM::QuickKeys::Type values, as the engine snapshot reports them. */
+private const val QUICK_KEY_UNASSIGNED = 3
+
+/** One quick slot from the engine's snapshot ([EngineActivity.getCompanionQuickKeys]). */
+private data class QuickSlot(val index: Int, val type: Int, val name: String, val icon: String) {
+    val assigned: Boolean get() = type != QUICK_KEY_UNASSIGNED
+}
+
+/** Parse the snapshot: one "index|type|name|icon" line per slot. Malformed lines are skipped. */
+private fun parseQuickSlots(snapshot: String?): List<QuickSlot> =
+    snapshot.orEmpty().lineSequence().mapNotNull { line ->
+        val p = line.split('|')
+        val index = p.getOrNull(0)?.toIntOrNull() ?: return@mapNotNull null
+        QuickSlot(index, p.getOrNull(1)?.toIntOrNull() ?: QUICK_KEY_UNASSIGNED, p.getOrNull(2).orEmpty(), p.getOrNull(3).orEmpty())
+    }.toList()
+
+/** The key that uses quick slot [index]: 1-9 for slots 1-9 and 0 for slot 10, OpenMW's defaults
+ *  for A_QuickKey1..10. A player who rebinds those keys breaks this, as with the F-key row. */
+private fun quickSlotKeyCode(index: Int): Int =
+    if (index == 10) KeyEvent.KEYCODE_0 else KeyEvent.KEYCODE_0 + index
+
+/**
+ * The top-screen quick slot button (issue #15) and the row it toggles. ALWAYS drawn on the Single
+ * Screen profile; opt-in on two-screen profiles (Controls > Quick slot button). [buttonSlot] places
+ * the button in the menu corner (0) or beside the keyboard button there (1). A quick slot button that toggles
+ * a row of the 10 quick slots along the bottom of the screen, between the vanilla HUD's equipped
+ * magic box and its active effects. Tapping a slot uses it, exactly as pressing its number key
+ * would; the Edit cell at the end opens OpenMW's own quick keys menu (F1) to assign them. The row
+ * stays up until the button is tapped again, like a hotbar.
+ *
+ * The slots come from a PULL ([EngineActivity.getCompanionQuickKeys], built natively by
+ * companion-quickkeys-snapshot.patch), re-read every [QUICK_SLOT_REFRESH_MS] while the row is up so
+ * an edit made in the F1 menu shows without reopening it. Not from GameStateRepository: this profile
+ * installs no companion line sink, so nothing is ever pushed to it here. The icons still come
+ * through [rememberItemIcon], whose extraction JNI does not depend on that sink.
+ */
+// Same opt-in as the FPS overlay's read of EngineActivity's statics, which needs it for the same reason.
+@OptIn(InternalCoroutinesApi::class)
+@Composable
+fun TopScreenQuickSlots(context: Context, buttonSlot: Int) {
+    var visible by remember { mutableStateOf(false) }
+    var slots by remember { mutableStateOf<List<QuickSlot>>(emptyList()) }
+
+    CornerOverlayButton(
+        context = context,
+        iconRes = R.drawable.apps_24dp,
+        contentDescription = "Quick slots",
+        slot = buttonSlot
+    ) { visible = !visible }
+
+    if (!visible) return
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            // Plain try/catch: an UnsatisfiedLinkError (native side older than this build) leaves
+            // the row empty instead of crashing the overlay, and CancellationException must not be
+            // swallowed, which runCatching would.
+            val snapshot = try { EngineActivity.getCompanionQuickKeys() } catch (e: UnsatisfiedLinkError) { null }
+            slots = parseQuickSlots(snapshot)
+            delay(QUICK_SLOT_REFRESH_MS)
+        }
+    }
+
+    QuickSlotRow(
+        slots = slots,
+        onUse = { slot -> injectNativeKey(quickSlotKeyCode(slot.index)) },
+        onEdit = { injectNativeKey(KeyEvent.KEYCODE_F1) }
+    )
+}
+
+/** How often the visible quick slot row re-reads the engine snapshot (ms). */
+private const val QUICK_SLOT_REFRESH_MS = 1000L
+
+// The vanilla HUD (openmw_hud.layout) in MyGUI LOGICAL units, which the row is placed in so it lines
+// up with the HUD at any resolution. The HUD is anchored bottom-left: the spell box sits at x 122,
+// the sneak icon (shown only while sneaking) at x 162, both 36 wide. The row starts past the sneak
+// spot so it never covers it. Its bottom lines up with the bottom of the MINIMAP box (y 123 + 65 =
+// 188 of 200, so 12 above the edge), the developer's choice over the weapon/spell boxes' 18.
+private const val HUD_QUICK_ROW_LEFT = 202f
+private const val HUD_QUICK_ROW_BOTTOM = 12f
+// Cells are 1.25x the HUD boxes' size (36), tuned on device: 30 and 36 were too small for a
+// finger, 54 too big. Bottom-aligned with the boxes, so they stand a little taller. The row reaches
+// ~737 of a 960 canvas, leaving room for ~7 active effects before the right-anchored effects box
+// meets it.
+private const val HUD_QUICK_SLOT_SIZE = 45f
+private const val HUD_QUICK_SLOT_GAP = 4f
+/** The logical canvas when settings.cfg cannot be read: this app's 1080p at scaling 2.0. */
+private const val HUD_FALLBACK_CANVAS_W = 960f
+private const val HUD_FALLBACK_CANVAS_H = 540f
+
+@Composable
+private fun QuickSlotRow(
+    slots: List<QuickSlot>,
+    onUse: (QuickSlot) -> Unit,
+    onEdit: () -> Unit
+) {
+    // MyGUI's logical canvas is resolution / scaling factor, stretched over the whole screen, so
+    // logical units convert to pixels by the screen size over that canvas. Read once per showing.
+    val canvas = remember {
+        val res = readGameResolutionFromConfig()
+        val scaling = readGuiScalingFromConfig()
+        if (res != null && scaling != null)
+            Size(res.first / scaling, res.second / scaling)
+        else
+            Size(HUD_FALLBACK_CANVAS_W, HUD_FALLBACK_CANVAS_H)
+    }
+    val density = LocalDensity.current
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val fx = constraints.maxWidth / canvas.width
+        val fy = constraints.maxHeight / canvas.height
+        // Square cells sized on the vertical scale, as MyGUI keeps HUD boxes square.
+        val cell = with(density) { (HUD_QUICK_SLOT_SIZE * fy).toDp() }
+        val gap = with(density) { (HUD_QUICK_SLOT_GAP * fx).toDp() }
+        val left = with(density) { (HUD_QUICK_ROW_LEFT * fx).toDp() }
+        val bottom = with(density) { (HUD_QUICK_ROW_BOTTOM * fy).toDp() }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = left, bottom = bottom),
+            horizontalArrangement = Arrangement.spacedBy(gap)
+        ) {
+            slots.forEach { slot -> QuickSlotCell(slot, cell) { onUse(slot) } }
+            QuickSlotEditCell(cell, onEdit)
+        }
+    }
+}
+
+@Composable
+private fun QuickSlotCell(slot: QuickSlot, size: Dp, onUse: () -> Unit) {
+    val icon = rememberItemIcon(slot.icon)
+    Box(
+        modifier = Modifier
+            .size(size)
+            .background(Color.Black.copy(alpha = 0.55f))
+            .border(1.dp, if (slot.assigned) BronzeLight else BronzeDark)
+            // An empty slot does nothing in the game either, so it is not a target here.
+            .then(if (slot.assigned) Modifier.clickable(onClick = onUse) else Modifier),
+        contentAlignment = Alignment.Center
+    ) {
+        if (icon != null) {
+            Image(icon, contentDescription = slot.name, modifier = Modifier.fillMaxSize(0.8f))
+        }
+        // The slot's number, as on the key it stands for (slot 10 is the 0 key).
+        Text(
+            if (slot.index == 10) "0" else slot.index.toString(),
+            color = if (slot.assigned) Bone else BoneDim,
+            fontSize = if (icon == null) 15.sp else 10.sp,
+            fontFamily = MwData,
+            modifier = if (icon == null) Modifier else Modifier.align(Alignment.TopStart).padding(1.dp)
+        )
+    }
+}
+
+@Composable
+private fun QuickSlotEditCell(size: Dp, onEdit: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .background(Color.Black.copy(alpha = 0.55f))
+            .border(1.dp, BronzeDark)
+            .clickable(onClick = onEdit),
+        contentAlignment = Alignment.Center
+    ) {
+        Text("Edit", color = BronzeLight, fontSize = 12.sp, fontFamily = MwData)
     }
 }
 
@@ -21018,6 +21326,7 @@ private fun OptionsSubPage(
                     items(HUD_ELEMENTS, key = { it.key }) { HudToggleRow(it) }
                     item { OptionsSubLabel("DS overlays on the top screen") }
                     item { TopPanelOpacityRow() }
+                    item { ConversationWindowRow() }
                 }
 
                 // BOTTOM DISPLAY SETTINGS: how the companion screen itself looks.
@@ -21044,6 +21353,7 @@ private fun OptionsSubPage(
                     item { TouchInputRow() }
                     item { GameCursorRow() }
                     item { TopKeyboardButtonRow() }
+                    item { TopQuickSlotsButtonRow() }
                     item { InputPairNote() }
                 }
 
@@ -22466,6 +22776,24 @@ private fun TextSizeRow() {
     }
 }
 
+/** Explains the movable top-screen conversation window and puts it back where it started. There is
+ *  nothing to choose here, since the window is moved on the top screen itself; the row exists so
+ *  the gesture can be found and a layout dragged somewhere awkward can always be undone. */
+@Composable
+private fun ConversationWindowRow() {
+    val context = LocalContext.current
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Conversation window", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "When a conversation is on the top screen, drag its name bar to move it and drag its " +
+                "bottom-right corner to resize it. Each layout remembers its own position.",
+            color = BoneDim, fontSize = 11.sp, fontFamily = MwBody
+        )
+        ScopedResetButton("Reset conversation window") { UiPreferences.resetConversationRects(context) }
+    }
+}
+
 /** Interior notches on the Text size slider: 85% to 125% in 5% steps is 8 intervals, 7 notches. */
 private const val TEXT_SIZE_SLIDER_STEPS = 7
 
@@ -23393,7 +23721,7 @@ private fun DeveloperActionsPanel() {
         ) { CompanionActions.devAddSpellKit() }
         DevActionButton(
             title = "Active effects",
-            description = "Applies a dozen different beneficial effects at once, to fill the " +
+            description = "Applies up to 24 different beneficial effects at once, to fill the " +
                 "effects list on the HUD and Stats screen.",
             button = "Stack Many Effects"
         ) { CompanionActions.devStackEffects() }
@@ -23821,6 +24149,44 @@ private fun TopKeyboardButtonRow() {
                 active = !enabled,
                 enabled = true
             ) { UiPreferences.setTopKeyboardButton(context, false) }
+        }
+    }
+}
+
+/** Input row: draw the quick slot button on the top screen ([On][Off], default Off), the same
+ *  button and bottom-of-screen slot row the Single Screen profile always has. See
+ *  [TopScreenQuickSlots]. Hidden on that profile, where it would control nothing. */
+@Composable
+private fun TopQuickSlotsButtonRow() {
+    val context = LocalContext.current
+    if (remember(context) { DisplayRoles.singleScreen(context) }) return
+    val enabled by UiPreferences.topQuickSlotsButtonFlow().collectAsState()
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
+        Text("Quick slot button", color = Bone, fontSize = 14.sp, fontFamily = MwBody)
+        Text(
+            "A small button in the corner of the top screen that shows your 10 quick slots in a " +
+                "row along the bottom. Tap a slot to use it, or Edit to assign them. Tap the " +
+                "button again to hide the row.",
+            color = BoneDim,
+            fontSize = 10.sp,
+            fontFamily = MwBody,
+            modifier = Modifier.padding(top = 1.dp)
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionPill(
+                Modifier.weight(1f),
+                label = "On",
+                active = enabled,
+                enabled = true
+            ) { UiPreferences.setTopQuickSlotsButton(context, true) }
+            OptionPill(
+                Modifier.weight(1f),
+                label = "Off",
+                active = !enabled,
+                enabled = true
+            ) { UiPreferences.setTopQuickSlotsButton(context, false) }
         }
     }
 }

@@ -1529,6 +1529,23 @@ extern "C" JNIEXPORT jfloatArray JNICALL Java_org_openmw_EngineActivity_getCompa
     return arr;
 }
 
+// OpenMW-DS: the 10 quick slots as text ("index|type|name|icon" per line), for the Single Screen
+// quick slot bar. A PULL, like getCompanionFrameTimes above: that profile installs no companion line
+// sink, and the bar only needs the slots at the moment it opens. The snapshot is built on the engine
+// thread by QuickKeysMenu (companion-quickkeys-snapshot.patch) and copied out under its mutex.
+// Empty before the quick keys menu exists (title screen).
+namespace MWGui
+{
+    std::string companionQuickKeysSnapshot();
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_org_openmw_EngineActivity_getCompanionQuickKeys(
+    JNIEnv* env, jclass /*cls*/)
+{
+    const std::string snapshot = MWGui::companionQuickKeysSnapshot();
+    return env->NewStringUTF(snapshot.c_str());
+}
+
 extern "C" JNIEXPORT jstring JNICALL Java_org_openmw_EngineActivity_getLastResourceName(JNIEnv* env, jobject thiz)
 {
     return env->NewStringUTF(MWSound::g_lastResourceName.c_str());

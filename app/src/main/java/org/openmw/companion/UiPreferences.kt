@@ -24,6 +24,13 @@ import kotlinx.coroutines.flow.map
 enum class ConversationLocation { BOTTOM, SPLIT, TOP }
 
 /**
+ * A top-screen panel the player has moved or resized, as FRACTIONS of the window it sits in (left,
+ * top, width, height), so a saved layout survives a resolution change. Null in the prefs means
+ * "never moved": the panel then lays out exactly as it did before it was movable.
+ */
+data class PanelRect(val x: Float, val y: Float, val w: Float, val h: Float)
+
+/**
  * Where a service UI (looting, bartering) is drawn.
  * - [BOTTOM]: original layout entirely on the bottom screen (default).
  * - [SPLIT]: an icon grid on the top screen, controls only on the bottom.
@@ -818,6 +825,10 @@ object UiPreferences {
     private const val TEXT_SIZE = "text_size"
     private const val MINIMAP_ZOOM = "minimap_zoom"
     private const val TOP_KEYBOARD_BUTTON = "top_keyboard_button"
+    private const val TOP_QUICK_SLOTS_BUTTON = "top_quick_slots_button"
+    // Moved/resized top-screen conversation panels: one rect per layout, as four floats under this
+    // prefix + the layout name + _x/_y/_w/_h. See PanelRect.
+    private const val CONVERSATION_RECT = "conversation_rect_"
     private const val DEVELOPER_MODE = "developer_mode"
     private const val LOOTING_LOCATION = "layout_looting"
     private const val BARTER_LOCATION = "layout_bartering"
@@ -1012,6 +1023,14 @@ object UiPreferences {
     // profile always has. Default off: the companion already has Show Keyboard, and this puts a
     // permanent control over the game view, so it is opt-in.
     private val topKeyboardButtonFlow = MutableStateFlow(false)
+
+    // The same opt-in for the quick slot button, which the Single Screen profile always draws.
+    private val topQuickSlotsButtonFlow = MutableStateFlow(false)
+
+    // Where the player has put the top-screen conversation panel, per layout. Only SPLIT and TOP
+    // have a top-screen panel; BOTTOM is never stored.
+    private val conversationRectFlows: Map<ConversationLocation, MutableStateFlow<PanelRect?>> =
+        listOf(ConversationLocation.SPLIT, ConversationLocation.TOP).associateWith { MutableStateFlow(null) }
 
     // Whether the Developer Tools action panel (add gold, max stats, god mode, …) is shown. These
     // are cheats and can change a save in ways normal play cannot, so this gates them behind a
@@ -1259,6 +1278,8 @@ object UiPreferences {
         textSizeFlow.value = p.getFloat(TEXT_SIZE, TEXT_SIZE_DEFAULT).coerceIn(TEXT_SIZE_RANGE)
         minimapZoomFlow.value = p.getFloat(MINIMAP_ZOOM, MINIMAP_ZOOM_DEFAULT).coerceIn(MINIMAP_ZOOM_RANGE)
         topKeyboardButtonFlow.value = p.getBoolean(TOP_KEYBOARD_BUTTON, false)
+        topQuickSlotsButtonFlow.value = p.getBoolean(TOP_QUICK_SLOTS_BUTTON, false)
+        conversationRectFlows.forEach { (loc, flow) -> flow.value = readPanelRect(p, CONVERSATION_RECT + loc.name) }
         developerModeFlow.value = p.getBoolean(DEVELOPER_MODE, false)
         // Looting / bartering offer exactly [Native][DS] as of Aug 21 2026, where DS *is* the
         // split layout — so SPLIT is now the only value either can legitimately hold. Anything else
@@ -1776,6 +1797,50 @@ object UiPreferences {
         topKeyboardButtonFlow.value = enabled
         editor(context).putBoolean(TOP_KEYBOARD_BUTTON, enabled).apply()
     }
+
+    /** Whether a two-screen profile also draws the top-screen quick slot button. */
+    fun topQuickSlotsButtonFlow(): StateFlow<Boolean> = topQuickSlotsButtonFlow.asStateFlow()
+
+    /** Set whether the top-screen quick slot button is drawn on a two-screen profile, and persist. */
+    fun setTopQuickSlotsButton(context: Context, enabled: Boolean) {
+        topQuickSlotsButtonFlow.value = enabled
+        editor(context).putBoolean(TOP_QUICK_SLOTS_BUTTON, enabled).apply()
+    }
+
+    /** The player's position and size for the top-screen conversation panel in [location] (SPLIT or
+     *  TOP), or null if it has never been moved. */
+    fun conversationRectFlow(location: ConversationLocation): StateFlow<PanelRect?> =
+        (conversationRectFlows[location] ?: MutableStateFlow(null)).asStateFlow()
+
+    /** Save where the top-screen conversation panel for [location] has been moved/resized to. */
+    fun setConversationRect(context: Context, location: ConversationLocation, rect: PanelRect) {
+        val flow = conversationRectFlows[location] ?: return
+        flow.value = rect
+        writePanelRect(editor(context), CONVERSATION_RECT + location.name, rect).apply()
+    }
+
+    /** Put both top-screen conversation panels back to their default layout. */
+    fun resetConversationRects(context: Context) {
+        val e = editor(context)
+        conversationRectFlows.forEach { (loc, flow) ->
+            flow.value = null
+            listOf("_x", "_y", "_w", "_h").forEach { e.remove(CONVERSATION_RECT + loc.name + it) }
+        }
+        e.apply()
+    }
+
+    // A rect is stored only as a whole; a missing or partial one (e.g. from an interrupted write)
+    // reads as "never moved" rather than as a half-default panel.
+    private fun readPanelRect(p: SharedPreferences, key: String): PanelRect? {
+        val parts = listOf("_x", "_y", "_w", "_h").map { key + it }
+        if (!parts.all { p.contains(it) }) return null
+        val (x, y, w, h) = parts.map { p.getFloat(it, 0f) }
+        return PanelRect(x, y, w, h)
+    }
+
+    private fun writePanelRect(e: SharedPreferences.Editor, key: String, r: PanelRect) =
+        e.putFloat(key + "_x", r.x).putFloat(key + "_y", r.y)
+            .putFloat(key + "_w", r.w).putFloat(key + "_h", r.h)
 
     /** Whether the Developer Tools action panel (cheats / test helpers) is shown. */
     fun developerModeFlow(): StateFlow<Boolean> = developerModeFlow.asStateFlow()

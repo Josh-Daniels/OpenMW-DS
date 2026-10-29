@@ -871,8 +871,9 @@ private suspend fun applyGuiScalingForTier(context: Context, appliedHeight: Int,
     }
 }
 
-/** Current `[GUI] scaling factor` in `settings.cfg`, or null if absent/unparseable. Seeding only. */
-private fun readGuiScalingFromConfig(): Float? {
+/** Current `[GUI] scaling factor` in `settings.cfg`, or null if absent/unparseable. Seeding only
+ *  here; also read by the Single Screen quick slot row to line up with the vanilla HUD. */
+fun readGuiScalingFromConfig(): Float? {
     val file = File(Constants.SETTINGS_FILE)
     if (!file.exists()) return null
     var value: Float? = null

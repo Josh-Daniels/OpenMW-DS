@@ -2564,7 +2564,9 @@ local DEV_SKILL_INCREASES = 10
 local DEV_DAY_HOUR = 12
 local DEV_NIGHT_HOUR = 22
 local DEV_SPELLKIT_PER_SCHOOL = 2
-local DEV_STACK_EFFECT_COUNT = 12
+-- 24 (was 12, doubled Oct 29 2026) to fill the native HUD's effects box when testing what it
+-- collides with, e.g. the Single Screen quick slot row.
+local DEV_STACK_EFFECT_COUNT = 24
 local DEV_BULK_PER_TYPE = 6
 
 -- Change-detected god-mode / noclip state for the options pills. Both are real ENGINE flags
@@ -2673,16 +2675,22 @@ end
 -- with no duration expires instantly (that is what rules out abilities/instant damage here).
 local function devStackEffects()
     local added = 0
+    -- One spell per distinct first effect (effect id + its attribute/skill). Several cheap spells
+    -- share an effect, and the HUD shows ONE icon per effect, so without this the count overstated
+    -- how full the effects box gets.
+    local seen = {}
     for _, rec in ipairs(devSpellCandidates()) do
         if added >= DEV_STACK_EFFECT_COUNT then break end
-        local dur, harmful = 0, true
+        local dur, harmful, key = 0, true, nil
         pcall(function()
             local eff = rec.effects[1]
             dur = eff.duration or 0
             harmful = eff.effect.harmful and true or false
+            key = tostring(eff.id) .. "|" .. tostring(eff.affectedAttribute) .. "|" .. tostring(eff.affectedSkill)
         end)
         -- Beneficial + lasting only, so the test pile can't kill the player it is testing on.
-        if dur > 0 and not harmful then
+        if dur > 0 and not harmful and key and not seen[key] then
+            seen[key] = true
             -- effects indexes are 0-BASED here (they index the record's effect list directly via
             -- .at(index) in magicbindings.cpp), unlike most OpenMW Lua list APIs.
             local ok = pcall(function()
